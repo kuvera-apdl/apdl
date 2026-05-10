@@ -7,12 +7,14 @@ even at the highest autonomy level.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, TypedDict
 
 from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
+from app.llm.utils import parse_llm_json
 from app.llm.prompts.feature import FEATURE_PROPOSAL_PROMPT, FEATURE_PROPOSAL_SYSTEM
 from app.memory.pgvector_store import PgVectorStore
 from app.tools.experiments import get_active_experiments, get_experiment_results
@@ -48,23 +50,21 @@ async def gather_experiment_data(state: FeatureProposalState) -> FeatureProposal
         logger.warning("Could not fetch active experiments: %s", exc)
         state["active_experiments"] = []
 
-    # Fetch results for completed/running experiments
-    results: list[dict[str, Any]] = []
-    for exp in state.get("active_experiments", []):
+    async def _fetch_result(exp: dict) -> dict[str, Any] | None:
         exp_id = exp.get("experiment_id", "")
         metric = exp.get("primary_metric", {}).get("event", "")
-        if exp_id and metric:
-            try:
-                result = await get_experiment_results(
-                    experiment_id=exp_id,
-                    metric=metric,
-                    project_id=project_id,
-                )
-                results.append(result)
-            except Exception as exc:
-                logger.debug("Could not fetch results for %s: %s", exp_id, exc)
+        if not exp_id or not metric:
+            return None
+        try:
+            return await get_experiment_results(
+                experiment_id=exp_id, metric=metric, project_id=project_id
+            )
+        except Exception as exc:
+            logger.debug("Could not fetch results for %s: %s", exp_id, exc)
+            return None
 
-    state["experiment_results"] = results
+    fetched = await asyncio.gather(*[_fetch_result(e) for e in state.get("active_experiments", [])])
+    state["experiment_results"] = [r for r in fetched if r is not None]
     return state
 
 
@@ -105,15 +105,7 @@ async def generate_proposals(state: FeatureProposalState) -> FeatureProposalStat
         ],
     )
 
-    try:
-        proposals = json.loads(response)
-    except json.JSONDecodeError:
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            proposals = json.loads(json_str)
-        else:
-            proposals = []
-
+    proposals = parse_llm_json(response, [])
     if not isinstance(proposals, list):
         proposals = [proposals] if proposals else []
 

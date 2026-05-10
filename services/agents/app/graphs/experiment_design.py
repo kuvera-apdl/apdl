@@ -13,6 +13,7 @@ from typing import TypedDict
 
 from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
+from app.llm.utils import parse_llm_json
 from app.llm.prompts.experiment import (
     EXPERIMENT_DESIGN_PROMPT,
     EXPERIMENT_DESIGN_SYSTEM,
@@ -110,15 +111,10 @@ async def design(state: ExperimentDesignState) -> ExperimentDesignState:
         ],
     )
 
-    try:
-        design_obj = json.loads(response)
-    except json.JSONDecodeError:
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            design_obj = json.loads(json_str)
-        else:
-            state["error"] = f"Failed to parse experiment design: {response[:200]}"
-            return state
+    design_obj = parse_llm_json(response)
+    if design_obj is None:
+        state["error"] = f"Failed to parse experiment design: {response[:200]}"
+        return state
 
     state["experiment_design"] = design_obj
     return state
@@ -152,18 +148,14 @@ async def execute_safety(state: ExperimentDesignState) -> ExperimentDesignState:
                 {"role": "user", "content": llm_review_prompt},
             ],
         )
-        try:
-            llm_result = json.loads(llm_review)
-            # If the LLM flagged additional concerns, merge them
-            if not llm_result.get("approved", True):
-                state["safety_result"]["checks"].append({
-                    "name": "llm_safety_review",
-                    "passed": False,
-                    "message": "; ".join(llm_result.get("concerns", [])),
-                })
-                state["safety_result"]["passed"] = False
-        except json.JSONDecodeError:
-            pass
+        llm_result = parse_llm_json(llm_review)
+        if llm_result and not llm_result.get("approved", True):
+            state["safety_result"]["checks"].append({
+                "name": "llm_safety_review",
+                "passed": False,
+                "message": "; ".join(llm_result.get("concerns", [])),
+            })
+            state["safety_result"]["passed"] = False
     except Exception as exc:
         logger.warning("LLM safety review failed: %s", exc)
 

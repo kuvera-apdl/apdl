@@ -6,6 +6,7 @@ and stores them in the vector memory for downstream agents.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import date, timedelta
@@ -13,6 +14,7 @@ from typing import Any, TypedDict
 
 from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
+from app.llm.utils import parse_llm_json
 from app.llm.prompts.analysis import (
     ANALYSIS_PLAN_PROMPT,
     BEHAVIOR_ANALYSIS_SYSTEM,
@@ -83,15 +85,7 @@ async def plan_analysis(state: AnalysisState) -> AnalysisState:
         ],
     )
 
-    try:
-        plan = json.loads(response)
-    except json.JSONDecodeError:
-        # If LLM returned markdown-wrapped JSON, try to extract it
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            plan = json.loads(json_str)
-        else:
-            plan = {"queries": [], "rationale": response, "focus_areas": []}
+    plan = parse_llm_json(response, {"queries": [], "rationale": response, "focus_areas": []})
 
     state["analysis_plan"] = plan
     return state
@@ -108,9 +102,7 @@ async def run_queries(state: AnalysisState) -> AnalysisState:
     start_str = start.isoformat()
     end_str = end.isoformat()
 
-    results: list[dict[str, Any]] = []
-
-    for q in queries:
+    async def _run_one(q: dict) -> dict[str, Any]:
         query_type = q.get("type", "event_count")
         try:
             if query_type == "event_count":
@@ -154,13 +146,12 @@ async def run_queries(state: AnalysisState) -> AnalysisState:
                 )
             else:
                 result = {"error": f"Unknown query type: {query_type}"}
-
-            results.append({"type": query_type, "params": q, "result": result})
+            return {"type": query_type, "params": q, "result": result}
         except Exception as exc:
             logger.error("Query failed (%s): %s", query_type, exc)
-            results.append({"type": query_type, "params": q, "error": str(exc)})
+            return {"type": query_type, "params": q, "error": str(exc)}
 
-    state["query_results"] = results
+    state["query_results"] = list(await asyncio.gather(*[_run_one(q) for q in queries]))
     return state
 
 
@@ -182,15 +173,9 @@ async def synthesize_insights(state: AnalysisState) -> AnalysisState:
         ],
     )
 
-    try:
-        insights = json.loads(response)
-    except json.JSONDecodeError:
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            insights = json.loads(json_str)
-        else:
-            insights = [{"title": "Raw analysis", "description": response, "confidence": "low"}]
-
+    insights = parse_llm_json(
+        response, [{"title": "Raw analysis", "description": response, "confidence": "low"}]
+    )
     if not isinstance(insights, list):
         insights = [insights]
 

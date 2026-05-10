@@ -6,12 +6,15 @@ UI configurations to personalise the user experience.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import date, timedelta
 from typing import TypedDict
 
 from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
+from app.llm.utils import parse_llm_json
 from app.llm.prompts.personalize import PERSONALIZATION_PROMPT, PERSONALIZATION_SYSTEM
 from app.memory.pgvector_store import PgVectorStore
 from app.safety.validator import AgentAction, ActionType, SafetyValidator
@@ -46,24 +49,28 @@ async def gather_segments(state: PersonalizationState) -> PersonalizationState:
 
     # Extract segment dimensions from insights
     properties_to_check = {"plan", "platform", "country", "source", "device_type"}
+    end = date.today()
+    start = end - timedelta(days=7)
+    start_str, end_str = start.isoformat(), end.isoformat()
 
-    for prop in properties_to_check:
+    async def _fetch_breakdown(prop: str) -> dict | None:
         try:
-            from datetime import date, timedelta
-            end = date.today()
-            start = end - timedelta(days=7)
             result = await query_breakdown(
                 project_id=project_id,
                 event_name="page_view",
                 property_name=prop,
-                start_date=start.isoformat(),
-                end_date=end.isoformat(),
+                start_date=start_str,
+                end_date=end_str,
                 limit=10,
             )
             if isinstance(result, dict) and result.get("results"):
-                segments.append({"property": prop, "breakdown": result["results"]})
+                return {"property": prop, "breakdown": result["results"]}
         except Exception as exc:
             logger.debug("Segment breakdown for %s failed: %s", prop, exc)
+        return None
+
+    breakdown_results = await asyncio.gather(*[_fetch_breakdown(p) for p in properties_to_check])
+    segments = [r for r in breakdown_results if r is not None]
 
     # Also fetch existing UI configs to avoid duplication
     try:
@@ -116,15 +123,7 @@ async def generate_configs(state: PersonalizationState) -> PersonalizationState:
         ],
     )
 
-    try:
-        configs = json.loads(response)
-    except json.JSONDecodeError:
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            configs = json.loads(json_str)
-        else:
-            configs = []
-
+    configs = parse_llm_json(response, [])
     if not isinstance(configs, list):
         configs = [configs] if configs else []
 

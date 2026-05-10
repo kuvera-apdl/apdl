@@ -15,6 +15,24 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 
+def _row_to_audit_entry(row) -> dict:
+    config = row["config"]
+    safety = row["safety_result"]
+    if isinstance(config, str):
+        config = json.loads(config)
+    if isinstance(safety, str):
+        safety = json.loads(safety)
+    return {
+        "id": row["id"],
+        "run_id": row["run_id"],
+        "action_type": row["action_type"],
+        "config": config,
+        "safety_result": safety,
+        "approval_status": row["approval_status"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
 class AuditLogger:
     """Logs agent actions to the agent_audit_log table.
 
@@ -105,28 +123,7 @@ class AuditLogger:
                 limit,
             )
 
-        entries = []
-        for row in rows:
-            config = row["config"]
-            safety = row["safety_result"]
-            if isinstance(config, str):
-                config = json.loads(config)
-            if isinstance(safety, str):
-                safety = json.loads(safety)
-
-            entries.append(
-                {
-                    "id": row["id"],
-                    "run_id": row["run_id"],
-                    "action_type": row["action_type"],
-                    "config": config,
-                    "safety_result": safety,
-                    "approval_status": row["approval_status"],
-                    "created_at": row["created_at"].isoformat(),
-                }
-            )
-
-        return entries
+        return [_row_to_audit_entry(row) for row in rows]
 
     async def get_recent_actions(
         self,
@@ -173,25 +170,4 @@ class AuditLogger:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
 
-        entries = []
-        for row in rows:
-            config = row["config"]
-            safety = row["safety_result"]
-            if isinstance(config, str):
-                config = json.loads(config)
-            if isinstance(safety, str):
-                safety = json.loads(safety)
-
-            entries.append(
-                {
-                    "id": row["id"],
-                    "run_id": row["run_id"],
-                    "action_type": row["action_type"],
-                    "config": config,
-                    "safety_result": safety,
-                    "approval_status": row["approval_status"],
-                    "created_at": row["created_at"].isoformat(),
-                }
-            )
-
-        return entries
+        return [_row_to_audit_entry(row) for row in rows]
