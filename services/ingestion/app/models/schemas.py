@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 MAX_BATCH_SIZE = 500
 MAX_EVENT_NAME_LENGTH = 256
@@ -35,15 +35,6 @@ class Event(BaseModel):
     traits: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def require_event_or_type(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        if not isinstance(data.get("event"), str) and not isinstance(data.get("type"), str):
-            raise ValueError("Event must have either 'event' (name) or 'type' field")
-        return data
-
     @field_validator("event")
     @classmethod
     def validate_event_name(cls, v: str | None) -> str | None:
@@ -64,16 +55,6 @@ class Event(BaseModel):
             )
         return v
 
-    @model_validator(mode="after")
-    def require_user_identity(self) -> "Event":
-        has_user = bool(self.user_id) or bool(self.userId)
-        has_anon = bool(self.anonymous_id) or bool(self.anonymousId)
-        if not has_user and not has_anon:
-            raise ValueError(
-                "Event must have either 'user_id'/'userId' or 'anonymous_id'/'anonymousId'"
-            )
-        return self
-
     @field_validator("properties")
     @classmethod
     def validate_properties(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -88,4 +69,4 @@ class Event(BaseModel):
 
 
 class EventBatch(BaseModel):
-    events: list[Event] = Field(..., min_length=1, max_length=MAX_BATCH_SIZE)
+    events: list[Event] = Field(..., min_length=1)

@@ -85,7 +85,7 @@ class BreakdownResponse(BaseModel):
 
 class FunnelRequest(DateRangeRequest):
     project_id: int
-    steps: list[str] = Field(..., min_length=2)
+    steps: list[str] = Field(...)
     window_days: int = Field(default=7, ge=1, le=90)
 
 
