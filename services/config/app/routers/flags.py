@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.store import postgres as pg_store
 from app.store import redis_cache
-from app.utils import extract_project_id
+from app.utils import extract_project_id, serialize_flag
 
 logger = logging.getLogger(__name__)
 
@@ -17,29 +17,7 @@ router = APIRouter()
 
 def _flags_to_json(flags: list[dict]) -> str:
     """Serialize flags to the JSON format matching C++ flags_to_json output."""
-    result_flags = []
-    for f in flags:
-        entry: dict = {
-            "key": f["key"],
-            "enabled": f["enabled"],
-            "description": f.get("description", ""),
-            "variant_type": f.get("variant_type", "boolean"),
-            "default_value": f.get("default_value", "false"),
-            "rollout_percentage": f.get("rollout_percentage", 100.0),
-        }
-
-        rules_json = f.get("rules_json", "[]")
-        if rules_json and rules_json != "[]":
-            entry["rules"] = json.loads(rules_json)
-
-        variants_json = f.get("variants_json", "[]")
-        if variants_json and variants_json != "[]":
-            entry["variants"] = json.loads(variants_json)
-
-        entry["updated_at"] = f.get("updated_at", "")
-        result_flags.append(entry)
-
-    return json.dumps({"flags": result_flags}, separators=(",", ":"))
+    return json.dumps({"flags": [serialize_flag(f) for f in flags]}, separators=(",", ":"))
 
 
 @router.get("/v1/flags")

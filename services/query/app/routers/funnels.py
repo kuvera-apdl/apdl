@@ -28,10 +28,6 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
     conversion window.
     """
     client = _get_client(request)
-
-    if len(body.steps) < 2:
-        return FunnelResponse(steps=[], overall_conversion=0.0)
-
     window_seconds = body.window_days * 86400
     query = build_funnel_query(body.steps, window_seconds=window_seconds)
 

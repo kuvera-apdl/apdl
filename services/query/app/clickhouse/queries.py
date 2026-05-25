@@ -49,6 +49,11 @@ LIMIT %(limit)s
 # Funnel query builder
 # ---------------------------------------------------------------------------
 
+def _sql_str(s: str) -> str:
+    """Escape a string for safe embedding in a ClickHouse SQL string literal."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str:
     """Dynamically build an N-step funnel query using windowFunnel.
 
@@ -64,9 +69,8 @@ def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str
         A parameterized SQL string.  The caller must supply ``project_id``,
         ``start_date``, and ``end_date`` as parameters.
     """
-    conditions = ", ".join(
-        f"event_name = '{step}'" for step in steps
-    )
+    safe_steps = [_sql_str(s) for s in steps]
+    conditions = ", ".join(f"event_name = '{s}'" for s in safe_steps)
     query = f"""
 WITH funnel AS (
     SELECT
@@ -75,7 +79,7 @@ WITH funnel AS (
     FROM events
     WHERE project_id = %(project_id)s
       AND event_date BETWEEN %(start_date)s AND %(end_date)s
-      AND event_name IN ({', '.join(f"'{s}'" for s in steps)})
+      AND event_name IN ({', '.join(f"'{s}'" for s in safe_steps)})
     GROUP BY user_id
 )
 SELECT

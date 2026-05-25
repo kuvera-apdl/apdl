@@ -76,7 +76,7 @@ class ClickHouseClient:
             async with conn.cursor(cursor=DictCursor) as cursor:
                 await cursor.execute(query, params or {})
                 rows = await cursor.fetchall()
-                return [dict(row) for row in rows] if rows else []
+                result = [dict(row) for row in rows] if rows else []
         except Exception:
             # On error, discard the connection instead of returning it to the pool.
             try:
@@ -86,6 +86,7 @@ class ClickHouseClient:
             raise
         else:
             await self._release(conn)
+        return result
 
     async def execute_iter(
         self, query: str, params: dict[str, Any] | None = None

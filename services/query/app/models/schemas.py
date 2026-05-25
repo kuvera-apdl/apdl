@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -29,13 +29,26 @@ class AnalysisMethod(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Shared base with date-range validation
+# ---------------------------------------------------------------------------
+
+class DateRangeRequest(BaseModel):
+    start_date: date
+    end_date: date
+
+    @model_validator(mode="after")
+    def check_date_range(self) -> "DateRangeRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Event models
 # ---------------------------------------------------------------------------
 
-class EventCountRequest(BaseModel):
+class EventCountRequest(DateRangeRequest):
     project_id: int
-    start_date: date
-    end_date: date
     event_names: list[str] | None = None
 
 
@@ -45,11 +58,9 @@ class EventCountResponse(BaseModel):
     total_users: int
 
 
-class TimeseriesRequest(BaseModel):
+class TimeseriesRequest(DateRangeRequest):
     project_id: int
     event_name: str
-    start_date: date
-    end_date: date
     interval: TimeInterval = TimeInterval.day
 
 
@@ -57,13 +68,11 @@ class TimeseriesResponse(BaseModel):
     buckets: list[dict[str, Any]]
 
 
-class BreakdownRequest(BaseModel):
+class BreakdownRequest(DateRangeRequest):
     project_id: int
     event_name: str
     property: str
-    start_date: date
-    end_date: date
-    limit: int = Field(default=20, le=100)
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class BreakdownResponse(BaseModel):
@@ -74,11 +83,9 @@ class BreakdownResponse(BaseModel):
 # Funnel models
 # ---------------------------------------------------------------------------
 
-class FunnelRequest(BaseModel):
+class FunnelRequest(DateRangeRequest):
     project_id: int
-    steps: list[str]  # ordered event names
-    start_date: date
-    end_date: date
+    steps: list[str] = Field(..., min_length=2)
     window_days: int = Field(default=7, ge=1, le=90)
 
 
@@ -86,8 +93,8 @@ class FunnelStep(BaseModel):
     step: int
     event_name: str
     count: int
-    conversion_rate: float  # from previous step (1.0 for step 1)
-    overall_rate: float  # from step 1
+    conversion_rate: float
+    overall_rate: float
 
 
 class FunnelResponse(BaseModel):
@@ -99,19 +106,17 @@ class FunnelResponse(BaseModel):
 # Retention models
 # ---------------------------------------------------------------------------
 
-class RetentionRequest(BaseModel):
+class RetentionRequest(DateRangeRequest):
     project_id: int
     cohort_event: str
     return_event: str
-    start_date: date
-    end_date: date
-    period: str = "day"  # "day" or "week"
+    period: Literal["day", "week"] = "day"
 
 
 class RetentionCohort(BaseModel):
     cohort_date: str
     size: int
-    retention: list[float]  # [day0_pct, day1_pct, ...]
+    retention: list[float]
 
 
 class RetentionResponse(BaseModel):
@@ -122,12 +127,10 @@ class RetentionResponse(BaseModel):
 # Cohort comparison models
 # ---------------------------------------------------------------------------
 
-class CohortRequest(BaseModel):
+class CohortRequest(DateRangeRequest):
     project_id: int
-    cohort_property: str  # property to segment by
+    cohort_property: str
     metric_event: str
-    start_date: date
-    end_date: date
 
 
 class CohortResponse(BaseModel):

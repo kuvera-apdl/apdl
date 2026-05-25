@@ -1,10 +1,32 @@
 """Shared utilities for the config service."""
 
+import json
 import re
 
 from fastapi import Request
 
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
+
+
+def serialize_flag(f: dict, include_description: bool = True) -> dict:
+    """Convert a flag DB row to the API representation."""
+    entry: dict = {
+        "key": f["key"],
+        "enabled": f["enabled"],
+        "variant_type": f.get("variant_type", "boolean"),
+        "default_value": f.get("default_value", "false"),
+        "rollout_percentage": f.get("rollout_percentage", 100.0),
+    }
+    if include_description:
+        entry["description"] = f.get("description", "")
+    rules_json = f.get("rules_json", "[]")
+    if rules_json and rules_json != "[]":
+        entry["rules"] = json.loads(rules_json)
+    variants_json = f.get("variants_json", "[]")
+    if variants_json and variants_json != "[]":
+        entry["variants"] = json.loads(variants_json)
+    entry["updated_at"] = f.get("updated_at", "")
+    return entry
 
 
 def extract_project_id(request: Request) -> str:

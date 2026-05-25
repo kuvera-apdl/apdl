@@ -13,6 +13,10 @@ from app.memory.embeddings import embed
 logger = logging.getLogger(__name__)
 
 
+def _vec_str(embedding: list[float]) -> str:
+    return "[" + ",".join(str(v) for v in embedding) + "]"
+
+
 class PgVectorStore:
     """Long-term memory store using PostgreSQL + pgvector.
 
@@ -41,9 +45,7 @@ class PgVectorStore:
         """
         embedding = await embed(content)
         meta_json = json.dumps(metadata or {})
-
-        # pgvector expects the embedding as a string representation of a list
-        embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
+        embedding_str = _vec_str(embedding)
 
         async with self._pool.acquire() as conn:
             row_id = await conn.fetchval(
@@ -80,7 +82,7 @@ class PgVectorStore:
             List of dicts with keys: id, content, metadata, similarity, created_at.
         """
         query_embedding = await embed(query)
-        embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+        embedding_str = _vec_str(query_embedding)
 
         # Build optional metadata filter clause
         filter_clause = ""
