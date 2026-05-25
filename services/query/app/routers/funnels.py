@@ -27,6 +27,9 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
     determine the deepest step each user reached within the specified
     conversion window.
     """
+    if len(body.steps) < 2:
+        return FunnelResponse(steps=[], overall_conversion=0.0)
+
     client = _get_client(request)
     window_seconds = body.window_days * 86400
     query = build_funnel_query(body.steps, window_seconds=window_seconds)
