@@ -14,7 +14,7 @@ from app.models.schemas import (
 )
 from app.store import postgres as pg_store
 from app.store import redis_cache
-from app.utils import extract_project_id
+from app.utils import extract_project_id, serialize_flag
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +39,11 @@ async def list_flags(request: Request):
         return _unauthorized()
 
     flags = await pg_store.get_flags(request.app.state.pg_pool, project_id)
-    result = [
-        {
-            "key": f["key"],
-            "enabled": f["enabled"],
-            "description": f.get("description", ""),
-            "variant_type": f.get("variant_type", "boolean"),
-            "default_value": f.get("default_value", "false"),
-            "rollout_percentage": f.get("rollout_percentage", 100.0),
-            "created_at": f.get("created_at", ""),
-            "updated_at": f.get("updated_at", ""),
-        }
-        for f in flags
-    ]
+    result = []
+    for flag in flags:
+        entry = serialize_flag(flag)
+        entry["created_at"] = flag.get("created_at", "")
+        result.append(entry)
     return JSONResponse(content={"flags": result, "count": len(result)})
 
 
@@ -93,7 +85,10 @@ async def create_flag(body: FlagCreate, request: Request):
     await request.app.state.broadcaster.broadcast(
         project_id,
         "flag_update",
-        json.dumps({"action": "flag_created", "key": flag["key"], "enabled": flag["enabled"]}, separators=(",", ":")),
+        json.dumps(
+            {"action": "flag_created", "flag": serialize_flag(flag)},
+            separators=(",", ":"),
+        ),
     )
     logger.info("Flag '%s' created for project %s", flag["key"], project_id)
     return JSONResponse(status_code=201, content={"created": True, "key": flag["key"]})
@@ -141,7 +136,10 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
     await request.app.state.broadcaster.broadcast(
         project_id,
         "flag_update",
-        json.dumps({"action": "flag_updated", "key": flag["key"], "enabled": flag["enabled"]}, separators=(",", ":")),
+        json.dumps(
+            {"action": "flag_updated", "flag": serialize_flag(flag)},
+            separators=(",", ":"),
+        ),
     )
     logger.info("Flag '%s' updated for project %s", flag["key"], project_id)
     return JSONResponse(content={"updated": True, "key": flag["key"]})

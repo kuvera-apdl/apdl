@@ -1,5 +1,6 @@
 import type { FlagConfig } from '../flags/types';
 import type { FlagCache } from '../flags/cache';
+import { extractFlagConfig, extractFlagConfigs } from '../flags/schema';
 import type { SlotManager } from '../ui/slot';
 
 interface SSEMessage {
@@ -35,8 +36,13 @@ export class SSEHandlers {
    */
   handle(message: SSEMessage): void {
     switch (message.type) {
+      case 'config':
       case 'flags_update':
         this.handleFlagsUpdate(message.data);
+        break;
+
+      case 'flag_update':
+        this.handleFlagUpdate(message.data);
         break;
 
       case 'experiment_update':
@@ -76,11 +82,12 @@ export class SSEHandlers {
 
   private handleFlagsUpdate(data: string): void {
     try {
-      const parsed = JSON.parse(data) as { flags: FlagConfig[] };
-      if (parsed.flags && Array.isArray(parsed.flags)) {
-        this.flagCache.set(parsed.flags);
+      const parsed = JSON.parse(data) as unknown;
+      if (isFlagCollection(parsed)) {
+        const flags = extractFlagConfigs(parsed);
+        this.flagCache.set(flags);
         if (this.debug) {
-          console.debug(`APDL: Updated ${parsed.flags.length} flags from SSE`);
+          console.debug(`APDL: Updated ${flags.length} flags from SSE`);
         }
       }
     } catch (err) {
@@ -90,20 +97,57 @@ export class SSEHandlers {
     }
   }
 
+  private handleFlagUpdate(data: string): void {
+    try {
+      const parsed = JSON.parse(data) as unknown;
+      const flags = extractFlagConfigs(parsed);
+      if (flags.length > 0) {
+        this.mergeFlags(flags);
+        return;
+      }
+
+      if (!isRecord(parsed)) {
+        return;
+      }
+
+      const current = new Map(this.flagCache.getAll().map((flag) => [flag.key, flag]));
+      const fullFlag = extractFlagConfig(parsed.flag) ?? extractFlagConfig(parsed);
+      if (fullFlag) {
+        current.set(fullFlag.key, fullFlag);
+        this.flagCache.set(Array.from(current.values()));
+        return;
+      }
+
+      if (typeof parsed.key !== 'string') {
+        return;
+      }
+
+      if (parsed.action === 'flag_deleted') {
+        current.delete(parsed.key);
+        this.flagCache.set(Array.from(current.values()));
+        return;
+      }
+
+      const existing = current.get(parsed.key);
+      if (existing && typeof parsed.enabled === 'boolean') {
+        current.set(parsed.key, { ...existing, enabled: parsed.enabled });
+        this.flagCache.set(Array.from(current.values()));
+      }
+    } catch (err) {
+      if (this.debug) {
+        console.error('APDL: Failed to parse flag_update:', err);
+      }
+    }
+  }
+
   private handleExperimentUpdate(data: string): void {
     // Experiment updates come as flag updates with variant information
     try {
-      const parsed = JSON.parse(data) as { flags: FlagConfig[] };
-      if (parsed.flags && Array.isArray(parsed.flags)) {
+      const parsed = JSON.parse(data) as unknown;
+      const flags = extractFlagConfigs(parsed);
+      if (flags.length > 0) {
         // Merge experiment flags into the cache
-        const existingFlags = this.flagCache.getAll();
-        const existingMap = new Map(existingFlags.map((f) => [f.key, f]));
-
-        for (const flag of parsed.flags) {
-          existingMap.set(flag.key, flag);
-        }
-
-        this.flagCache.set(Array.from(existingMap.values()));
+        this.mergeFlags(flags);
         if (this.debug) {
           console.debug(`APDL: Updated experiments from SSE`);
         }
@@ -144,4 +188,22 @@ export class SSEHandlers {
       // Not JSON or not routable — ignore
     }
   }
+
+  private mergeFlags(flags: FlagConfig[]): void {
+    const existingMap = new Map(this.flagCache.getAll().map((f) => [f.key, f]));
+
+    for (const flag of flags) {
+      existingMap.set(flag.key, flag);
+    }
+
+    this.flagCache.set(Array.from(existingMap.values()));
+  }
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === 'object' && input !== null && !Array.isArray(input);
+}
+
+function isFlagCollection(input: unknown): boolean {
+  return Array.isArray(input) || (isRecord(input) && Array.isArray(input.flags));
 }

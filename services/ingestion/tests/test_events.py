@@ -60,6 +60,55 @@ async def test_valid_batch_with_track_event(client):
 
 
 @pytest.mark.asyncio
+async def test_sdk_aligned_payload_is_published_to_project_stream(client):
+    """SDK contract: /v1/events, X-API-Key, events[], and snake_case IDs."""
+    payload = {
+        "events": [{
+            "event": "sdk_aligned_probe",
+            "type": "track",
+            "anonymous_id": "anon-sdk-1",
+            "session_id": "sess-sdk-1",
+            "message_id": "msg-sdk-1",
+            "timestamp": "2026-05-26T02:26:53.455Z",
+            "properties": {"source": "sdk-contract-test"},
+            "context": {
+                "browser": "Chrome",
+                "browser_version": "123",
+                "device_type": "desktop",
+            },
+        }],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    app.state.redis.xadd.assert_awaited_once()
+
+    args, kwargs = app.state.redis.xadd.await_args
+    stream_key, fields = args
+    assert stream_key == "events:raw:testproj"
+    assert kwargs["maxlen"] == 1000000
+    assert kwargs["approximate"] is True
+
+    published = json.loads(fields["event_json"])
+    assert published["event"] == "sdk_aligned_probe"
+    assert published["type"] == "track"
+    assert published["anonymous_id"] == "anon-sdk-1"
+    assert published["session_id"] == "sess-sdk-1"
+    assert published["message_id"] == "msg-sdk-1"
+    assert published["properties"] == {"source": "sdk-contract-test"}
+    assert published["context"]["browser"] == "Chrome"
+    assert published["context"]["device_type"] == "desktop"
+    assert published["project_id"] == "testproj"
+    assert "server_timestamp" in published
+    assert "ip" in published
+    assert "anonymousId" not in published
+    assert "sessionId" not in published
+    assert "messageId" not in published
+
+
+@pytest.mark.asyncio
 async def test_valid_batch_with_anonymous_id(client):
     """ValidBatchWithAnonymousId"""
     payload = {

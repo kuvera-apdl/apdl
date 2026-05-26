@@ -10,21 +10,19 @@ _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
 
 def serialize_flag(f: dict, include_description: bool = True) -> dict:
     """Convert a flag DB row to the API representation."""
+    rules_json = f.get("rules_json", "[]")
+    variants_json = f.get("variants_json", "[]")
     entry: dict = {
         "key": f["key"],
         "enabled": f["enabled"],
         "variant_type": f.get("variant_type", "boolean"),
         "default_value": f.get("default_value", "false"),
         "rollout_percentage": f.get("rollout_percentage", 100.0),
+        "rules": json.loads(rules_json) if rules_json else [],
+        "variants": json.loads(variants_json) if variants_json else [],
     }
     if include_description:
         entry["description"] = f.get("description", "")
-    rules_json = f.get("rules_json", "[]")
-    if rules_json and rules_json != "[]":
-        entry["rules"] = json.loads(rules_json)
-    variants_json = f.get("variants_json", "[]")
-    if variants_json and variants_json != "[]":
-        entry["variants"] = json.loads(variants_json)
     entry["updated_at"] = f.get("updated_at", "")
     return entry
 

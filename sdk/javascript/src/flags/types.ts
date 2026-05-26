@@ -1,57 +1,79 @@
 export interface FlagConfig {
   key: string;
   enabled: boolean;
-  salt: string;
-  rolloutPercentage: number; // 0-10000 (0.01% granularity)
+  variant_type: 'boolean' | 'string' | string;
+  default_value: string;
+  rollout_percentage: number; // 0-100
   rules: TargetingRule[];
   variants: Variant[];
+  description?: string;
+  updated_at?: string;
   payload?: unknown;
 }
 
 export interface TargetingRule {
-  id: string;
-  conditions: Condition[]; // AND logic within a rule
-  variants: Variant[];
-  rolloutPercentage: number;
+  conditions?: Condition[]; // AND logic within a rule
+  attribute?: string;
+  operator?: ConditionOperator;
+  value?: unknown;
 }
 
 export interface Condition {
-  property: string; // "userId", "traits.plan", "country", etc.
-  operator:
-    | 'eq'
-    | 'neq'
-    | 'gt'
-    | 'lt'
-    | 'gte'
-    | 'lte'
-    | 'contains'
-    | 'regex'
-    | 'in'
-    | 'not_in';
-  value: unknown;
+  attribute: string;
+  operator: ConditionOperator;
+  value?: unknown;
 }
 
+export type ConditionOperator =
+  | 'equals'
+  | 'eq'
+  | 'is'
+  | 'not_equals'
+  | 'neq'
+  | 'is_not'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'contains'
+  | 'not_contains'
+  | 'starts_with'
+  | 'ends_with'
+  | 'regex'
+  | 'matches'
+  | 'in'
+  | 'not_in'
+  | 'exists'
+  | 'is_set'
+  | 'not_exists'
+  | 'is_not_set';
+
 export interface Variant {
-  name: string;
-  weight: number; // sums to 10000 across variants
+  key?: string;
+  value?: unknown;
+  weight?: number; // percentage-style weight; all weights are relative
   payload?: unknown;
 }
 
 export interface FlagResult {
-  value: boolean;
-  variant: string | null;
+  key: string;
+  enabled: boolean;
+  value: string;
+  variant: string;
   payload?: unknown;
   reason:
     | 'not_found'
     | 'disabled'
+    | 'error'
+    | 'rule_no_match'
     | 'rule_match'
     | 'rollout'
-    | 'not_in_rollout';
+    | 'default';
 }
 
 export interface EvalContext {
-  userId?: string;
-  anonymousId: string;
-  traits?: Record<string, unknown>;
+  user_id?: string;
+  anonymous_id: string;
+  attributes?: Record<string, unknown>;
   groups?: Record<string, string>;
 }
