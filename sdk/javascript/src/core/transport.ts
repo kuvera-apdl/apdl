@@ -31,7 +31,7 @@ export class Transport {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.apiKey}`,
+            'X-API-Key': this.apiKey,
             'X-APDL-SDK': 'js/0.1.0',
           },
           body,

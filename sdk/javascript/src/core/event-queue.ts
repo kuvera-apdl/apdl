@@ -5,6 +5,20 @@ import { OfflineStorage } from './storage';
 import type { Scrubber } from '../privacy/scrubber';
 import type { ConsentManager } from '../privacy/consent';
 
+interface IngestionEvent {
+  event: string;
+  type: TrackEvent['type'];
+  user_id?: string;
+  anonymous_id: string;
+  group_id?: string;
+  properties?: Record<string, unknown>;
+  traits?: Record<string, unknown>;
+  context: Record<string, unknown>;
+  timestamp: string;
+  message_id: string;
+  session_id: string;
+}
+
 /**
  * Batching event queue with offline fallback.
  * Collects events, batches them, and sends via Transport.
@@ -90,10 +104,9 @@ export class EventQueue {
     const batch = this.queue.splice(0, this.config.batchSize);
 
     try {
-      const url = `${this.config.host}/v1/batch`;
+      const url = `${this.config.host}/v1/events`;
       const payload = {
-        batch,
-        sentAt: new Date().toISOString(),
+        events: batch.map((event) => this.toIngestionEvent(event)),
       };
 
       const success = await this.transport.send(url, payload);
@@ -101,7 +114,7 @@ export class EventQueue {
       if (!success) {
         // Persist failed batch to offline storage
         if (this.config.debug) {
-          console.warn('APDL: Batch send failed, persisting to offline storage');
+          console.warn('APDL: Event send failed, persisting to offline storage');
         }
         await this.storage.store(batch);
       }
@@ -127,10 +140,9 @@ export class EventQueue {
     if (this.queue.length === 0) return;
 
     const batch = this.queue.splice(0);
-    const url = `${this.config.host}/v1/batch`;
+    const url = `${this.config.host}/v1/events`;
     const payload = {
-      batch,
-      sentAt: new Date().toISOString(),
+      events: batch.map((event) => this.toIngestionEvent(event)),
     };
 
     const accepted = this.transport.sendBeacon(url, payload);
@@ -227,5 +239,46 @@ export class EventQueue {
    */
   get length(): number {
     return this.queue.length;
+  }
+
+  private toIngestionEvent(event: TrackEvent): IngestionEvent {
+    const normalized: IngestionEvent = {
+      event: event.event ?? event.type,
+      type: event.type,
+      anonymous_id: event.anonymousId,
+      context: this.toIngestionContext(event),
+      timestamp: event.timestamp,
+      message_id: event.messageId,
+      session_id: event.sessionId,
+    };
+
+    if (event.userId) {
+      normalized.user_id = event.userId;
+    }
+
+    if (event.groupId) {
+      normalized.group_id = event.groupId;
+    }
+
+    if (event.properties) {
+      normalized.properties = event.properties;
+    }
+
+    if (event.traits) {
+      normalized.traits = event.traits;
+    }
+
+    return normalized;
+  }
+
+  private toIngestionContext(event: TrackEvent): Record<string, unknown> {
+    return {
+      ...event.context,
+      browser: event.context.browser?.name ?? '',
+      browser_version: event.context.browser?.version ?? '',
+      os: event.context.os?.name ?? '',
+      os_version: event.context.os?.version ?? '',
+      device_type: event.context.device?.type ?? '',
+    };
   }
 }

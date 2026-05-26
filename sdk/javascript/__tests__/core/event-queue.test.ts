@@ -141,10 +141,55 @@ describe('EventQueue', () => {
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const call = sendSpy.mock.calls[0];
-      expect(call[0]).toBe('https://ingest.test.dev/v1/batch');
-      const payload = call[1] as { batch: unknown[]; sentAt: string };
-      expect(payload.batch).toHaveLength(2);
-      expect(payload.sentAt).toBeDefined();
+      expect(call[0]).toBe('https://ingest.test.dev/v1/events');
+      const payload = call[1] as { events: Array<Record<string, unknown>> };
+      expect(payload.events).toHaveLength(2);
+      expect(payload.events[0]).toMatchObject({
+        event: 'test_event',
+        type: 'track',
+        anonymous_id: 'anon-1',
+        session_id: 'sess-1',
+      });
+      expect(payload.events[0]).toHaveProperty('message_id');
+    });
+
+    it('should normalize SDK camelCase event fields for ingestion', async () => {
+      const sendSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue(true);
+
+      queue.enqueue(createEvent({
+        event: undefined,
+        type: 'identify',
+        userId: 'user-1',
+        anonymousId: 'anon-1',
+        groupId: 'group-1',
+        sessionId: 'sess-1',
+        messageId: 'msg-1',
+        traits: { plan: 'pro' },
+        context: {
+          browser: { name: 'Chrome', version: '123' },
+          device: { type: 'desktop' },
+        },
+      }));
+      await queue.flush();
+
+      const payload = sendSpy.mock.calls[0][1] as { events: Array<Record<string, unknown>> };
+      expect(payload.events[0]).toMatchObject({
+        event: 'identify',
+        type: 'identify',
+        user_id: 'user-1',
+        anonymous_id: 'anon-1',
+        group_id: 'group-1',
+        session_id: 'sess-1',
+        message_id: 'msg-1',
+        traits: { plan: 'pro' },
+        context: {
+          browser: 'Chrome',
+          browser_version: '123',
+          device_type: 'desktop',
+        },
+      });
     });
 
     it('should clear the queue after successful flush', async () => {

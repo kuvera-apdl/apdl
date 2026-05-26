@@ -328,7 +328,7 @@ export class APDLClient {
       const url = `${this.config.configHost}/v1/flags`;
       const response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${this.config.apiKey}`,
+          'X-API-Key': this.config.apiKey,
           'X-APDL-SDK': 'js/0.1.0',
         },
       });

@@ -23,7 +23,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', { data: 'test' });
+      const promise = transport.send('https://api.test.dev/v1/events', { data: 'test' });
       await vi.runAllTimersAsync();
       const result = await promise;
 
@@ -31,12 +31,12 @@ describe('Transport', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       const call = fetchMock.mock.calls[0];
-      expect(call[0]).toBe('https://api.test.dev/v1/batch');
+      expect(call[0]).toBe('https://api.test.dev/v1/events');
       expect(call[1]).toMatchObject({
         method: 'POST',
         headers: expect.objectContaining({
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer test-api-key',
+          'X-API-Key': 'test-api-key',
         }),
         body: JSON.stringify({ data: 'test' }),
       });
@@ -48,7 +48,7 @@ describe('Transport', () => {
         vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers() })
       );
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       await vi.runAllTimersAsync();
       expect(await promise).toBe(true);
     });
@@ -61,7 +61,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       await vi.runAllTimersAsync();
       const result = await promise;
 
@@ -89,7 +89,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       // Keep advancing timers to process retries
       for (let i = 0; i < 20; i++) {
         await vi.advanceTimersByTimeAsync(5000);
@@ -119,7 +119,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       for (let i = 0; i < 20; i++) {
         await vi.advanceTimersByTimeAsync(5000);
       }
@@ -144,7 +144,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       for (let i = 0; i < 20; i++) {
         await vi.advanceTimersByTimeAsync(5000);
       }
@@ -162,7 +162,7 @@ describe('Transport', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      const promise = transport.send('https://api.test.dev/v1/batch', {});
+      const promise = transport.send('https://api.test.dev/v1/events', {});
       // Advance enough for all 7 retries + initial attempt
       for (let i = 0; i < 40; i++) {
         await vi.advanceTimersByTimeAsync(10000);
@@ -181,7 +181,7 @@ describe('Transport', () => {
       vi.stubGlobal('navigator', { sendBeacon: sendBeaconMock });
 
       const result = transport.sendBeacon(
-        'https://api.test.dev/v1/batch',
+        'https://api.test.dev/v1/events',
         { test: true }
       );
 
@@ -199,7 +199,7 @@ describe('Transport', () => {
       vi.stubGlobal('navigator', {});
 
       const result = transport.sendBeacon(
-        'https://api.test.dev/v1/batch',
+        'https://api.test.dev/v1/events',
         {}
       );
 
@@ -211,7 +211,7 @@ describe('Transport', () => {
       vi.stubGlobal('navigator', { sendBeacon: sendBeaconMock });
 
       const result = transport.sendBeacon(
-        'https://api.test.dev/v1/batch',
+        'https://api.test.dev/v1/events',
         {}
       );
 
