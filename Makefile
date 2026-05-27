@@ -1,4 +1,4 @@
-.PHONY: all setup build test clean lint dev dev-all dev-down
+.PHONY: all setup build test clean lint dev dev-all dev-down install-hooks lint-staged
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -6,6 +6,14 @@ all: build
 
 setup:
 	@bash scripts/setup.sh
+
+install-hooks:
+	@git config core.hooksPath .githooks
+	@echo "==> Git hooks path set to .githooks (pre-commit active)"
+	@echo "    Bypass once with: git commit --no-verify"
+
+lint-staged:
+	@.githooks/pre-commit
 
 deps:
 	@echo "==> Installing SDK dependencies"
