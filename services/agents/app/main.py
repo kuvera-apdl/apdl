@@ -19,10 +19,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
-    dsn = os.getenv(
-        "POSTGRES_DSN",
-        "postgresql://apdl:apdl@localhost:5432/apdl_agents",
-    )
+    dsn = os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=20)
     application.state.pg_pool = pool
