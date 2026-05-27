@@ -9,8 +9,10 @@ setup:
 
 install-hooks:
 	@git config core.hooksPath .githooks
-	@echo "==> Git hooks path set to .githooks (pre-commit active)"
-	@echo "    Bypass once with: git commit --no-verify"
+	@echo "==> Git hooks path set to .githooks"
+	@echo "    pre-commit: ruff + merge-marker guard on staged files"
+	@echo "    pre-push:   pytest for services whose .py files changed in the push range"
+	@echo "    Bypass once with: git commit --no-verify  /  git push --no-verify"
 
 lint-staged:
 	@.githooks/pre-commit
