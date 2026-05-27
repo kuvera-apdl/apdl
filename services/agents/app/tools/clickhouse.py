@@ -20,7 +20,7 @@ async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def query_events(
-    project_id: int,
+    project_id: str,
     start_date: str,
     end_date: str,
     event_names: list[str] | None = None,
@@ -44,7 +44,7 @@ async def query_events(
 
 
 async def query_timeseries(
-    project_id: int,
+    project_id: str,
     event_name: str,
     start_date: str,
     end_date: str,
@@ -69,7 +69,7 @@ async def query_timeseries(
 
 
 async def query_funnel(
-    project_id: int,
+    project_id: str,
     steps: list[str],
     start_date: str,
     end_date: str,
@@ -94,7 +94,7 @@ async def query_funnel(
 
 
 async def query_retention(
-    project_id: int,
+    project_id: str,
     cohort_event: str,
     return_event: str,
     start_date: str,
@@ -122,7 +122,7 @@ async def query_retention(
 
 
 async def query_cohort(
-    project_id: int,
+    project_id: str,
     cohort_property: str,
     metric_event: str,
     start_date: str,
@@ -147,7 +147,7 @@ async def query_cohort(
 
 
 async def query_breakdown(
-    project_id: int,
+    project_id: str,
     event_name: str,
     property_name: str,
     start_date: str,

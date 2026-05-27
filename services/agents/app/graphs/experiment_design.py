@@ -33,7 +33,7 @@ safety_validator = SafetyValidator()
 
 class ExperimentDesignState(TypedDict, total=False):
     """State passed between nodes in the experiment design graph."""
-    project_id: int
+    project_id: str
     autonomy_level: int
     insights: list[dict]       # input insights from behavior analysis
     context: str               # historical context

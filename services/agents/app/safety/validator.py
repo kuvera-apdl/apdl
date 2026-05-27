@@ -27,7 +27,7 @@ class ActionType(str, Enum):
 class AgentAction(BaseModel):
     type: ActionType
     config: dict[str, Any]
-    project_id: int
+    project_id: str
 
 
 class SafetyResult(BaseModel):

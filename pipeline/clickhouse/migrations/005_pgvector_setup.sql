@@ -7,7 +7,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE IF NOT EXISTS agent_memory (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     agent_type TEXT NOT NULL,
     content TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}',
@@ -24,7 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_embedding ON agent_memory
 CREATE TABLE IF NOT EXISTS agent_audit_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL,
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     agent_type TEXT NOT NULL,
     action_type TEXT NOT NULL,
     action_config JSONB NOT NULL DEFAULT '{}',
@@ -41,7 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_project ON agent_audit_log(project_id);
 -- Agent run tracking table
 CREATE TABLE IF NOT EXISTS agent_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     trigger_type TEXT NOT NULL,
     autonomy_level INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'running',
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_status ON agent_runs(status);
 -- Feature flags table (used by Config Service)
 CREATE TABLE IF NOT EXISTS feature_flags (
     id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     flag_key TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT DEFAULT '',
@@ -82,7 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_flags_project ON feature_flags(project_id);
 -- Experiments table
 CREATE TABLE IF NOT EXISTS experiments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     experiment_key TEXT NOT NULL,
     name TEXT NOT NULL,
     hypothesis TEXT DEFAULT '',
@@ -106,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_experiments_status ON experiments(project_id, sta
 -- UI configurations table
 CREATE TABLE IF NOT EXISTS ui_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
     slot_id TEXT NOT NULL,
     component_name TEXT NOT NULL,
     props JSONB DEFAULT '{}',
