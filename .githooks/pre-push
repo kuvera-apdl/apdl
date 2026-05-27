@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Pre-push: run pytest for each service whose .py files changed in the
+# pushed commit range. Skips services without a .venv or tests dir.
+# Bypass with: git push --no-verify
+set -euo pipefail
+
+remote="${1:-origin}"
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+zero=0000000000000000000000000000000000000000
+
+changed_services_tmp=$(mktemp)
+trap 'rm -f "$changed_services_tmp"' EXIT
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -z "${local_sha:-}" ]] && continue
+  [[ "$local_sha" == "$zero" ]] && continue   # branch deletion
+
+  if [[ -z "${remote_sha:-}" || "$remote_sha" == "$zero" ]]; then
+    # New branch on remote: compare against the merge-base with origin/main
+    # (or the root commit if main isn't an ancestor — e.g. unrelated branch).
+    base=$(git merge-base "$local_sha" "refs/remotes/$remote/main" 2>/dev/null \
+           || git merge-base "$local_sha" origin/main 2>/dev/null \
+           || git rev-list --max-parents=0 "$local_sha" | tail -1)
+    range="${base}..${local_sha}"
+  else
+    range="${remote_sha}..${local_sha}"
+  fi
+
+  git diff --name-only "$range" 2>/dev/null \
+    | awk -F/ '$1=="services" && /\.py$/ {print $2}' \
+    >> "$changed_services_tmp" || true
+done
+
+if [[ ! -s "$changed_services_tmp" ]]; then
+  exit 0
+fi
+
+services=$(sort -u "$changed_services_tmp")
+fail=0
+
+for svc in $services; do
+  svc_dir="services/$svc"
+  venv_py="$svc_dir/.venv/bin/python"
+  if [[ ! -d "$svc_dir/tests" ]]; then
+    continue
+  fi
+  if [[ ! -x "$venv_py" ]]; then
+    echo "[pre-push] no venv at $venv_py; skipping $svc tests (run 'make deps')"
+    continue
+  fi
+  echo "[pre-push] pytest $svc_dir"
+  if ! (cd "$svc_dir" && ./.venv/bin/python -m pytest -x -q); then
+    fail=1
+  fi
+done
+
+if [[ $fail -ne 0 ]]; then
+  echo "[pre-push] tests failed. Push aborted. Bypass with: git push --no-verify"
+  exit 1
+fi
