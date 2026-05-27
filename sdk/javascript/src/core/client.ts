@@ -9,6 +9,7 @@ import { ContextCollector } from '../capture/context';
 import { AutoCapture } from '../capture/auto-capture';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
+import { extractFlagConfigs } from '../flags/schema';
 import type { EvalContext } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
@@ -247,7 +248,7 @@ export class APDLClient {
   flag(key: string, defaultValue = false): boolean {
     const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
     if (result.reason === 'not_found') return defaultValue;
-    return result.value;
+    return result.value === 'true';
   }
 
   /**
@@ -263,7 +264,7 @@ export class APDLClient {
    */
   experiment(key: string): string {
     const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    return result.variant ?? 'control';
+    return result.variant || 'control';
   }
 
   /**
@@ -328,16 +329,14 @@ export class APDLClient {
       const url = `${this.config.configHost}/v1/flags`;
       const response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${this.config.apiKey}`,
+          'X-API-Key': this.config.apiKey,
           'X-APDL-SDK': 'js/0.1.0',
         },
       });
 
       if (response.ok) {
-        const data = (await response.json()) as { flags: Array<Record<string, unknown>> };
-        if (data.flags && Array.isArray(data.flags)) {
-          this.flagCache.set(data.flags as never[]);
-        }
+        const data = await response.json();
+        this.flagCache.set(extractFlagConfigs(data));
       }
     } catch {
       if (this.config.debug) {
@@ -395,9 +394,9 @@ export class APDLClient {
 
   private getEvalContext(): EvalContext {
     return {
-      userId: this.manualCapture.getUserId(),
-      anonymousId: this.manualCapture.getAnonymousId(),
-      traits: this.manualCapture.getTraits(),
+      user_id: this.manualCapture.getUserId(),
+      anonymous_id: this.manualCapture.getAnonymousId(),
+      attributes: this.stringifyAttributes(this.manualCapture.getTraits()),
       groups: this.manualCapture.getGroupId()
         ? { default: this.manualCapture.getGroupId()! }
         : undefined,
@@ -409,7 +408,7 @@ export class APDLClient {
       const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
       for (const listener of listeners) {
         try {
-          listener(result.value);
+          listener(result.value === 'true');
         } catch {
           // Listener errors should not propagate
         }
@@ -424,5 +423,26 @@ export class APDLClient {
     this.componentRegistry.register(CardComponent);
     this.componentRegistry.register(ToastComponent);
     this.componentRegistry.register(InlineMessageComponent);
+  }
+
+  private stringifyAttributes(
+    attributes: Record<string, unknown>
+  ): Record<string, string> {
+    const result: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(attributes)) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+      if (typeof value === 'string') {
+        result[key] = value;
+      } else if (typeof value === 'number' || typeof value === 'boolean') {
+        result[key] = String(value);
+      } else {
+        result[key] = JSON.stringify(value);
+      }
+    }
+
+    return result;
   }
 }

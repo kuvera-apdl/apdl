@@ -99,7 +99,14 @@ export class SSEConnection {
     };
 
     // Listen for typed events
-    const eventTypes = ['flags_update', 'experiment_update', 'ui_config', 'heartbeat'];
+    const eventTypes = [
+      'config',
+      'flag_update',
+      'flags_update',
+      'experiment_update',
+      'ui_config',
+      'heartbeat',
+    ];
     for (const type of eventTypes) {
       this.eventSource.addEventListener(type, ((event: MessageEvent) => {
         this.handleMessage(type, event);

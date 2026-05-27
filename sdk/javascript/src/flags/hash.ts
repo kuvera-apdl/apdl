@@ -1,72 +1,69 @@
+const UINT32_MAX = 0xffffffff;
+const FNV_OFFSET_BASIS = 2166136261;
+const FNV_PRIME = 16777619;
+
 /**
- * MurmurHash3 (32-bit) implementation in pure TypeScript.
- * Produces deterministic hashes matching the reference C implementation.
- *
- * Based on the MurmurHash3_x86_32 algorithm by Austin Appleby.
- * Public domain.
+ * FNV-1a 32-bit hash matching services/config/app/flags/evaluator.py.
  */
-export function murmurhash3(key: string, seed: number = 0): number {
-  let h1 = seed >>> 0;
-  const len = key.length;
+export function hashBucket(key: string, userId: string): number {
+  let hash = FNV_OFFSET_BASIS;
+  const bytes = utf8Bytes(`${key}:${userId}`);
 
-  const c1 = 0xcc9e2d51;
-  const c2 = 0x1b873593;
-
-  // Process the body (4-byte blocks)
-  const nblocks = len >> 2;
-
-  for (let i = 0; i < nblocks; i++) {
-    const i4 = i * 4;
-    let k1 =
-      (key.charCodeAt(i4) & 0xff) |
-      ((key.charCodeAt(i4 + 1) & 0xff) << 8) |
-      ((key.charCodeAt(i4 + 2) & 0xff) << 16) |
-      ((key.charCodeAt(i4 + 3) & 0xff) << 24);
-
-    k1 = Math.imul(k1, c1);
-    k1 = (k1 << 15) | (k1 >>> 17);
-    k1 = Math.imul(k1, c2);
-
-    h1 ^= k1;
-    h1 = (h1 << 13) | (h1 >>> 19);
-    h1 = Math.imul(h1, 5) + 0xe6546b64;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, FNV_PRIME) >>> 0;
   }
 
-  // Process the tail
-  const tail = nblocks * 4;
-  let k1 = 0;
-
-  switch (len & 3) {
-    // @ts-expect-error intentional fallthrough for MurmurHash3 tail processing
-    case 3:
-      k1 ^= (key.charCodeAt(tail + 2) & 0xff) << 16;
-    // @ts-expect-error intentional fallthrough for MurmurHash3 tail processing
-    case 2:
-      k1 ^= (key.charCodeAt(tail + 1) & 0xff) << 8;
-    // falls through
-    case 1:
-      k1 ^= key.charCodeAt(tail) & 0xff;
-      k1 = Math.imul(k1, c1);
-      k1 = (k1 << 15) | (k1 >>> 17);
-      k1 = Math.imul(k1, c2);
-      h1 ^= k1;
-  }
-
-  // Finalization mix
-  h1 ^= len;
-  h1 = fmix32(h1);
-
-  return h1 >>> 0;
+  return hash >>> 0;
 }
 
-/**
- * Finalization mix — forces all bits of a hash block to avalanche.
- */
-function fmix32(h: number): number {
-  h ^= h >>> 16;
-  h = Math.imul(h, 0x85ebca6b);
-  h ^= h >>> 13;
-  h = Math.imul(h, 0xc2b2ae35);
-  h ^= h >>> 16;
-  return h;
+export function percentageBucket(key: string, userId: string): number {
+  return (hashBucket(key, userId) / UINT32_MAX) * 100.0;
+}
+
+export function isInRollout(
+  flagKey: string,
+  userId: string,
+  percentage: number
+): boolean {
+  if (percentage >= 100.0) return true;
+  if (percentage <= 0.0) return false;
+  return percentageBucket(flagKey, userId) < percentage;
+}
+
+function utf8Bytes(input: string): Uint8Array {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(input);
+  }
+
+  const bytes: number[] = [];
+  for (let i = 0; i < input.length; i++) {
+    let codePoint = input.charCodeAt(i);
+
+    if (codePoint >= 0xd800 && codePoint <= 0xdbff && i + 1 < input.length) {
+      const next = input.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        codePoint = 0x10000 + ((codePoint - 0xd800) << 10) + (next - 0xdc00);
+        i++;
+      }
+    }
+
+    if (codePoint < 0x80) {
+      bytes.push(codePoint);
+    } else if (codePoint < 0x800) {
+      bytes.push(0xc0 | (codePoint >> 6));
+      bytes.push(0x80 | (codePoint & 0x3f));
+    } else if (codePoint < 0x10000) {
+      bytes.push(0xe0 | (codePoint >> 12));
+      bytes.push(0x80 | ((codePoint >> 6) & 0x3f));
+      bytes.push(0x80 | (codePoint & 0x3f));
+    } else {
+      bytes.push(0xf0 | (codePoint >> 18));
+      bytes.push(0x80 | ((codePoint >> 12) & 0x3f));
+      bytes.push(0x80 | ((codePoint >> 6) & 0x3f));
+      bytes.push(0x80 | (codePoint & 0x3f));
+    }
+  }
+
+  return new Uint8Array(bytes);
 }

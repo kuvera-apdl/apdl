@@ -33,8 +33,8 @@ export type { ScrubFunction } from './privacy/scrubber';
 // Re-export the client class
 export { APDLClient };
 
-// Re-export hash utility for advanced usage
-export { murmurhash3 } from './flags/hash';
+// Re-export hash utilities for advanced usage
+export { hashBucket, isInRollout, percentageBucket } from './flags/hash';
 
 /**
  * APDL namespace — the primary entry point for the SDK.
@@ -48,5 +48,4 @@ export const APDL = {
     return new APDLClient(config);
   },
 };
-
 
