@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Fast pre-commit checks: ruff on staged Python files + merge-marker guard.
+# Install once with: make install-hooks
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+staged=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] && staged+=("$line")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [[ ${#staged[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+fail=0
+
+# --- Merge conflict marker guard (added lines only) ---------------------------
+if git diff --cached -U0 --diff-filter=ACMR | \
+     grep -E '^\+(<{7}|={7}|>{7})( |$)' >/dev/null; then
+  echo "[pre-commit] merge conflict markers in staged changes"
+  fail=1
+fi
+
+# --- Python: ruff check on staged .py files ----------------------------------
+py_files=()
+for f in "${staged[@]}"; do
+  [[ "$f" == *.py && -f "$f" ]] && py_files+=("$f")
+done
+
+if [[ ${#py_files[@]} -gt 0 ]]; then
+  ruff_bin=""
+  for candidate in \
+    "$repo_root/services/ingestion/.venv/bin/ruff" \
+    "$repo_root/services/config/.venv/bin/ruff" \
+    "$repo_root/services/query/.venv/bin/ruff" \
+    "$repo_root/services/agents/.venv/bin/ruff"; do
+    [[ -x "$candidate" ]] && ruff_bin="$candidate" && break
+  done
+  [[ -z "$ruff_bin" ]] && ruff_bin=$(command -v ruff || true)
+
+  if [[ -z "$ruff_bin" ]]; then
+    echo "[pre-commit] ruff not found; skipping Python lint"
+  else
+    echo "[pre-commit] ruff check (${#py_files[@]} file(s))"
+    if ! "$ruff_bin" check --no-cache "${py_files[@]}"; then
+      fail=1
+    fi
+  fi
+fi
+
+if [[ $fail -ne 0 ]]; then
+  echo "[pre-commit] blocked. Fix the issues above, or bypass with: git commit --no-verify"
+  exit 1
+fi
