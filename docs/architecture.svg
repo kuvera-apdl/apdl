@@ -67,7 +67,7 @@
   ══════════════════════════════════════════════════════════════ -->
   <rect x="200" y="78" width="700" height="76" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
   <text x="550" y="106" text-anchor="middle" font-size="16" font-weight="700" fill="#1e40af">@apdl/sdk</text>
-  <text x="550" y="124" text-anchor="middle" font-size="11" fill="#3b82f6">TypeScript  ·  Auto-capture  ·  Client-side Flag Eval (MurmurHash3)  ·  SSE  ·  Privacy</text>
+  <text x="550" y="124" text-anchor="middle" font-size="11" fill="#3b82f6">TypeScript  ·  Auto-capture  ·  Client-side Flag Eval (FNV-1a)  ·  SSE  ·  Privacy</text>
   <text x="550" y="142" text-anchor="middle" font-size="10" fill="#93c5fd">Rollup → ESM / CJS / IIFE</text>
 
   <!-- ═══════════════════════════════════════════════════════════
@@ -140,8 +140,8 @@
   <rect x="730" y="322" width="270" height="96" rx="9" fill="#f0fdf4" stroke="#22c55e" stroke-width="2" filter="url(#shadow)"/>
   <text x="865" y="349" text-anchor="middle" font-size="14" font-weight="700" fill="#166534">PostgreSQL 16</text>
   <text x="865" y="367" text-anchor="middle" font-size="10" fill="#16a34a">+ pgvector</text>
-  <text x="865" y="382" text-anchor="middle" font-size="10" fill="#16a34a">Flags  ·  Experiments</text>
-  <text x="865" y="397" text-anchor="middle" font-size="10" fill="#16a34a">Agent memory (vector search)</text>
+  <text x="865" y="382" text-anchor="middle" font-size="10" fill="#16a34a">Config: flags · experiments · ui_configs</text>
+  <text x="865" y="397" text-anchor="middle" font-size="10" fill="#16a34a">Agents: memory · audit_log · runs</text>
 
   <!-- ClickHouse Writer — Redis Streams XREAD → Writer -->
   <line x1="232" y1="418" x2="232" y2="456" stroke="#8b5cf6" stroke-width="1.8" marker-end="url(#arr-purple)"/>
@@ -158,7 +158,7 @@
   <rect x="82" y="554" width="624" height="36" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2" filter="url(#shadow)"/>
   <text x="180" y="577" text-anchor="middle" font-size="14" font-weight="700" fill="#9a3412">ClickHouse</text>
   <text x="460" y="570" text-anchor="middle" font-size="10" fill="#c2410c">:8123 (HTTP)  ·  :9000 (native)</text>
-  <text x="500" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events  ·  sessions  ·  experiments  ·  materialized views (hourly / daily)</text>
+  <text x="500" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events  ·  sessions  ·  experiment_exposures  ·  MVs: event_counts (hourly / daily)  ·  experiment_metrics</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ANALYTICS LAYER — Query Service
@@ -170,7 +170,7 @@
   <rect x="82" y="624" width="640" height="74" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
   <text x="402" y="652" text-anchor="middle" font-size="16" font-weight="700" fill="#065f46">Query Service</text>
   <text x="402" y="670" text-anchor="middle" font-size="11" fill="#059669">Python 3.12 / FastAPI  · :8082</text>
-  <text x="402" y="686" text-anchor="middle" font-size="10" fill="#10b981">Funnels (windowFunnel)  ·  Cohorts  ·  Retention  ·  Experiment Stats (frequentist / Bayesian / sequential)</text>
+  <text x="402" y="686" text-anchor="middle" font-size="10" fill="#10b981">Event analytics (count / timeseries / breakdown)  ·  Funnels (windowFunnel)  ·  Cohorts  ·  Retention  ·  Experiments (freq · Bayes · sequential)</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        RIGHT-SIDE RAIL — PostgreSQL → Agents Service
