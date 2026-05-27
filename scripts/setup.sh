@@ -102,15 +102,8 @@ echo ""
 ok "Infrastructure is running"
 
 # ── ClickHouse migrations ──────────────────────────────────────────
-if [ -d "$ROOT_DIR/pipeline/clickhouse/migrations" ]; then
-    info "Running ClickHouse migrations"
-    for f in "$ROOT_DIR"/pipeline/clickhouse/migrations/*.sql; do
-        if [ -f "$f" ]; then
-            docker exec -i "$(docker compose -f "$ROOT_DIR/infra/docker/docker-compose.deps.yml" ps -q clickhouse)" \
-                clickhouse-client --multiquery < "$f" 2>/dev/null && ok "Applied $(basename "$f")" || warn "Skipped $(basename "$f")"
-        fi
-    done
-fi
+CLICKHOUSE_COMPOSE_FILE="$ROOT_DIR/infra/docker/docker-compose.deps.yml" "$ROOT_DIR/scripts/init-clickhouse.sh"
+ok "ClickHouse schema initialized"
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
