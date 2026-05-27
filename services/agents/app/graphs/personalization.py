@@ -27,7 +27,7 @@ safety_validator = SafetyValidator()
 
 class PersonalizationState(TypedDict, total=False):
     """State passed between nodes in the personalization graph."""
-    project_id: int
+    project_id: str
     autonomy_level: int
     insights: list[dict]
     segments: list[dict]

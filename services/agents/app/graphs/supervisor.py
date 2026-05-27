@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class SupervisorState(TypedDict, total=False):
     """Top-level state for the supervisor orchestration."""
     run_id: str
-    project_id: int
+    project_id: str
     autonomy_level: int
     analysis_types: list[str]
     time_range_days: int
@@ -67,7 +67,7 @@ async def run_supervisor(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
     run_id: str,
-    project_id: int,
+    project_id: str,
     analysis_types: list[str],
     time_range_days: int,
     autonomy_level: int,

@@ -1,6 +1,6 @@
 -- Migration 001: Events table
 CREATE TABLE IF NOT EXISTS events (
-    project_id     UInt32,
+    project_id     String,
     event_id       UUID DEFAULT generateUUIDv4(),
     event_name     LowCardinality(String),
     user_id        String,

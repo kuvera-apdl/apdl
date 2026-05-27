@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class FeatureProposalState(TypedDict, total=False):
     """State passed between nodes in the feature proposal graph."""
-    project_id: int
+    project_id: str
     autonomy_level: int
     insights: list[dict]
     context: str
