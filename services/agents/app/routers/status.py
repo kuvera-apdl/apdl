@@ -15,7 +15,7 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 class RunStatus(BaseModel):
     run_id: str
-    project_id: int
+    project_id: str
     status: str
     phase: str
     insights_count: int

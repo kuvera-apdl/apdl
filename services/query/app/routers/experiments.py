@@ -20,7 +20,7 @@ router = APIRouter(prefix="/v1/query", tags=["experiments"])
 
 analyzer = ExperimentAnalyzer()
 
-DEFAULT_PROJECT_ID = int(os.getenv("DEFAULT_PROJECT_ID", "1"))
+DEFAULT_PROJECT_ID = os.getenv("DEFAULT_PROJECT_ID", "default")
 
 
 def _get_client(request: Request) -> ClickHouseClient:
@@ -36,7 +36,10 @@ async def experiment_results(
         AnalysisMethod.frequentist,
         description="Statistical method: frequentist, bayesian, or sequential",
     ),
-    project_id: int = Query(None, description="Project ID (defaults to env DEFAULT_PROJECT_ID)"),
+    project_id: str | None = Query(
+        None,
+        description="Project ID (defaults to env DEFAULT_PROJECT_ID)",
+    ),
 ) -> ExperimentResult:
     """Retrieve and statistically analyse experiment results.
 

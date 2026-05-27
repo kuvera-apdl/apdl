@@ -53,7 +53,7 @@ class ExperimentRollbackMonitor:
     Usage:
         monitor = ExperimentRollbackMonitor(thresholds=RollbackThresholds())
         decision = await monitor.evaluate(
-            project_id=1,
+            project_id="default",
             experiment_id="exp_checkout_v2",
             flag_key="exp_checkout_v2",
             baseline=MetricSnapshot(error_rate=0.01, p95_latency_ms=200, primary_metric_value=0.12),
@@ -67,7 +67,7 @@ class ExperimentRollbackMonitor:
 
     async def evaluate(
         self,
-        project_id: int,
+        project_id: str,
         experiment_id: str,
         flag_key: str,
         baseline: MetricSnapshot,
@@ -168,7 +168,7 @@ class ExperimentRollbackMonitor:
 
     async def _fetch_current_metrics(
         self,
-        project_id: int,
+        project_id: str,
         experiment_id: str,
         primary_metric_event: str,
     ) -> MetricSnapshot:

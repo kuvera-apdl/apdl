@@ -1,6 +1,6 @@
 -- Migration 002: Sessions table
 CREATE TABLE IF NOT EXISTS sessions (
-    project_id     UInt32,
+    project_id     String,
     session_id     String,
     user_id        String,
     anonymous_id   String,

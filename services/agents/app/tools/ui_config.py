@@ -12,7 +12,7 @@ _TIMEOUT = 15.0
 
 
 async def create_ui_config(
-    project_id: int,
+    project_id: str,
     config_id: str,
     component: str,
     targeting: dict[str, Any],
@@ -99,7 +99,7 @@ async def update_ui_config(
 
 
 async def list_ui_configs(
-    project_id: int,
+    project_id: str,
     component: str | None = None,
 ) -> list[dict[str, Any]]:
     """List server-driven UI configurations for a project.

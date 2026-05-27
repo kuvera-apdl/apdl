@@ -4,9 +4,18 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
+
+
+def _coerce_project_id(value: Any) -> str:
+    if value is None:
+        raise ValueError("project_id is required")
+    return str(value)
+
+
+ProjectId = Annotated[str, BeforeValidator(_coerce_project_id)]
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +57,7 @@ class DateRangeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 class EventCountRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     event_names: list[str] | None = None
 
 
@@ -59,7 +68,7 @@ class EventCountResponse(BaseModel):
 
 
 class TimeseriesRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     event_name: str
     interval: TimeInterval = TimeInterval.day
 
@@ -69,7 +78,7 @@ class TimeseriesResponse(BaseModel):
 
 
 class BreakdownRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     event_name: str
     property: str
     limit: int = Field(default=20, ge=1, le=100)
@@ -84,7 +93,7 @@ class BreakdownResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class FunnelRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     steps: list[str] = Field(...)
     window_days: int = Field(default=7, ge=1, le=90)
 
@@ -107,7 +116,7 @@ class FunnelResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class RetentionRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     cohort_event: str
     return_event: str
     period: Literal["day", "week"] = "day"
@@ -128,7 +137,7 @@ class RetentionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class CohortRequest(DateRangeRequest):
-    project_id: int
+    project_id: ProjectId
     cohort_property: str
     metric_event: str
 

@@ -35,7 +35,7 @@ async def lifespan(application: FastAPI):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_memory (
                 id BIGSERIAL PRIMARY KEY,
-                project_id INTEGER NOT NULL,
+                project_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 metadata JSONB DEFAULT '{}',
                 embedding vector(1536),
@@ -50,7 +50,7 @@ async def lifespan(application: FastAPI):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_runs (
                 run_id TEXT PRIMARY KEY,
-                project_id INTEGER NOT NULL,
+                project_id TEXT NOT NULL,
                 trigger_type TEXT NOT NULL,
                 autonomy_level INTEGER NOT NULL DEFAULT 2,
                 status TEXT NOT NULL DEFAULT 'started',

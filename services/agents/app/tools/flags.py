@@ -32,7 +32,7 @@ async def _put(path: str, payload: dict[str, Any]) -> Any:
         return resp.json()
 
 
-async def get_active_flags(project_id: int) -> list[dict[str, Any]]:
+async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
     """Get all active feature flags for a project.
 
     Args:
@@ -45,7 +45,7 @@ async def get_active_flags(project_id: int) -> list[dict[str, Any]]:
 
 
 async def create_flag(
-    project_id: int,
+    project_id: str,
     key: str,
     description: str,
     variants: list[dict[str, Any]],
