@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, AsyncIterator
 
 from asynch.connection import Connection
 from asynch.cursors import DictCursor
 
 logger = logging.getLogger(__name__)
+
+_PYFORMAT_PARAM_RE = re.compile(r"%\(([A-Za-z_][A-Za-z0-9_]*)\)s")
+
+
+def normalize_query_params(query: str) -> str:
+    """Convert pyformat placeholders to the format expected by asynch.
+
+    The sync clickhouse-driver supports ``%(name)s`` placeholders, but asynch
+    substitutes parameters via ``str.format`` and expects ``{name}``.
+    """
+    return _PYFORMAT_PARAM_RE.sub(r"{\1}", query)
 
 
 class ClickHouseClient:
@@ -69,12 +81,13 @@ class ClickHouseClient:
     async def execute(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Execute a query and return all rows as a list of dicts.
 
-        Parameters use ClickHouse's %(name)s format for substitution.
+        Query templates may use clickhouse-driver's ``%(name)s`` placeholder
+        style; this wrapper normalizes them for asynch before execution.
         """
         conn = await self._acquire()
         try:
             async with conn.cursor(cursor=DictCursor) as cursor:
-                await cursor.execute(query, params or {})
+                await cursor.execute(normalize_query_params(query), params or {})
                 rows = await cursor.fetchall()
                 result = [dict(row) for row in rows] if rows else []
         except Exception:
@@ -95,7 +108,7 @@ class ClickHouseClient:
         conn = await self._acquire()
         try:
             async with conn.cursor(cursor=DictCursor) as cursor:
-                await cursor.execute(query, params or {})
+                await cursor.execute(normalize_query_params(query), params or {})
                 while True:
                     row = await cursor.fetchone()
                     if row is None:

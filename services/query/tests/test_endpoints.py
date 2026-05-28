@@ -1,6 +1,6 @@
 """Integration tests for query service router endpoints with mocked ClickHouse."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
