@@ -19,10 +19,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
-    dsn = os.getenv(
-        "POSTGRES_DSN",
-        "postgresql://apdl:apdl@localhost:5432/apdl_agents",
-    )
+    dsn = os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=20)
     application.state.pg_pool = pool
@@ -35,7 +32,7 @@ async def lifespan(application: FastAPI):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_memory (
                 id BIGSERIAL PRIMARY KEY,
-                project_id INTEGER NOT NULL,
+                project_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 metadata JSONB DEFAULT '{}',
                 embedding vector(1536),
@@ -50,7 +47,7 @@ async def lifespan(application: FastAPI):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_runs (
                 run_id TEXT PRIMARY KEY,
-                project_id INTEGER NOT NULL,
+                project_id TEXT NOT NULL,
                 trigger_type TEXT NOT NULL,
                 autonomy_level INTEGER NOT NULL DEFAULT 2,
                 status TEXT NOT NULL DEFAULT 'started',

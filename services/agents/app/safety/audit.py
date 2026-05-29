@@ -127,7 +127,7 @@ class AuditLogger:
 
     async def get_recent_actions(
         self,
-        project_id: int | None = None,
+        project_id: str | None = None,
         action_type: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:

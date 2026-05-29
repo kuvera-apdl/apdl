@@ -6,7 +6,7 @@
 -- Source: events.enriched Kafka topic
 -- =============================================================================
 CREATE TABLE events_enriched (
-    project_id     INT,
+    project_id     STRING,
     event_name     STRING,
     user_id        STRING,
     anonymous_id   STRING,
@@ -34,7 +34,7 @@ CREATE TABLE events_enriched (
 -- Sink: Real-time event counts (1-minute tumbling window)
 -- =============================================================================
 CREATE TABLE event_counts_realtime (
-    project_id   INT,
+    project_id   STRING,
     event_name   STRING,
     window_start TIMESTAMP(3),
     window_end   TIMESTAMP(3),
@@ -70,7 +70,7 @@ GROUP BY
 -- Sink: Hourly event counts
 -- =============================================================================
 CREATE TABLE event_counts_hourly (
-    project_id   INT,
+    project_id   STRING,
     event_name   STRING,
     event_hour   TIMESTAMP(3),
     event_count  BIGINT,
@@ -104,7 +104,7 @@ GROUP BY
 -- Sink: Daily event counts
 -- =============================================================================
 CREATE TABLE event_counts_daily (
-    project_id   INT,
+    project_id   STRING,
     event_name   STRING,
     event_day    DATE,
     event_count  BIGINT,
@@ -138,7 +138,7 @@ GROUP BY
 -- Sink: Country-level event breakdown (1-hour window)
 -- =============================================================================
 CREATE TABLE event_counts_by_country (
-    project_id   INT,
+    project_id   STRING,
     event_name   STRING,
     country      STRING,
     event_hour   TIMESTAMP(3),
@@ -176,7 +176,7 @@ GROUP BY
 -- Sink: Device-type event breakdown (1-hour window)
 -- =============================================================================
 CREATE TABLE event_counts_by_device (
-    project_id   INT,
+    project_id   STRING,
     event_name   STRING,
     device_type  STRING,
     event_hour   TIMESTAMP(3),
@@ -215,7 +215,7 @@ GROUP BY
 -- For events that carry a revenue property
 -- =============================================================================
 CREATE TABLE revenue_metrics_hourly (
-    project_id    INT,
+    project_id    STRING,
     event_name    STRING,
     event_hour    TIMESTAMP(3),
     event_count   BIGINT,

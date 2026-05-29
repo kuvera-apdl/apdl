@@ -1,12 +1,14 @@
 """Integration tests for query service router endpoints with mocked ClickHouse."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+
+PROJECT_ID = "apiasport"
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +72,7 @@ async def test_event_count(client):
     ])
 
     resp = await client.post("/v1/query/events/count", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
@@ -89,7 +91,7 @@ async def test_event_count_with_filter(client):
     ])
 
     resp = await client.post("/v1/query/events/count", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
         "event_names": ["click"],
@@ -101,6 +103,21 @@ async def test_event_count_with_filter(client):
 
 
 @pytest.mark.asyncio
+async def test_event_count_coerces_legacy_numeric_project_id(client):
+    app.state.ch_client.execute = AsyncMock(return_value=[])
+
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": 1,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+    })
+
+    assert resp.status_code == 200
+    _, params = app.state.ch_client.execute.await_args.args
+    assert params["project_id"] == "1"
+
+
+@pytest.mark.asyncio
 async def test_event_timeseries(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
         {"bucket": "2025-01-01T00:00:00", "event_count": 10, "unique_users": 5},
@@ -108,7 +125,7 @@ async def test_event_timeseries(client):
     ])
 
     resp = await client.post("/v1/query/events/timeseries", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "event_name": "click",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
@@ -127,7 +144,7 @@ async def test_event_breakdown(client):
     ])
 
     resp = await client.post("/v1/query/events/breakdown", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "event_name": "click",
         "property": "country",
         "start_date": "2025-01-01",
@@ -153,7 +170,7 @@ async def test_funnel_analysis(client):
     ])
 
     resp = await client.post("/v1/query/funnel", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "steps": ["view", "add_to_cart", "purchase"],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
@@ -172,7 +189,7 @@ async def test_funnel_analysis(client):
 async def test_funnel_too_few_steps(client):
     """A funnel with fewer than 2 steps returns empty."""
     resp = await client.post("/v1/query/funnel", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "steps": ["only_one"],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
@@ -190,7 +207,7 @@ async def test_funnel_no_data(client):
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
     resp = await client.post("/v1/query/funnel", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "steps": ["a", "b"],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
@@ -214,7 +231,7 @@ async def test_cohort_comparison(client):
     ])
 
     resp = await client.post("/v1/query/cohort", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "cohort_property": "plan",
         "metric_event": "purchase",
         "start_date": "2025-01-01",
@@ -240,7 +257,7 @@ async def test_retention_analysis(client):
     ])
 
     resp = await client.post("/v1/query/retention", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "cohort_event": "signup",
         "return_event": "login",
         "start_date": "2025-01-01",
@@ -266,7 +283,7 @@ async def test_retention_weekly(client):
     ])
 
     resp = await client.post("/v1/query/retention", json={
-        "project_id": 1,
+        "project_id": PROJECT_ID,
         "cohort_event": "signup",
         "return_event": "login",
         "start_date": "2025-01-01",
@@ -306,7 +323,11 @@ async def test_experiment_results_frequentist(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_123",
-        params={"metric": "purchase", "method": "frequentist", "project_id": 1},
+        params={
+            "metric": "purchase",
+            "method": "frequentist",
+            "project_id": PROJECT_ID,
+        },
     )
 
     assert resp.status_code == 200
@@ -325,7 +346,7 @@ async def test_experiment_no_data_returns_404(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_missing",
-        params={"metric": "purchase", "project_id": 1},
+        params={"metric": "purchase", "project_id": PROJECT_ID},
     )
 
     assert resp.status_code == 404
@@ -343,7 +364,7 @@ async def test_experiment_single_variant_returns_400(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_single",
-        params={"metric": "purchase", "project_id": 1},
+        params={"metric": "purchase", "project_id": PROJECT_ID},
     )
 
     assert resp.status_code == 400

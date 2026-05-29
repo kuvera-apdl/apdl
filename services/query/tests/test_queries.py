@@ -24,16 +24,22 @@ class TestBuildFunnelQuery:
         assert "checkout" in sql
 
     def test_custom_window_seconds(self):
-        """Custom window_seconds should appear in the windowFunnel call."""
+        """Custom window_seconds should be converted to milliseconds."""
         sql = build_funnel_query(["a", "b"], window_seconds=3600)
 
-        assert "3600" in sql
+        assert "windowFunnel(3600000)" in sql
 
     def test_default_window_is_7_days(self):
-        """Default window should be 7 * 86400 = 604800 seconds."""
+        """Default window should be 7 days expressed in milliseconds."""
         sql = build_funnel_query(["a", "b"])
 
-        assert "604800" in sql
+        assert "windowFunnel(604800000)" in sql
+
+    def test_datetime64_timestamp_is_converted_for_window_funnel(self):
+        """windowFunnel does not accept the DateTime64 timestamp column directly."""
+        sql = build_funnel_query(["a", "b"])
+
+        assert "toUInt64(toUnixTimestamp64Milli(timestamp))" in sql
 
     def test_in_clause_contains_all_steps(self):
         """The IN clause should list all step event names for pre-filtering."""

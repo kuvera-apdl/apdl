@@ -23,7 +23,7 @@ class TriggerType(str, Enum):
 
 
 class TriggerRequest(BaseModel):
-    project_id: int
+    project_id: str
     trigger_type: TriggerType
     analysis_types: list[str] = Field(
         default_factory=lambda: ["behavior_analysis"],
@@ -74,7 +74,7 @@ async def trigger_agent_run(
             },
         )
 
-    logger.info("Agent run %s created for project %d", run_id, body.project_id)
+    logger.info("Agent run %s created for project %s", run_id, body.project_id)
 
     # Launch supervisor in background
     background_tasks.add_task(

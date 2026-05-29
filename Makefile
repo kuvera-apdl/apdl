@@ -1,8 +1,10 @@
-.PHONY: all setup build test clean lint dev dev-all dev-down install-hooks lint-staged
+.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse
 
 # ─── Top-Level ───────────────────────────────────────────────
 
 all: build
+
+CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
 setup:
 	@bash scripts/setup.sh
@@ -103,21 +105,20 @@ run-pipeline:
 	cd pipeline/redis && .venv/bin/python clickhouse_writer.py
 
 migrate-clickhouse:
-	@echo "==> Running ClickHouse migrations"
-	@for f in pipeline/clickhouse/migrations/*.sql; do \
-		echo "  Applying $$f"; \
-		clickhouse-client --multiquery < "$$f"; \
-	done
+	@CLICKHOUSE_COMPOSE_FILE="$(CLICKHOUSE_COMPOSE_FILE)" scripts/init-clickhouse.sh
 
 # ─── Docker ──────────────────────────────────────────────────
 
 dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
+	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-pipeline"
 
 dev-all:
-	docker compose -f infra/docker/docker-compose.yml up --build
+	docker compose -f infra/docker/docker-compose.yml up -d --build redis clickhouse postgres
+	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.yml
+	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents clickhouse-writer
 
 dev-down:
 	docker compose -f infra/docker/docker-compose.yml down

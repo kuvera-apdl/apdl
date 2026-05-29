@@ -71,11 +71,15 @@ def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str
     """
     safe_steps = [_sql_str(s) for s in steps]
     conditions = ", ".join(f"event_name = '{s}'" for s in safe_steps)
+    window_milliseconds = window_seconds * 1000
     query = f"""
 WITH funnel AS (
     SELECT
         user_id,
-        windowFunnel({window_seconds})(timestamp, {conditions}) AS depth
+        windowFunnel({window_milliseconds})(
+            toUInt64(toUnixTimestamp64Milli(timestamp)),
+            {conditions}
+        ) AS depth
     FROM events
     WHERE project_id = %(project_id)s
       AND event_date BETWEEN %(start_date)s AND %(end_date)s

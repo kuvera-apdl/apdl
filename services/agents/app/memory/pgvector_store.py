@@ -29,7 +29,7 @@ class PgVectorStore:
 
     async def store(
         self,
-        project_id: int,
+        project_id: str,
         content: str,
         metadata: dict[str, Any] | None = None,
     ) -> int:
@@ -60,12 +60,12 @@ class PgVectorStore:
                 embedding_str,
             )
 
-        logger.debug("Stored memory entry %d for project %d", row_id, project_id)
+        logger.debug("Stored memory entry %d for project %s", row_id, project_id)
         return row_id
 
     async def search(
         self,
-        project_id: int,
+        project_id: str,
         query: str,
         top_k: int = 5,
         metadata_filter: dict[str, Any] | None = None,

@@ -162,7 +162,7 @@ class AggregationWindowFunction(ProcessWindowFunction):
                       the preceding AggregateFunction).
         """
         key_parts = key.split(":", 1)
-        project_id = int(key_parts[0]) if key_parts else 0
+        project_id = key_parts[0] if key_parts else ""
         event_name = key_parts[1] if len(key_parts) > 1 else ""
 
         window = context.window()
@@ -198,9 +198,9 @@ def extract_aggregation_key(event_json: str) -> str:
     try:
         event = json.loads(event_json)
     except json.JSONDecodeError:
-        return "0:unknown"
+        return ":unknown"
 
-    project_id = event.get("project_id", 0)
+    project_id = event.get("project_id", "")
     event_name = event.get("event", "")
     return f"{project_id}:{event_name}"
 

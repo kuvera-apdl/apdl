@@ -12,7 +12,7 @@ CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 30.0
 
 
-async def get_active_experiments(project_id: int) -> list[dict[str, Any]]:
+async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
     """Get all active experiments for a project from the config service.
 
     Args:
@@ -28,7 +28,7 @@ async def get_active_experiments(project_id: int) -> list[dict[str, Any]]:
 
 
 async def create_experiment_config(
-    project_id: int,
+    project_id: str,
     experiment_id: str,
     hypothesis: str,
     variants: list[dict[str, Any]],
@@ -115,7 +115,7 @@ async def calculate_sample_size(
 async def get_experiment_results(
     experiment_id: str,
     metric: str,
-    project_id: int = 1,
+    project_id: str = "default",
     method: str = "frequentist",
 ) -> dict[str, Any]:
     """Get statistical results for a running or completed experiment.
@@ -172,5 +172,4 @@ class _InlineAnalyzer:
         num = (z_alpha * math.sqrt(2 * p_bar * (1 - p_bar))
                + z_beta * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
         return math.ceil(num / (mde ** 2)) if mde != 0 else 0
-
 

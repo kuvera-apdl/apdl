@@ -247,11 +247,14 @@ All services and dependencies run via Docker Compose:
 
 ```bash
 # Dependencies only (Redis, ClickHouse, PostgreSQL)
-docker compose -f infra/docker/docker-compose.deps.yml up -d
+make dev
 
 # Full stack (deps + all application services)
-docker compose -f infra/docker/docker-compose.yml up --build
+make dev-all
 ```
+
+Both commands initialize the local ClickHouse schema before ClickHouse-dependent
+services process requests or events.
 
 | Container | Port | Description |
 |---|---|---|

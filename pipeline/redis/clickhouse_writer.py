@@ -382,9 +382,10 @@ class ClickHouseWriter:
             timestamp = datetime.now(timezone.utc)
 
         context = event_json.get("context", {})
+        project_id = data.get("project_id") or event_json.get("project_id", "")
 
         return {
-            "project_id": int(data.get("project_id", 0)),
+            "project_id": str(project_id),
             "event_name": event_json.get("event", ""),
             "user_id": event_json.get("user_id", ""),
             "anonymous_id": event_json.get("anonymous_id", ""),

@@ -1,6 +1,6 @@
 -- Migration 003: Experiment exposures table
 CREATE TABLE IF NOT EXISTS experiment_exposures (
-    project_id      UInt32,
+    project_id      String,
     experiment_id   String,
     user_id         String,
     variant         LowCardinality(String),

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class AnalysisState(TypedDict, total=False):
     """State passed between nodes in the behavior analysis graph."""
-    project_id: int
+    project_id: str
     time_range_days: int
     context: str               # retrieved historical context
     analysis_plan: dict        # LLM-generated plan

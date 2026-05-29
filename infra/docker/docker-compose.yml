@@ -84,6 +84,8 @@ services:
       - "8082:8082"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 9000
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
