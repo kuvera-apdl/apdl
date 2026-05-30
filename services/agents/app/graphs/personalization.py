@@ -57,7 +57,7 @@ async def gather_segments(state: PersonalizationState) -> PersonalizationState:
         try:
             result = await query_breakdown(
                 project_id=project_id,
-                event_name="page_view",
+                selector={"event_name": "page_view", "filters": []},
                 property_name=prop,
                 start_date=start_str,
                 end_date=end_str,
