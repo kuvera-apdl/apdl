@@ -135,12 +135,12 @@ class BehaviorAnalysisAgent(BaseAgent):
                     raise ValueError("Missing required field 'type' for query")
 
                 if query_type == "event_count":
-                        result = await query_events(
-                            project_id=project_id,
-                            start_date=start_str,
-                            end_date=end_str,
-                            selectors=_required(q, "selectors"),
-                        )
+                    result = await query_events(
+                        project_id=project_id,
+                        start_date=start_str,
+                        end_date=end_str,
+                        event_names=q.get("event_names"),
+                    )
                 elif query_type == "timeseries":
                     result = await query_timeseries(
                         project_id=project_id,
