@@ -9,10 +9,11 @@ from fastapi import APIRouter, Request
 
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import (
-    EVENT_BREAKDOWN_QUERY,
-    EVENT_COUNT_QUERY,
-    EVENT_TIMESERIES_QUERY,
+    build_event_breakdown_query,
+    build_event_count_query,
+    build_event_timeseries_query,
 )
+from app.clickhouse.selectors import selector_label
 from app.models.schemas import (
     BreakdownRequest,
     BreakdownResponse,
@@ -32,7 +33,7 @@ def _get_client(request: Request) -> ClickHouseClient:
 
 @router.post("/count", response_model=EventCountResponse)
 async def event_counts(body: EventCountRequest, request: Request) -> EventCountResponse:
-    """Aggregate event counts and unique-user counts, optionally filtered by event names."""
+    """Aggregate event counts and unique-user counts for event selectors."""
     client = _get_client(request)
 
     params: dict[str, Any] = {
@@ -41,16 +42,7 @@ async def event_counts(body: EventCountRequest, request: Request) -> EventCountR
         "end_date": body.end_date.isoformat(),
     }
 
-    # Build optional event-name filter
-    if body.event_names:
-        placeholders = ", ".join(f"%(ev_{i})s" for i in range(len(body.event_names)))
-        event_filter = f"AND event_name IN ({placeholders})"
-        for i, name in enumerate(body.event_names):
-            params[f"ev_{i}"] = name
-    else:
-        event_filter = ""
-
-    query = EVENT_COUNT_QUERY.format(event_filter=event_filter)
+    query = build_event_count_query(body.selectors, params)
     rows = await client.execute(query, params)
 
     total_events = sum(r.get("event_count", 0) for r in rows)
@@ -65,20 +57,19 @@ async def event_counts(body: EventCountRequest, request: Request) -> EventCountR
 
 @router.post("/timeseries", response_model=TimeseriesResponse)
 async def event_timeseries(body: TimeseriesRequest, request: Request) -> TimeseriesResponse:
-    """Time-bucketed event counts for a single event."""
+    """Time-bucketed event counts for one event selector."""
     client = _get_client(request)
 
     # The interval value (e.g. "1 DAY") is injected directly into the SQL
     # because ClickHouse does not support parameterised INTERVAL literals.
     # The TimeInterval enum constrains input to known-safe values.
-    query = EVENT_TIMESERIES_QUERY.format(interval=body.interval.value)
 
     params: dict[str, Any] = {
         "project_id": body.project_id,
-        "event_name": body.event_name,
         "start_date": body.start_date.isoformat(),
         "end_date": body.end_date.isoformat(),
     }
+    query = build_event_timeseries_query(body.selector, params, body.interval.value)
 
     rows = await client.execute(query, params)
 
@@ -90,22 +81,26 @@ async def event_timeseries(body: TimeseriesRequest, request: Request) -> Timeser
             bucket["bucket"] = bucket["bucket"].isoformat()
         buckets.append(bucket)
 
-    return TimeseriesResponse(buckets=buckets)
+    return TimeseriesResponse(selector=selector_label(body.selector), buckets=buckets)
 
 
 @router.post("/breakdown", response_model=BreakdownResponse)
 async def event_breakdown(body: BreakdownRequest, request: Request) -> BreakdownResponse:
-    """Break down an event by a JSON property value."""
+    """Break down a selector's matching events by a JSON property value."""
     client = _get_client(request)
 
     params: dict[str, Any] = {
         "project_id": body.project_id,
-        "event_name": body.event_name,
         "property": body.property,
         "start_date": body.start_date.isoformat(),
         "end_date": body.end_date.isoformat(),
         "limit": body.limit,
     }
+    query = build_event_breakdown_query(body.selector, params)
 
-    rows = await client.execute(EVENT_BREAKDOWN_QUERY, params)
-    return BreakdownResponse(results=rows)
+    rows = await client.execute(query, params)
+    return BreakdownResponse(
+        selector=selector_label(body.selector),
+        property=body.property,
+        results=rows,
+    )

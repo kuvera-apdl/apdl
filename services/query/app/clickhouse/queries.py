@@ -1,44 +1,84 @@
-"""Parameterized SQL templates for ClickHouse analytics queries."""
+"""Parameterized SQL templates and builders for ClickHouse analytics queries."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.clickhouse.selectors import build_selector_condition, selector_label
+from app.models.schemas import EventSelector
 
 # ---------------------------------------------------------------------------
 # Event queries
 # ---------------------------------------------------------------------------
 
-EVENT_COUNT_QUERY = """
+def build_event_count_query(selectors: list[EventSelector], params: dict[str, Any]) -> str:
+    """Build a count query that returns one row per event selector."""
+    subqueries: list[str] = []
+    for index, selector in enumerate(selectors):
+        prefix = f"count_{index}"
+        label_param = f"{prefix}_label"
+        params[label_param] = selector_label(selector)
+        condition = build_selector_condition(selector, params, prefix)
+        subqueries.append(
+            f"""
 SELECT
-    event_name,
+    %({label_param})s AS selector,
+    %({prefix}_event_name)s AS event_name,
     count() AS event_count,
     uniq(user_id) AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
-  {event_filter}
-GROUP BY event_name
+  AND {condition}
+"""
+        )
+
+    return f"""
+SELECT *
+FROM (
+{'\nUNION ALL\n'.join(subqueries)}
+)
 ORDER BY event_count DESC
 """
 
-EVENT_TIMESERIES_QUERY = """
+
+def build_event_timeseries_query(
+    selector: EventSelector,
+    params: dict[str, Any],
+    interval: str,
+) -> str:
+    """Build a time-bucketed event query for one selector."""
+    params["selector_label"] = selector_label(selector)
+    condition = build_selector_condition(selector, params, "timeseries")
+    return f"""
 SELECT
+    %(selector_label)s AS selector,
     toStartOfInterval(timestamp, INTERVAL {interval}) AS bucket,
     count() AS event_count,
     uniq(user_id) AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
-  AND event_name = %(event_name)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
+  AND {condition}
 GROUP BY bucket
 ORDER BY bucket
 """
 
-EVENT_BREAKDOWN_QUERY = """
+
+def build_event_breakdown_query(selector: EventSelector, params: dict[str, Any]) -> str:
+    """Build a property breakdown query for one selector."""
+    params["selector_label"] = selector_label(selector)
+    condition = build_selector_condition(selector, params, "breakdown")
+    return f"""
 SELECT
+    %(selector_label)s AS selector,
     JSONExtractString(properties, %(property)s) AS property_value,
     count() AS event_count,
     uniq(user_id) AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
-  AND event_name = %(event_name)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
+  AND {condition}
 GROUP BY property_value
 ORDER BY event_count DESC
 LIMIT %(limit)s
@@ -49,19 +89,19 @@ LIMIT %(limit)s
 # Funnel query builder
 # ---------------------------------------------------------------------------
 
-def _sql_str(s: str) -> str:
-    """Escape a string for safe embedding in a ClickHouse SQL string literal."""
-    return s.replace("\\", "\\\\").replace("'", "\\'")
-
-
-def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str:
+def build_funnel_query(
+    steps: list[EventSelector],
+    params: dict[str, Any],
+    window_seconds: int = 86400 * 7,
+) -> str:
     """Dynamically build an N-step funnel query using windowFunnel.
 
     ClickHouse's ``windowFunnel`` aggregate function efficiently computes
     the deepest step each user reached within a sliding window.
 
     Args:
-        steps: Ordered list of event names defining the funnel.
+        steps: Ordered list of event selectors defining the funnel.
+        params: Parameter dictionary to populate with selector values.
         window_seconds: Maximum seconds between first and last step
                         (default 7 days).
 
@@ -69,10 +109,14 @@ def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str
         A parameterized SQL string.  The caller must supply ``project_id``,
         ``start_date``, and ``end_date`` as parameters.
     """
-    safe_steps = [_sql_str(s) for s in steps]
-    conditions = ", ".join(f"event_name = '{s}'" for s in safe_steps)
+    step_conditions = [
+        build_selector_condition(step, params, f"funnel_step_{index}")
+        for index, step in enumerate(steps)
+    ]
+    conditions = ",\n            ".join(step_conditions)
+    prefilter = "\n          OR ".join(f"({condition})" for condition in step_conditions)
     window_milliseconds = window_seconds * 1000
-    query = f"""
+    return f"""
 WITH funnel AS (
     SELECT
         user_id,
@@ -83,7 +127,9 @@ WITH funnel AS (
     FROM events
     WHERE project_id = %(project_id)s
       AND event_date BETWEEN %(start_date)s AND %(end_date)s
-      AND event_name IN ({', '.join(f"'{s}'" for s in safe_steps)})
+      AND (
+          {prefilter}
+      )
     GROUP BY user_id
 )
 SELECT
@@ -98,14 +144,38 @@ FROM (
 GROUP BY step_number
 ORDER BY step_number
 """
-    return query
 
 
 # ---------------------------------------------------------------------------
 # Retention query
 # ---------------------------------------------------------------------------
 
-RETENTION_QUERY_DAY = """
+def build_retention_query(
+    cohort_selector: EventSelector,
+    return_selector: EventSelector,
+    params: dict[str, Any],
+    *,
+    period: str,
+) -> str:
+    """Build a day or week retention query using selectors for both event sets."""
+    cohort_condition = build_selector_condition(
+        cohort_selector,
+        params,
+        "retention_cohort",
+    )
+    return_condition = build_selector_condition(
+        return_selector,
+        params,
+        "retention_return",
+    )
+
+    if period == "week":
+        return _build_retention_week_query(cohort_condition, return_condition)
+    return _build_retention_day_query(cohort_condition, return_condition)
+
+
+def _build_retention_day_query(cohort_condition: str, return_condition: str) -> str:
+    return f"""
 WITH
     cohort AS (
         SELECT
@@ -113,7 +183,7 @@ WITH
             min(event_date) AS cohort_date
         FROM events
         WHERE project_id = %(project_id)s
-          AND event_name = %(cohort_event)s
+          AND {cohort_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
         GROUP BY user_id
     ),
@@ -123,7 +193,7 @@ WITH
             event_date AS activity_date
         FROM events
         WHERE project_id = %(project_id)s
-          AND event_name = %(return_event)s
+          AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
     )
 SELECT
@@ -138,7 +208,9 @@ GROUP BY c.cohort_date, period_offset
 ORDER BY c.cohort_date, period_offset
 """
 
-RETENTION_QUERY_WEEK = """
+
+def _build_retention_week_query(cohort_condition: str, return_condition: str) -> str:
+    return f"""
 WITH
     cohort AS (
         SELECT
@@ -146,7 +218,7 @@ WITH
             toMonday(min(event_date)) AS cohort_week
         FROM events
         WHERE project_id = %(project_id)s
-          AND event_name = %(cohort_event)s
+          AND {cohort_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
         GROUP BY user_id
     ),
@@ -156,7 +228,7 @@ WITH
             toMonday(event_date) AS activity_week
         FROM events
         WHERE project_id = %(project_id)s
-          AND event_name = %(return_event)s
+          AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
     )
 SELECT
@@ -176,7 +248,10 @@ ORDER BY c.cohort_week, period_offset
 # Cohort comparison query
 # ---------------------------------------------------------------------------
 
-COHORT_QUERY = """
+def build_cohort_query(metric_selector: EventSelector, params: dict[str, Any]) -> str:
+    """Build a cohort comparison query using a selector for the metric event."""
+    condition = build_selector_condition(metric_selector, params, "cohort_metric")
+    return f"""
 SELECT
     JSONExtractString(properties, %(cohort_property)s) AS cohort_value,
     toStartOfInterval(timestamp, INTERVAL 1 DAY) AS day,
@@ -184,8 +259,8 @@ SELECT
     uniq(user_id) AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
-  AND event_name = %(metric_event)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
+  AND {condition}
   AND JSONHas(properties, %(cohort_property)s)
 GROUP BY cohort_value, day
 ORDER BY cohort_value, day

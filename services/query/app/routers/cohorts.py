@@ -9,7 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.clickhouse.client import ClickHouseClient
-from app.clickhouse.queries import COHORT_QUERY
+from app.clickhouse.queries import build_cohort_query
+from app.clickhouse.selectors import selector_label
 from app.models.schemas import CohortRequest, CohortResponse
 
 logger = logging.getLogger(__name__)
@@ -33,12 +34,12 @@ async def cohort_comparison(body: CohortRequest, request: Request) -> CohortResp
     params: dict[str, Any] = {
         "project_id": body.project_id,
         "cohort_property": body.cohort_property,
-        "metric_event": body.metric_event,
         "start_date": body.start_date.isoformat(),
         "end_date": body.end_date.isoformat(),
     }
+    query = build_cohort_query(body.metric_selector, params)
 
-    rows = await client.execute(COHORT_QUERY, params)
+    rows = await client.execute(query, params)
 
     # Group rows by cohort_value
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -68,4 +69,8 @@ async def cohort_comparison(body: CohortRequest, request: Request) -> CohortResp
             }
         )
 
-    return CohortResponse(cohorts=cohorts)
+    return CohortResponse(
+        metric_selector=selector_label(body.metric_selector),
+        cohort_property=body.cohort_property,
+        cohorts=cohorts,
+    )

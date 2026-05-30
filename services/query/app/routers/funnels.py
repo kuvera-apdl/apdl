@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_funnel_query
+from app.clickhouse.selectors import selector_label
 from app.models.schemas import FunnelRequest, FunnelResponse, FunnelStep
 
 logger = logging.getLogger(__name__)
@@ -32,13 +33,12 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
 
     client = _get_client(request)
     window_seconds = body.window_days * 86400
-    query = build_funnel_query(body.steps, window_seconds=window_seconds)
-
     params: dict[str, Any] = {
         "project_id": body.project_id,
         "start_date": body.start_date.isoformat(),
         "end_date": body.end_date.isoformat(),
     }
+    query = build_funnel_query(body.steps, params, window_seconds=window_seconds)
 
     rows = await client.execute(query, params)
 
@@ -66,7 +66,8 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
         funnel_steps.append(
             FunnelStep(
                 step=i,
-                event_name=body.steps[i - 1],
+                event_name=body.steps[i - 1].event_name,
+                selector=selector_label(body.steps[i - 1]),
                 count=count,
                 conversion_rate=round(conversion_rate, 2),
                 overall_rate=round(overall_rate, 2),
