@@ -29,6 +29,7 @@ import { Scrubber, type ScrubFunction } from '../privacy/scrubber';
 import { CookielessIdentity } from '../privacy/cookieless';
 
 const ANON_ID_KEY = 'apdl_anonymous_id';
+const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
 
 /**
  * Main APDL client.
@@ -54,6 +55,7 @@ export class APDLClient {
   private consentManager: ConsentManager;
   private scrubber: Scrubber;
   private flagChangeListeners: Map<string, Set<(value: boolean) => void>> = new Map();
+  private featureFlagExposureKeys: Set<string> = new Set();
 
   /** UI namespace */
   public ui: {
@@ -257,7 +259,9 @@ export class APDLClient {
    * Evaluates a feature gate and returns explanation details.
    */
   checkGateDetails(key: string): GateEvaluationResult {
-    return this.flagEvaluator.evaluate(key, this.getEvalContext());
+    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+    this.logFeatureFlagExposure(result);
+    return result;
   }
 
   /**
@@ -394,6 +398,56 @@ export class APDLClient {
       anonymous_id: this.manualCapture.getAnonymousId(),
       attributes: this.stringifyAttributes(this.manualCapture.getTraits()),
     };
+  }
+
+  private logFeatureFlagExposure(result: GateEvaluationResult): void {
+    if (result.reason === 'not_found') {
+      return;
+    }
+
+    if (!this.consentManager.isGranted('analytics')) {
+      return;
+    }
+
+    const page = this.currentPagePath();
+    const dedupeKey = this.featureFlagExposureKey(result, page);
+    if (this.featureFlagExposureKeys.has(dedupeKey)) {
+      return;
+    }
+
+    this.featureFlagExposureKeys.add(dedupeKey);
+    this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
+      flag_key: result.key,
+      value: result.value,
+      reason: result.reason,
+      rule_id: result.rule_id,
+      bucket: result.bucket,
+      rollout_percentage: result.rollout_percentage,
+      bucket_by: result.bucket_by,
+      config_version: result.config_version,
+      source: result.source,
+      page,
+    });
+  }
+
+  private featureFlagExposureKey(result: GateEvaluationResult, page: string): string {
+    const userId = this.manualCapture.getUserId();
+    const identity = userId
+      ? `user:${userId}`
+      : `anon:${this.manualCapture.getAnonymousId()}`;
+
+    return JSON.stringify([
+      this.sessionManager.getSessionId(),
+      identity,
+      result.key,
+      result.config_version,
+      result.value,
+      page,
+    ]);
+  }
+
+  private currentPagePath(): string {
+    return this.contextCollector.collect().page?.path ?? '';
   }
 
   private notifyFlagListeners(): void {

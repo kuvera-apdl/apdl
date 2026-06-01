@@ -8,9 +8,60 @@ specific field a client would expect, and so that multiple errors per event are
 collected in a single response instead of short-circuiting on the first.
 """
 
+import math
+
 from pydantic import ValidationError
 
 from app.models.schemas import MAX_BATCH_SIZE, Event
+
+FEATURE_FLAG_EXPOSURE_EVENT = "$feature_flag_exposure"
+FEATURE_FLAG_EXPOSURE_ENVELOPE_KEYS = frozenset({
+    "event",
+    "type",
+    "user_id",
+    "anonymous_id",
+    "group_id",
+    "timestamp",
+    "properties",
+    "context",
+    "message_id",
+    "session_id",
+})
+FEATURE_FLAG_EXPOSURE_REQUIRED_ENVELOPE_KEYS = frozenset({
+    "event",
+    "type",
+    "timestamp",
+    "properties",
+    "message_id",
+    "session_id",
+})
+FEATURE_FLAG_EXPOSURE_KEYS = frozenset({
+    "flag_key",
+    "value",
+    "reason",
+    "rule_id",
+    "bucket",
+    "rollout_percentage",
+    "bucket_by",
+    "config_version",
+    "source",
+    "page",
+})
+FEATURE_FLAG_EXPOSURE_REASONS = frozenset({
+    "invalid_config",
+    "disabled",
+    "error",
+    "rule_match",
+    "rule_rollout",
+    "fallthrough",
+    "fallthrough_rollout",
+})
+FEATURE_FLAG_EXPOSURE_SOURCES = frozenset({
+    "memory",
+    "initial_fetch",
+    "sse",
+    "local_storage",
+})
 
 
 def validate_event_batch(body: object) -> dict:
@@ -79,7 +130,211 @@ def _validate_event(event: object, prefix: str) -> list[dict]:
     except ValidationError as exc:
         errors.extend(_format_errors(exc, prefix=prefix))
 
+    errors.extend(_validate_reserved_event(event, prefix))
+
     return errors
+
+
+def _validate_reserved_event(event: dict, prefix: str) -> list[dict]:
+    if event.get("event") != FEATURE_FLAG_EXPOSURE_EVENT:
+        return []
+
+    errors: list[dict] = []
+    if event.get("type") != "track":
+        errors.append({
+            "field": _join(prefix, "type"),
+            "message": "Reserved event '$feature_flag_exposure' must use type 'track'",
+        })
+
+    _validate_feature_flag_exposure_envelope(event, prefix, errors)
+
+    if "properties" not in event:
+        errors.append({
+            "field": _join(prefix, "properties"),
+            "message": "Missing required reserved event properties",
+        })
+        return errors
+
+    properties = event.get("properties")
+    if not isinstance(properties, dict):
+        errors.append({
+            "field": _join(prefix, "properties"),
+            "message": "Reserved event properties must be an object",
+        })
+        return errors
+
+    keys = set(properties)
+    for key in sorted(FEATURE_FLAG_EXPOSURE_KEYS - keys):
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": "Missing required feature flag exposure property",
+        })
+
+    for key in sorted(keys - FEATURE_FLAG_EXPOSURE_KEYS):
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": "Unknown feature flag exposure property",
+        })
+
+    _validate_feature_flag_exposure_types(properties, prefix, errors)
+    return errors
+
+
+def _validate_feature_flag_exposure_envelope(
+    event: dict,
+    prefix: str,
+    errors: list[dict],
+) -> None:
+    keys = set(event)
+
+    for key in sorted(FEATURE_FLAG_EXPOSURE_REQUIRED_ENVELOPE_KEYS - keys):
+        errors.append({
+            "field": _join(prefix, key),
+            "message": "Missing required feature flag exposure envelope field",
+        })
+
+    for key in sorted(keys - FEATURE_FLAG_EXPOSURE_ENVELOPE_KEYS):
+        errors.append({
+            "field": _join(prefix, key),
+            "message": "Unknown feature flag exposure envelope field",
+        })
+
+    if not event.get("user_id") and not event.get("anonymous_id"):
+        errors.append({
+            "field": _join(prefix, "user_id"),
+            "message": "Feature flag exposure requires canonical user_id or anonymous_id",
+        })
+
+    for key in ("user_id", "anonymous_id", "group_id", "timestamp", "message_id", "session_id"):
+        if key in event and not _is_non_empty_string(event[key]):
+            errors.append({
+                "field": _join(prefix, key),
+                "message": f"Envelope field '{key}' must be a non-empty string",
+            })
+
+    if "context" in event and not isinstance(event["context"], dict):
+        errors.append({
+            "field": _join(prefix, "context"),
+            "message": "Envelope field 'context' must be an object",
+        })
+
+
+def _validate_feature_flag_exposure_types(
+    properties: dict,
+    prefix: str,
+    errors: list[dict],
+) -> None:
+    if "flag_key" in properties and not _is_non_empty_string(properties["flag_key"]):
+        errors.append({
+            "field": _join(prefix, "properties.flag_key"),
+            "message": "Property 'flag_key' must be a non-empty string",
+        })
+
+    if "value" in properties and not isinstance(properties["value"], bool):
+        errors.append({
+            "field": _join(prefix, "properties.value"),
+            "message": "Property 'value' must be a boolean",
+        })
+
+    if (
+        "reason" in properties
+        and properties["reason"] not in FEATURE_FLAG_EXPOSURE_REASONS
+    ):
+        errors.append({
+            "field": _join(prefix, "properties.reason"),
+            "message": "Property 'reason' is not a canonical gate evaluation reason",
+        })
+
+    _validate_string_property(properties, "rule_id", prefix, errors)
+    _validate_nullable_number_property(properties, "bucket", prefix, errors)
+    _validate_nullable_number_property(
+        properties,
+        "rollout_percentage",
+        prefix,
+        errors,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    _validate_string_property(properties, "bucket_by", prefix, errors)
+
+    if "config_version" in properties and not _is_non_negative_int(
+        properties["config_version"]
+    ):
+        errors.append({
+            "field": _join(prefix, "properties.config_version"),
+            "message": "Property 'config_version' must be a non-negative integer",
+        })
+
+    if "source" in properties and properties["source"] not in FEATURE_FLAG_EXPOSURE_SOURCES:
+        errors.append({
+            "field": _join(prefix, "properties.source"),
+            "message": "Property 'source' is not a canonical gate config source",
+        })
+
+    _validate_string_property(properties, "page", prefix, errors)
+
+
+def _validate_string_property(
+    properties: dict,
+    key: str,
+    prefix: str,
+    errors: list[dict],
+) -> None:
+    if key in properties and not isinstance(properties[key], str):
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": f"Property '{key}' must be a string",
+        })
+
+
+def _validate_nullable_number_property(
+    properties: dict,
+    key: str,
+    prefix: str,
+    errors: list[dict],
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> None:
+    if key not in properties:
+        return
+
+    value = properties[key]
+    if value is None:
+        return
+
+    if not _is_finite_number(value):
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": f"Property '{key}' must be a finite number or null",
+        })
+        return
+
+    if minimum is not None and value < minimum:
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": f"Property '{key}' must be greater than or equal to {minimum:g}",
+        })
+    if maximum is not None and value > maximum:
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": f"Property '{key}' must be less than or equal to {maximum:g}",
+        })
+
+
+def _is_non_empty_string(value: object) -> bool:
+    return isinstance(value, str) and len(value) > 0
+
+
+def _is_finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _is_non_negative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _format_errors(exc: ValidationError, prefix: str = "") -> list[dict]:

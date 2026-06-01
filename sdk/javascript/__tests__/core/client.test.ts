@@ -202,6 +202,7 @@ describe('APDLClient', () => {
         reason: 'not_found',
         source: 'none',
       });
+      expect(featureFlagExposures(client)).toHaveLength(0);
     });
 
     it('should evaluate gates from initial fetch', async () => {
@@ -334,6 +335,111 @@ describe('APDLClient', () => {
       expect(strictClient.checkGate('cached-gate')).toBe(false);
       expect(strictClient.checkGateDetails('cached-gate').reason).toBe('not_found');
     });
+
+    it('should log one deduplicated exposure for repeated gate checks', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('new-checkout-flow')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow').value).toBe(true);
+      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
+
+      const exposures = featureFlagExposures(flaggedClient);
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0].properties).toMatchObject({
+        flag_key: 'new-checkout-flow',
+        value: true,
+        reason: 'fallthrough',
+        rule_id: '',
+        rollout_percentage: 100,
+        bucket_by: 'user_id',
+        config_version: 1,
+        source: 'initial_fetch',
+        page: '/checkout',
+      });
+      expect(exposures[0].properties?.bucket).toBeTypeOf('number');
+    });
+
+    it('should log a distinct exposure when the page changes', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('pricing-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      window.history.pushState({}, '', '/checkout');
+      flaggedClient.checkGate('pricing-gate');
+      window.history.pushState({}, '', '/pricing');
+      flaggedClient.checkGate('pricing-gate');
+
+      const exposurePages = featureFlagExposures(flaggedClient)
+        .map((event) => event.properties?.page);
+      expect(exposurePages).toEqual(['/checkout', '/pricing']);
+    });
+
+    it('should not mark exposures as deduped while analytics consent is denied', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('consent-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+        consent: { analytics: false, personalization: true, experiments: true },
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+      flaggedClient.checkGate('consent-gate');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
+
+      flaggedClient.consent.update({ analytics: true });
+      flaggedClient.checkGate('consent-gate');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
+    });
   });
 
   describe('consent', () => {
@@ -407,6 +513,14 @@ async function flushAsync(): Promise<void> {
 
 function flagStorageKey(apiKey: string): string {
   return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', apiKey).toString(16)}`;
+}
+
+function featureFlagExposures(
+  client: APDLClient
+): Array<{ properties?: Record<string, unknown> }> {
+  return client.debug.getQueue()
+    .map((event) => event as { event?: string; properties?: Record<string, unknown> })
+    .filter((event) => event.event === '$feature_flag_exposure');
 }
 
 function makeGate(key: string): Record<string, unknown> {

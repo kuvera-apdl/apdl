@@ -109,6 +109,80 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
 
 
 @pytest.mark.asyncio
+async def test_feature_flag_exposure_payload_is_published(client):
+    payload = {
+        "events": [{
+            "event": "$feature_flag_exposure",
+            "type": "track",
+            "anonymous_id": "anon-sdk-1",
+            "session_id": "sess-sdk-1",
+            "message_id": "msg-sdk-1",
+            "timestamp": "2026-05-26T02:26:53.455Z",
+            "properties": {
+                "flag_key": "checkout-gate",
+                "value": True,
+                "reason": "fallthrough",
+                "rule_id": "",
+                "bucket": 7.31,
+                "rollout_percentage": 100,
+                "bucket_by": "user_id",
+                "config_version": 3,
+                "source": "initial_fetch",
+                "page": "/checkout",
+            },
+        }],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 1
+    app.state.redis.xadd.assert_awaited_once()
+
+    args, _ = app.state.redis.xadd.await_args
+    _, fields = args
+    published = json.loads(fields["event_json"])
+    assert published["event"] == "$feature_flag_exposure"
+    assert published["type"] == "track"
+    assert published["properties"] == payload["events"][0]["properties"]
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_exposure_rejects_camel_case_identity(client):
+    payload = {
+        "events": [{
+            "event": "$feature_flag_exposure",
+            "type": "track",
+            "anonymousId": "anon-sdk-1",
+            "session_id": "sess-sdk-1",
+            "message_id": "msg-sdk-1",
+            "timestamp": "2026-05-26T02:26:53.455Z",
+            "properties": {
+                "flag_key": "checkout-gate",
+                "value": True,
+                "reason": "fallthrough",
+                "rule_id": "",
+                "bucket": 7.31,
+                "rollout_percentage": 100,
+                "bucket_by": "user_id",
+                "config_version": 3,
+                "source": "initial_fetch",
+                "page": "/checkout",
+            },
+        }],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    fields = {error["field"] for error in body["errors"]}
+    assert "events[0].anonymousId" in fields
+    assert "events[0].user_id" in fields
+    app.state.redis.xadd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_valid_batch_with_anonymous_id(client):
     """ValidBatchWithAnonymousId"""
     payload = {
