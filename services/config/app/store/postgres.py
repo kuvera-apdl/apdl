@@ -32,7 +32,7 @@ def _row_to_flag(row) -> dict:
         "rules": _json_value(row["rules"], []),
         "fallthrough": _json_value(row["fallthrough"], {}),
         "salt": row["salt"],
-        "client_exposed": row["client_exposed"],
+        "evaluation_mode": row["evaluation_mode"],
         "auto_disable": row["auto_disable"],
         "guardrails": _json_value(row["guardrails"], []),
         "disabled_reason": row["disabled_reason"],
@@ -70,14 +70,14 @@ async def get_flags(
     project_id: str,
     *,
     include_archived: bool = False,
-    client_exposed_only: bool = False,
+    client_visible_only: bool = False,
 ) -> list[dict]:
     """Fetch all flags for a project, ordered by key."""
     filters = ["project_id = $1"]
     if not include_archived:
         filters.append("archived_at IS NULL")
-    if client_exposed_only:
-        filters.append("client_exposed = true")
+    if client_visible_only:
+        filters.append("evaluation_mode IN ('client', 'both')")
 
     sql = f"SELECT * FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
     rows = await pool.fetch(sql, project_id)
@@ -101,7 +101,7 @@ async def create_flag(pool, flag: dict) -> dict | None:
     sql = """
         INSERT INTO flags (
             key, project_id, name, enabled, description, default_value,
-            rules, fallthrough, salt, client_exposed, auto_disable, guardrails
+            rules, fallthrough, salt, evaluation_mode, auto_disable, guardrails
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb)
         RETURNING *
@@ -118,7 +118,7 @@ async def create_flag(pool, flag: dict) -> dict | None:
             json.dumps(flag.get("rules", []), separators=(",", ":")),
             json.dumps(flag.get("fallthrough", {}), separators=(",", ":")),
             flag["salt"],
-            flag.get("client_exposed", True),
+            flag.get("evaluation_mode", "client"),
             flag.get("auto_disable", True),
             json.dumps(flag.get("guardrails", []), separators=(",", ":")),
         )
@@ -138,7 +138,7 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             default_value = $7,
             rules = $8::jsonb,
             fallthrough = $9::jsonb,
-            client_exposed = $10,
+            evaluation_mode = $10,
             auto_disable = $11,
             guardrails = $12::jsonb,
             version = version + 1,
@@ -161,7 +161,7 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             flag["default_value"],
             json.dumps(flag["rules"], separators=(",", ":")),
             json.dumps(flag["fallthrough"], separators=(",", ":")),
-            flag["client_exposed"],
+            flag["evaluation_mode"],
             flag["auto_disable"],
             json.dumps(flag["guardrails"], separators=(",", ":")),
         )

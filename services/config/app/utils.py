@@ -27,7 +27,7 @@ def serialize_flag(f: dict) -> dict:
         "rules": f.get("rules", []),
         "fallthrough": f.get("fallthrough", {}),
         "salt": f.get("salt", ""),
-        "client_exposed": f.get("client_exposed", True),
+        "evaluation_mode": f.get("evaluation_mode", "client"),
         "auto_disable": f.get("auto_disable", True),
         "guardrails": f.get("guardrails", []),
         "disabled_reason": f.get("disabled_reason", ""),

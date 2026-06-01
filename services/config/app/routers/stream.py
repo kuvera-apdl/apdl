@@ -37,7 +37,7 @@ async def sse_stream(request: Request):
     broadcaster = request.app.state.broadcaster
 
     # Get initial flags from PostgreSQL
-    flags = await pg_store.get_flags(pool, project_id, client_exposed_only=True)
+    flags = await pg_store.get_flags(pool, project_id, client_visible_only=True)
     initial_data = _flags_to_json(project_id, flags)
 
     # Create a queue for this connection

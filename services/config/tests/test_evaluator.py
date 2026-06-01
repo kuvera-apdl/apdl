@@ -27,7 +27,7 @@ def make_flag(overrides: dict | None = None) -> dict:
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",
-        "client_exposed": True,
+        "evaluation_mode": "client",
         "auto_disable": True,
         "guardrails": [],
         "version": 4,

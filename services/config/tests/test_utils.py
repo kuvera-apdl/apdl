@@ -28,7 +28,7 @@ def make_flag() -> dict:
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",
-        "client_exposed": True,
+        "evaluation_mode": "client",
         "auto_disable": True,
         "guardrails": [{
             "metric": "frontend_error_rate",
@@ -83,9 +83,26 @@ def test_serialize_flag_collection_uses_canonical_envelope():
     }
 
 
+def test_flag_create_accepts_canonical_evaluation_mode():
+    flag = FlagCreate.model_validate({
+        "key": "checkout",
+        "name": "Checkout",
+        "evaluation_mode": "server",
+    })
+
+    assert flag.evaluation_mode == "server"
+
+
 @pytest.mark.parametrize(
     "legacy_field",
-    ["variant_type", "variants", "rollout_percentage", "targeting_rules", "default_variant"],
+    [
+        "variant_type",
+        "variants",
+        "rollout_percentage",
+        "targeting_rules",
+        "default_variant",
+        "client_exposed",
+    ],
 )
 def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
     payload = {

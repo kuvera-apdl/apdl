@@ -31,6 +31,17 @@ ConditionOperator = Literal[
 
 GuardrailMetric = Literal["frontend_error_rate", "frontend_error_count"]
 GuardrailThreshold = Literal["2x_baseline", "at_least_one"]
+EvaluationMode = Literal["client", "server", "both"]
+GateEvaluationReason = Literal[
+    "not_found",
+    "invalid_config",
+    "disabled",
+    "error",
+    "rule_match",
+    "rule_rollout",
+    "fallthrough",
+    "fallthrough_rollout",
+]
 
 
 class GateCondition(StrictModel):
@@ -94,7 +105,7 @@ class FlagConfig(BaseModel):
     rules: list[GateRule] = Field(default_factory=list)
     fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
     salt: str = ""
-    client_exposed: bool = True
+    evaluation_mode: EvaluationMode = "client"
     auto_disable: bool = True
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
     disabled_reason: str = ""
@@ -120,10 +131,10 @@ class ExperimentConfig(BaseModel):
     updated_at: str = ""
 
 
-class EvalContext(BaseModel):
+class EvalContext(StrictModel):
     user_id: str = ""
     anonymous_id: str = ""
-    attributes: dict[str, str] = Field(default_factory=dict)
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class EvalResult(BaseModel):
@@ -137,6 +148,28 @@ class EvalResult(BaseModel):
     config_version: int = 0
 
 
+class GateEvaluateRequest(StrictModel):
+    project_id: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1)
+    context: EvalContext = Field(default_factory=EvalContext)
+    log_exposure: bool = True
+    session_id: str = ""
+    message_id: str = ""
+    page: str = ""
+
+
+class GateEvaluateResponse(StrictModel):
+    key: str
+    value: bool = False
+    reason: GateEvaluationReason
+    rule_id: str = ""
+    bucket: float | None = None
+    rollout_percentage: float | None = None
+    bucket_by: str = ""
+    config_version: int = 0
+    source: Literal["server"] = "server"
+
+
 # ---------- Admin request bodies ----------
 
 class FlagCreate(StrictModel):
@@ -147,7 +180,7 @@ class FlagCreate(StrictModel):
     default_value: bool = False
     rules: list[GateRule] = Field(default_factory=list)
     fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
-    client_exposed: bool = True
+    evaluation_mode: EvaluationMode = "client"
     auto_disable: bool = True
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
 
@@ -160,7 +193,7 @@ class FlagUpdate(StrictModel):
     default_value: bool | None = None
     rules: list[GateRule] | None = None
     fallthrough: FallthroughConfig | None = None
-    client_exposed: bool | None = None
+    evaluation_mode: EvaluationMode | None = None
     auto_disable: bool | None = None
     guardrails: list[GuardrailConfig] | None = None
 

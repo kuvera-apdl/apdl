@@ -50,7 +50,7 @@ async def get_flags(request: Request):
         "Cache miss for flags of project %s, querying Postgres", project_id
     )
     pool = request.app.state.pg_pool
-    flags = await pg_store.get_flags(pool, project_id, client_exposed_only=True)
+    flags = await pg_store.get_flags(pool, project_id, client_visible_only=True)
 
     flags_json = _flags_to_json(project_id, flags)
 

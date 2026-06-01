@@ -63,6 +63,7 @@ FEATURE_FLAG_EXPOSURE_SOURCES = frozenset({
     "initial_fetch",
     "sse",
     "local_storage",
+    "server",
 })
 FRONTEND_ERROR_KEYS = frozenset({
     "error_type",

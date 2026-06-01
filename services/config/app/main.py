@@ -9,7 +9,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, flags, stream
+from app.routers import admin, evaluate, flags, stream
 from app.sse.broadcaster import SSEBroadcaster
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS flags (
     rules JSONB NOT NULL DEFAULT '[]'::jsonb,
     fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb,
     salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text),
-    client_exposed BOOLEAN NOT NULL DEFAULT true,
+    evaluation_mode TEXT NOT NULL DEFAULT 'client'
+        CHECK (evaluation_mode IN ('client', 'server', 'both')),
     auto_disable BOOLEAN NOT NULL DEFAULT true,
     guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
     disabled_reason TEXT NOT NULL DEFAULT '',
@@ -44,7 +45,7 @@ ALTER TABLE flags ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
-ALTER TABLE flags ADD COLUMN IF NOT EXISTS client_exposed BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS evaluation_mode TEXT NOT NULL DEFAULT 'client';
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS auto_disable BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS guardrails JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_reason TEXT NOT NULL DEFAULT '';
@@ -67,10 +68,18 @@ WHERE salt = '';
 
 DO $$
 BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flags' AND column_name = 'client_exposed'
+    ) THEN
+        UPDATE flags
+        SET evaluation_mode = CASE WHEN client_exposed THEN 'client' ELSE 'server' END;
+    END IF;
+
     IF to_regclass('public.feature_flags') IS NOT NULL THEN
         INSERT INTO flags (
             key, project_id, name, enabled, description, default_value,
-            rules, fallthrough, salt, client_exposed, auto_disable,
+            rules, fallthrough, salt, evaluation_mode, auto_disable,
             guardrails, created_at, updated_at
         )
         SELECT
@@ -89,7 +98,7 @@ BEGIN
                 )
             ),
             salt,
-            true,
+            'client',
             true,
             '[]'::jsonb,
             COALESCE(created_at, NOW()),
@@ -168,10 +177,15 @@ BEGIN
     END IF;
 END $$;
 
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_evaluation_mode_check;
+ALTER TABLE flags ADD CONSTRAINT flags_evaluation_mode_check
+    CHECK (evaluation_mode IN ('client', 'server', 'both'));
+
 ALTER TABLE flags DROP COLUMN IF EXISTS variant_type;
 ALTER TABLE flags DROP COLUMN IF EXISTS rules_json;
 ALTER TABLE flags DROP COLUMN IF EXISTS variants_json;
 ALTER TABLE flags DROP COLUMN IF EXISTS rollout_percentage;
+ALTER TABLE flags DROP COLUMN IF EXISTS client_exposed;
 """
 
 CREATE_FLAG_AUDIT_TABLE = """
@@ -299,6 +313,7 @@ app.add_middleware(
 
 app.include_router(flags.router)
 app.include_router(stream.router)
+app.include_router(evaluate.router)
 app.include_router(admin.router)
 
 

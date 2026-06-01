@@ -103,6 +103,14 @@ class TestSingleEventValidation:
         result = validate_single_event(event)
         assert result["valid"] is True
 
+    def test_valid_server_feature_flag_exposure_event(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["source"] = "server"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is True
+
     def test_valid_frontend_error_event(self):
         event = frontend_error_event()
         result = validate_single_event(event)

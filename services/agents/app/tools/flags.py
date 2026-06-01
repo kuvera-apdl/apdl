@@ -41,7 +41,7 @@ async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of flag configurations.
     """
-    response = await _get("/v1/flags", params={"project_id": project_id})
+    response = await _get("/v1/admin/flags", params={"project_id": project_id})
     return response.get("flags", []) if isinstance(response, dict) else response
 
 
@@ -54,7 +54,7 @@ async def create_flag(
     default_value: bool = False,
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
-    client_exposed: bool = True,
+    evaluation_mode: str = "client",
     auto_disable: bool = True,
     guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -69,7 +69,7 @@ async def create_flag(
         default_value: Value returned when the flag is disabled or invalid.
         rules: Ordered canonical gate rules.
         fallthrough: Canonical fallthrough config.
-        client_exposed: Whether this gate can be sent to browser SDKs.
+        evaluation_mode: One of "client", "server", or "both".
         auto_disable: Whether guardrail automation may disable this gate.
         guardrails: Optional guardrail configs.
 
@@ -87,7 +87,7 @@ async def create_flag(
             "value": False,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
-        "client_exposed": client_exposed,
+        "evaluation_mode": evaluation_mode,
         "auto_disable": auto_disable,
         "guardrails": guardrails or [],
     }
@@ -104,7 +104,7 @@ async def update_flag(
     default_value: bool | None = None,
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
-    client_exposed: bool | None = None,
+    evaluation_mode: str | None = None,
     auto_disable: bool | None = None,
     guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -120,7 +120,7 @@ async def update_flag(
         default_value: Updated disabled/invalid fallback.
         rules: Updated canonical gate rules.
         fallthrough: Updated fallthrough config.
-        client_exposed: Updated browser exposure setting.
+        evaluation_mode: Updated evaluation mode.
         auto_disable: Updated guardrail automation setting.
         guardrails: Updated guardrail configs.
 
@@ -140,10 +140,44 @@ async def update_flag(
         payload["rules"] = rules
     if fallthrough is not None:
         payload["fallthrough"] = fallthrough
-    if client_exposed is not None:
-        payload["client_exposed"] = client_exposed
+    if evaluation_mode is not None:
+        payload["evaluation_mode"] = evaluation_mode
     if auto_disable is not None:
         payload["auto_disable"] = auto_disable
     if guardrails is not None:
         payload["guardrails"] = guardrails
     return await _put(f"/v1/admin/flags/{key}", payload, params={"project_id": project_id})
+
+
+async def evaluate_gate(
+    project_id: str,
+    key: str,
+    user_id: str = "",
+    anonymous_id: str = "",
+    attributes: dict[str, Any] | None = None,
+    session_id: str = "",
+    message_id: str = "",
+    page: str = "",
+    log_exposure: bool = True,
+) -> dict[str, Any]:
+    """Evaluate a server-side feature gate through the trusted Config API."""
+    internal_token = os.getenv("APDL_INTERNAL_TOKEN", "")
+    headers = {"X-APDL-Internal-Token": internal_token} if internal_token else {}
+    payload = {
+        "project_id": project_id,
+        "key": key,
+        "context": {
+            "user_id": user_id,
+            "anonymous_id": anonymous_id,
+            "attributes": attributes or {},
+        },
+        "session_id": session_id,
+        "message_id": message_id,
+        "page": page,
+        "log_exposure": log_exposure,
+    }
+
+    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+        resp = await client.post("/v1/evaluate", json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()

@@ -36,7 +36,11 @@ def _actor(request: Request) -> str:
 
 async def _broadcast_flag_change(request: Request, project_id: str, action: str, flag: dict | None, key: str) -> None:
     payload: dict
-    if flag and flag.get("client_exposed") and not flag.get("archived_at"):
+    if (
+        flag
+        and flag.get("evaluation_mode") in {"client", "both"}
+        and not flag.get("archived_at")
+    ):
         payload = {"action": action, "flag": serialize_client_flag(flag)}
     else:
         payload = {"action": "flag_removed", "key": key}

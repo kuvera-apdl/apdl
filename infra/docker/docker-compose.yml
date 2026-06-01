@@ -69,6 +69,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       LOG_LEVEL: info
     depends_on:
       redis:
@@ -90,6 +91,7 @@ services:
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
       CONFIG_SERVICE_URL: http://config:8081
+      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       GUARDRAIL_MONITOR_ENABLED: "false"
     depends_on:
       clickhouse:
@@ -107,6 +109,7 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
+      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     depends_on:
