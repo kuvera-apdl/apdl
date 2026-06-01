@@ -1,51 +1,105 @@
-from app.utils import serialize_flag
+import pytest
+from pydantic import ValidationError
+
+from app.models.schemas import FlagCreate, FlagUpdate
+from app.utils import serialize_client_flag, serialize_flag, serialize_flag_collection
 
 
-def test_serialize_flag_always_includes_rules_and_variants():
-    flag = {
+def make_flag() -> dict:
+    return {
         "key": "checkout",
+        "project_id": "apdl",
+        "name": "Checkout",
+        "description": "Controls the checkout redesign.",
         "enabled": True,
-        "variant_type": "boolean",
-        "default_value": "false",
-        "rollout_percentage": 25.0,
-        "rules_json": "[]",
-        "variants_json": "[]",
+        "default_value": False,
+        "rules": [{
+            "id": "rule_beta",
+            "name": "Beta users",
+            "conditions": [{
+                "attribute": "plan",
+                "operator": "equals",
+                "value": "pro",
+            }],
+            "rollout": {"percentage": 25.0, "bucket_by": "user_id"},
+        }],
+        "fallthrough": {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        "salt": "salt_123",
+        "client_exposed": True,
+        "auto_disable": True,
+        "guardrails": [{
+            "metric": "frontend_error_rate",
+            "threshold": "2x_baseline",
+            "scope": "page:/checkout",
+            "minimum_exposures": 100,
+            "window_minutes": 10,
+        }],
+        "version": 4,
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "updated_at": "2026-06-01T00:00:00+00:00",
+        "archived_at": None,
     }
 
-    assert serialize_flag(flag) == {
+
+def test_serialize_flag_returns_full_canonical_admin_shape():
+    assert serialize_flag(make_flag()) == make_flag()
+
+
+def test_serialize_client_flag_returns_sdk_shape_only():
+    assert serialize_client_flag(make_flag()) == {
         "key": "checkout",
         "enabled": True,
-        "variant_type": "boolean",
-        "default_value": "false",
-        "rollout_percentage": 25.0,
+        "default_value": False,
+        "salt": "salt_123",
+        "rules": [{
+            "id": "rule_beta",
+            "name": "Beta users",
+            "conditions": [{
+                "attribute": "plan",
+                "operator": "equals",
+                "value": "pro",
+            }],
+            "rollout": {"percentage": 25.0, "bucket_by": "user_id"},
+        }],
+        "fallthrough": {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        "version": 4,
+    }
+
+
+def test_serialize_flag_collection_uses_canonical_envelope():
+    assert serialize_flag_collection("apdl", [make_flag()]) == {
+        "schema_version": 1,
+        "project_id": "apdl",
+        "flags": [serialize_client_flag(make_flag())],
+    }
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    ["variant_type", "variants", "rollout_percentage", "targeting_rules", "default_variant"],
+)
+def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
+    payload = {
+        "key": "checkout",
+        "name": "Checkout",
         "rules": [],
-        "variants": [],
-        "description": "",
-        "updated_at": "",
+        "fallthrough": {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        legacy_field: "legacy",
     }
 
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(payload)
 
-def test_serialize_flag_parses_rules_and_variants():
-    flag = {
-        "key": "checkout_variant",
-        "enabled": True,
-        "variant_type": "string",
-        "default_value": "control",
-        "rollout_percentage": 100.0,
-        "rules_json": '[{"attribute":"plan","operator":"equals","value":"pro"}]',
-        "variants_json": (
-            '[{"key":"control","value":"control","weight":50},'
-            '{"key":"treatment","value":"treatment","weight":50}]'
-        ),
-    }
 
-    serialized = serialize_flag(flag, include_description=False)
-
-    assert serialized["rules"] == [
-        {"attribute": "plan", "operator": "equals", "value": "pro"}
-    ]
-    assert serialized["variants"] == [
-        {"key": "control", "value": "control", "weight": 50},
-        {"key": "treatment", "value": "treatment", "weight": 50},
-    ]
-    assert "description" not in serialized
+def test_flag_update_requires_version():
+    with pytest.raises(ValidationError):
+        FlagUpdate.model_validate({"enabled": False})

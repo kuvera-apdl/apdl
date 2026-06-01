@@ -197,18 +197,27 @@ async def deploy(state: ExperimentDesignState) -> ExperimentDesignState:
     try:
         # Create the feature flag
         flag_config = experiment.get("flag_config", {})
-        variants = experiment.get("variants", [])
         flag_key = flag_config.get("key", experiment.get("experiment_id", "unknown"))
 
         await create_flag(
             project_id=project_id,
             key=flag_key,
+            name=flag_config.get("name", flag_key),
             description=experiment.get("hypothesis", ""),
-            variants=[{"key": v["key"], "weight": v.get("weight", 50)} for v in variants],
             enabled=True,
+            default_value=False,
+            rules=flag_config.get("rules", []),
+            fallthrough=flag_config.get(
+                "fallthrough",
+                {
+                    "value": True,
+                    "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+                },
+            ),
         )
 
         # Create the experiment configuration
+        variants = experiment.get("variants", [])
         await create_experiment_config(
             project_id=project_id,
             experiment_id=experiment.get("experiment_id", flag_key),

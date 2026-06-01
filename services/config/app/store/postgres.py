@@ -3,9 +3,21 @@
 All operations use parameterized queries to prevent SQL injection.
 """
 
+import json
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _json_value(value, fallback):
+    if value is None:
+        return fallback
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return fallback
+    return value
 
 
 def _row_to_flag(row) -> dict:
@@ -13,15 +25,20 @@ def _row_to_flag(row) -> dict:
     return {
         "key": row["key"],
         "project_id": row["project_id"],
+        "name": row["name"],
         "enabled": row["enabled"],
         "description": row["description"],
-        "variant_type": row["variant_type"],
         "default_value": row["default_value"],
-        "rules_json": row["rules_json"],
-        "variants_json": row["variants_json"],
-        "rollout_percentage": float(row["rollout_percentage"]),
+        "rules": _json_value(row["rules"], []),
+        "fallthrough": _json_value(row["fallthrough"], {}),
+        "salt": row["salt"],
+        "client_exposed": row["client_exposed"],
+        "auto_disable": row["auto_disable"],
+        "guardrails": _json_value(row["guardrails"], []),
+        "version": row["version"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
+        "archived_at": str(row["archived_at"]) if row["archived_at"] else None,
     }
 
 
@@ -45,91 +62,161 @@ def _row_to_experiment(row) -> dict:
 # ---- Flag operations ----
 
 
-async def get_flags(pool, project_id: str) -> list[dict]:
+async def get_flags(
+    pool,
+    project_id: str,
+    *,
+    include_archived: bool = False,
+    client_exposed_only: bool = False,
+) -> list[dict]:
     """Fetch all flags for a project, ordered by key."""
-    sql = "SELECT * FROM flags WHERE project_id = $1 ORDER BY key"
+    filters = ["project_id = $1"]
+    if not include_archived:
+        filters.append("archived_at IS NULL")
+    if client_exposed_only:
+        filters.append("client_exposed = true")
+
+    sql = f"SELECT * FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
     rows = await pool.fetch(sql, project_id)
     return [_row_to_flag(r) for r in rows]
 
 
-async def get_flag(pool, project_id: str, key: str) -> dict | None:
+async def get_flag(
+    pool, project_id: str, key: str, *, include_archived: bool = False
+) -> dict | None:
     """Fetch a single flag by project_id and key."""
-    sql = "SELECT * FROM flags WHERE project_id = $1 AND key = $2"
+    archived_filter = "" if include_archived else " AND archived_at IS NULL"
+    sql = f"SELECT * FROM flags WHERE project_id = $1 AND key = $2{archived_filter}"
     row = await pool.fetchrow(sql, project_id, key)
     if row is None:
         return None
     return _row_to_flag(row)
 
 
-async def create_flag(pool, flag: dict) -> bool:
-    """Insert a new flag. Returns True on success, False on failure."""
+async def create_flag(pool, flag: dict) -> dict | None:
+    """Insert a new flag. Returns the inserted row, or None on failure."""
     sql = """
-        INSERT INTO flags (key, project_id, enabled, description, variant_type,
-                           default_value, rules_json, variants_json, rollout_percentage)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO flags (
+            key, project_id, name, enabled, description, default_value,
+            rules, fallthrough, salt, client_exposed, auto_disable, guardrails
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb)
+        RETURNING *
     """
     try:
-        await pool.execute(
+        row = await pool.fetchrow(
             sql,
             flag["key"],
             flag["project_id"],
+            flag["name"],
             flag.get("enabled", False),
             flag.get("description", ""),
-            flag.get("variant_type", "boolean"),
-            flag.get("default_value", "false"),
-            flag.get("rules_json", "[]"),
-            flag.get("variants_json", "[]"),
-            flag.get("rollout_percentage", 100.0),
+            flag.get("default_value", False),
+            json.dumps(flag.get("rules", []), separators=(",", ":")),
+            json.dumps(flag.get("fallthrough", {}), separators=(",", ":")),
+            flag["salt"],
+            flag.get("client_exposed", True),
+            flag.get("auto_disable", True),
+            json.dumps(flag.get("guardrails", []), separators=(",", ":")),
         )
-        return True
+        return _row_to_flag(row)
     except Exception as exc:
         logger.error("createFlag failed: %s", exc)
-        return False
+        return None
 
 
-async def update_flag(pool, flag: dict) -> bool:
-    """Update an existing flag. Returns True if a row was modified."""
+async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
+    """Update an existing flag using optimistic versioning."""
     sql = """
         UPDATE flags SET
-            enabled = $3,
-            description = $4,
-            variant_type = $5,
-            default_value = $6,
-            rules_json = $7,
-            variants_json = $8,
-            rollout_percentage = $9,
+            name = $4,
+            enabled = $5,
+            description = $6,
+            default_value = $7,
+            rules = $8::jsonb,
+            fallthrough = $9::jsonb,
+            client_exposed = $10,
+            auto_disable = $11,
+            guardrails = $12::jsonb,
+            version = version + 1,
             updated_at = NOW()
-        WHERE project_id = $1 AND key = $2
+        WHERE project_id = $1
+          AND key = $2
+          AND version = $3
+          AND archived_at IS NULL
+        RETURNING *
     """
     try:
-        result = await pool.execute(
+        row = await pool.fetchrow(
             sql,
             flag["project_id"],
             flag["key"],
-            flag.get("enabled", False),
-            flag.get("description", ""),
-            flag.get("variant_type", "boolean"),
-            flag.get("default_value", "false"),
-            flag.get("rules_json", "[]"),
-            flag.get("variants_json", "[]"),
-            flag.get("rollout_percentage", 100.0),
+            expected_version,
+            flag["name"],
+            flag["enabled"],
+            flag["description"],
+            flag["default_value"],
+            json.dumps(flag["rules"], separators=(",", ":")),
+            json.dumps(flag["fallthrough"], separators=(",", ":")),
+            flag["client_exposed"],
+            flag["auto_disable"],
+            json.dumps(flag["guardrails"], separators=(",", ":")),
         )
-        # asyncpg returns e.g. "UPDATE 1" or "UPDATE 0"
-        return result.endswith("1")
+        return _row_to_flag(row) if row is not None else None
     except Exception as exc:
         logger.error("updateFlag failed: %s", exc)
-        return False
+        return None
 
 
-async def delete_flag(pool, project_id: str, key: str) -> bool:
-    """Delete a flag. Returns True if a row was deleted."""
-    sql = "DELETE FROM flags WHERE project_id = $1 AND key = $2"
+async def archive_flag(pool, project_id: str, key: str) -> dict | None:
+    """Soft-archive a flag. Returns the archived row if it existed."""
+    sql = """
+        UPDATE flags SET
+            archived_at = NOW(),
+            version = version + 1,
+            updated_at = NOW()
+        WHERE project_id = $1 AND key = $2 AND archived_at IS NULL
+        RETURNING *
+    """
     try:
-        result = await pool.execute(sql, project_id, key)
-        return result.endswith("1")
+        row = await pool.fetchrow(sql, project_id, key)
+        return _row_to_flag(row) if row is not None else None
     except Exception as exc:
-        logger.error("deleteFlag failed: %s", exc)
-        return False
+        logger.error("archiveFlag failed: %s", exc)
+        return None
+
+
+async def create_flag_audit_entry(
+    pool,
+    *,
+    project_id: str,
+    flag_key: str,
+    action: str,
+    actor: str,
+    before: dict | None,
+    after: dict | None,
+    reason: str = "",
+) -> None:
+    """Append a flag audit event."""
+    sql = """
+        INSERT INTO flag_audit_log (
+            project_id, flag_key, action, actor, previous_version,
+            new_version, before, after, reason
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
+    """
+    await pool.execute(
+        sql,
+        project_id,
+        flag_key,
+        action,
+        actor,
+        before.get("version") if before else None,
+        after.get("version") if after else None,
+        json.dumps(before, separators=(",", ":")) if before else None,
+        json.dumps(after, separators=(",", ":")) if after else None,
+        reason,
+    )
 
 
 # ---- Experiment operations ----

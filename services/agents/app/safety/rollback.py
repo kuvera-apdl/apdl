@@ -59,7 +59,10 @@ class ExperimentRollbackMonitor:
             baseline=MetricSnapshot(error_rate=0.01, p95_latency_ms=200, primary_metric_value=0.12),
         )
         if decision.should_rollback:
-            await monitor.execute_rollback(flag_key="exp_checkout_v2")
+            await monitor.execute_rollback(
+                project_id="your-project",
+                flag_key="exp_checkout_v2",
+            )
     """
 
     def __init__(self, thresholds: RollbackThresholds | None = None) -> None:
@@ -139,12 +142,13 @@ class ExperimentRollbackMonitor:
             current=current,
         )
 
-    async def execute_rollback(self, flag_key: str) -> bool:
+    async def execute_rollback(self, project_id: str, flag_key: str) -> bool:
         """Execute a rollback by disabling the experiment's feature flag.
 
         This forces all users to see the control variant.
 
         Args:
+            project_id: Project containing the feature flag.
             flag_key: The feature flag to disable.
 
         Returns:
@@ -154,9 +158,21 @@ class ExperimentRollbackMonitor:
             async with httpx.AsyncClient(
                 base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
             ) as client:
+                list_resp = await client.get(
+                    "/v1/admin/flags",
+                    params={"project_id": project_id},
+                )
+                list_resp.raise_for_status()
+                flags = list_resp.json().get("flags", [])
+                flag = next((item for item in flags if item.get("key") == flag_key), None)
+                if flag is None:
+                    logger.error("Rollback failed: flag %s not found", flag_key)
+                    return False
+
                 resp = await client.put(
                     f"/v1/admin/flags/{flag_key}",
-                    json={"enabled": False},
+                    params={"project_id": project_id},
+                    json={"version": flag["version"], "enabled": False},
                 )
                 resp.raise_for_status()
 

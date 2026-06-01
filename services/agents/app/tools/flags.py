@@ -18,16 +18,16 @@ async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
         return resp.json()
 
 
-async def _post(path: str, payload: dict[str, Any]) -> Any:
+async def _post(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(path, json=payload)
+        resp = await client.post(path, json=payload, params=params)
         resp.raise_for_status()
         return resp.json()
 
 
-async def _put(path: str, payload: dict[str, Any]) -> Any:
+async def _put(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.put(path, json=payload)
+        resp = await client.put(path, json=payload, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -41,71 +41,109 @@ async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of flag configurations.
     """
-    return await _get("/v1/flags", params={"project_id": project_id})
+    response = await _get("/v1/flags", params={"project_id": project_id})
+    return response.get("flags", []) if isinstance(response, dict) else response
 
 
 async def create_flag(
     project_id: str,
     key: str,
-    description: str,
-    variants: list[dict[str, Any]],
-    targeting_rules: list[dict[str, Any]] | None = None,
-    default_variant: str = "control",
+    name: str,
+    description: str = "",
     enabled: bool = False,
+    default_value: bool = False,
+    rules: list[dict[str, Any]] | None = None,
+    fallthrough: dict[str, Any] | None = None,
+    client_exposed: bool = True,
+    auto_disable: bool = True,
+    guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a new feature flag.
 
     Args:
         project_id: Project to create the flag in.
         key: Unique flag key (e.g. "exp_checkout_redesign").
+        name: Human-readable flag name.
         description: Human-readable description of the flag.
-        variants: List of variant objects, each with "key" and "weight".
-        targeting_rules: Optional targeting rules for the flag.
-        default_variant: Variant to serve when targeting rules don't match.
         enabled: Whether the flag is initially enabled.
+        default_value: Value returned when the flag is disabled or invalid.
+        rules: Ordered canonical gate rules.
+        fallthrough: Canonical fallthrough config.
+        client_exposed: Whether this gate can be sent to browser SDKs.
+        auto_disable: Whether guardrail automation may disable this gate.
+        guardrails: Optional guardrail configs.
 
     Returns:
         The created flag configuration.
     """
     payload: dict[str, Any] = {
-        "project_id": project_id,
         "key": key,
+        "name": name,
         "description": description,
-        "variants": variants,
-        "default_variant": default_variant,
         "enabled": enabled,
+        "default_value": default_value,
+        "rules": rules or [],
+        "fallthrough": fallthrough or {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        "client_exposed": client_exposed,
+        "auto_disable": auto_disable,
+        "guardrails": guardrails or [],
     }
-    if targeting_rules:
-        payload["targeting_rules"] = targeting_rules
-    return await _post("/v1/admin/flags", payload)
+    return await _post("/v1/admin/flags", payload, params={"project_id": project_id})
 
 
 async def update_flag(
+    project_id: str,
     key: str,
+    version: int,
     enabled: bool | None = None,
-    variants: list[dict[str, Any]] | None = None,
-    targeting_rules: list[dict[str, Any]] | None = None,
+    name: str | None = None,
     description: str | None = None,
+    default_value: bool | None = None,
+    rules: list[dict[str, Any]] | None = None,
+    fallthrough: dict[str, Any] | None = None,
+    client_exposed: bool | None = None,
+    auto_disable: bool | None = None,
+    guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Update an existing feature flag.
 
     Args:
+        project_id: Project containing the flag.
         key: Flag key to update.
+        version: Expected current config version.
         enabled: Set flag enabled/disabled state.
-        variants: Updated variant definitions.
-        targeting_rules: Updated targeting rules.
+        name: Updated name.
         description: Updated description.
+        default_value: Updated disabled/invalid fallback.
+        rules: Updated canonical gate rules.
+        fallthrough: Updated fallthrough config.
+        client_exposed: Updated browser exposure setting.
+        auto_disable: Updated guardrail automation setting.
+        guardrails: Updated guardrail configs.
 
     Returns:
         The updated flag configuration.
     """
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = {"version": version}
     if enabled is not None:
         payload["enabled"] = enabled
-    if variants is not None:
-        payload["variants"] = variants
-    if targeting_rules is not None:
-        payload["targeting_rules"] = targeting_rules
+    if name is not None:
+        payload["name"] = name
     if description is not None:
         payload["description"] = description
-    return await _put(f"/v1/admin/flags/{key}", payload)
+    if default_value is not None:
+        payload["default_value"] = default_value
+    if rules is not None:
+        payload["rules"] = rules
+    if fallthrough is not None:
+        payload["fallthrough"] = fallthrough
+    if client_exposed is not None:
+        payload["client_exposed"] = client_exposed
+    if auto_disable is not None:
+        payload["auto_disable"] = auto_disable
+    if guardrails is not None:
+        payload["guardrails"] = guardrails
+    return await _put(f"/v1/admin/flags/{key}", payload, params={"project_id": project_id})

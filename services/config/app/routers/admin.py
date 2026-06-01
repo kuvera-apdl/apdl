@@ -2,6 +2,7 @@
 
 import json
 import logging
+import secrets
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -14,7 +15,7 @@ from app.models.schemas import (
 )
 from app.store import postgres as pg_store
 from app.store import redis_cache
-from app.utils import extract_project_id, serialize_flag
+from app.utils import extract_project_id, serialize_client_flag, serialize_flag
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,24 @@ def _unauthorized():
     return JSONResponse(
         status_code=401,
         content={"error": "unauthorized", "message": "API key or project_id required"},
+    )
+
+
+def _actor(request: Request) -> str:
+    return request.headers.get("x-apdl-actor", "admin")
+
+
+async def _broadcast_flag_change(request: Request, project_id: str, action: str, flag: dict | None, key: str) -> None:
+    payload: dict
+    if flag and flag.get("client_exposed") and not flag.get("archived_at"):
+        payload = {"action": action, "flag": serialize_client_flag(flag)}
+    else:
+        payload = {"action": "flag_removed", "key": key}
+
+    await request.app.state.broadcaster.broadcast(
+        project_id,
+        "flag_update",
+        json.dumps(payload, separators=(",", ":")),
     )
 
 
@@ -39,11 +58,7 @@ async def list_flags(request: Request):
         return _unauthorized()
 
     flags = await pg_store.get_flags(request.app.state.pg_pool, project_id)
-    result = []
-    for flag in flags:
-        entry = serialize_flag(flag)
-        entry["created_at"] = flag.get("created_at", "")
-        result.append(entry)
+    result = [serialize_flag(flag) for flag in flags]
     return JSONResponse(content={"flags": result, "count": len(result)})
 
 
@@ -56,42 +71,41 @@ async def create_flag(body: FlagCreate, request: Request):
 
     pool = request.app.state.pg_pool
 
-    if await pg_store.get_flag(pool, project_id, body.key) is not None:
+    if await pg_store.get_flag(pool, project_id, body.key, include_archived=True) is not None:
         return JSONResponse(
             status_code=409,
             content={"error": "conflict", "message": f"Flag with key '{body.key}' already exists"},
         )
 
+    body_data = body.model_dump(mode="json", exclude_none=True)
     flag = {
-        "key": body.key,
+        **body_data,
         "project_id": project_id,
-        "enabled": body.enabled,
-        "description": body.description,
-        "variant_type": body.variant_type,
-        "default_value": body.default_value,
-        "rollout_percentage": body.rollout_percentage,
-        "rules_json": json.dumps(body.rules, separators=(",", ":")),
-        "variants_json": json.dumps(body.variants, separators=(",", ":")),
+        "salt": secrets.token_urlsafe(16),
     }
 
-    if not await pg_store.create_flag(pool, flag):
+    created = await pg_store.create_flag(pool, flag)
+    if created is None:
         return JSONResponse(
             status_code=500,
             content={"error": "internal_error", "message": "Failed to create flag in database"},
         )
 
+    await pg_store.create_flag_audit_entry(
+        pool,
+        project_id=project_id,
+        flag_key=created["key"],
+        action="flag_created",
+        actor=_actor(request),
+        before=None,
+        after=created,
+    )
+
     redis = request.app.state.redis
     await redis_cache.invalidate_flags(redis, project_id)
-    await request.app.state.broadcaster.broadcast(
-        project_id,
-        "flag_update",
-        json.dumps(
-            {"action": "flag_created", "flag": serialize_flag(flag)},
-            separators=(",", ":"),
-        ),
-    )
-    logger.info("Flag '%s' created for project %s", flag["key"], project_id)
-    return JSONResponse(status_code=201, content={"created": True, "key": flag["key"]})
+    await _broadcast_flag_change(request, project_id, "flag_created", created, created["key"])
+    logger.info("Flag '%s' created for project %s", created["key"], project_id)
+    return JSONResponse(status_code=201, content={"created": True, "flag": serialize_flag(created)})
 
 
 @router.put("/flags/{key}")
@@ -108,41 +122,52 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
             status_code=404,
             content={"error": "not_found", "message": f"Flag '{key}' not found"},
         )
+    if body.version != existing["version"]:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "version_conflict",
+                "message": f"Flag '{key}' is at version {existing['version']}",
+                "current_version": existing["version"],
+            },
+        )
+
+    updates = body.model_dump(exclude_unset=True, exclude_none=True, mode="json")
+    updates.pop("version", None)
+    if not updates:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_request", "message": "No flag fields provided to update"},
+        )
 
     flag = dict(existing)
-    if body.enabled is not None:
-        flag["enabled"] = body.enabled
-    if body.description is not None:
-        flag["description"] = body.description
-    if body.variant_type is not None:
-        flag["variant_type"] = body.variant_type
-    if body.default_value is not None:
-        flag["default_value"] = body.default_value
-    if body.rollout_percentage is not None:
-        flag["rollout_percentage"] = body.rollout_percentage
-    if body.rules is not None:
-        flag["rules_json"] = json.dumps(body.rules, separators=(",", ":"))
-    if body.variants is not None:
-        flag["variants_json"] = json.dumps(body.variants, separators=(",", ":"))
+    flag.update(updates)
 
-    if not await pg_store.update_flag(pool, flag):
+    updated = await pg_store.update_flag(pool, flag, body.version)
+    if updated is None:
         return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to update flag"},
+            status_code=409,
+            content={
+                "error": "version_conflict",
+                "message": f"Flag '{key}' was modified before this update completed",
+            },
         )
+
+    await pg_store.create_flag_audit_entry(
+        pool,
+        project_id=project_id,
+        flag_key=updated["key"],
+        action="flag_updated",
+        actor=_actor(request),
+        before=existing,
+        after=updated,
+    )
 
     redis = request.app.state.redis
     await redis_cache.invalidate_flags(redis, project_id)
-    await request.app.state.broadcaster.broadcast(
-        project_id,
-        "flag_update",
-        json.dumps(
-            {"action": "flag_updated", "flag": serialize_flag(flag)},
-            separators=(",", ":"),
-        ),
-    )
-    logger.info("Flag '%s' updated for project %s", flag["key"], project_id)
-    return JSONResponse(content={"updated": True, "key": flag["key"]})
+    await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
+    logger.info("Flag '%s' updated for project %s", updated["key"], project_id)
+    return JSONResponse(content={"updated": True, "flag": serialize_flag(updated)})
 
 
 @router.delete("/flags/{key}")
@@ -152,21 +177,36 @@ async def delete_flag(key: str, request: Request):
     if not project_id:
         return _unauthorized()
 
-    if not await pg_store.delete_flag(request.app.state.pg_pool, project_id, key):
+    pool = request.app.state.pg_pool
+    existing = await pg_store.get_flag(pool, project_id, key)
+    if existing is None:
         return JSONResponse(
             status_code=404,
-            content={"error": "not_found", "message": f"Flag '{key}' not found or already deleted"},
+            content={"error": "not_found", "message": f"Flag '{key}' not found or already archived"},
         )
+
+    archived = await pg_store.archive_flag(pool, project_id, key)
+    if archived is None:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "internal_error", "message": "Failed to archive flag"},
+        )
+
+    await pg_store.create_flag_audit_entry(
+        pool,
+        project_id=project_id,
+        flag_key=key,
+        action="flag_archived",
+        actor=_actor(request),
+        before=existing,
+        after=archived,
+    )
 
     redis = request.app.state.redis
     await redis_cache.invalidate_flags(redis, project_id)
-    await request.app.state.broadcaster.broadcast(
-        project_id,
-        "flag_update",
-        json.dumps({"action": "flag_deleted", "key": key}, separators=(",", ":")),
-    )
-    logger.info("Flag '%s' deleted for project %s", key, project_id)
-    return JSONResponse(content={"deleted": True, "key": key})
+    await _broadcast_flag_change(request, project_id, "flag_archived", archived, key)
+    logger.info("Flag '%s' archived for project %s", key, project_id)
+    return JSONResponse(content={"archived": True, "flag": serialize_flag(archived)})
 
 
 # ---------- Experiments ----------
