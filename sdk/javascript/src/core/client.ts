@@ -63,6 +63,7 @@ export class APDLClient {
   private scrubber: Scrubber;
   private flagChangeListeners: Map<string, Set<(value: boolean) => void>> = new Map();
   private featureFlagExposureKeys: Set<string> = new Set();
+  private missingGateWarnings: Set<string> = new Set();
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
 
   /** UI namespace */
@@ -280,6 +281,7 @@ export class APDLClient {
    */
   checkGateDetails(key: string): GateEvaluationResult {
     const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+    this.warnMissingGate(result);
     this.rememberActiveFlag(result);
     this.logFeatureFlagExposure(result);
     return result;
@@ -453,6 +455,17 @@ export class APDLClient {
       source: result.source,
       page,
     });
+  }
+
+  private warnMissingGate(result: GateEvaluationResult): void {
+    if (result.reason !== 'not_found' || this.missingGateWarnings.has(result.key)) {
+      return;
+    }
+
+    this.missingGateWarnings.add(result.key);
+    console.warn(
+      `APDL: Feature gate '${result.key}' is missing or archived; returning false.`
+    );
   }
 
   private featureFlagExposureKey(result: GateEvaluationResult, page: string): string {

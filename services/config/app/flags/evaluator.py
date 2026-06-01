@@ -153,6 +153,10 @@ def evaluate(flag: dict, ctx: dict) -> dict:
     """Evaluate one canonical gate config against a context."""
     result = _base_result(flag)
 
+    if flag.get("state", "active") != "active":
+        result["reason"] = "disabled"
+        return result
+
     if not flag.get("enabled", False):
         result["reason"] = "disabled"
         return result

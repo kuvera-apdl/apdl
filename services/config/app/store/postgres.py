@@ -26,6 +26,9 @@ def _row_to_flag(row) -> dict:
         "key": row["key"],
         "project_id": row["project_id"],
         "name": row["name"],
+        "state": row["state"],
+        "owners": _json_value(row["owners"], []),
+        "review_by": str(row["review_by"]) if row["review_by"] else None,
         "enabled": row["enabled"],
         "description": row["description"],
         "default_value": row["default_value"],
@@ -100,10 +103,14 @@ async def create_flag(pool, flag: dict) -> dict | None:
     """Insert a new flag. Returns the inserted row, or None on failure."""
     sql = """
         INSERT INTO flags (
-            key, project_id, name, enabled, description, default_value,
-            rules, fallthrough, salt, evaluation_mode, auto_disable, guardrails
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_value, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10, $11, $12::jsonb)
+        VALUES (
+            $1, $2, $3, $4, $5::jsonb, $6, $7,
+            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15::jsonb
+        )
         RETURNING *
     """
     try:
@@ -112,6 +119,9 @@ async def create_flag(pool, flag: dict) -> dict | None:
             flag["key"],
             flag["project_id"],
             flag["name"],
+            flag.get("state", "draft"),
+            json.dumps(flag.get("owners", []), separators=(",", ":")),
+            flag.get("review_by"),
             flag.get("enabled", False),
             flag.get("description", ""),
             flag.get("default_value", False),
@@ -133,14 +143,17 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
     sql = """
         UPDATE flags SET
             name = $4,
-            enabled = $5,
-            description = $6,
-            default_value = $7,
-            rules = $8::jsonb,
-            fallthrough = $9::jsonb,
-            evaluation_mode = $10,
-            auto_disable = $11,
-            guardrails = $12::jsonb,
+            state = $5,
+            owners = $6::jsonb,
+            review_by = $7,
+            enabled = $8,
+            description = $9,
+            default_value = $10,
+            rules = $11::jsonb,
+            fallthrough = $12::jsonb,
+            evaluation_mode = $13,
+            auto_disable = $14,
+            guardrails = $15::jsonb,
             version = version + 1,
             updated_at = NOW()
         WHERE project_id = $1
@@ -156,6 +169,9 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             flag["key"],
             expected_version,
             flag["name"],
+            flag["state"],
+            json.dumps(flag["owners"], separators=(",", ":")),
+            flag.get("review_by"),
             flag["enabled"],
             flag["description"],
             flag["default_value"],
@@ -171,18 +187,29 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
         return None
 
 
-async def archive_flag(pool, project_id: str, key: str) -> dict | None:
+async def archive_flag(
+    pool,
+    project_id: str,
+    key: str,
+    *,
+    expected_version: int | None = None,
+) -> dict | None:
     """Soft-archive a flag. Returns the archived row if it existed."""
+    version_filter = "" if expected_version is None else " AND version = $3"
     sql = """
         UPDATE flags SET
+            state = 'archived',
+            enabled = false,
             archived_at = NOW(),
             version = version + 1,
             updated_at = NOW()
         WHERE project_id = $1 AND key = $2 AND archived_at IS NULL
+    """ + version_filter + """
         RETURNING *
     """
     try:
-        row = await pool.fetchrow(sql, project_id, key)
+        args = (project_id, key) if expected_version is None else (project_id, key, expected_version)
+        row = await pool.fetchrow(sql, *args)
         return _row_to_flag(row) if row is not None else None
     except Exception as exc:
         logger.error("archiveFlag failed: %s", exc)
@@ -200,6 +227,7 @@ async def disable_flag(
     """Disable an enabled flag and record disable metadata."""
     sql = """
         UPDATE flags SET
+            state = 'disabled',
             enabled = false,
             disabled_reason = $3,
             disabled_by = $4,
@@ -253,6 +281,42 @@ async def create_flag_audit_entry(
         json.dumps(evidence or {}, separators=(",", ":")),
         reason,
     )
+
+
+async def get_flag_audit_entries(
+    pool,
+    project_id: str,
+    flag_key: str,
+    *,
+    limit: int = 50,
+) -> list[dict]:
+    """Fetch recent audit entries for a flag."""
+    sql = """
+        SELECT id, project_id, flag_key, action, actor, previous_version,
+               new_version, before, after, evidence, reason, created_at
+        FROM flag_audit_log
+        WHERE project_id = $1 AND flag_key = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3
+    """
+    rows = await pool.fetch(sql, project_id, flag_key, limit)
+    return [
+        {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "flag_key": row["flag_key"],
+            "action": row["action"],
+            "actor": row["actor"],
+            "previous_version": row["previous_version"],
+            "new_version": row["new_version"],
+            "before": _json_value(row["before"], None),
+            "after": _json_value(row["after"], None),
+            "evidence": _json_value(row["evidence"], {}),
+            "reason": row["reason"],
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
 
 
 # ---- Experiment operations ----

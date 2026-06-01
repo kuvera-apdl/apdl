@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS flags (
     key TEXT NOT NULL,
     project_id TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK (state IN ('draft', 'active', 'disabled', 'archived')),
+    owners JSONB NOT NULL DEFAULT '[]'::jsonb,
+    review_by TEXT,
     enabled BOOLEAN NOT NULL DEFAULT false,
     description TEXT NOT NULL DEFAULT '',
     default_value BOOLEAN NOT NULL DEFAULT false,
@@ -36,12 +40,16 @@ CREATE TABLE IF NOT EXISTS flags (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at TIMESTAMPTZ,
+    CONSTRAINT flags_state_enabled_check CHECK ((state = 'active') = enabled),
     PRIMARY KEY (project_id, key)
 );
 """
 
 MIGRATE_FLAGS_TABLE = """
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'draft';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS owners JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS review_by TEXT;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
@@ -65,6 +73,15 @@ UPDATE flags SET name = key WHERE name = '';
 UPDATE flags
 SET salt = md5(random()::text || clock_timestamp()::text || project_id || key)
 WHERE salt = '';
+UPDATE flags
+SET state = CASE
+    WHEN archived_at IS NOT NULL THEN 'archived'
+    WHEN disabled_at IS NOT NULL OR disabled_reason <> '' THEN 'disabled'
+    WHEN enabled THEN 'active'
+    ELSE 'draft'
+END
+WHERE state = 'draft'
+  AND (archived_at IS NOT NULL OR disabled_at IS NOT NULL OR disabled_reason <> '' OR enabled);
 
 DO $$
 BEGIN
@@ -78,7 +95,7 @@ BEGIN
 
     IF to_regclass('public.feature_flags') IS NOT NULL THEN
         INSERT INTO flags (
-            key, project_id, name, enabled, description, default_value,
+            key, project_id, name, state, enabled, description, default_value,
             rules, fallthrough, salt, evaluation_mode, auto_disable,
             guardrails, created_at, updated_at
         )
@@ -86,6 +103,7 @@ BEGIN
             flag_key,
             project_id,
             name,
+            CASE WHEN COALESCE(enabled, false) THEN 'active' ELSE 'draft' END,
             COALESCE(enabled, false),
             COALESCE(description, ''),
             false,
@@ -177,9 +195,19 @@ BEGIN
     END IF;
 END $$;
 
+UPDATE flags
+SET enabled = (state = 'active')
+WHERE enabled IS DISTINCT FROM (state = 'active');
+
 ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_evaluation_mode_check;
 ALTER TABLE flags ADD CONSTRAINT flags_evaluation_mode_check
     CHECK (evaluation_mode IN ('client', 'server', 'both'));
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_check;
+ALTER TABLE flags ADD CONSTRAINT flags_state_check
+    CHECK (state IN ('draft', 'active', 'disabled', 'archived'));
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_enabled_check;
+ALTER TABLE flags ADD CONSTRAINT flags_state_enabled_check
+    CHECK ((state = 'active') = enabled);
 
 ALTER TABLE flags DROP COLUMN IF EXISTS variant_type;
 ALTER TABLE flags DROP COLUMN IF EXISTS rules_json;
@@ -231,6 +259,11 @@ CREATE_FLAGS_INDEX = (
     "ON flags (project_id, archived_at, updated_at DESC);"
 )
 
+CREATE_FLAGS_LIFECYCLE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_flags_project_state_review "
+    "ON flags (project_id, state, review_by, updated_at DESC);"
+)
+
 CREATE_FLAG_AUDIT_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_flag_audit_project_flag "
     "ON flag_audit_log (project_id, flag_key, created_at DESC);"
@@ -265,6 +298,7 @@ async def lifespan(application: FastAPI):
         await conn.execute(MIGRATE_FLAG_AUDIT_TABLE)
         await conn.execute(CREATE_EXPERIMENTS_TABLE)
         await conn.execute(CREATE_FLAGS_INDEX)
+        await conn.execute(CREATE_FLAGS_LIFECYCLE_INDEX)
         await conn.execute(CREATE_FLAG_AUDIT_INDEX)
         await conn.execute(CREATE_EXPERIMENTS_INDEX)
     logger.info("Database schema initialized")

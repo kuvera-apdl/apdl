@@ -195,6 +195,8 @@ describe('APDLClient', () => {
 
   describe('checkGate()', () => {
     it('should return false and details when gate not found', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
       expect(client.checkGate('nonexistent')).toBe(false);
       expect(client.checkGateDetails('nonexistent')).toMatchObject({
         key: 'nonexistent',
@@ -203,6 +205,12 @@ describe('APDLClient', () => {
         source: 'none',
       });
       expect(featureFlagExposures(client)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "APDL: Feature gate 'nonexistent' is missing or archived; returning false."
+      );
+
+      warn.mockRestore();
     });
 
     it('should evaluate gates from initial fetch', async () => {
@@ -310,9 +318,14 @@ describe('APDLClient', () => {
       await flushAsync();
       cachedClient.identify('user_123');
 
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       expect(cachedClient.checkGate('cached-gate')).toBe(true);
       expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
       expect(cachedClient.checkGate('legacy')).toBe(false);
+      expect(warn).toHaveBeenCalledWith(
+        "APDL: Feature gate 'legacy' is missing or archived; returning false."
+      );
+      warn.mockRestore();
     });
 
     it('should not restore cached gates in strict privacy mode', () => {
@@ -332,8 +345,11 @@ describe('APDLClient', () => {
       });
       strictClient.identify('user_123');
 
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       expect(strictClient.checkGate('cached-gate')).toBe(false);
       expect(strictClient.checkGateDetails('cached-gate').reason).toBe('not_found');
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
     });
 
     it('should log one deduplicated exposure for repeated gate checks', async () => {

@@ -1,5 +1,6 @@
 """Pydantic models for gates and experiments."""
 
+from datetime import date
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,6 +33,8 @@ ConditionOperator = Literal[
 GuardrailMetric = Literal["frontend_error_rate", "frontend_error_count"]
 GuardrailThreshold = Literal["2x_baseline", "at_least_one"]
 EvaluationMode = Literal["client", "server", "both"]
+FlagState = Literal["draft", "active", "disabled", "archived"]
+WritableFlagState = Literal["draft", "active", "disabled"]
 GateEvaluationReason = Literal[
     "not_found",
     "invalid_config",
@@ -99,6 +102,9 @@ class FlagConfig(BaseModel):
     key: str
     project_id: str = ""
     name: str = ""
+    state: FlagState = "draft"
+    owners: list[str] = Field(default_factory=list)
+    review_by: date | None = None
     enabled: bool = False
     description: str = ""
     default_value: bool = False
@@ -175,6 +181,9 @@ class GateEvaluateResponse(StrictModel):
 class FlagCreate(StrictModel):
     key: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
+    state: WritableFlagState = "draft"
+    owners: list[str] = Field(default_factory=list)
+    review_by: date | None = None
     enabled: bool = False
     description: str = ""
     default_value: bool = False
@@ -184,9 +193,18 @@ class FlagCreate(StrictModel):
     auto_disable: bool = True
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_lifecycle(self):
+        validate_owners(self.owners)
+        validate_state_enabled(self.state, self.enabled)
+        return self
+
 
 class FlagUpdate(StrictModel):
     version: int = Field(..., ge=1)
+    state: WritableFlagState | None = None
+    owners: list[str] | None = None
+    review_by: date | None = None
     enabled: bool | None = None
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
@@ -197,11 +215,37 @@ class FlagUpdate(StrictModel):
     auto_disable: bool | None = None
     guardrails: list[GuardrailConfig] | None = None
 
+    @model_validator(mode="after")
+    def validate_lifecycle(self):
+        if self.owners is not None:
+            validate_owners(self.owners)
+        if self.state is not None and self.enabled is not None:
+            validate_state_enabled(self.state, self.enabled)
+        return self
+
 
 class FlagDisable(StrictModel):
     reason: Literal["guardrail_failed"] = "guardrail_failed"
     source: Literal["system", "admin"] = "system"
     evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class FlagCleanup(StrictModel):
+    version: int = Field(..., ge=1)
+    source: Literal["admin", "system"] = "admin"
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+def validate_owners(owners: list[str]) -> None:
+    for owner in owners:
+        if not owner.strip():
+            raise ValueError("owners must contain non-empty strings")
+
+
+def validate_state_enabled(state: str, enabled: bool) -> None:
+    expected_enabled = state == "active"
+    if enabled != expected_enabled:
+        raise ValueError(f"state '{state}' requires enabled={expected_enabled}")
 
 
 class ExperimentCreate(BaseModel):

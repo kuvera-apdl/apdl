@@ -18,6 +18,7 @@ def make_flag(overrides: dict | None = None) -> dict:
         "key": "checkout",
         "project_id": "apdl",
         "name": "Checkout",
+        "state": "active",
         "enabled": True,
         "description": "",
         "default_value": False,
@@ -51,6 +52,13 @@ def test_disabled_flag_returns_default_value():
     assert result["value"] is True
     assert result["reason"] == "disabled"
     assert result["config_version"] == 4
+
+
+def test_draft_flag_returns_default_value():
+    result = evaluate(make_flag({"state": "draft", "default_value": True}), make_context())
+
+    assert result["value"] is True
+    assert result["reason"] == "disabled"
 
 
 def test_first_matching_rule_serves_true_when_rollout_passes():

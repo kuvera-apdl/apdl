@@ -3,13 +3,15 @@
 import json
 import logging
 import secrets
+from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.models.schemas import (
     ExperimentCreate,
     ExperimentUpdate,
+    FlagCleanup,
     FlagCreate,
     FlagDisable,
     FlagUpdate,
@@ -21,6 +23,7 @@ from app.utils import extract_project_id, serialize_client_flag, serialize_flag
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/admin")
+STALE_STATE_AGE_DAYS = 90
 
 
 def _unauthorized():
@@ -32,6 +35,17 @@ def _unauthorized():
 
 def _actor(request: Request) -> str:
     return request.headers.get("x-apdl-actor", "admin")
+
+
+def _enabled_for_state(state: str) -> bool:
+    return state == "active"
+
+
+def _sync_lifecycle_update(updates: dict) -> None:
+    if "state" in updates and "enabled" not in updates:
+        updates["enabled"] = _enabled_for_state(updates["state"])
+    elif "enabled" in updates and "state" not in updates:
+        updates["state"] = "active" if updates["enabled"] else "disabled"
 
 
 async def _broadcast_flag_change(request: Request, project_id: str, action: str, flag: dict | None, key: str) -> None:
@@ -52,19 +66,130 @@ async def _broadcast_flag_change(request: Request, project_id: str, action: str,
     )
 
 
+def _stale_reasons(flag: dict, today: date, older_than_days: int) -> list[str]:
+    reasons: list[str] = []
+    owners = flag.get("owners", [])
+    if not owners:
+        reasons.append("missing_owner")
+
+    review_by = _review_date(flag.get("review_by"))
+    if review_by is None:
+        reasons.append("missing_review_date")
+    elif review_by < today:
+        reasons.append("review_overdue")
+
+    days_since_update = _days_since_update(flag)
+    if flag.get("state") == "draft" and days_since_update >= older_than_days:
+        reasons.append("stale_draft")
+    if flag.get("state") == "disabled" and days_since_update >= older_than_days:
+        reasons.append("stale_disabled")
+
+    reasons.extend(_cleanup_reasons(flag))
+    return reasons
+
+
+def _cleanup_reasons(flag: dict) -> list[str]:
+    if _is_cleanup_candidate(flag):
+        return ["fully_rolled_out"]
+    return []
+
+
+def _is_cleanup_candidate(flag: dict) -> bool:
+    if flag.get("state") != "active" or not flag.get("enabled", False):
+        return False
+    if flag.get("rules"):
+        return False
+
+    fallthrough = flag.get("fallthrough", {})
+    if not isinstance(fallthrough, dict) or fallthrough.get("value") is not True:
+        return False
+    rollout = fallthrough.get("rollout", {})
+    if not isinstance(rollout, dict):
+        return False
+    try:
+        percentage = float(rollout.get("percentage", 0.0))
+    except (TypeError, ValueError):
+        return False
+    return percentage >= 100.0
+
+
+def _review_date(value) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _days_since_update(flag: dict) -> int:
+    updated_at = flag.get("updated_at")
+    if not updated_at:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max((now - parsed.astimezone(timezone.utc)).days, 0)
+
+
 # ---------- Flags ----------
 
 
 @router.get("/flags")
-async def list_flags(request: Request):
+async def list_flags(
+    request: Request,
+    include_archived: bool = False,
+):
     """List all flags for a project."""
     project_id = extract_project_id(request)
     if not project_id:
         return _unauthorized()
 
-    flags = await pg_store.get_flags(request.app.state.pg_pool, project_id)
+    flags = await pg_store.get_flags(
+        request.app.state.pg_pool,
+        project_id,
+        include_archived=include_archived,
+    )
     result = [serialize_flag(flag) for flag in flags]
     return JSONResponse(content={"flags": result, "count": len(result)})
+
+
+@router.get("/flags/stale")
+async def list_stale_flags(
+    request: Request,
+    older_than_days: int = Query(default=STALE_STATE_AGE_DAYS, ge=1, le=3650),
+):
+    """Report flags that need owner review or rollout cleanup."""
+    project_id = extract_project_id(request)
+    if not project_id:
+        return _unauthorized()
+
+    today = date.today()
+    flags = await pg_store.get_flags(request.app.state.pg_pool, project_id)
+    stale_flags = []
+    for flag in flags:
+        reasons = _stale_reasons(flag, today, older_than_days)
+        if not reasons:
+            continue
+        entry = serialize_flag(flag)
+        entry["stale_reasons"] = reasons
+        entry["cleanup_recommended"] = _is_cleanup_candidate(flag)
+        entry["days_since_update"] = _days_since_update(flag)
+        stale_flags.append(entry)
+
+    return JSONResponse(content={
+        "flags": stale_flags,
+        "count": len(stale_flags),
+        "older_than_days": older_than_days,
+    })
 
 
 @router.post("/flags", status_code=201)
@@ -139,6 +264,7 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
 
     updates = body.model_dump(exclude_unset=True, exclude_none=True, mode="json")
     updates.pop("version", None)
+    _sync_lifecycle_update(updates)
     if not updates:
         return JSONResponse(
             status_code=400,
@@ -280,6 +406,115 @@ async def delete_flag(key: str, request: Request):
     await _broadcast_flag_change(request, project_id, "flag_archived", archived, key)
     logger.info("Flag '%s' archived for project %s", key, project_id)
     return JSONResponse(content={"archived": True, "flag": serialize_flag(archived)})
+
+
+@router.post("/flags/{key}/cleanup")
+async def cleanup_flag(key: str, body: FlagCleanup, request: Request):
+    """Archive a fully rolled out flag through the cleanup workflow."""
+    project_id = extract_project_id(request)
+    if not project_id:
+        return _unauthorized()
+
+    pool = request.app.state.pg_pool
+    existing = await pg_store.get_flag(pool, project_id, key)
+    if existing is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"Flag '{key}' not found or already archived"},
+        )
+    if body.version != existing["version"]:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "version_conflict",
+                "message": f"Flag '{key}' is at version {existing['version']}",
+                "current_version": existing["version"],
+            },
+        )
+
+    cleanup_reasons = _cleanup_reasons(existing)
+    if "fully_rolled_out" not in cleanup_reasons:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "not_cleanup_candidate",
+                "message": f"Flag '{key}' is not eligible for rollout cleanup",
+                "cleanup_reasons": cleanup_reasons,
+            },
+        )
+
+    archived = await pg_store.archive_flag(
+        pool,
+        project_id,
+        key,
+        expected_version=body.version,
+    )
+    if archived is None:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "version_conflict",
+                "message": f"Flag '{key}' was modified before cleanup completed",
+            },
+        )
+
+    evidence = {
+        **body.evidence,
+        "cleanup_reasons": cleanup_reasons,
+    }
+    await pg_store.create_flag_audit_entry(
+        pool,
+        project_id=project_id,
+        flag_key=key,
+        action="flag_cleanup_archived",
+        actor=body.source,
+        before=existing,
+        after=archived,
+        reason="fully_rolled_out",
+        evidence=evidence,
+    )
+
+    redis = request.app.state.redis
+    await redis_cache.invalidate_flags(redis, project_id)
+    await _broadcast_flag_change(request, project_id, "flag_archived", archived, key)
+    logger.info("Flag '%s' cleaned up for project %s", key, project_id)
+    return JSONResponse(content={
+        "cleaned_up": True,
+        "cleanup_reasons": cleanup_reasons,
+        "flag": serialize_flag(archived),
+    })
+
+
+@router.get("/flags/{key}/audit")
+async def get_flag_audit(
+    key: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Return the retained audit history for a flag."""
+    project_id = extract_project_id(request)
+    if not project_id:
+        return _unauthorized()
+
+    pool = request.app.state.pg_pool
+    existing = await pg_store.get_flag(pool, project_id, key, include_archived=True)
+    if existing is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"Flag '{key}' not found"},
+        )
+
+    entries = await pg_store.get_flag_audit_entries(
+        pool,
+        project_id,
+        key,
+        limit=limit,
+    )
+    return JSONResponse(content={
+        "flag_key": key,
+        "audit": entries,
+        "count": len(entries),
+    })
 
 
 # ---------- Experiments ----------

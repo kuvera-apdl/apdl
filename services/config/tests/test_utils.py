@@ -10,6 +10,9 @@ def make_flag() -> dict:
         "key": "checkout",
         "project_id": "apdl",
         "name": "Checkout",
+        "state": "active",
+        "owners": ["team-growth"],
+        "review_by": "2099-07-01",
         "description": "Controls the checkout redesign.",
         "enabled": True,
         "default_value": False,
@@ -91,6 +94,25 @@ def test_flag_create_accepts_canonical_evaluation_mode():
     })
 
     assert flag.evaluation_mode == "server"
+
+
+def test_flag_create_rejects_state_enabled_mismatch():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate({
+            "key": "checkout",
+            "name": "Checkout",
+            "state": "draft",
+            "enabled": True,
+        })
+
+
+def test_flag_update_rejects_state_enabled_mismatch():
+    with pytest.raises(ValidationError):
+        FlagUpdate.model_validate({
+            "version": 4,
+            "state": "disabled",
+            "enabled": True,
+        })
 
 
 @pytest.mark.parametrize(

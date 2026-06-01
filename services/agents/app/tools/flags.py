@@ -50,7 +50,10 @@ async def create_flag(
     key: str,
     name: str,
     description: str = "",
-    enabled: bool = False,
+    state: str | None = None,
+    owners: list[str] | None = None,
+    review_by: str | None = None,
+    enabled: bool | None = None,
     default_value: bool = False,
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
@@ -65,7 +68,10 @@ async def create_flag(
         key: Unique flag key (e.g. "exp_checkout_redesign").
         name: Human-readable flag name.
         description: Human-readable description of the flag.
-        enabled: Whether the flag is initially enabled.
+        state: Lifecycle state: "draft", "active", or "disabled".
+        owners: Users or teams responsible for reviewing the flag.
+        review_by: ISO date when the flag should next be reviewed.
+        enabled: Whether the flag is initially enabled. Defaults from state when omitted.
         default_value: Value returned when the flag is disabled or invalid.
         rules: Ordered canonical gate rules.
         fallthrough: Canonical fallthrough config.
@@ -76,11 +82,16 @@ async def create_flag(
     Returns:
         The created flag configuration.
     """
+    resolved_state = state or ("active" if enabled is True else "draft")
+    resolved_enabled = enabled if enabled is not None else resolved_state == "active"
     payload: dict[str, Any] = {
         "key": key,
         "name": name,
         "description": description,
-        "enabled": enabled,
+        "state": resolved_state,
+        "owners": owners or [],
+        "review_by": review_by,
+        "enabled": resolved_enabled,
         "default_value": default_value,
         "rules": rules or [],
         "fallthrough": fallthrough or {
@@ -98,6 +109,9 @@ async def update_flag(
     project_id: str,
     key: str,
     version: int,
+    state: str | None = None,
+    owners: list[str] | None = None,
+    review_by: str | None = None,
     enabled: bool | None = None,
     name: str | None = None,
     description: str | None = None,
@@ -114,6 +128,9 @@ async def update_flag(
         project_id: Project containing the flag.
         key: Flag key to update.
         version: Expected current config version.
+        state: Updated lifecycle state.
+        owners: Updated owner list.
+        review_by: Updated ISO review date.
         enabled: Set flag enabled/disabled state.
         name: Updated name.
         description: Updated description.
@@ -128,6 +145,12 @@ async def update_flag(
         The updated flag configuration.
     """
     payload: dict[str, Any] = {"version": version}
+    if state is not None:
+        payload["state"] = state
+    if owners is not None:
+        payload["owners"] = owners
+    if review_by is not None:
+        payload["review_by"] = review_by
     if enabled is not None:
         payload["enabled"] = enabled
     if name is not None:
