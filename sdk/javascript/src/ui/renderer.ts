@@ -8,6 +8,12 @@ interface ActiveRender {
   slotElement: HTMLElement;
 }
 
+type RenderErrorCallback = (
+  component: string,
+  slotId: string,
+  error: unknown
+) => void;
+
 /**
  * Renders UI components from JSON configuration into DOM slots.
  * Handles cleanup of previous renders and auto-tracks component events.
@@ -17,15 +23,18 @@ export class UIRenderer {
   private capture: ManualCapture;
   private activeRenders: Map<string, ActiveRender> = new Map();
   private debug: boolean;
+  private renderErrorCallback?: RenderErrorCallback;
 
   constructor(
     registry: ComponentRegistry,
     capture: ManualCapture,
-    debug = false
+    debug = false,
+    renderErrorCallback?: RenderErrorCallback
   ) {
     this.registry = registry;
     this.capture = capture;
     this.debug = debug;
+    this.renderErrorCallback = renderErrorCallback;
   }
 
   /**
@@ -100,6 +109,7 @@ export class UIRenderer {
 
       return element;
     } catch (err) {
+      this.renderErrorCallback?.(config.component, slotId, err);
       if (this.debug) {
         console.error(
           `APDL: Error rendering "${config.component}":`,

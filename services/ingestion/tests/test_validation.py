@@ -103,6 +103,46 @@ class TestSingleEventValidation:
         result = validate_single_event(event)
         assert result["valid"] is True
 
+    def test_valid_frontend_error_event(self):
+        event = frontend_error_event()
+        result = validate_single_event(event)
+        assert result["valid"] is True
+
+    def test_frontend_error_rejects_unknown_properties(self):
+        event = frontend_error_event()
+        event["properties"]["activeFlags"] = {"checkout-gate": True}
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.activeFlags" for error in result["errors"])
+
+    def test_frontend_error_requires_matching_active_flag_versions(self):
+        event = frontend_error_event()
+        event["properties"]["active_flag_versions"] = {}
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(
+            error["field"] == "properties.active_flag_versions"
+            for error in result["errors"]
+        )
+
+    def test_valid_web_vital_event(self):
+        event = web_vital_event()
+        result = validate_single_event(event)
+        assert result["valid"] is True
+
+    def test_web_vital_rejects_noncanonical_rating(self):
+        event = web_vital_event()
+        event["properties"]["rating"] = "needs-improvement"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.rating" for error in result["errors"])
+
     def test_feature_flag_exposure_rejects_alias_properties(self):
         event = feature_flag_exposure_event()
         properties = event["properties"]
@@ -398,5 +438,53 @@ def feature_flag_exposure_event():
             "config_version": 3,
             "source": "initial_fetch",
             "page": "/checkout",
+        },
+    }
+
+
+def frontend_error_event():
+    return {
+        "event": "$frontend_error",
+        "type": "track",
+        "user_id": "usr_42",
+        "anonymous_id": "anon_42",
+        "session_id": "sess_42",
+        "message_id": "msg_42",
+        "timestamp": "2026-05-26T02:26:53.455Z",
+        "properties": {
+            "error_type": "javascript_error",
+            "message": "Checkout exploded",
+            "page": "/checkout",
+            "component": "",
+            "slot_id": "",
+            "source": "checkout.js",
+            "line": 12,
+            "column": 4,
+            "stack": "Error: Checkout exploded",
+            "active_flags": {"checkout-gate": True},
+            "active_flag_versions": {"checkout-gate": 3},
+        },
+    }
+
+
+def web_vital_event():
+    return {
+        "event": "$web_vital",
+        "type": "track",
+        "user_id": "usr_42",
+        "anonymous_id": "anon_42",
+        "session_id": "sess_42",
+        "message_id": "msg_42",
+        "timestamp": "2026-05-26T02:26:53.455Z",
+        "properties": {
+            "metric": "LCP",
+            "value": 2410.5,
+            "rating": "needs_improvement",
+            "delta": 2410.5,
+            "id": "vital_1",
+            "navigation_type": "navigate",
+            "page": "/checkout",
+            "active_flags": {"checkout-gate": True},
+            "active_flag_versions": {"checkout-gate": 3},
         },
     }

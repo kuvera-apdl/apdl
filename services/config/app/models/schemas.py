@@ -29,6 +29,9 @@ ConditionOperator = Literal[
     "not_exists",
 ]
 
+GuardrailMetric = Literal["frontend_error_rate", "frontend_error_count"]
+GuardrailThreshold = Literal["2x_baseline", "at_least_one"]
+
 
 class GateCondition(StrictModel):
     attribute: str = Field(..., min_length=1)
@@ -66,11 +69,19 @@ class FallthroughConfig(StrictModel):
 
 
 class GuardrailConfig(StrictModel):
-    metric: str = Field(..., min_length=1)
-    threshold: str = Field(..., min_length=1)
+    metric: GuardrailMetric
+    threshold: GuardrailThreshold
     scope: str = ""
     minimum_exposures: int = Field(default=0, ge=0)
     window_minutes: int = Field(default=10, ge=1)
+
+    @model_validator(mode="after")
+    def validate_metric_threshold(self):
+        if self.metric == "frontend_error_rate" and self.threshold != "2x_baseline":
+            raise ValueError("frontend_error_rate guardrails require threshold '2x_baseline'")
+        if self.metric == "frontend_error_count" and self.threshold != "at_least_one":
+            raise ValueError("frontend_error_count guardrails require threshold 'at_least_one'")
+        return self
 
 
 class FlagConfig(BaseModel):
@@ -86,6 +97,9 @@ class FlagConfig(BaseModel):
     client_exposed: bool = True
     auto_disable: bool = True
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
+    disabled_reason: str = ""
+    disabled_by: str = ""
+    disabled_at: str | None = None
     version: int = 1
     created_at: str = ""
     updated_at: str = ""
@@ -149,6 +163,12 @@ class FlagUpdate(StrictModel):
     client_exposed: bool | None = None
     auto_disable: bool | None = None
     guardrails: list[GuardrailConfig] | None = None
+
+
+class FlagDisable(StrictModel):
+    reason: Literal["guardrail_failed"] = "guardrail_failed"
+    source: Literal["system", "admin"] = "system"
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExperimentCreate(BaseModel):

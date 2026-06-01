@@ -37,6 +37,9 @@ def make_flag() -> dict:
             "minimum_exposures": 100,
             "window_minutes": 10,
         }],
+        "disabled_reason": "",
+        "disabled_by": "",
+        "disabled_at": None,
         "version": 4,
         "created_at": "2026-06-01T00:00:00+00:00",
         "updated_at": "2026-06-01T00:00:00+00:00",
@@ -103,3 +106,17 @@ def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
 def test_flag_update_requires_version():
     with pytest.raises(ValidationError):
         FlagUpdate.model_validate({"enabled": False})
+
+
+def test_frontend_error_count_guardrail_requires_at_least_one_threshold():
+    payload = {
+        "key": "checkout",
+        "name": "Checkout",
+        "guardrails": [{
+            "metric": "frontend_error_count",
+            "threshold": "2x_baseline",
+        }],
+    }
+
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(payload)

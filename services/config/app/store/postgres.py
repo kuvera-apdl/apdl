@@ -35,6 +35,9 @@ def _row_to_flag(row) -> dict:
         "client_exposed": row["client_exposed"],
         "auto_disable": row["auto_disable"],
         "guardrails": _json_value(row["guardrails"], []),
+        "disabled_reason": row["disabled_reason"],
+        "disabled_by": row["disabled_by"],
+        "disabled_at": str(row["disabled_at"]) if row["disabled_at"] else None,
         "version": row["version"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
@@ -186,6 +189,37 @@ async def archive_flag(pool, project_id: str, key: str) -> dict | None:
         return None
 
 
+async def disable_flag(
+    pool,
+    *,
+    project_id: str,
+    key: str,
+    reason: str,
+    source: str,
+) -> dict | None:
+    """Disable an enabled flag and record disable metadata."""
+    sql = """
+        UPDATE flags SET
+            enabled = false,
+            disabled_reason = $3,
+            disabled_by = $4,
+            disabled_at = NOW(),
+            version = version + 1,
+            updated_at = NOW()
+        WHERE project_id = $1
+          AND key = $2
+          AND enabled = true
+          AND archived_at IS NULL
+        RETURNING *
+    """
+    try:
+        row = await pool.fetchrow(sql, project_id, key, reason, source)
+        return _row_to_flag(row) if row is not None else None
+    except Exception as exc:
+        logger.error("disableFlag failed: %s", exc)
+        return None
+
+
 async def create_flag_audit_entry(
     pool,
     *,
@@ -196,14 +230,15 @@ async def create_flag_audit_entry(
     before: dict | None,
     after: dict | None,
     reason: str = "",
+    evidence: dict | None = None,
 ) -> None:
     """Append a flag audit event."""
     sql = """
         INSERT INTO flag_audit_log (
             project_id, flag_key, action, actor, previous_version,
-            new_version, before, after, reason
+            new_version, before, after, evidence, reason
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
     """
     await pool.execute(
         sql,
@@ -215,6 +250,7 @@ async def create_flag_audit_entry(
         after.get("version") if after else None,
         json.dumps(before, separators=(",", ":")) if before else None,
         json.dumps(after, separators=(",", ":")) if after else None,
+        json.dumps(evidence or {}, separators=(",", ":")),
         reason,
     )
 

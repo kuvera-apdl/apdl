@@ -11,6 +11,7 @@ from app.models.schemas import (
     ExperimentCreate,
     ExperimentUpdate,
     FlagCreate,
+    FlagDisable,
     FlagUpdate,
 )
 from app.store import postgres as pg_store
@@ -168,6 +169,74 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
     await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
     logger.info("Flag '%s' updated for project %s", updated["key"], project_id)
     return JSONResponse(content={"updated": True, "flag": serialize_flag(updated)})
+
+
+@router.post("/flags/{key}/disable")
+async def disable_flag(key: str, body: FlagDisable, request: Request):
+    """Disable a flag through the canonical rollback path."""
+    project_id = extract_project_id(request)
+    if not project_id:
+        return _unauthorized()
+
+    pool = request.app.state.pg_pool
+    existing = await pg_store.get_flag(pool, project_id, key)
+    if existing is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": f"Flag '{key}' not found"},
+        )
+
+    if not existing.get("enabled", False):
+        return JSONResponse(content={"disabled": False, "flag": serialize_flag(existing)})
+
+    if body.source == "system" and not existing.get("auto_disable", True):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "auto_disable_disabled",
+                "message": f"Flag '{key}' does not allow automatic disable actions",
+            },
+        )
+
+    updated = await pg_store.disable_flag(
+        pool,
+        project_id=project_id,
+        key=key,
+        reason=body.reason,
+        source=body.source,
+    )
+    if updated is None:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "disable_conflict",
+                "message": f"Flag '{key}' was modified before disable completed",
+            },
+        )
+
+    await pg_store.create_flag_audit_entry(
+        pool,
+        project_id=project_id,
+        flag_key=updated["key"],
+        action="flag_auto_disabled" if body.source == "system" else "flag_disabled",
+        actor=body.source,
+        before=existing,
+        after=updated,
+        reason=body.reason,
+        evidence=body.evidence,
+    )
+
+    redis = request.app.state.redis
+    await redis_cache.invalidate_flags(redis, project_id)
+    await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
+    logger.warning(
+        "Flag '%s' disabled for project %s by %s: %s",
+        updated["key"],
+        project_id,
+        body.source,
+        body.reason,
+    )
+    return JSONResponse(content={"disabled": True, "flag": serialize_flag(updated)})
 
 
 @router.delete("/flags/{key}")

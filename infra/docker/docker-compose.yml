@@ -89,6 +89,8 @@ services:
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
+      CONFIG_SERVICE_URL: http://config:8081
+      GUARDRAIL_MONITOR_ENABLED: "false"
     depends_on:
       clickhouse:
         condition: service_healthy

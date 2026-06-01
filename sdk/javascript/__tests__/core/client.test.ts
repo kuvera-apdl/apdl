@@ -442,6 +442,223 @@ describe('APDLClient', () => {
     });
   });
 
+  describe('frontend health capture', () => {
+    it('should include active flag state in frontend error events', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      healthClient.checkGate('checkout-gate');
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Checkout exploded',
+        filename: 'checkout.js',
+        lineno: 12,
+        colno: 4,
+        error: new Error('Checkout exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        error_type: 'javascript_error',
+        message: 'Checkout exploded',
+        page: '/checkout',
+        component: '',
+        slot_id: '',
+        source: 'checkout.js',
+        line: 12,
+        column: 4,
+        active_flags: { 'checkout-gate': true },
+        active_flag_versions: { 'checkout-gate': 1 },
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should not include flags evaluated on a different page', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      window.history.pushState({}, '', '/checkout');
+      healthClient.checkGate('checkout-gate');
+      window.history.pushState({}, '', '/pricing');
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Pricing exploded',
+        error: new Error('Pricing exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        page: '/pricing',
+        active_flags: {},
+        active_flag_versions: {},
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should refresh page-scoped active flag states after config updates', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      window.history.pushState({}, '', '/checkout');
+      healthClient.checkGate('checkout-gate');
+
+      const source = MockEventSource.instances.at(-1);
+      source?.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({
+          type: 'flag_update',
+          action: 'flag_updated',
+          flag: {
+            ...makeGate('checkout-gate'),
+            enabled: false,
+            default_value: false,
+            version: 2,
+          },
+        }),
+      }));
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Checkout exploded',
+        error: new Error('Checkout exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        active_flags: { 'checkout-gate': false },
+        active_flag_versions: { 'checkout-gate': 2 },
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should capture component render failures as frontend errors', async () => {
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+      healthClient.ui.register({
+        name: 'broken-card',
+        schema: { type: 'object', properties: {} },
+        render: () => {
+          throw new Error('Render failed');
+        },
+      });
+
+      const target = document.createElement('div');
+      target.setAttribute('data-apdl-slot', 'checkout-slot');
+      expect(healthClient.ui.render({
+        component: 'broken-card',
+        props: {},
+      }, target)).toBeNull();
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        error_type: 'component_render_error',
+        message: 'Render failed',
+        component: 'broken-card',
+        slot_id: 'checkout-slot',
+      });
+
+      await healthClient.shutdown();
+    });
+  });
+
   describe('consent', () => {
     it('should return default consent state', () => {
       const state = client.consent.get();
@@ -521,6 +738,14 @@ function featureFlagExposures(
   return client.debug.getQueue()
     .map((event) => event as { event?: string; properties?: Record<string, unknown> })
     .filter((event) => event.event === '$feature_flag_exposure');
+}
+
+function frontendErrors(
+  client: APDLClient
+): Array<{ properties?: Record<string, unknown> }> {
+  return client.debug.getQueue()
+    .map((event) => event as { event?: string; properties?: Record<string, unknown> })
+    .filter((event) => event.event === '$frontend_error');
 }
 
 function makeGate(key: string): Record<string, unknown> {

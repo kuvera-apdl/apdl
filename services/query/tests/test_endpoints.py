@@ -84,6 +84,104 @@ async def test_event_count(client):
     assert len(body["results"]) == 2
 
 
+# ------------------------------------------------------------------
+# Guardrail endpoints
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_guardrail_frontend_error_count_trips_on_single_failure(client):
+    app.state.ch_client.execute = AsyncMock(return_value=[{
+        "exposed_sessions": 1,
+        "baseline_sessions": 0,
+        "exposed_failure_sessions": 1,
+        "baseline_failure_sessions": 0,
+        "exposed_failures": 1,
+        "baseline_failures": 0,
+    }])
+
+    resp = await client.post("/v1/query/guardrails/evaluate", json={
+        "project_id": PROJECT_ID,
+        "flag_key": "checkout-gate",
+        "guardrail": {
+            "metric": "frontend_error_count",
+            "threshold": "at_least_one",
+            "scope": "page:/checkout",
+            "minimum_exposures": 0,
+            "window_minutes": 10,
+        },
+    })
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tripped"] is True
+    assert body["evidence"]["exposed_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_guardrail_frontend_error_rate_uses_baseline(client):
+    app.state.ch_client.execute = AsyncMock(return_value=[{
+        "exposed_sessions": 100,
+        "baseline_sessions": 100,
+        "exposed_failure_sessions": 8,
+        "baseline_failure_sessions": 2,
+        "exposed_failures": 8,
+        "baseline_failures": 2,
+    }])
+
+    resp = await client.post("/v1/query/guardrails/evaluate", json={
+        "project_id": PROJECT_ID,
+        "flag_key": "checkout-gate",
+        "guardrail": {
+            "metric": "frontend_error_rate",
+            "threshold": "2x_baseline",
+            "scope": "",
+            "minimum_exposures": 100,
+            "window_minutes": 10,
+        },
+    })
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tripped"] is True
+    assert body["evidence"]["exposed_error_rate"] == 0.08
+    assert body["evidence"]["baseline_error_rate"] == 0.02
+
+
+@pytest.mark.asyncio
+async def test_guardrail_rejects_noncanonical_fields(client):
+    resp = await client.post("/v1/query/guardrails/evaluate", json={
+        "project_id": PROJECT_ID,
+        "flag_key": "checkout-gate",
+        "guardrail": {
+            "metric": "frontend_error_count",
+            "threshold": "at_least_one",
+            "minimumExposures": 10,
+        },
+    })
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_guardrail_query_requires_active_flag_snapshot(client):
+    app.state.ch_client.execute = AsyncMock(return_value=[])
+
+    resp = await client.post("/v1/query/guardrails/evaluate", json={
+        "project_id": PROJECT_ID,
+        "flag_key": "checkout-gate",
+        "guardrail": {
+            "metric": "frontend_error_count",
+            "threshold": "at_least_one",
+        },
+    })
+
+    assert resp.status_code == 200
+    query = app.state.ch_client.execute.await_args.args[0]
+    assert "JSONHas(f.active_flags, %(flag_key)s)" in query
+    assert "JSONExtractBool(f.active_flags, %(flag_key)s)" in query
+
+
 @pytest.mark.asyncio
 async def test_event_count_with_filter(client):
     app.state.ch_client.execute = AsyncMock(return_value=[

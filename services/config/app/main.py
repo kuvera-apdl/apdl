@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS flags (
     client_exposed BOOLEAN NOT NULL DEFAULT true,
     auto_disable BOOLEAN NOT NULL DEFAULT true,
     guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
+    disabled_reason TEXT NOT NULL DEFAULT '',
+    disabled_by TEXT NOT NULL DEFAULT '',
+    disabled_at TIMESTAMPTZ,
     version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -44,6 +47,9 @@ ALTER TABLE flags ADD COLUMN IF NOT EXISTS salt TEXT NOT NULL DEFAULT md5(random
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS client_exposed BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS auto_disable BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS guardrails JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
@@ -179,9 +185,14 @@ CREATE TABLE IF NOT EXISTS flag_audit_log (
     new_version INTEGER,
     before JSONB,
     after JSONB,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
     reason TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+"""
+
+MIGRATE_FLAG_AUDIT_TABLE = """
+ALTER TABLE flag_audit_log ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
 """
 
 CREATE_EXPERIMENTS_TABLE = """
@@ -237,6 +248,7 @@ async def lifespan(application: FastAPI):
         await conn.execute(CREATE_FLAGS_TABLE)
         await conn.execute(MIGRATE_FLAGS_TABLE)
         await conn.execute(CREATE_FLAG_AUDIT_TABLE)
+        await conn.execute(MIGRATE_FLAG_AUDIT_TABLE)
         await conn.execute(CREATE_EXPERIMENTS_TABLE)
         await conn.execute(CREATE_FLAGS_INDEX)
         await conn.execute(CREATE_FLAG_AUDIT_INDEX)
