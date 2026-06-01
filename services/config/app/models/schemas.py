@@ -119,6 +119,7 @@ class EvalResult(BaseModel):
     rule_id: str = ""
     bucket: float | None = None
     rollout_percentage: float | None = None
+    bucket_by: str = ""
     config_version: int = 0
 
 

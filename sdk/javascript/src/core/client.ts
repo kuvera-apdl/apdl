@@ -9,8 +9,9 @@ import { ContextCollector } from '../capture/context';
 import { AutoCapture } from '../capture/auto-capture';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
-import { extractFlagConfigs } from '../flags/schema';
-import type { EvalContext } from '../flags/types';
+import { hashBucket } from '../flags/hash';
+import { parseFlagConfigs } from '../flags/schema';
+import type { EvalContext, GateEvaluationResult } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
 import { ComponentRegistry } from '../ui/registry';
@@ -127,7 +128,10 @@ export class APDLClient {
     );
 
     // Feature flags
-    this.flagCache = new FlagCache();
+    this.flagCache = new FlagCache({
+      persist: this.shouldPersistFlagCache(),
+      storageKey: this.flagStorageKey(),
+    });
     this.flagEvaluator = new FlagEvaluator(this.flagCache);
 
     // Wire up flag change notifications to per-key listeners
@@ -243,28 +247,17 @@ export class APDLClient {
   // ── Feature flags ─────────────────────────────────────────────
 
   /**
-   * Evaluates a boolean feature flag.
+   * Evaluates a boolean feature gate.
    */
-  flag(key: string, defaultValue = false): boolean {
-    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    if (result.reason === 'not_found') return defaultValue;
-    return result.value === 'true';
+  checkGate(key: string): boolean {
+    return this.checkGateDetails(key).value;
   }
 
   /**
-   * Returns the payload attached to a feature flag.
+   * Evaluates a feature gate and returns explanation details.
    */
-  flagPayload(key: string): unknown | null {
-    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    return result.payload ?? null;
-  }
-
-  /**
-   * Returns the experiment variant name for a flag key.
-   */
-  experiment(key: string): string {
-    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    return result.variant || 'control';
+  checkGateDetails(key: string): GateEvaluationResult {
+    return this.flagEvaluator.evaluate(key, this.getEvalContext());
   }
 
   /**
@@ -336,7 +329,10 @@ export class APDLClient {
 
       if (response.ok) {
         const data = await response.json();
-        this.flagCache.set(extractFlagConfigs(data));
+        const flags = parseFlagConfigs(data);
+        if (flags !== null) {
+          this.flagCache.set(flags, 'initial_fetch');
+        }
       }
     } catch {
       if (this.config.debug) {
@@ -397,9 +393,6 @@ export class APDLClient {
       user_id: this.manualCapture.getUserId(),
       anonymous_id: this.manualCapture.getAnonymousId(),
       attributes: this.stringifyAttributes(this.manualCapture.getTraits()),
-      groups: this.manualCapture.getGroupId()
-        ? { default: this.manualCapture.getGroupId()! }
-        : undefined,
     };
   }
 
@@ -408,12 +401,21 @@ export class APDLClient {
       const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
       for (const listener of listeners) {
         try {
-          listener(result.value === 'true');
+          listener(result.value);
         } catch {
           // Listener errors should not propagate
         }
       }
     }
+  }
+
+  private shouldPersistFlagCache(): boolean {
+    return this.config.privacyMode === 'standard'
+      && this.config.persistence === 'localStorage';
+  }
+
+  private flagStorageKey(): string {
+    return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', this.config.apiKey).toString(16)}`;
   }
 
   private registerBuiltInComponents(): void {

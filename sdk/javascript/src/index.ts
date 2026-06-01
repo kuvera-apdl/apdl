@@ -15,9 +15,16 @@ export type {
   FlagConfig,
   TargetingRule,
   Condition,
-  Variant,
   FlagResult,
   EvalContext,
+  GateConfig,
+  GateRule,
+  GateCondition,
+  RolloutConfig,
+  FallthroughConfig,
+  GateEvaluationResult,
+  GateEvaluationReason,
+  GateConfigSource,
 } from './flags/types';
 
 export type {
@@ -48,4 +55,3 @@ export const APDL = {
     return new APDLClient(config);
   },
 };
-

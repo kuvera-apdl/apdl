@@ -1,46 +1,57 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { hashBucket, isInRollout, percentageBucket } from '../../src/flags/hash';
 
-describe('FNV-1a flag hashing', () => {
-  it('should match config-service golden hash values', () => {
-    expect(hashBucket('', '')).toBe(1057798253);
-    expect(hashBucket('feature_y', 'user_123')).toBe(3351610489);
-    expect(hashBucket('rollout_test', 'consistent_user')).toBe(1371409931);
-    expect(hashBucket('distribution_test', 'user_1')).toBe(2379438105);
-    expect(hashBucket('multivar:variant', 'user_123')).toBe(1166540398);
+interface HashFixture {
+  flag_key: string;
+  salt: string;
+  unit_id: string;
+  hash: number;
+  bucket: number;
+}
+
+interface ParityFixture {
+  hash_cases: HashFixture[];
+}
+
+const fixtures = JSON.parse(
+  readFileSync(resolve(process.cwd(), '../../fixtures/gates/parity.json'), 'utf8')
+) as ParityFixture;
+
+describe('FNV-1a gate hashing', () => {
+  it('matches config-service golden hash values', () => {
+    for (const fixture of fixtures.hash_cases) {
+      expect(hashBucket(fixture.flag_key, fixture.salt, fixture.unit_id)).toBe(fixture.hash);
+      expect(
+        percentageBucket(fixture.flag_key, fixture.salt, fixture.unit_id)
+      ).toBeCloseTo(fixture.bucket, 10);
+    }
   });
 
-  it('should return unsigned 32-bit integers', () => {
-    for (const [key, user] of [
-      ['a', 'user_1'],
-      ['feature', 'anon_1'],
-      ['emoji', '\u{1F600}'],
-      ['long', 'x'.repeat(10000)],
+  it('returns unsigned 32-bit integers', () => {
+    for (const [flagKey, salt, unitId] of [
+      ['a', 'salt', 'user_1'],
+      ['feature', 'salt', 'anon_1'],
+      ['emoji', 'salt', '\u{1F600}'],
+      ['long', 'salt', 'x'.repeat(10000)],
     ]) {
-      const hash = hashBucket(key, user);
+      const hash = hashBucket(flagKey, salt, unitId);
       expect(hash).toBeGreaterThanOrEqual(0);
       expect(hash).toBeLessThanOrEqual(0xffffffff);
       expect(Number.isInteger(hash)).toBe(true);
     }
   });
 
-  it('should convert hash values to 0-100 percentage buckets', () => {
-    const bucket = percentageBucket('feature_y', 'user_123');
-
-    expect(bucket).toBeGreaterThanOrEqual(0);
-    expect(bucket).toBeLessThanOrEqual(100);
-    expect(bucket).toBeCloseTo(78.0358, 4);
+  it('handles rollout boundary values', () => {
+    expect(isInRollout('feature', 'salt', 'user', 100)).toBe(true);
+    expect(isInRollout('feature', 'salt', 'user', 0)).toBe(false);
   });
 
-  it('should handle rollout boundary values', () => {
-    expect(isInRollout('feature', 'user', 100)).toBe(true);
-    expect(isInRollout('feature', 'user', 0)).toBe(false);
-  });
-
-  it('should distribute 50 percent rollout roughly evenly', () => {
+  it('distributes 50 percent rollout roughly evenly', () => {
     let enabled = 0;
     for (let index = 0; index < 10000; index++) {
-      if (isInRollout('distribution_test', `user_${index}`, 50)) {
+      if (isInRollout('distribution_test', 'salt_123', `user_${index}`, 50)) {
         enabled++;
       }
     }

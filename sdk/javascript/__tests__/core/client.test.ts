@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
+import { hashBucket } from '../../src/flags/hash';
 
 // Mock fetch globally
 const fetchMock = vi.fn().mockResolvedValue({
@@ -192,16 +193,146 @@ describe('APDLClient', () => {
     });
   });
 
-  describe('flag()', () => {
-    it('should return default value when flag not found', () => {
-      expect(client.flag('nonexistent')).toBe(false);
-      expect(client.flag('nonexistent', true)).toBe(true);
+  describe('checkGate()', () => {
+    it('should return false and details when gate not found', () => {
+      expect(client.checkGate('nonexistent')).toBe(false);
+      expect(client.checkGateDetails('nonexistent')).toMatchObject({
+        key: 'nonexistent',
+        value: false,
+        reason: 'not_found',
+        source: 'none',
+      });
     });
-  });
 
-  describe('experiment()', () => {
-    it('should return "control" when flag not found', () => {
-      expect(client.experiment('nonexistent')).toBe('control');
+    it('should evaluate gates from initial fetch', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [{
+            key: 'new-checkout-flow',
+            enabled: true,
+            default_value: false,
+            salt: 'salt_123',
+            rules: [],
+            fallthrough: {
+              value: true,
+              rollout: { percentage: 100, bucket_by: 'user_id' },
+            },
+            version: 3,
+          }],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow')).toMatchObject({
+        value: true,
+        reason: 'fallthrough',
+        config_version: 3,
+        source: 'initial_fetch',
+      });
+    });
+
+    it('should not expose removed legacy gate APIs', () => {
+      const api = client as unknown as Record<string, unknown>;
+
+      expect(api.flag).toBeUndefined();
+      expect(api.flagPayload).toBeUndefined();
+      expect(api.experiment).toBeUndefined();
+    });
+
+    it('should restore cached gates in standard localStorage mode', () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+
+      const cachedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'standard',
+      });
+      cachedClient.identify('user_123');
+
+      expect(cachedClient.checkGate('cached-gate')).toBe(true);
+      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
+    });
+
+    it('should preserve restored gates when initial fetch returns malformed config', async () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [{
+            key: 'legacy',
+            enabled: true,
+            variant_type: 'boolean',
+            default_value: 'false',
+            rollout_percentage: 100,
+            rules: [],
+            variants: [],
+          }],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const cachedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'standard',
+      });
+      await flushAsync();
+      cachedClient.identify('user_123');
+
+      expect(cachedClient.checkGate('cached-gate')).toBe(true);
+      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
+      expect(cachedClient.checkGate('legacy')).toBe(false);
+    });
+
+    it('should not restore cached gates in strict privacy mode', () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+
+      const strictClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'strict',
+      });
+      strictClient.identify('user_123');
+
+      expect(strictClient.checkGate('cached-gate')).toBe(false);
+      expect(strictClient.checkGateDetails('cached-gate').reason).toBe('not_found');
     });
   });
 
@@ -267,3 +398,28 @@ describe('APDLClient', () => {
     });
   });
 });
+
+async function flushAsync(): Promise<void> {
+  for (let index = 0; index < 5; index++) {
+    await Promise.resolve();
+  }
+}
+
+function flagStorageKey(apiKey: string): string {
+  return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', apiKey).toString(16)}`;
+}
+
+function makeGate(key: string): Record<string, unknown> {
+  return {
+    key,
+    enabled: true,
+    default_value: false,
+    salt: 'salt_123',
+    rules: [],
+    fallthrough: {
+      value: true,
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    },
+    version: 1,
+  };
+}

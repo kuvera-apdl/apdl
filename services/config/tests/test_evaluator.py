@@ -1,6 +1,16 @@
 """Tests for canonical feature gate evaluation."""
 
-from app.flags.evaluator import evaluate, evaluate_all
+import json
+from pathlib import Path
+
+from app.flags.evaluator import (
+    evaluate,
+    evaluate_all,
+    hash_bucket,
+    percentage_bucket,
+)
+
+FIXTURES_PATH = Path(__file__).parents[3] / "fixtures" / "gates" / "parity.json"
 
 
 def make_flag(overrides: dict | None = None) -> dict:
@@ -162,3 +172,29 @@ def test_evaluate_all_flags():
     )
 
     assert [result["value"] for result in results] == [True, False]
+
+
+def test_hash_parity_fixtures():
+    fixtures = _load_parity_fixtures()
+
+    for case in fixtures["hash_cases"]:
+        assert hash_bucket(case["flag_key"], case["salt"], case["unit_id"]) == case["hash"]
+        assert percentage_bucket(
+            case["flag_key"],
+            case["salt"],
+            case["unit_id"],
+        ) == case["bucket"]
+
+
+def test_evaluation_parity_fixtures():
+    fixtures = _load_parity_fixtures()
+
+    for case in fixtures["evaluation_cases"]:
+        result = evaluate(case["flag"], case["context"])
+        expected = case["result"]
+
+        assert result == expected
+
+
+def _load_parity_fixtures() -> dict:
+    return json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))

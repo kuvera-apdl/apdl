@@ -130,18 +130,23 @@ def _base_result(flag: dict) -> dict:
         "rule_id": "",
         "bucket": None,
         "rollout_percentage": None,
+        "bucket_by": "",
         "config_version": int(flag.get("version", 0)),
     }
 
 
-def _apply_rollout(flag: dict, rollout: dict, ctx: dict) -> tuple[bool, float | None, float]:
+def _apply_rollout(
+    flag: dict,
+    rollout: dict,
+    ctx: dict,
+) -> tuple[bool, float | None, float, str]:
     percentage = float(rollout.get("percentage", 0.0))
     bucket_by = rollout.get("bucket_by", "user_id")
     unit_id = _unit_id(ctx, bucket_by)
     if not unit_id:
-        return False, None, percentage
+        return False, None, percentage, bucket_by
     bucket = percentage_bucket(flag.get("key", ""), flag.get("salt", ""), unit_id)
-    return bucket < percentage, bucket, percentage
+    return bucket < percentage, bucket, percentage, bucket_by
 
 
 def evaluate(flag: dict, ctx: dict) -> dict:
@@ -156,10 +161,18 @@ def evaluate(flag: dict, ctx: dict) -> dict:
         if not isinstance(rule, dict) or not matches_rule(rule, ctx):
             continue
 
-        passed, bucket, percentage = _apply_rollout(flag, rule.get("rollout", {}), ctx)
+        passed, bucket, percentage, bucket_by = _apply_rollout(
+            flag,
+            rule.get("rollout", {}),
+            ctx,
+        )
         result["rule_id"] = rule.get("id", "")
         result["bucket"] = bucket
         result["rollout_percentage"] = percentage
+        result["bucket_by"] = bucket_by
+        if bucket is None:
+            result["reason"] = "error"
+            return result
         if passed:
             result["value"] = True
             result["reason"] = "rule_match"
@@ -168,9 +181,14 @@ def evaluate(flag: dict, ctx: dict) -> dict:
         return result
 
     fallthrough = flag.get("fallthrough", {})
-    passed, bucket, percentage = _apply_rollout(flag, fallthrough.get("rollout", {}), ctx)
+    passed, bucket, percentage, bucket_by = _apply_rollout(
+        flag,
+        fallthrough.get("rollout", {}),
+        ctx,
+    )
     result["bucket"] = bucket
     result["rollout_percentage"] = percentage
+    result["bucket_by"] = bucket_by
     if bucket is None:
         result["reason"] = "error"
         return result

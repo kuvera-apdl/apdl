@@ -1,25 +1,49 @@
-import type { FlagConfig } from './types';
+import { parseFlagConfigs } from './schema';
+import type { FlagConfig, GateConfigSource } from './types';
 
 type FlagChangeCallback = (flags: FlagConfig[]) => void;
+
+interface FlagCacheOptions {
+  persist?: boolean;
+  storageKey?: string;
+}
+
+const DEFAULT_STORAGE_KEY = 'apdl_flags';
+const STORAGE_SCHEMA_VERSION = 1;
 
 /**
  * In-memory flag configuration store with change notification.
  */
 export class FlagCache {
   private flags: Map<string, FlagConfig> = new Map();
+  private sources: Map<string, GateConfigSource> = new Map();
   private version = 0;
   private listeners: Set<FlagChangeCallback> = new Set();
+  private persistEnabled: boolean;
+  private storageKey: string;
+
+  constructor(options: FlagCacheOptions = {}) {
+    this.persistEnabled = options.persist === true;
+    this.storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
+
+    if (this.persistEnabled) {
+      this.restorePersisted();
+    }
+  }
 
   /**
    * Bulk-updates all flag configurations.
    * Increments the version counter and notifies listeners.
    */
-  set(flags: FlagConfig[]): void {
+  set(flags: FlagConfig[], source: GateConfigSource = 'memory'): void {
     this.flags.clear();
+    this.sources.clear();
     for (const flag of flags) {
       this.flags.set(flag.key, flag);
+      this.sources.set(flag.key, source);
     }
     this.version++;
+    this.persistFlags();
     this.notifyListeners(flags);
   }
 
@@ -28,6 +52,13 @@ export class FlagCache {
    */
   get(key: string): FlagConfig | undefined {
     return this.flags.get(key);
+  }
+
+  /**
+   * Returns where a flag configuration most recently came from.
+   */
+  getSource(key: string): GateConfigSource | 'none' {
+    return this.sources.get(key) ?? 'none';
   }
 
   /**
@@ -62,6 +93,54 @@ export class FlagCache {
         listener(flags);
       } catch {
         // Listener errors should not break the notification chain
+      }
+    }
+  }
+
+  private persistFlags(): void {
+    if (!this.persistEnabled) return;
+
+    try {
+      if (typeof localStorage === 'undefined') return;
+
+      localStorage.setItem(
+        this.storageKey,
+        JSON.stringify({
+          schema_version: STORAGE_SCHEMA_VERSION,
+          flags: this.getAll(),
+        })
+      );
+    } catch {
+      // Storage may be unavailable or full; keep the in-memory cache.
+    }
+  }
+
+  private restorePersisted(): void {
+    try {
+      if (typeof localStorage === 'undefined') return;
+
+      const raw = localStorage.getItem(this.storageKey);
+      if (!raw) return;
+
+      const parsed = JSON.parse(raw) as unknown;
+      const flags = parseFlagConfigs(parsed);
+      if (flags === null) {
+        localStorage.removeItem(this.storageKey);
+        return;
+      }
+
+      this.flags.clear();
+      this.sources.clear();
+      for (const flag of flags) {
+        this.flags.set(flag.key, flag);
+        this.sources.set(flag.key, 'local_storage');
+      }
+      this.version++;
+    } catch {
+      try {
+        localStorage.removeItem(this.storageKey);
+      } catch {
+        // Ignore cleanup failure.
       }
     }
   }
