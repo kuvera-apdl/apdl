@@ -50,6 +50,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
                 "page": "/checkout",
+                "component": "CheckoutPage",
             },
         )
 
@@ -89,6 +90,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
         "config_version": 4,
         "source": "server",
         "page": "/checkout",
+        "component": "CheckoutPage",
     }
 
 

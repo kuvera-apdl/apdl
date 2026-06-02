@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models.schemas import FlagCreate, FlagUpdate
+from app.models.schemas import FlagCreate, FlagDisable, FlagUpdate
 from app.utils import serialize_client_flag, serialize_flag, serialize_flag_collection
 
 
@@ -145,6 +145,16 @@ def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
 def test_flag_update_requires_version():
     with pytest.raises(ValidationError):
         FlagUpdate.model_validate({"enabled": False})
+
+
+def test_flag_disable_accepts_experiment_rollback_reason():
+    body = FlagDisable.model_validate({
+        "reason": "experiment_rollback",
+        "source": "system",
+        "evidence": {"rollback_monitor": "experiment"},
+    })
+
+    assert body.reason == "experiment_rollback"
 
 
 def test_frontend_error_count_guardrail_requires_at_least_one_threshold():

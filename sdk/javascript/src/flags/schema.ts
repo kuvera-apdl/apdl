@@ -9,6 +9,11 @@ import type {
 
 type RawRecord = Record<string, unknown>;
 
+export interface FlagConfigParseResult {
+  flags: GateConfig[];
+  invalid_keys: string[];
+}
+
 const CONDITION_OPERATORS = new Set<ConditionOperator>([
   'equals',
   'not_equals',
@@ -42,26 +47,71 @@ const CONDITION_KEYS = new Set(['attribute', 'operator', 'value']);
 const ROLLOUT_KEYS = new Set(['percentage', 'bucket_by']);
 const FALLTHROUGH_KEYS = new Set(['value', 'rollout']);
 const COLLECTION_KEYS = new Set(['schema_version', 'project_id', 'flags']);
+const LEGACY_GATE_KEYS = new Set([
+  'variant_type',
+  'variants',
+  'rollout_percentage',
+  'targeting_rules',
+  'default_variant',
+]);
 
 export function extractFlagConfigs(input: unknown): GateConfig[] {
   return parseFlagConfigs(input) ?? [];
 }
 
 export function parseFlagConfigs(input: unknown): GateConfig[] | null {
+  const result = parseFlagConfigResult(input);
+  if (!result || result.invalid_keys.length > 0) {
+    return null;
+  }
+
+  return result.flags;
+}
+
+export function parseFlagConfigResult(input: unknown): FlagConfigParseResult | null {
   const candidates = extractCandidates(input);
   if (!candidates) {
     return null;
   }
 
-  if (!candidates.every(isFlagConfig)) {
-    return null;
+  const flags: GateConfig[] = [];
+  const invalidKeys: string[] = [];
+
+  for (const candidate of candidates) {
+    if (isFlagConfig(candidate)) {
+      flags.push(candidate);
+      continue;
+    }
+
+    const invalidKey = extractInvalidFlagKey(candidate);
+    if (!invalidKey) {
+      return null;
+    }
+    invalidKeys.push(invalidKey);
   }
 
-  return candidates;
+  return {
+    flags,
+    invalid_keys: invalidKeys,
+  };
 }
 
 export function extractFlagConfig(input: unknown): GateConfig | null {
   return isFlagConfig(input) ? input : null;
+}
+
+export function extractInvalidFlagKey(input: unknown): string | null {
+  if (
+    isRecord(input)
+    && typeof input.key === 'string'
+    && input.key.length > 0
+    && !isFlagConfig(input)
+    && (hasAnyKey(input, LEGACY_GATE_KEYS) || hasAllKeys(input, GATE_KEYS))
+  ) {
+    return input.key;
+  }
+
+  return null;
 }
 
 export function isFlagConfig(input: unknown): input is GateConfig {
@@ -151,6 +201,14 @@ function isFallthroughConfig(input: unknown): input is FallthroughConfig {
 
 function hasOnlyKeys(input: RawRecord, allowed: Set<string>): boolean {
   return Object.keys(input).every((key) => allowed.has(key));
+}
+
+function hasAnyKey(input: RawRecord, keys: Set<string>): boolean {
+  return Object.keys(input).some((key) => keys.has(key));
+}
+
+function hasAllKeys(input: RawRecord, keys: Set<string>): boolean {
+  return Array.from(keys).every((key) => Object.prototype.hasOwnProperty.call(input, key));
 }
 
 function isRecord(input: unknown): input is RawRecord {

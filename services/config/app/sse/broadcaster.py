@@ -167,10 +167,10 @@ class SSEBroadcaster:
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeat comments to all connections.
 
-        SSE comments (lines starting with ':') are ignored by clients but
-        keep the connection alive through proxies and load balancers.
+        Typed heartbeat events keep the connection alive and are observable by
+        browser EventSource clients for client-side liveness monitoring.
         """
-        heartbeat = ": heartbeat\n\n"
+        heartbeat = "event: heartbeat\ndata: {}\n\n"
 
         while self._running:
             try:

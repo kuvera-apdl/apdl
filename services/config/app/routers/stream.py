@@ -65,7 +65,7 @@ async def sse_stream(request: Request):
                     yield message
                 except asyncio.TimeoutError:
                     # Send a heartbeat if nothing in the queue for 35s
-                    yield ": heartbeat\n\n"
+                    yield "event: heartbeat\ndata: {}\n\n"
                 except asyncio.CancelledError:
                     break
         finally:

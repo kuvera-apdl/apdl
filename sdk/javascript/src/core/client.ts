@@ -11,8 +11,8 @@ import { HealthCapture } from '../capture/health';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
 import { hashBucket } from '../flags/hash';
-import { parseFlagConfigs } from '../flags/schema';
-import type { EvalContext, GateEvaluationResult } from '../flags/types';
+import { parseFlagConfigResult } from '../flags/schema';
+import type { EvalContext, GateEvaluationOptions, GateEvaluationResult } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
 import { ComponentRegistry } from '../ui/registry';
@@ -272,18 +272,18 @@ export class APDLClient {
   /**
    * Evaluates a boolean feature gate.
    */
-  checkGate(key: string): boolean {
-    return this.checkGateDetails(key).value;
+  checkGate(key: string, options?: GateEvaluationOptions): boolean {
+    return this.checkGateDetails(key, options).value;
   }
 
   /**
    * Evaluates a feature gate and returns explanation details.
    */
-  checkGateDetails(key: string): GateEvaluationResult {
+  checkGateDetails(key: string, options?: GateEvaluationOptions): GateEvaluationResult {
     const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
     this.warnMissingGate(result);
-    this.rememberActiveFlag(result);
-    this.logFeatureFlagExposure(result);
+    this.rememberActiveFlag(result, options);
+    this.logFeatureFlagExposure(result, options);
     return result;
   }
 
@@ -360,9 +360,13 @@ export class APDLClient {
 
       if (response.ok) {
         const data = await response.json();
-        const flags = parseFlagConfigs(data);
-        if (flags !== null) {
-          this.flagCache.set(flags, 'initial_fetch');
+        const result = parseFlagConfigResult(data);
+        if (result !== null) {
+          if (result.flags.length > 0 || result.invalid_keys.length === 0) {
+            this.flagCache.set(result.flags, 'initial_fetch', result.invalid_keys);
+          } else {
+            this.flagCache.markInvalid(result.invalid_keys, 'initial_fetch');
+          }
         }
       }
     } catch {
@@ -427,7 +431,10 @@ export class APDLClient {
     };
   }
 
-  private logFeatureFlagExposure(result: GateEvaluationResult): void {
+  private logFeatureFlagExposure(
+    result: GateEvaluationResult,
+    options?: GateEvaluationOptions
+  ): void {
     if (result.reason === 'not_found') {
       return;
     }
@@ -436,8 +443,9 @@ export class APDLClient {
       return;
     }
 
-    const page = this.currentPagePath();
-    const dedupeKey = this.featureFlagExposureKey(result, page);
+    const page = this.currentPagePath(options?.page);
+    const component = options?.component ?? '';
+    const dedupeKey = this.featureFlagExposureKey(result, page, component);
     if (this.featureFlagExposureKeys.has(dedupeKey)) {
       return;
     }
@@ -454,6 +462,7 @@ export class APDLClient {
       config_version: result.config_version,
       source: result.source,
       page,
+      component,
     });
   }
 
@@ -468,7 +477,11 @@ export class APDLClient {
     );
   }
 
-  private featureFlagExposureKey(result: GateEvaluationResult, page: string): string {
+  private featureFlagExposureKey(
+    result: GateEvaluationResult,
+    page: string,
+    component: string
+  ): string {
     const userId = this.manualCapture.getUserId();
     const identity = userId
       ? `user:${userId}`
@@ -481,11 +494,12 @@ export class APDLClient {
       result.config_version,
       result.value,
       page,
+      component,
     ]);
   }
 
-  private currentPagePath(): string {
-    return this.contextCollector.collect().page?.path ?? '';
+  private currentPagePath(pageOverride?: string): string {
+    return pageOverride ?? this.contextCollector.collect().page?.path ?? '';
   }
 
   private notifyFlagListeners(): void {
@@ -501,8 +515,11 @@ export class APDLClient {
     }
   }
 
-  private rememberActiveFlag(result: GateEvaluationResult): void {
-    const page = this.currentPagePath();
+  private rememberActiveFlag(
+    result: GateEvaluationResult,
+    options?: GateEvaluationOptions
+  ): void {
+    const page = this.currentPagePath(options?.page);
     const pageStates = this.activeFlagStatesByPage.get(page);
 
     if (result.reason === 'not_found') {

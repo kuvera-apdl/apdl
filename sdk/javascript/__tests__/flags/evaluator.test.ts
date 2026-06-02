@@ -47,6 +47,26 @@ describe('FlagEvaluator', () => {
     });
   });
 
+  it('returns invalid_config for malformed keyed gate configs', () => {
+    cache.markInvalid(['broken-gate'], 'initial_fetch');
+
+    expect(evaluator.evaluate('broken-gate', {
+      user_id: 'user_123',
+      anonymous_id: '',
+      attributes: {},
+    })).toEqual({
+      key: 'broken-gate',
+      value: false,
+      reason: 'invalid_config',
+      rule_id: '',
+      bucket: null,
+      rollout_percentage: null,
+      bucket_by: '',
+      config_version: 0,
+      source: 'initial_fetch',
+    });
+  });
+
   for (const fixture of fixtures.evaluation_cases) {
     it(`matches config-service parity fixture: ${fixture.name}`, () => {
       cache.set([fixture.flag]);

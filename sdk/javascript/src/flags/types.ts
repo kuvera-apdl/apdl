@@ -76,6 +76,11 @@ export interface GateEvaluationResult {
   source: GateConfigSource | 'none';
 }
 
+export interface GateEvaluationOptions {
+  page?: string;
+  component?: string;
+}
+
 export interface EvalContext {
   user_id?: string;
   anonymous_id: string;

@@ -25,6 +25,7 @@ export type {
   GateEvaluationResult,
   GateEvaluationReason,
   GateConfigSource,
+  GateEvaluationOptions,
 } from './flags/types';
 
 export type {

@@ -34,6 +34,20 @@ export class FlagEvaluator {
     const flag = this.cache.get(key);
 
     if (!flag) {
+      if (this.cache.isInvalid(key)) {
+        return {
+          key,
+          value: false,
+          reason: 'invalid_config',
+          rule_id: '',
+          bucket: null,
+          rollout_percentage: null,
+          bucket_by: '',
+          config_version: 0,
+          source: this.cache.getInvalidSource(key),
+        };
+      }
+
       return {
         key,
         value: false,

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { extractFlagConfig, extractFlagConfigs } from '../../src/flags/schema';
+import {
+  extractFlagConfig,
+  extractFlagConfigs,
+  extractInvalidFlagKey,
+  parseFlagConfigResult,
+} from '../../src/flags/schema';
 
 describe('gate config schema parsing', () => {
   it('extracts canonical gate configs from the SDK envelope', () => {
@@ -32,7 +37,29 @@ describe('gate config schema parsing', () => {
         ...makeGate(),
         [legacyField]: 'legacy',
       })).toBeNull();
+      expect(extractInvalidFlagKey({
+        ...makeGate(),
+        [legacyField]: 'legacy',
+      })).toBe('checkout');
     }
+  });
+
+  it('returns invalid keyed records in parse results', () => {
+    const result = parseFlagConfigResult({
+      schema_version: 1,
+      flags: [
+        makeGate({ key: 'valid' }),
+        {
+          ...makeGate({ key: 'invalid' }),
+          default_value: 'false',
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      flags: [makeGate({ key: 'valid' })],
+      invalid_keys: ['invalid'],
+    });
   });
 
   it('rejects non-canonical condition aliases', () => {

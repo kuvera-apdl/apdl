@@ -98,6 +98,7 @@ async def _publish_exposure(
             "config_version": result.config_version,
             "source": SERVER_EXPOSURE_SOURCE,
             "page": body.page,
+            "component": body.component,
         },
     }
     if user_id:

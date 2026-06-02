@@ -19,12 +19,26 @@ class MockEventSource {
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   readyState = 0;
+  private listeners: Map<string, Set<(ev: MessageEvent) => void>> = new Map();
 
   constructor(public url: string) {
     MockEventSource.instances.push(this);
   }
 
-  addEventListener() {}
+  addEventListener(type: string, listener: EventListener) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(listener as (ev: MessageEvent) => void);
+  }
+
+  emit(type: string, data: string) {
+    const event = new MessageEvent(type, { data });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
+
   close() {
     this.readyState = 2;
   }
@@ -83,6 +97,20 @@ describe('APDLClient', () => {
       expect(client.debug.disable).toBeTypeOf('function');
       expect(client.debug.getQueue).toBeTypeOf('function');
       expect(client.debug.flush).toBeTypeOf('function');
+    });
+
+    it('should keep the SSE connection open while typed heartbeats arrive', () => {
+      const source = MockEventSource.instances.at(-1);
+      expect(source).toBeDefined();
+
+      source?.onopen?.(new Event('open'));
+      vi.advanceTimersByTime(30000);
+      source?.emit('heartbeat', '{}');
+      vi.advanceTimersByTime(30000);
+      source?.emit('heartbeat', '{}');
+      vi.advanceTimersByTime(30000);
+
+      expect(MockEventSource.instances).toHaveLength(1);
     });
   });
 
@@ -322,9 +350,11 @@ describe('APDLClient', () => {
       expect(cachedClient.checkGate('cached-gate')).toBe(true);
       expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
       expect(cachedClient.checkGate('legacy')).toBe(false);
-      expect(warn).toHaveBeenCalledWith(
-        "APDL: Feature gate 'legacy' is missing or archived; returning false."
-      );
+      expect(cachedClient.checkGateDetails('legacy')).toMatchObject({
+        reason: 'invalid_config',
+        source: 'initial_fetch',
+      });
+      expect(warn).not.toHaveBeenCalled();
       warn.mockRestore();
     });
 
@@ -375,9 +405,10 @@ describe('APDLClient', () => {
       await flushAsync();
       flaggedClient.identify('user_123');
 
-      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
-      expect(flaggedClient.checkGateDetails('new-checkout-flow').value).toBe(true);
-      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
+      const gateOptions = { component: 'CheckoutPage' };
+      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow', gateOptions).value).toBe(true);
+      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
 
       const exposures = featureFlagExposures(flaggedClient);
       expect(exposures).toHaveLength(1);
@@ -391,8 +422,40 @@ describe('APDLClient', () => {
         config_version: 1,
         source: 'initial_fetch',
         page: '/checkout',
+        component: 'CheckoutPage',
       });
       expect(exposures[0].properties?.bucket).toBeTypeOf('number');
+    });
+
+    it('should log distinct exposures for different components', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('component-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      flaggedClient.checkGate('component-gate', { component: 'HeaderCTA' });
+      flaggedClient.checkGate('component-gate', { component: 'FooterCTA' });
+
+      const exposureComponents = featureFlagExposures(flaggedClient)
+        .map((event) => event.properties?.component);
+      expect(exposureComponents).toEqual(['HeaderCTA', 'FooterCTA']);
     });
 
     it('should log a distinct exposure when the page changes', async () => {

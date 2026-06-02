@@ -158,21 +158,16 @@ class ExperimentRollbackMonitor:
             async with httpx.AsyncClient(
                 base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
             ) as client:
-                list_resp = await client.get(
-                    "/v1/admin/flags",
+                resp = await client.post(
+                    f"/v1/admin/flags/{flag_key}/disable",
                     params={"project_id": project_id},
-                )
-                list_resp.raise_for_status()
-                flags = list_resp.json().get("flags", [])
-                flag = next((item for item in flags if item.get("key") == flag_key), None)
-                if flag is None:
-                    logger.error("Rollback failed: flag %s not found", flag_key)
-                    return False
-
-                resp = await client.put(
-                    f"/v1/admin/flags/{flag_key}",
-                    params={"project_id": project_id},
-                    json={"version": flag["version"], "enabled": False},
+                    json={
+                        "reason": "experiment_rollback",
+                        "source": "system",
+                        "evidence": {
+                            "rollback_monitor": "experiment",
+                        },
+                    },
                 )
                 resp.raise_for_status()
 

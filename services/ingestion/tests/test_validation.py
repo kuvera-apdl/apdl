@@ -446,6 +446,7 @@ def feature_flag_exposure_event():
             "config_version": 3,
             "source": "initial_fetch",
             "page": "/checkout",
+            "component": "CheckoutPage",
         },
     }
 

@@ -42,6 +42,17 @@ describe('FlagCache', () => {
 
     expect(restored.get('checkout')).toBeUndefined();
   });
+
+  it('tracks invalid keyed configs without clearing unrelated flags', () => {
+    const cache = new FlagCache();
+    cache.set([makeGate()], 'initial_fetch');
+
+    cache.markInvalid(['broken'], 'sse');
+
+    expect(cache.get('checkout')).toBeDefined();
+    expect(cache.isInvalid('broken')).toBe(true);
+    expect(cache.getInvalidSource('broken')).toBe('sse');
+  });
 });
 
 function makeGate(): GateConfig {

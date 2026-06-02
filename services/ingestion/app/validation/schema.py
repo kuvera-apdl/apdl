@@ -48,6 +48,7 @@ FEATURE_FLAG_EXPOSURE_KEYS = frozenset({
     "config_version",
     "source",
     "page",
+    "component",
 })
 FEATURE_FLAG_EXPOSURE_REASONS = frozenset({
     "invalid_config",
@@ -310,6 +311,7 @@ def _validate_web_vital_event(event: dict, prefix: str) -> list[dict]:
     _validate_string_property(properties, "id", prefix, errors)
     _validate_string_property(properties, "navigation_type", prefix, errors)
     _validate_string_property(properties, "page", prefix, errors)
+    _validate_string_property(properties, "component", prefix, errors)
     _validate_active_flag_properties(properties, prefix, errors)
     return errors
 

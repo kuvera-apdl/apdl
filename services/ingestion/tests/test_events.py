@@ -129,6 +129,7 @@ async def test_feature_flag_exposure_payload_is_published(client):
                 "config_version": 3,
                 "source": "initial_fetch",
                 "page": "/checkout",
+                "component": "CheckoutPage",
             },
         }],
     }
@@ -168,6 +169,7 @@ async def test_feature_flag_exposure_rejects_camel_case_identity(client):
                 "config_version": 3,
                 "source": "initial_fetch",
                 "page": "/checkout",
+                "component": "CheckoutPage",
             },
         }],
     }

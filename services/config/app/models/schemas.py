@@ -162,6 +162,7 @@ class GateEvaluateRequest(StrictModel):
     session_id: str = ""
     message_id: str = ""
     page: str = ""
+    component: str = ""
 
 
 class GateEvaluateResponse(StrictModel):
@@ -225,7 +226,7 @@ class FlagUpdate(StrictModel):
 
 
 class FlagDisable(StrictModel):
-    reason: Literal["guardrail_failed"] = "guardrail_failed"
+    reason: Literal["guardrail_failed", "experiment_rollback"] = "guardrail_failed"
     source: Literal["system", "admin"] = "system"
     evidence: dict[str, Any] = Field(default_factory=dict)
 

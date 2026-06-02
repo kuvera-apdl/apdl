@@ -1,6 +1,11 @@
 import type { FlagConfig } from '../flags/types';
 import type { FlagCache } from '../flags/cache';
-import { extractFlagConfig, parseFlagConfigs } from '../flags/schema';
+import {
+  extractFlagConfig,
+  extractInvalidFlagKey,
+  parseFlagConfigResult,
+  parseFlagConfigs,
+} from '../flags/schema';
 import type { SlotManager } from '../ui/slot';
 
 interface SSEMessage {
@@ -78,11 +83,15 @@ export class SSEHandlers {
   private handleFlagsUpdate(data: string): void {
     try {
       const parsed = JSON.parse(data) as unknown;
-      const flags = parseFlagConfigs(parsed);
-      if (flags !== null) {
-        this.flagCache.set(flags, 'sse');
+      const result = parseFlagConfigResult(parsed);
+      if (result !== null) {
+        if (result.flags.length > 0 || result.invalid_keys.length === 0) {
+          this.flagCache.set(result.flags, 'sse', result.invalid_keys);
+        } else {
+          this.flagCache.markInvalid(result.invalid_keys, 'sse');
+        }
         if (this.debug) {
-          console.debug(`APDL: Updated ${flags.length} flags from SSE`);
+          console.debug(`APDL: Updated ${result.flags.length} flags from SSE`);
         }
       }
     } catch (err) {
@@ -117,6 +126,12 @@ export class SSEHandlers {
       if (fullFlag) {
         current.set(fullFlag.key, fullFlag);
         this.flagCache.set(Array.from(current.values()), 'sse');
+        return;
+      }
+
+      const invalidKey = extractInvalidFlagKey(parsed.flag) ?? extractInvalidFlagKey(parsed);
+      if (invalidKey) {
+        this.flagCache.markInvalid([invalidKey], 'sse');
       }
     } catch (err) {
       if (this.debug) {

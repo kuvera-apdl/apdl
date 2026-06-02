@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS feature_flag_exposures (
     config_version       UInt32,
     source               LowCardinality(String),
     page                 String,
+    component            String,
     first_exposure       DateTime64(3),
     event_date           Date DEFAULT toDate(first_exposure)
 ) ENGINE = ReplacingMergeTree(first_exposure)
@@ -46,6 +47,7 @@ AS SELECT
     toUInt32(JSONExtractUInt(properties, 'config_version')) AS config_version,
     JSONExtractString(properties, 'source') AS source,
     JSONExtractString(properties, 'page') AS page,
+    JSONExtractString(properties, 'component') AS component,
     timestamp AS first_exposure,
     toDate(timestamp) AS event_date
 FROM events

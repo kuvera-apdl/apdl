@@ -142,6 +142,8 @@ describe('SSEHandlers', () => {
 
     expect(cache.get('existing')).toBeDefined();
     expect(cache.get('legacy')).toBeUndefined();
+    expect(cache.isInvalid('legacy')).toBe(true);
+    expect(cache.getInvalidSource('legacy')).toBe('sse');
   });
 
   it('ignores enabled-only compatibility deltas', () => {

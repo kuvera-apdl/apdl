@@ -181,6 +181,7 @@ async def evaluate_gate(
     session_id: str = "",
     message_id: str = "",
     page: str = "",
+    component: str = "",
     log_exposure: bool = True,
 ) -> dict[str, Any]:
     """Evaluate a server-side feature gate through the trusted Config API."""
@@ -197,6 +198,7 @@ async def evaluate_gate(
         "session_id": session_id,
         "message_id": message_id,
         "page": page,
+        "component": component,
         "log_exposure": log_exposure,
     }
 

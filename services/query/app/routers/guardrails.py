@@ -90,11 +90,12 @@ async def evaluate_guardrail(
             exposed_sessions >= guardrail.minimum_exposures
             and baseline_sessions >= guardrail.minimum_exposures
         )
-        tripped = (
-            has_minimum_exposures
-            and baseline_rate > 0
-            and exposed_rate >= baseline_rate * 2
-        )
+        if not has_minimum_exposures:
+            tripped = False
+        elif baseline_rate == 0:
+            tripped = exposed_rate > 0
+        else:
+            tripped = exposed_rate >= baseline_rate * 2
 
     evidence: dict[str, Any] = {
         "metric": guardrail.metric.value,
