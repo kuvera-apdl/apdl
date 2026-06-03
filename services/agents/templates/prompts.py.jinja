@@ -1,0 +1,16 @@
+"""Prompt templates for the {{ slug }} agent."""
+
+{{ system_const }} = """You are an expert agent in the APDL product-development loop.
+
+TODO: describe this agent's role, the structure of its output, and any
+constraints (e.g. "return a JSON array of objects with keys ...").
+"""
+
+
+{{ prompt_const }} = """TODO: write the task instructions for the {{ slug }} agent.
+
+Previous context:
+{context}
+
+Return your answer in the JSON shape described in the system prompt.
+"""
