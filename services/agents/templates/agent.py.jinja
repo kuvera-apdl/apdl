@@ -1,0 +1,99 @@
+"""{{ description }}
+
+Scaffolded by ``scripts/new_agent.py``. Fill in the TODO hooks: ``gather``
+fetches tool/warehouse data, ``build_prompt`` shapes the LLM input,{% if has_act %} ``act``
+validates and deploys side effects,{% endif %} and ``memory_entries`` persists results.
+The lifecycle (retrieve_context -> gather -> build_prompt -> reason{% if has_act %} -> act{% endif %} ->
+persist) is provided by :class:`app.framework.BaseAgent`.
+"""
+
+from __future__ import annotations
+
+import json  # noqa: F401  (commonly needed when wiring up prompts)
+import logging
+from typing import Any
+
+from app.framework import (
+{% for imp in framework_imports %}
+    {{ imp }},
+{% endfor %}
+)
+from app.llm.prompts.{{ prompt_module }} import {{ system_const }}, {{ prompt_const }}
+{% if has_act %}
+from app.safety.validator import ActionType, AgentAction, SafetyValidator
+{% endif %}
+
+logger = logging.getLogger(__name__)
+{% if has_act %}
+_safety = SafetyValidator()
+{% endif %}
+
+
+@register_agent
+class {{ class_name }}(BaseAgent):
+    """{{ description }}"""
+
+    name = "{{ slug }}"
+    description = "{{ description }}"
+    order = {{ order }}
+    system_prompt = {{ system_const }}
+    model_tier = "{{ model_tier }}"
+    memory_query = {{ memory_query_repr }}
+    memory_top_k = {{ memory_top_k }}
+    requires = {{ requires_repr }}
+    produces = "{{ produces }}"
+    parse_as = "{{ parse_as }}"
+
+    async def gather(
+        self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
+    ) -> dict[str, Any]:
+        # TODO: fetch tool/warehouse data; the returned dict is merged into
+        # ``working`` and is available to build_prompt{% if has_act %}/act{% endif %}.
+        return {}
+
+    def build_prompt(
+        self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
+    ) -> str | None:
+        # TODO: build the user prompt. Return None to skip the LLM call.
+        return {{ prompt_const }}.format(
+            context=working.get("context", ""),
+        )
+
+{% if has_act %}
+    async def act(
+        self,
+        ctx: AgentContext,
+        state: dict[str, Any],
+        working: dict[str, Any],
+        output: Any,
+    ) -> dict[str, Any]:
+        # TODO: pick the right ActionType and build the config to validate.
+        action = AgentAction(
+            type=ActionType.update_ui_config,
+            config=output if isinstance(output, dict) else {},
+            project_id=ctx.project_id,
+        )
+        safety = _safety.validate(action).model_dump()
+        decision = gate_action(ctx.autonomy_level, safety)
+        meta: dict[str, Any] = {
+            "safety_result": safety,
+            "decision": decision.value,
+            "deployed": False,
+            "needs_approval": decision is GateDecision.approve,
+        }
+        if decision is GateDecision.deploy:
+            # TODO: perform the deployment via the appropriate tool.
+            meta["deployed"] = True
+        return meta
+
+{% endif %}
+    def memory_entries(
+        self,
+        ctx: AgentContext,
+        state: dict[str, Any],
+        working: dict[str, Any],
+        output: Any,
+        action: dict[str, Any],
+    ) -> list[MemoryEntry]:
+        # TODO: return MemoryEntry objects to persist (or [] for none).
+        return []
