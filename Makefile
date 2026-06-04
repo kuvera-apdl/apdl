@@ -32,12 +32,14 @@ deps:
 	cd services/agents && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
+	@echo "==> Setting up ETL framework"
+	cd pipeline/etl && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
 build: build-sdk
 
-test: test-sdk test-ingestion test-config test-query test-agents
+test: test-sdk test-ingestion test-config test-query test-agents test-etl
 
-lint: lint-sdk lint-ingestion lint-config lint-query lint-agents
+lint: lint-sdk lint-ingestion lint-config lint-query lint-agents lint-etl
 
 clean: clean-sdk
 
@@ -104,6 +106,15 @@ run-agents:
 run-pipeline:
 	cd pipeline/redis && .venv/bin/python clickhouse_writer.py
 
+test-etl:
+	cd pipeline/etl && .venv/bin/python -m pytest -v
+
+lint-etl:
+	cd pipeline/etl && .venv/bin/ruff check etl/ scripts/ tests/
+
+new-transform:
+	cd pipeline/etl && .venv/bin/python scripts/new_transform.py $(ARGS)
+
 migrate-clickhouse:
 	@CLICKHOUSE_COMPOSE_FILE="$(CLICKHOUSE_COMPOSE_FILE)" scripts/init-clickhouse.sh
 
@@ -126,4 +137,4 @@ dev-down:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-ingestion lint-config lint-query lint-agents
+ci: lint-sdk test-sdk lint-ingestion lint-config lint-query lint-agents lint-etl test-etl

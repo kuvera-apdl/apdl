@@ -73,3 +73,18 @@ jobs:
         working-directory: services/config
       - run: ruff check app/
         working-directory: services/config
+
+  etl-framework:
+    name: ETL Framework
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+        working-directory: pipeline/etl
+      - run: ruff check etl/ scripts/ tests/
+        working-directory: pipeline/etl
+      - run: python -m pytest -v
+        working-directory: pipeline/etl
