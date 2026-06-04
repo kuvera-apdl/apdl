@@ -178,6 +178,6 @@ class BehaviorAnalysisAgent(BaseAgent):
                 return {"type": query_type, "params": q, "result": result}
             except Exception as exc:
                 logger.error("Query failed (%s): %s", query_type, exc)
-            return {"type": query_type, "params": q, "error": str(exc)}
+                return {"type": query_type, "params": q, "error": str(exc)}
 
         return list(await asyncio.gather(*[_run_one(q) for q in queries]))
