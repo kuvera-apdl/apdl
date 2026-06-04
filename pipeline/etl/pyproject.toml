@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Pin discovery to the etl package; the top-level templates/ and scripts/
+# dirs are tooling, not importable packages, and would otherwise break
+# setuptools flat-layout auto-discovery (same trick the agents service uses).
+include = ["etl*"]
+
+[project]
+name = "apdl-etl"
+version = "0.1.0"
+description = "Custom-events ETL framework: schema-routed transforms for the APDL canonical envelope."
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6.0",
+    "jinja2>=3.1",
+]
