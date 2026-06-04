@@ -1,41 +1,27 @@
-"""Supervisor orchestration graph — coordinates all agent sub-graphs.
+"""Supervisor orchestration — registry-driven.
 
-The supervisor decides which agents to invoke based on the trigger
-configuration, passes state between them, and manages the overall run
-lifecycle with PostgreSQL-backed checkpointing.
+The supervisor no longer hard-codes each agent. It resolves the requested
+agents from the framework registry, runs them in declared pipeline order,
+skips any whose data dependencies (``requires``) are unmet, and threads a
+shared state dict between them so each agent's ``produces`` output is visible
+to the next. Run-status updates and audit logging are handled here, uniformly,
+for every agent.
 """
 
 from __future__ import annotations
 
 import logging
 import traceback
-from typing import TypedDict
+from typing import Any
 
 import asyncpg
 
-from app.graphs.behavior_analysis import behavior_analysis_graph
-from app.graphs.experiment_design import experiment_design_graph
-from app.graphs.feature_proposal import feature_proposal_graph
-from app.graphs.personalization import personalization_graph
+import app.graphs  # noqa: F401  ensures all agents are registered
+from app.framework import AgentContext, get_agent, is_registered
 from app.memory.pgvector_store import PgVectorStore
 from app.safety.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
-
-
-class SupervisorState(TypedDict, total=False):
-    """Top-level state for the supervisor orchestration."""
-    run_id: str
-    project_id: str
-    autonomy_level: int
-    analysis_types: list[str]
-    time_range_days: int
-    insights: list[dict]
-    experiment_designs: list[dict]
-    personalizations: list[dict]
-    feature_proposals: list[dict]
-    current_phase: str
-    errors: list[str]
 
 
 async def _update_run(
@@ -72,32 +58,29 @@ async def run_supervisor(
     time_range_days: int,
     autonomy_level: int,
 ) -> None:
-    """Execute the supervisor orchestration.
+    """Execute the supervisor orchestration as a background task.
 
-    This function is invoked as a background task by the trigger endpoint.
-    It runs each requested agent sub-graph in sequence, passing insights
-    forward between stages.
-
-    The flow is:
-    1. behavior_analysis -> produces insights
-    2. experiment_design -> consumes insights, produces experiment designs
-    3. personalization -> consumes insights, produces UI configs
-    4. feature_proposal -> consumes insights + experiment results, produces proposals
+    Resolves the requested ``analysis_types`` against the agent registry, runs
+    each in pipeline order, and passes outputs forward via shared state.
     """
     audit = AuditLogger(pool)
-    state = SupervisorState(
+    ctx = AgentContext(
+        pool=pool,
+        vector_store=vector_store,
+        audit=audit,
         run_id=run_id,
         project_id=project_id,
         autonomy_level=autonomy_level,
-        analysis_types=analysis_types,
         time_range_days=time_range_days,
-        insights=[],
-        experiment_designs=[],
-        personalizations=[],
-        feature_proposals=[],
-        current_phase="starting",
-        errors=[],
     )
+    state: dict[str, Any] = {
+        "project_id": project_id,
+        "insights": [],
+        "experiment_designs": [],
+        "personalizations": [],
+        "feature_proposals": [],
+        "errors": [],
+    }
 
     await audit.log(run_id, "supervisor_start", {
         "analysis_types": analysis_types,
@@ -105,154 +88,67 @@ async def run_supervisor(
         "time_range_days": time_range_days,
     })
 
+    # Resolve requested agents, warn on unknown names, order by pipeline order.
+    agents = []
+    for name in analysis_types:
+        if not is_registered(name):
+            msg = f"Unknown agent '{name}' requested — skipping."
+            logger.warning("[%s] %s", run_id, msg)
+            state["errors"].append(msg)
+            continue
+        agents.append(get_agent(name))
+    agents.sort(key=lambda a: a.order)
+
+    def _counts() -> dict[str, int]:
+        return {
+            "insights_count": len(state["insights"]),
+            "experiments_count": len(state["experiment_designs"]),
+        }
+
     try:
-        # ---- Phase 1: Behavior Analysis ----
-        if "behavior_analysis" in analysis_types:
-            await _update_run(pool, run_id, "running", "behavior_analysis")
-            logger.info("[%s] Starting behavior analysis", run_id)
-
-            try:
-                analysis_state = {
-                    "project_id": project_id,
-                    "time_range_days": time_range_days,
-                    "_vector_store": vector_store,
-                }
-                result = await behavior_analysis_graph.ainvoke(analysis_state)
-                insights = result.get("insights", [])
-                state["insights"] = insights
-
-                await audit.log(run_id, "behavior_analysis_complete", {
-                    "insights_count": len(insights),
-                })
-                logger.info("[%s] Behavior analysis produced %d insights", run_id, len(insights))
-            except Exception as exc:
-                error_msg = f"Behavior analysis failed: {exc}"
-                logger.error("[%s] %s", run_id, error_msg)
-                state["errors"].append(error_msg)
-                await audit.log(run_id, "behavior_analysis_error", {"error": str(exc)})
-
-        # ---- Phase 2: Experiment Design ----
-        if "experiment_design" in analysis_types and state["insights"]:
-            await _update_run(
-                pool, run_id, "running", "experiment_design",
-                insights_count=len(state["insights"]),
-            )
-            logger.info("[%s] Starting experiment design", run_id)
-
-            try:
-                exp_state = {
-                    "project_id": project_id,
-                    "autonomy_level": autonomy_level,
-                    "insights": state["insights"],
-                    "_vector_store": vector_store,
-                }
-                result = await experiment_design_graph.ainvoke(exp_state)
-
-                design = result.get("experiment_design", {})
-                if design:
-                    state["experiment_designs"].append(design)
-
-                deployed = result.get("deployed", False)
-                await audit.log(run_id, "experiment_design_complete", {
-                    "experiment_id": design.get("experiment_id", ""),
-                    "deployed": deployed,
-                    "safety_result": result.get("safety_result", {}),
-                })
-
-                # If approval is needed, pause the run
-                if not result.get("approved") and result.get("safety_result", {}).get("passed"):
-                    if autonomy_level < 3 or result.get("safety_result", {}).get("risk_level") != "low":
-                        await _update_run(
-                            pool, run_id, "waiting_approval", "experiment_approval",
-                            insights_count=len(state["insights"]),
-                            experiments_count=len(state["experiment_designs"]),
-                        )
-                        await audit.log(run_id, "waiting_approval", {
-                            "experiment_id": design.get("experiment_id", ""),
-                        })
-                        logger.info("[%s] Waiting for human approval", run_id)
-                        # In a full implementation, we'd suspend here and resume
-                        # when the approval endpoint is called. For now, we continue
-                        # with the remaining non-blocking agents.
-
-                logger.info("[%s] Experiment design complete", run_id)
-            except Exception as exc:
-                error_msg = f"Experiment design failed: {exc}"
-                logger.error("[%s] %s", run_id, error_msg)
-                state["errors"].append(error_msg)
-                await audit.log(run_id, "experiment_design_error", {"error": str(exc)})
-
-        # ---- Phase 3: Personalization ----
-        if "personalization" in analysis_types and state["insights"]:
-            await _update_run(
-                pool, run_id, "running", "personalization",
-                insights_count=len(state["insights"]),
-                experiments_count=len(state["experiment_designs"]),
-            )
-            logger.info("[%s] Starting personalization", run_id)
-
-            try:
-                pers_state = {
-                    "project_id": project_id,
-                    "autonomy_level": autonomy_level,
-                    "insights": state["insights"],
-                    "_vector_store": vector_store,
-                }
-                result = await personalization_graph.ainvoke(pers_state)
-                configs = result.get("ui_configs", [])
-                state["personalizations"] = configs
-
-                await audit.log(run_id, "personalization_complete", {
-                    "configs_generated": len(configs),
-                    "configs_deployed": result.get("deployed_count", 0),
-                })
+        for agent in agents:
+            if not agent.requirements_met(state):
                 logger.info(
-                    "[%s] Personalization generated %d configs, deployed %d",
-                    run_id, len(configs), result.get("deployed_count", 0),
+                    "[%s] Skipping %s — unmet requirements %s",
+                    run_id, agent.name, agent.requires,
                 )
-            except Exception as exc:
-                error_msg = f"Personalization failed: {exc}"
-                logger.error("[%s] %s", run_id, error_msg)
-                state["errors"].append(error_msg)
-                await audit.log(run_id, "personalization_error", {"error": str(exc)})
+                await audit.log(run_id, f"{agent.name}_skipped", {
+                    "reason": "unmet_requirements",
+                    "requires": list(agent.requires),
+                })
+                continue
 
-        # ---- Phase 4: Feature Proposal ----
-        if "feature_proposal" in analysis_types and state["insights"]:
-            await _update_run(
-                pool, run_id, "running", "feature_proposal",
-                insights_count=len(state["insights"]),
-                experiments_count=len(state["experiment_designs"]),
-            )
-            logger.info("[%s] Starting feature proposal", run_id)
+            await _update_run(pool, run_id, "running", agent.name, **_counts())
+            logger.info("[%s] Running agent: %s", run_id, agent.name)
 
             try:
-                fp_state = {
-                    "project_id": project_id,
-                    "autonomy_level": autonomy_level,
-                    "insights": state["insights"],
-                    "_vector_store": vector_store,
-                }
-                result = await feature_proposal_graph.ainvoke(fp_state)
-                proposals = result.get("proposals", [])
-                state["feature_proposals"] = proposals
+                result = await agent.run(ctx, state)
+                state[agent.produces] = result.output
 
-                await audit.log(run_id, "feature_proposal_complete", {
-                    "proposals_count": len(proposals),
+                await audit.log(run_id, f"{agent.name}_complete", {
+                    "produced": agent.produces,
+                    "count": len(result.output) if isinstance(result.output, list) else 1,
+                    **result.metadata,
                 })
-                logger.info("[%s] Feature proposal generated %d proposals", run_id, len(proposals))
+
+                if result.metadata.get("needs_approval"):
+                    await _update_run(
+                        pool, run_id, "waiting_approval", f"{agent.name}_approval",
+                        **_counts(),
+                    )
+                    await audit.log(run_id, "waiting_approval", {
+                        "agent": agent.name,
+                        "experiment_id": result.metadata.get("experiment_id", ""),
+                    })
+                    logger.info("[%s] %s awaiting human approval", run_id, agent.name)
             except Exception as exc:
-                error_msg = f"Feature proposal failed: {exc}"
+                error_msg = f"{agent.name} failed: {exc}"
                 logger.error("[%s] %s", run_id, error_msg)
                 state["errors"].append(error_msg)
-                await audit.log(run_id, "feature_proposal_error", {"error": str(exc)})
+                await audit.log(run_id, f"{agent.name}_error", {"error": str(exc)})
 
-        # ---- Completion ----
         final_status = "completed" if not state["errors"] else "completed_with_errors"
-        await _update_run(
-            pool, run_id, final_status, "done",
-            insights_count=len(state["insights"]),
-            experiments_count=len(state["experiment_designs"]),
-        )
+        await _update_run(pool, run_id, final_status, "done", **_counts())
 
         await audit.log(run_id, "supervisor_complete", {
             "status": final_status,
