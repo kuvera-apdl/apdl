@@ -92,7 +92,9 @@ services:
       CLICKHOUSE_DB: apdl
       CONFIG_SERVICE_URL: http://config:8081
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
-      GUARDRAIL_MONITOR_ENABLED: "false"
+      GUARDRAIL_MONITOR_ENABLED: ${GUARDRAIL_MONITOR_ENABLED:-true}
+      GUARDRAIL_PROJECT_IDS: ${GUARDRAIL_PROJECT_IDS:-apdl}
+      GUARDRAIL_MONITOR_INTERVAL_SECONDS: ${GUARDRAIL_MONITOR_INTERVAL_SECONDS:-60}
     depends_on:
       clickhouse:
         condition: service_healthy

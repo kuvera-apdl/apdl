@@ -245,7 +245,7 @@ WITH
         SELECT
             session_id,
             value,
-            min(first_exposure) AS first_exposure
+            min(first_exposure) AS exposure_time
         FROM feature_flag_exposures
         WHERE project_id = %(project_id)s
           AND flag_key = %(flag_key)s
@@ -258,15 +258,16 @@ WITH
         SELECT
             e.session_id AS session_id,
             e.value AS value,
-            count(f.session_id) AS failure_count
+            countIf(
+                f.timestamp >= e.exposure_time
+                AND f.timestamp >= subtractMinutes(now(), %(window_minutes)s)
+                AND f.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
+            ) AS failure_count
         FROM exposures e
         LEFT JOIN frontend_health_events f
             ON f.project_id = %(project_id)s
            AND f.session_id = e.session_id
            AND f.event_name = '$frontend_error'
-           AND f.timestamp >= e.first_exposure
-           AND f.timestamp >= subtractMinutes(now(), %(window_minutes)s)
-           AND f.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
            AND JSONHas(f.active_flags, %(flag_key)s)
            AND toBool(JSONExtractBool(f.active_flags, %(flag_key)s)) = e.value
            {health_scope_filter}

@@ -231,6 +231,11 @@ async def test_guardrail_query_requires_active_flag_snapshot(client):
 
     assert resp.status_code == 200
     query = app.state.ch_client.execute.await_args.args[0]
+    assert "min(first_exposure) AS exposure_time" in query
+    assert "countIf(" in query
+    assert "f.timestamp >= e.exposure_time" in query
+    assert "count(f.session_id)" not in query
+    assert "min(first_exposure) AS first_exposure" not in query
     assert "JSONHas(f.active_flags, %(flag_key)s)" in query
     assert "JSONExtractBool(f.active_flags, %(flag_key)s)" in query
 
