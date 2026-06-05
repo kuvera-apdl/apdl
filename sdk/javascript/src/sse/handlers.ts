@@ -1,6 +1,11 @@
 import type { FlagConfig } from '../flags/types';
 import type { FlagCache } from '../flags/cache';
-import { extractFlagConfig, extractFlagConfigs } from '../flags/schema';
+import {
+  extractFlagConfig,
+  extractInvalidFlagKey,
+  parseFlagConfigResult,
+  parseFlagConfigs,
+} from '../flags/schema';
 import type { SlotManager } from '../ui/slot';
 
 interface SSEMessage {
@@ -13,7 +18,7 @@ type UIConfigUpdateCallback = (config: unknown) => void;
 
 /**
  * Routes SSE messages to the appropriate subsystems.
- * Handles flag updates, experiment updates, UI config pushes, and heartbeats.
+ * Handles flag updates, UI config pushes, and heartbeats.
  */
 export class SSEHandlers {
   private flagCache: FlagCache;
@@ -37,16 +42,11 @@ export class SSEHandlers {
   handle(message: SSEMessage): void {
     switch (message.type) {
       case 'config':
-      case 'flags_update':
         this.handleFlagsUpdate(message.data);
         break;
 
       case 'flag_update':
         this.handleFlagUpdate(message.data);
-        break;
-
-      case 'experiment_update':
-        this.handleExperimentUpdate(message.data);
         break;
 
       case 'ui_config':
@@ -83,16 +83,20 @@ export class SSEHandlers {
   private handleFlagsUpdate(data: string): void {
     try {
       const parsed = JSON.parse(data) as unknown;
-      if (isFlagCollection(parsed)) {
-        const flags = extractFlagConfigs(parsed);
-        this.flagCache.set(flags);
+      const result = parseFlagConfigResult(parsed);
+      if (result !== null) {
+        if (result.flags.length > 0 || result.invalid_keys.length === 0) {
+          this.flagCache.set(result.flags, 'sse', result.invalid_keys);
+        } else {
+          this.flagCache.markInvalid(result.invalid_keys, 'sse');
+        }
         if (this.debug) {
-          console.debug(`APDL: Updated ${flags.length} flags from SSE`);
+          console.debug(`APDL: Updated ${result.flags.length} flags from SSE`);
         }
       }
     } catch (err) {
       if (this.debug) {
-        console.error('APDL: Failed to parse flags_update:', err);
+        console.error('APDL: Failed to parse config:', err);
       }
     }
   }
@@ -100,8 +104,8 @@ export class SSEHandlers {
   private handleFlagUpdate(data: string): void {
     try {
       const parsed = JSON.parse(data) as unknown;
-      const flags = extractFlagConfigs(parsed);
-      if (flags.length > 0) {
+      const flags = parseFlagConfigs(parsed);
+      if (flags !== null && flags.length > 0) {
         this.mergeFlags(flags);
         return;
       }
@@ -111,50 +115,27 @@ export class SSEHandlers {
       }
 
       const current = new Map(this.flagCache.getAll().map((flag) => [flag.key, flag]));
+
+      if (parsed.action === 'flag_removed' && typeof parsed.key === 'string') {
+        current.delete(parsed.key);
+        this.flagCache.set(Array.from(current.values()), 'sse');
+        return;
+      }
+
       const fullFlag = extractFlagConfig(parsed.flag) ?? extractFlagConfig(parsed);
       if (fullFlag) {
         current.set(fullFlag.key, fullFlag);
-        this.flagCache.set(Array.from(current.values()));
+        this.flagCache.set(Array.from(current.values()), 'sse');
         return;
       }
 
-      if (typeof parsed.key !== 'string') {
-        return;
-      }
-
-      if (parsed.action === 'flag_deleted') {
-        current.delete(parsed.key);
-        this.flagCache.set(Array.from(current.values()));
-        return;
-      }
-
-      const existing = current.get(parsed.key);
-      if (existing && typeof parsed.enabled === 'boolean') {
-        current.set(parsed.key, { ...existing, enabled: parsed.enabled });
-        this.flagCache.set(Array.from(current.values()));
+      const invalidKey = extractInvalidFlagKey(parsed.flag) ?? extractInvalidFlagKey(parsed);
+      if (invalidKey) {
+        this.flagCache.markInvalid([invalidKey], 'sse');
       }
     } catch (err) {
       if (this.debug) {
         console.error('APDL: Failed to parse flag_update:', err);
-      }
-    }
-  }
-
-  private handleExperimentUpdate(data: string): void {
-    // Experiment updates come as flag updates with variant information
-    try {
-      const parsed = JSON.parse(data) as unknown;
-      const flags = extractFlagConfigs(parsed);
-      if (flags.length > 0) {
-        // Merge experiment flags into the cache
-        this.mergeFlags(flags);
-        if (this.debug) {
-          console.debug(`APDL: Updated experiments from SSE`);
-        }
-      }
-    } catch (err) {
-      if (this.debug) {
-        console.error('APDL: Failed to parse experiment_update:', err);
       }
     }
   }
@@ -196,14 +177,10 @@ export class SSEHandlers {
       existingMap.set(flag.key, flag);
     }
 
-    this.flagCache.set(Array.from(existingMap.values()));
+    this.flagCache.set(Array.from(existingMap.values()), 'sse');
   }
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input);
-}
-
-function isFlagCollection(input: unknown): boolean {
-  return Array.isArray(input) || (isRecord(input) && Array.isArray(input.flags));
 }

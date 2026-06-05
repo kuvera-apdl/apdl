@@ -4,8 +4,6 @@ Tests validate_event_batch() and validate_single_event() directly,
 covering all 24+ test cases from the C++ test suite.
 """
 
-import pytest
-
 from app.validation.schema import validate_event_batch, validate_single_event
 
 
@@ -99,6 +97,121 @@ class TestSingleEventValidation:
         }
         result = validate_single_event(event)
         assert result["valid"] is True
+
+    def test_valid_feature_flag_exposure_event(self):
+        event = feature_flag_exposure_event()
+        result = validate_single_event(event)
+        assert result["valid"] is True
+
+    def test_valid_server_feature_flag_exposure_event(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["source"] = "server"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is True
+
+    def test_valid_frontend_error_event(self):
+        event = frontend_error_event()
+        result = validate_single_event(event)
+        assert result["valid"] is True
+
+    def test_frontend_error_rejects_unknown_properties(self):
+        event = frontend_error_event()
+        event["properties"]["activeFlags"] = {"checkout-gate": True}
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.activeFlags" for error in result["errors"])
+
+    def test_frontend_error_requires_matching_active_flag_versions(self):
+        event = frontend_error_event()
+        event["properties"]["active_flag_versions"] = {}
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(
+            error["field"] == "properties.active_flag_versions"
+            for error in result["errors"]
+        )
+
+    def test_valid_web_vital_event(self):
+        event = web_vital_event()
+        result = validate_single_event(event)
+        assert result["valid"] is True
+
+    def test_web_vital_rejects_noncanonical_rating(self):
+        event = web_vital_event()
+        event["properties"]["rating"] = "needs-improvement"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.rating" for error in result["errors"])
+
+    def test_feature_flag_exposure_rejects_alias_properties(self):
+        event = feature_flag_exposure_event()
+        properties = event["properties"]
+        properties.pop("flag_key")
+        properties["flagKey"] = "checkout-gate"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "properties.flag_key" in fields
+        assert "properties.flagKey" in fields
+
+    def test_feature_flag_exposure_rejects_top_level_alias_identifiers(self):
+        event = feature_flag_exposure_event()
+        event.pop("user_id")
+        event.pop("anonymous_id")
+        event["anonymousId"] = "anon_42"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "user_id" in fields
+        assert "anonymousId" in fields
+
+    def test_feature_flag_exposure_rejects_unknown_envelope_fields(self):
+        event = feature_flag_exposure_event()
+        event["extra_field"] = "extra"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "extra_field" for error in result["errors"])
+
+    def test_feature_flag_exposure_requires_session_metadata(self):
+        event = feature_flag_exposure_event()
+        event.pop("session_id")
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "session_id" for error in result["errors"])
+
+    def test_feature_flag_exposure_rejects_not_found_reason(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["reason"] = "not_found"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.reason" for error in result["errors"])
+
+    def test_feature_flag_exposure_requires_track_type(self):
+        event = feature_flag_exposure_event()
+        event["type"] = "page"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "type" for error in result["errors"])
 
     def test_valid_identify_event(self):
         """ValidIdentifyEvent"""
@@ -311,3 +424,76 @@ class TestSingleEventValidation:
         event = {"event": name, "user_id": "u1"}
         result = validate_single_event(event)
         assert result["valid"] is True
+
+
+def feature_flag_exposure_event():
+    return {
+        "event": "$feature_flag_exposure",
+        "type": "track",
+        "user_id": "usr_42",
+        "anonymous_id": "anon_42",
+        "session_id": "sess_42",
+        "message_id": "msg_42",
+        "timestamp": "2026-05-26T02:26:53.455Z",
+        "properties": {
+            "flag_key": "checkout-gate",
+            "value": True,
+            "reason": "fallthrough",
+            "rule_id": "",
+            "bucket": 7.31,
+            "rollout_percentage": 100,
+            "bucket_by": "user_id",
+            "config_version": 3,
+            "source": "initial_fetch",
+            "page": "/checkout",
+            "component": "CheckoutPage",
+        },
+    }
+
+
+def frontend_error_event():
+    return {
+        "event": "$frontend_error",
+        "type": "track",
+        "user_id": "usr_42",
+        "anonymous_id": "anon_42",
+        "session_id": "sess_42",
+        "message_id": "msg_42",
+        "timestamp": "2026-05-26T02:26:53.455Z",
+        "properties": {
+            "error_type": "javascript_error",
+            "message": "Checkout exploded",
+            "page": "/checkout",
+            "component": "",
+            "slot_id": "",
+            "source": "checkout.js",
+            "line": 12,
+            "column": 4,
+            "stack": "Error: Checkout exploded",
+            "active_flags": {"checkout-gate": True},
+            "active_flag_versions": {"checkout-gate": 3},
+        },
+    }
+
+
+def web_vital_event():
+    return {
+        "event": "$web_vital",
+        "type": "track",
+        "user_id": "usr_42",
+        "anonymous_id": "anon_42",
+        "session_id": "sess_42",
+        "message_id": "msg_42",
+        "timestamp": "2026-05-26T02:26:53.455Z",
+        "properties": {
+            "metric": "LCP",
+            "value": 2410.5,
+            "rating": "needs_improvement",
+            "delta": 2410.5,
+            "id": "vital_1",
+            "navigation_type": "navigate",
+            "page": "/checkout",
+            "active_flags": {"checkout-gate": True},
+            "active_flag_versions": {"checkout-gate": 3},
+        },
+    }

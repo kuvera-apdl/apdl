@@ -8,16 +8,16 @@ from fastapi.responses import JSONResponse
 
 from app.store import postgres as pg_store
 from app.store import redis_cache
-from app.utils import extract_project_id, serialize_flag
+from app.utils import extract_project_id, serialize_flag_collection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _flags_to_json(flags: list[dict]) -> str:
-    """Serialize flags to the JSON format matching C++ flags_to_json output."""
-    return json.dumps({"flags": [serialize_flag(f) for f in flags]}, separators=(",", ":"))
+def _flags_to_json(project_id: str, flags: list[dict]) -> str:
+    """Serialize flags to the canonical SDK bootstrap payload."""
+    return json.dumps(serialize_flag_collection(project_id, flags), separators=(",", ":"))
 
 
 @router.get("/v1/flags")
@@ -50,9 +50,9 @@ async def get_flags(request: Request):
         "Cache miss for flags of project %s, querying Postgres", project_id
     )
     pool = request.app.state.pg_pool
-    flags = await pg_store.get_flags(pool, project_id)
+    flags = await pg_store.get_flags(pool, project_id, client_visible_only=True)
 
-    flags_json = _flags_to_json(flags)
+    flags_json = _flags_to_json(project_id, flags)
 
     # Populate cache
     await redis_cache.set_flags(redis, project_id, flags_json, ttl=60)

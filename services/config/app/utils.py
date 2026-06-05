@@ -1,30 +1,68 @@
 """Shared utilities for the config service."""
 
-import json
 import re
+from datetime import date, datetime
 
 from fastapi import Request
 
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
+SCHEMA_VERSION = 1
 
 
-def serialize_flag(f: dict, include_description: bool = True) -> dict:
-    """Convert a flag DB row to the API representation."""
-    rules_json = f.get("rules_json", "[]")
-    variants_json = f.get("variants_json", "[]")
-    entry: dict = {
+def _json_safe(value):
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    return value
+
+
+def serialize_flag(f: dict) -> dict:
+    """Convert a canonical flag DB row to the full admin API representation."""
+    return {
+        "key": f["key"],
+        "project_id": f.get("project_id", ""),
+        "name": f.get("name", ""),
+        "state": f.get("state", "draft"),
+        "owners": f.get("owners", []),
+        "review_by": _json_safe(f.get("review_by")),
+        "description": f.get("description", ""),
+        "enabled": f["enabled"],
+        "default_value": f.get("default_value", False),
+        "rules": f.get("rules", []),
+        "fallthrough": f.get("fallthrough", {}),
+        "salt": f.get("salt", ""),
+        "evaluation_mode": f.get("evaluation_mode", "client"),
+        "auto_disable": f.get("auto_disable", True),
+        "guardrails": f.get("guardrails", []),
+        "disabled_reason": f.get("disabled_reason", ""),
+        "disabled_by": f.get("disabled_by", ""),
+        "disabled_at": _json_safe(f.get("disabled_at")),
+        "version": f.get("version", 1),
+        "created_at": _json_safe(f.get("created_at", "")),
+        "updated_at": _json_safe(f.get("updated_at", "")),
+        "archived_at": _json_safe(f.get("archived_at")),
+    }
+
+
+def serialize_client_flag(f: dict) -> dict:
+    """Convert a canonical flag DB row to the SDK bootstrap representation."""
+    return {
         "key": f["key"],
         "enabled": f["enabled"],
-        "variant_type": f.get("variant_type", "boolean"),
-        "default_value": f.get("default_value", "false"),
-        "rollout_percentage": f.get("rollout_percentage", 100.0),
-        "rules": json.loads(rules_json) if rules_json else [],
-        "variants": json.loads(variants_json) if variants_json else [],
+        "default_value": f.get("default_value", False),
+        "salt": f.get("salt", ""),
+        "rules": f.get("rules", []),
+        "fallthrough": f.get("fallthrough", {}),
+        "version": f.get("version", 1),
     }
-    if include_description:
-        entry["description"] = f.get("description", "")
-    entry["updated_at"] = f.get("updated_at", "")
-    return entry
+
+
+def serialize_flag_collection(project_id: str, flags: list[dict]) -> dict:
+    """Return the canonical SDK flag collection envelope."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "project_id": project_id,
+        "flags": [serialize_client_flag(flag) for flag in flags],
+    }
 
 
 def extract_project_id(request: Request) -> str:

@@ -5,9 +5,9 @@ const FNV_PRIME = 16777619;
 /**
  * FNV-1a 32-bit hash matching services/config/app/flags/evaluator.py.
  */
-export function hashBucket(key: string, userId: string): number {
+export function hashBucket(flagKey: string, salt: string, unitId: string): number {
   let hash = FNV_OFFSET_BASIS;
-  const bytes = utf8Bytes(`${key}:${userId}`);
+  const bytes = utf8Bytes(`${flagKey}:${salt}:${unitId}`);
 
   for (const byte of bytes) {
     hash ^= byte;
@@ -17,18 +17,19 @@ export function hashBucket(key: string, userId: string): number {
   return hash >>> 0;
 }
 
-export function percentageBucket(key: string, userId: string): number {
-  return (hashBucket(key, userId) / UINT32_MAX) * 100.0;
+export function percentageBucket(flagKey: string, salt: string, unitId: string): number {
+  return (hashBucket(flagKey, salt, unitId) / UINT32_MAX) * 100.0;
 }
 
 export function isInRollout(
   flagKey: string,
-  userId: string,
+  salt: string,
+  unitId: string,
   percentage: number
 ): boolean {
   if (percentage >= 100.0) return true;
   if (percentage <= 0.0) return false;
-  return percentageBucket(flagKey, userId) < percentage;
+  return percentageBucket(flagKey, salt, unitId) < percentage;
 }
 
 function utf8Bytes(input: string): Uint8Array {

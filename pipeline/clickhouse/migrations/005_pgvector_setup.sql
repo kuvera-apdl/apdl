@@ -59,26 +59,6 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_project ON agent_runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON agent_runs(status);
 
--- Feature flags table (used by Config Service)
-CREATE TABLE IF NOT EXISTS feature_flags (
-    id SERIAL PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    flag_key TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    enabled BOOLEAN DEFAULT false,
-    salt TEXT NOT NULL,
-    rollout_percentage INTEGER DEFAULT 0,
-    rules JSONB DEFAULT '[]',
-    variants JSONB DEFAULT '[]',
-    payload JSONB,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now(),
-    UNIQUE(project_id, flag_key)
-);
-
-CREATE INDEX IF NOT EXISTS idx_flags_project ON feature_flags(project_id);
-
 -- Experiments table
 CREATE TABLE IF NOT EXISTS experiments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

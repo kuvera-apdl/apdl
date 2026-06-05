@@ -9,7 +9,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin, flags, stream
+from app.routers import admin, evaluate, flags, stream
 from app.sse.broadcaster import SSEBroadcaster
 
 logger = logging.getLogger(__name__)
@@ -18,17 +18,223 @@ CREATE_FLAGS_TABLE = """
 CREATE TABLE IF NOT EXISTS flags (
     key TEXT NOT NULL,
     project_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'draft'
+        CHECK (state IN ('draft', 'active', 'disabled', 'archived')),
+    owners JSONB NOT NULL DEFAULT '[]'::jsonb,
+    review_by TEXT,
     enabled BOOLEAN NOT NULL DEFAULT false,
     description TEXT NOT NULL DEFAULT '',
-    variant_type TEXT NOT NULL DEFAULT 'boolean',
-    default_value TEXT NOT NULL DEFAULT 'false',
-    rules_json TEXT NOT NULL DEFAULT '[]',
-    variants_json TEXT NOT NULL DEFAULT '[]',
-    rollout_percentage DOUBLE PRECISION NOT NULL DEFAULT 100.0,
+    default_value BOOLEAN NOT NULL DEFAULT false,
+    rules JSONB NOT NULL DEFAULT '[]'::jsonb,
+    fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb,
+    salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text),
+    evaluation_mode TEXT NOT NULL DEFAULT 'client'
+        CHECK (evaluation_mode IN ('client', 'server', 'both')),
+    auto_disable BOOLEAN NOT NULL DEFAULT true,
+    guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
+    disabled_reason TEXT NOT NULL DEFAULT '',
+    disabled_by TEXT NOT NULL DEFAULT '',
+    disabled_at TIMESTAMPTZ,
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    archived_at TIMESTAMPTZ,
+    CONSTRAINT flags_state_enabled_check CHECK ((state = 'active') = enabled),
     PRIMARY KEY (project_id, key)
 );
+"""
+
+MIGRATE_FLAGS_TABLE = """
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'draft';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS owners JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS review_by TEXT;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS evaluation_mode TEXT NOT NULL DEFAULT 'client';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS auto_disable BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS guardrails JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+
+ALTER TABLE flags ALTER COLUMN default_value DROP DEFAULT;
+ALTER TABLE flags
+    ALTER COLUMN default_value TYPE BOOLEAN
+    USING CASE WHEN lower(default_value::text) = 'true' THEN true ELSE false END;
+ALTER TABLE flags ALTER COLUMN default_value SET DEFAULT false;
+ALTER TABLE flags ALTER COLUMN default_value SET NOT NULL;
+
+UPDATE flags SET name = key WHERE name = '';
+UPDATE flags
+SET salt = md5(random()::text || clock_timestamp()::text || project_id || key)
+WHERE salt = '';
+UPDATE flags
+SET state = CASE
+    WHEN archived_at IS NOT NULL THEN 'archived'
+    WHEN disabled_at IS NOT NULL OR disabled_reason <> '' THEN 'disabled'
+    WHEN enabled THEN 'active'
+    ELSE 'draft'
+END
+WHERE state = 'draft'
+  AND (archived_at IS NOT NULL OR disabled_at IS NOT NULL OR disabled_reason <> '' OR enabled);
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flags' AND column_name = 'client_exposed'
+    ) THEN
+        UPDATE flags
+        SET evaluation_mode = CASE WHEN client_exposed THEN 'client' ELSE 'server' END;
+    END IF;
+
+    IF to_regclass('public.feature_flags') IS NOT NULL THEN
+        INSERT INTO flags (
+            key, project_id, name, state, enabled, description, default_value,
+            rules, fallthrough, salt, evaluation_mode, auto_disable,
+            guardrails, created_at, updated_at
+        )
+        SELECT
+            flag_key,
+            project_id,
+            name,
+            CASE WHEN COALESCE(enabled, false) THEN 'active' ELSE 'draft' END,
+            COALESCE(enabled, false),
+            COALESCE(description, ''),
+            false,
+            COALESCE(rules, '[]'::jsonb),
+            jsonb_build_object(
+                'value', true,
+                'rollout', jsonb_build_object(
+                    'percentage', COALESCE(rollout_percentage, 0),
+                    'bucket_by', 'user_id'
+                )
+            ),
+            salt,
+            'client',
+            true,
+            '[]'::jsonb,
+            COALESCE(created_at, NOW()),
+            COALESCE(updated_at, NOW())
+        FROM feature_flags
+        ON CONFLICT (project_id, key) DO NOTHING;
+
+        DROP TABLE feature_flags;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flags' AND column_name = 'rollout_percentage'
+    ) THEN
+        EXECUTE $sql$
+            UPDATE flags
+            SET fallthrough = jsonb_build_object(
+                'value', true,
+                'rollout', jsonb_build_object(
+                    'percentage', rollout_percentage,
+                    'bucket_by', 'user_id'
+                )
+            )
+            WHERE fallthrough = '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb
+        $sql$;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flags' AND column_name = 'rules_json'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'flags' AND column_name = 'rollout_percentage'
+    ) THEN
+        EXECUTE $sql$
+            WITH migrated AS (
+                SELECT
+                    f.project_id,
+                    f.key,
+                    COALESCE(
+                        jsonb_agg(
+                            jsonb_build_object(
+                                'id', COALESCE(NULLIF(rule->>'id', ''), 'rule_' || ordinality::text),
+                                'name', COALESCE(rule->>'name', ''),
+                                'conditions',
+                                    CASE
+                                        WHEN jsonb_typeof(rule->'conditions') = 'array'
+                                            THEN rule->'conditions'
+                                        ELSE jsonb_build_array(rule - 'id' - 'name' - 'rollout')
+                                    END,
+                                'rollout',
+                                    CASE
+                                        WHEN jsonb_typeof(rule->'rollout') = 'object'
+                                            THEN rule->'rollout'
+                                        ELSE jsonb_build_object(
+                                            'percentage', f.rollout_percentage,
+                                            'bucket_by', 'user_id'
+                                        )
+                                    END
+                            )
+                        ) FILTER (WHERE jsonb_typeof(rule) = 'object'),
+                        '[]'::jsonb
+                    ) AS rules
+                FROM flags f
+                CROSS JOIN LATERAL jsonb_array_elements(f.rules_json::jsonb)
+                    WITH ORDINALITY AS parsed(rule, ordinality)
+                GROUP BY f.project_id, f.key
+            )
+            UPDATE flags f
+            SET rules = migrated.rules
+            FROM migrated
+            WHERE f.project_id = migrated.project_id
+              AND f.key = migrated.key
+              AND f.rules = '[]'::jsonb
+        $sql$;
+    END IF;
+END $$;
+
+UPDATE flags
+SET enabled = (state = 'active')
+WHERE enabled IS DISTINCT FROM (state = 'active');
+
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_evaluation_mode_check;
+ALTER TABLE flags ADD CONSTRAINT flags_evaluation_mode_check
+    CHECK (evaluation_mode IN ('client', 'server', 'both'));
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_check;
+ALTER TABLE flags ADD CONSTRAINT flags_state_check
+    CHECK (state IN ('draft', 'active', 'disabled', 'archived'));
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_enabled_check;
+ALTER TABLE flags ADD CONSTRAINT flags_state_enabled_check
+    CHECK ((state = 'active') = enabled);
+
+ALTER TABLE flags DROP COLUMN IF EXISTS variant_type;
+ALTER TABLE flags DROP COLUMN IF EXISTS rules_json;
+ALTER TABLE flags DROP COLUMN IF EXISTS variants_json;
+ALTER TABLE flags DROP COLUMN IF EXISTS rollout_percentage;
+ALTER TABLE flags DROP COLUMN IF EXISTS client_exposed;
+"""
+
+CREATE_FLAG_AUDIT_TABLE = """
+CREATE TABLE IF NOT EXISTS flag_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    flag_key TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'system',
+    previous_version INTEGER,
+    new_version INTEGER,
+    before JSONB,
+    after JSONB,
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+MIGRATE_FLAG_AUDIT_TABLE = """
+ALTER TABLE flag_audit_log ADD COLUMN IF NOT EXISTS evidence JSONB NOT NULL DEFAULT '{}'::jsonb;
 """
 
 CREATE_EXPERIMENTS_TABLE = """
@@ -50,7 +256,17 @@ CREATE TABLE IF NOT EXISTS experiments (
 
 CREATE_FLAGS_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_flags_project_updated "
-    "ON flags (project_id, updated_at DESC);"
+    "ON flags (project_id, archived_at, updated_at DESC);"
+)
+
+CREATE_FLAGS_LIFECYCLE_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_flags_project_state_review "
+    "ON flags (project_id, state, review_by, updated_at DESC);"
+)
+
+CREATE_FLAG_AUDIT_INDEX = (
+    "CREATE INDEX IF NOT EXISTS idx_flag_audit_project_flag "
+    "ON flag_audit_log (project_id, flag_key, created_at DESC);"
 )
 
 CREATE_EXPERIMENTS_INDEX = (
@@ -77,8 +293,13 @@ async def lifespan(application: FastAPI):
     # Initialize schema
     async with pg_pool.acquire() as conn:
         await conn.execute(CREATE_FLAGS_TABLE)
+        await conn.execute(MIGRATE_FLAGS_TABLE)
+        await conn.execute(CREATE_FLAG_AUDIT_TABLE)
+        await conn.execute(MIGRATE_FLAG_AUDIT_TABLE)
         await conn.execute(CREATE_EXPERIMENTS_TABLE)
         await conn.execute(CREATE_FLAGS_INDEX)
+        await conn.execute(CREATE_FLAGS_LIFECYCLE_INDEX)
+        await conn.execute(CREATE_FLAG_AUDIT_INDEX)
         await conn.execute(CREATE_EXPERIMENTS_INDEX)
     logger.info("Database schema initialized")
 
@@ -126,6 +347,7 @@ app.add_middleware(
 
 app.include_router(flags.router)
 app.include_router(stream.router)
+app.include_router(evaluate.router)
 app.include_router(admin.router)
 
 

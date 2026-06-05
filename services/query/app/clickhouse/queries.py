@@ -308,3 +308,52 @@ INNER JOIN events ev
     AND ev.project_id = %(project_id)s
 GROUP BY e.variant, e.user_id
 """
+
+
+# ---------------------------------------------------------------------------
+# Feature flag guardrail queries
+# ---------------------------------------------------------------------------
+
+FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY = """
+WITH
+    exposures AS (
+        SELECT
+            session_id,
+            value,
+            min(first_exposure) AS exposure_time
+        FROM feature_flag_exposures
+        WHERE project_id = %(project_id)s
+          AND flag_key = %(flag_key)s
+          AND first_exposure >= subtractMinutes(now(), %(window_minutes)s)
+          AND event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
+          {exposure_scope_filter}
+        GROUP BY session_id, value
+    ),
+    exposure_failures AS (
+        SELECT
+            e.session_id AS session_id,
+            e.value AS value,
+            countIf(
+                f.timestamp >= e.exposure_time
+                AND f.timestamp >= subtractMinutes(now(), %(window_minutes)s)
+                AND f.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
+            ) AS failure_count
+        FROM exposures e
+        LEFT JOIN frontend_health_events f
+            ON f.project_id = %(project_id)s
+           AND f.session_id = e.session_id
+           AND f.event_name = '$frontend_error'
+           AND JSONHas(f.active_flags, %(flag_key)s)
+           AND toBool(JSONExtractBool(f.active_flags, %(flag_key)s)) = e.value
+           {health_scope_filter}
+        GROUP BY e.session_id, e.value
+    )
+SELECT
+    countIf(value = 1) AS exposed_sessions,
+    countIf(value = 0) AS baseline_sessions,
+    countIf(value = 1 AND failure_count > 0) AS exposed_failure_sessions,
+    countIf(value = 0 AND failure_count > 0) AS baseline_failure_sessions,
+    sumIf(failure_count, value = 1) AS exposed_failures,
+    sumIf(failure_count, value = 0) AS baseline_failures
+FROM exposure_failures
+"""

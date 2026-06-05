@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
+import { hashBucket } from '../../src/flags/hash';
 
 // Mock fetch globally
 const fetchMock = vi.fn().mockResolvedValue({
@@ -18,12 +19,26 @@ class MockEventSource {
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   readyState = 0;
+  private listeners: Map<string, Set<(ev: MessageEvent) => void>> = new Map();
 
   constructor(public url: string) {
     MockEventSource.instances.push(this);
   }
 
-  addEventListener() {}
+  addEventListener(type: string, listener: EventListener) {
+    if (!this.listeners.has(type)) {
+      this.listeners.set(type, new Set());
+    }
+    this.listeners.get(type)!.add(listener as (ev: MessageEvent) => void);
+  }
+
+  emit(type: string, data: string) {
+    const event = new MessageEvent(type, { data });
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(event);
+    }
+  }
+
   close() {
     this.readyState = 2;
   }
@@ -82,6 +97,20 @@ describe('APDLClient', () => {
       expect(client.debug.disable).toBeTypeOf('function');
       expect(client.debug.getQueue).toBeTypeOf('function');
       expect(client.debug.flush).toBeTypeOf('function');
+    });
+
+    it('should keep the SSE connection open while typed heartbeats arrive', () => {
+      const source = MockEventSource.instances.at(-1);
+      expect(source).toBeDefined();
+
+      source?.onopen?.(new Event('open'));
+      vi.advanceTimersByTime(30000);
+      source?.emit('heartbeat', '{}');
+      vi.advanceTimersByTime(30000);
+      source?.emit('heartbeat', '{}');
+      vi.advanceTimersByTime(30000);
+
+      expect(MockEventSource.instances).toHaveLength(1);
     });
   });
 
@@ -192,16 +221,520 @@ describe('APDLClient', () => {
     });
   });
 
-  describe('flag()', () => {
-    it('should return default value when flag not found', () => {
-      expect(client.flag('nonexistent')).toBe(false);
-      expect(client.flag('nonexistent', true)).toBe(true);
+  describe('checkGate()', () => {
+    it('should return false and details when gate not found', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      expect(client.checkGate('nonexistent')).toBe(false);
+      expect(client.checkGateDetails('nonexistent')).toMatchObject({
+        key: 'nonexistent',
+        value: false,
+        reason: 'not_found',
+        source: 'none',
+      });
+      expect(featureFlagExposures(client)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "APDL: Feature gate 'nonexistent' is missing or archived; returning false."
+      );
+
+      warn.mockRestore();
+    });
+
+    it('should evaluate gates from initial fetch', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [{
+            key: 'new-checkout-flow',
+            enabled: true,
+            default_value: false,
+            salt: 'salt_123',
+            rules: [],
+            fallthrough: {
+              value: true,
+              rollout: { percentage: 100, bucket_by: 'user_id' },
+            },
+            version: 3,
+          }],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow')).toMatchObject({
+        value: true,
+        reason: 'fallthrough',
+        config_version: 3,
+        source: 'initial_fetch',
+      });
+    });
+
+    it('should not expose removed legacy gate APIs', () => {
+      const api = client as unknown as Record<string, unknown>;
+
+      expect(api.flag).toBeUndefined();
+      expect(api.flagPayload).toBeUndefined();
+      expect(api.experiment).toBeUndefined();
+    });
+
+    it('should restore cached gates in standard localStorage mode', () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+
+      const cachedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'standard',
+      });
+      cachedClient.identify('user_123');
+
+      expect(cachedClient.checkGate('cached-gate')).toBe(true);
+      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
+    });
+
+    it('should preserve restored gates when initial fetch returns malformed config', async () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [{
+            key: 'legacy',
+            enabled: true,
+            variant_type: 'boolean',
+            default_value: 'false',
+            rollout_percentage: 100,
+            rules: [],
+            variants: [],
+          }],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const cachedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'standard',
+      });
+      await flushAsync();
+      cachedClient.identify('user_123');
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(cachedClient.checkGate('cached-gate')).toBe(true);
+      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
+      expect(cachedClient.checkGate('legacy')).toBe(false);
+      expect(cachedClient.checkGateDetails('legacy')).toMatchObject({
+        reason: 'invalid_config',
+        source: 'initial_fetch',
+      });
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('should not restore cached gates in strict privacy mode', () => {
+      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+        schema_version: 1,
+        flags: [makeGate('cached-gate')],
+      }));
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+
+      const strictClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'localStorage',
+        privacyMode: 'strict',
+      });
+      strictClient.identify('user_123');
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(strictClient.checkGate('cached-gate')).toBe(false);
+      expect(strictClient.checkGateDetails('cached-gate').reason).toBe('not_found');
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    });
+
+    it('should log one deduplicated exposure for repeated gate checks', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('new-checkout-flow')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      const gateOptions = { component: 'CheckoutPage' };
+      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow', gateOptions).value).toBe(true);
+      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
+
+      const exposures = featureFlagExposures(flaggedClient);
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0].properties).toMatchObject({
+        flag_key: 'new-checkout-flow',
+        value: true,
+        reason: 'fallthrough',
+        rule_id: '',
+        rollout_percentage: 100,
+        bucket_by: 'user_id',
+        config_version: 1,
+        source: 'initial_fetch',
+        page: '/checkout',
+        component: 'CheckoutPage',
+      });
+      expect(exposures[0].properties?.bucket).toBeTypeOf('number');
+    });
+
+    it('should log distinct exposures for different components', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('component-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      flaggedClient.checkGate('component-gate', { component: 'HeaderCTA' });
+      flaggedClient.checkGate('component-gate', { component: 'FooterCTA' });
+
+      const exposureComponents = featureFlagExposures(flaggedClient)
+        .map((event) => event.properties?.component);
+      expect(exposureComponents).toEqual(['HeaderCTA', 'FooterCTA']);
+    });
+
+    it('should log a distinct exposure when the page changes', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('pricing-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      window.history.pushState({}, '', '/checkout');
+      flaggedClient.checkGate('pricing-gate');
+      window.history.pushState({}, '', '/pricing');
+      flaggedClient.checkGate('pricing-gate');
+
+      const exposurePages = featureFlagExposures(flaggedClient)
+        .map((event) => event.properties?.page);
+      expect(exposurePages).toEqual(['/checkout', '/pricing']);
+    });
+
+    it('should not mark exposures as deduped while analytics consent is denied', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('consent-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+        consent: { analytics: false, personalization: true, experiments: true },
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+      flaggedClient.checkGate('consent-gate');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
+
+      flaggedClient.consent.update({ analytics: true });
+      flaggedClient.checkGate('consent-gate');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
     });
   });
 
-  describe('experiment()', () => {
-    it('should return "control" when flag not found', () => {
-      expect(client.experiment('nonexistent')).toBe('control');
+  describe('frontend health capture', () => {
+    it('should include active flag state in frontend error events', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      healthClient.checkGate('checkout-gate');
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Checkout exploded',
+        filename: 'checkout.js',
+        lineno: 12,
+        colno: 4,
+        error: new Error('Checkout exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        error_type: 'javascript_error',
+        message: 'Checkout exploded',
+        page: '/checkout',
+        component: '',
+        slot_id: '',
+        source: 'checkout.js',
+        line: 12,
+        column: 4,
+        active_flags: { 'checkout-gate': true },
+        active_flag_versions: { 'checkout-gate': 1 },
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should not include flags evaluated on a different page', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      window.history.pushState({}, '', '/checkout');
+      healthClient.checkGate('checkout-gate');
+      window.history.pushState({}, '', '/pricing');
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Pricing exploded',
+        error: new Error('Pricing exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        page: '/pricing',
+        active_flags: {},
+        active_flag_versions: {},
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should refresh page-scoped active flag states after config updates', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 1,
+          flags: [makeGate('checkout-gate')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      healthClient.identify('user_123');
+      window.history.pushState({}, '', '/checkout');
+      healthClient.checkGate('checkout-gate');
+
+      const source = MockEventSource.instances.at(-1);
+      source?.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({
+          type: 'flag_update',
+          action: 'flag_updated',
+          flag: {
+            ...makeGate('checkout-gate'),
+            enabled: false,
+            default_value: false,
+            version: 2,
+          },
+        }),
+      }));
+
+      window.dispatchEvent(new ErrorEvent('error', {
+        message: 'Checkout exploded',
+        error: new Error('Checkout exploded'),
+      }));
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        active_flags: { 'checkout-gate': false },
+        active_flag_versions: { 'checkout-gate': 2 },
+      });
+
+      await healthClient.shutdown();
+    });
+
+    it('should capture component render failures as frontend errors', async () => {
+      const healthClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: {
+          pageViews: false,
+          clicks: false,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: true,
+          web_vitals: false,
+        },
+        persistence: 'memory',
+      });
+      healthClient.ui.register({
+        name: 'broken-card',
+        schema: { type: 'object', properties: {} },
+        render: () => {
+          throw new Error('Render failed');
+        },
+      });
+
+      const target = document.createElement('div');
+      target.setAttribute('data-apdl-slot', 'checkout-slot');
+      expect(healthClient.ui.render({
+        component: 'broken-card',
+        props: {},
+      }, target)).toBeNull();
+
+      const errors = frontendErrors(healthClient);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].properties).toMatchObject({
+        error_type: 'component_render_error',
+        message: 'Render failed',
+        component: 'broken-card',
+        slot_id: 'checkout-slot',
+      });
+
+      await healthClient.shutdown();
     });
   });
 
@@ -267,3 +800,44 @@ describe('APDLClient', () => {
     });
   });
 });
+
+async function flushAsync(): Promise<void> {
+  for (let index = 0; index < 5; index++) {
+    await Promise.resolve();
+  }
+}
+
+function flagStorageKey(apiKey: string): string {
+  return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', apiKey).toString(16)}`;
+}
+
+function featureFlagExposures(
+  client: APDLClient
+): Array<{ properties?: Record<string, unknown> }> {
+  return client.debug.getQueue()
+    .map((event) => event as { event?: string; properties?: Record<string, unknown> })
+    .filter((event) => event.event === '$feature_flag_exposure');
+}
+
+function frontendErrors(
+  client: APDLClient
+): Array<{ properties?: Record<string, unknown> }> {
+  return client.debug.getQueue()
+    .map((event) => event as { event?: string; properties?: Record<string, unknown> })
+    .filter((event) => event.event === '$frontend_error');
+}
+
+function makeGate(key: string): Record<string, unknown> {
+  return {
+    key,
+    enabled: true,
+    default_value: false,
+    salt: 'salt_123',
+    rules: [],
+    fallthrough: {
+      value: true,
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    },
+    version: 1,
+  };
+}

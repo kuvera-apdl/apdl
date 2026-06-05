@@ -1,333 +1,208 @@
-"""Port of all 24 test cases from C++ test_evaluator.cpp.
+"""Tests for canonical feature gate evaluation."""
 
-Tests the flag evaluation engine: FNV-1a hashing, rollout bucketing,
-multi-variate selection, rule matching, and evaluate/evaluateAll.
-"""
+import json
+from pathlib import Path
 
-from app.flags.evaluator import evaluate, evaluate_all
+from app.flags.evaluator import (
+    evaluate,
+    evaluate_all,
+    hash_bucket,
+    percentage_bucket,
+)
+
+FIXTURES_PATH = Path(__file__).parents[3] / "fixtures" / "gates" / "parity.json"
 
 
-def make_flag(key: str, enabled: bool, rollout: float = 100.0) -> dict:
-    return {
-        "key": key,
-        "project_id": "test_project",
-        "enabled": enabled,
-        "variant_type": "boolean",
-        "default_value": "false",
-        "rollout_percentage": rollout,
-        "rules_json": "[]",
-        "variants_json": "[]",
+def make_flag(overrides: dict | None = None) -> dict:
+    flag = {
+        "key": "checkout",
+        "project_id": "apdl",
+        "name": "Checkout",
+        "state": "active",
+        "enabled": True,
+        "description": "",
+        "default_value": False,
+        "rules": [],
+        "fallthrough": {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        "salt": "salt_123",
+        "evaluation_mode": "client",
+        "auto_disable": True,
+        "guardrails": [],
+        "version": 4,
     }
+    if overrides:
+        flag.update(overrides)
+    return flag
 
 
 def make_context(user_id: str = "user_123") -> dict:
-    return {"user_id": user_id, "anonymous_id": "", "attributes": {}}
+    return {
+        "user_id": user_id,
+        "anonymous_id": "",
+        "attributes": {"plan": "pro", "country": "US", "age": "30"},
+    }
 
 
-# ---- Basic evaluation ----
+def test_disabled_flag_returns_default_value():
+    result = evaluate(make_flag({"enabled": False, "default_value": True}), make_context())
+
+    assert result["value"] is True
+    assert result["reason"] == "disabled"
+    assert result["config_version"] == 4
 
 
-def test_disabled_flag_returns_default():
-    flag = make_flag("feature_x", False)
-    ctx = make_context()
+def test_draft_flag_returns_default_value():
+    result = evaluate(make_flag({"state": "draft", "default_value": True}), make_context())
 
-    result = evaluate(flag, ctx)
-
-    assert result["key"] == "feature_x"
-    assert result["enabled"] is False
-    assert result["value"] == "false"
+    assert result["value"] is True
     assert result["reason"] == "disabled"
 
 
-def test_enabled_flag_with_full_rollout():
-    flag = make_flag("feature_y", True, 100.0)
-    ctx = make_context()
+def test_first_matching_rule_serves_true_when_rollout_passes():
+    flag = make_flag({
+        "rules": [{
+            "id": "rule_pro",
+            "name": "Pro users",
+            "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        }],
+    })
 
-    result = evaluate(flag, ctx)
+    result = evaluate(flag, make_context())
 
-    assert result["key"] == "feature_y"
-    assert result["enabled"] is True
-    assert result["value"] == "true"
+    assert result["value"] is True
     assert result["reason"] == "rule_match"
+    assert result["rule_id"] == "rule_pro"
+    assert result["rollout_percentage"] == 100.0
 
 
-def test_enabled_flag_with_zero_rollout():
-    flag = make_flag("feature_z", True, 0.0)
-    ctx = make_context()
+def test_matching_rule_uses_default_when_rollout_fails():
+    flag = make_flag({
+        "default_value": False,
+        "rules": [{
+            "id": "rule_pro",
+            "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        }],
+    })
 
-    result = evaluate(flag, ctx)
+    result = evaluate(flag, make_context())
 
-    assert result["enabled"] is False
-    assert result["value"] == "false"
-    assert result["reason"] == "rollout"
+    assert result["value"] is False
+    assert result["reason"] == "rule_rollout"
+    assert result["rule_id"] == "rule_pro"
 
 
-def test_empty_user_id_returns_error():
-    flag = make_flag("feature_a", True)
-    ctx = {"user_id": "", "anonymous_id": "", "attributes": {}}
+def test_no_rule_match_uses_fallthrough():
+    flag = make_flag({
+        "fallthrough": {
+            "value": True,
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        },
+        "rules": [{
+            "id": "rule_enterprise",
+            "conditions": [{
+                "attribute": "plan",
+                "operator": "equals",
+                "value": "enterprise",
+            }],
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        }],
+    })
 
-    result = evaluate(flag, ctx)
+    result = evaluate(flag, make_context())
 
-    assert result["enabled"] is False
+    assert result["value"] is True
+    assert result["reason"] == "fallthrough"
+
+
+def test_fallthrough_rollout_returns_default_when_outside_rollout():
+    flag = make_flag({
+        "default_value": False,
+        "fallthrough": {
+            "value": True,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+    })
+
+    result = evaluate(flag, make_context())
+
+    assert result["value"] is False
+    assert result["reason"] == "fallthrough_rollout"
+
+
+def test_missing_bucket_unit_returns_error():
+    flag = make_flag({
+        "fallthrough": {
+            "value": True,
+            "rollout": {"percentage": 100.0, "bucket_by": "account_id"},
+        },
+    })
+
+    result = evaluate(flag, make_context())
+
+    assert result["value"] is False
     assert result["reason"] == "error"
 
 
-def test_falls_back_to_anonymous_id():
-    flag = make_flag("feature_b", True)
-    ctx = {"user_id": "", "anonymous_id": "anon_456", "attributes": {}}
-
-    result = evaluate(flag, ctx)
-
-    assert result["enabled"] is True
-
-
-# ---- Rollout consistency ----
-
-
-def test_rollout_is_consistent():
-    flag = make_flag("rollout_test", True, 50.0)
-    ctx = make_context("consistent_user")
-
-    result1 = evaluate(flag, ctx)
-    result2 = evaluate(flag, ctx)
-    result3 = evaluate(flag, ctx)
-
-    assert result1["enabled"] == result2["enabled"]
-    assert result2["enabled"] == result3["enabled"]
-
-
-def test_rollout_distribution():
-    flag = make_flag("distribution_test", True, 50.0)
-
-    in_count = 0
-    total = 1000
-
-    for i in range(total):
-        ctx = make_context(f"user_{i}")
-        result = evaluate(flag, ctx)
-        if result["enabled"]:
-            in_count += 1
-
-    # With 1000 users and 50% rollout, expect roughly 500.
-    # Allow generous margin: 35-65%
-    ratio = in_count / total
-    assert ratio > 0.35, f"Rollout ratio too low: {ratio}"
-    assert ratio < 0.65, f"Rollout ratio too high: {ratio}"
-
-
-# ---- Targeting rules ----
-
-
-def test_no_rules_matches_everyone():
-    flag = make_flag("no_rules", True)
-    flag["rules_json"] = "[]"
-    ctx = make_context()
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_equals_rule_matches():
-    flag = make_flag("rule_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "plan", "operator": "equals", "value": "pro"}]'
-    )
-
-    ctx = make_context()
-    ctx["attributes"]["plan"] = "pro"
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-    assert result["reason"] == "rule_match"
-
-
-def test_equals_rule_does_not_match():
-    flag = make_flag("rule_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "plan", "operator": "equals", "value": "pro"}]'
-    )
-
-    ctx = make_context()
-    ctx["attributes"]["plan"] = "free"
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is False
-    assert result["reason"] == "rule_no_match"
-
-
-def test_contains_operator():
-    flag = make_flag("contains_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "email", "operator": "contains", "value": "@company.com"}]'
-    )
-
-    ctx = make_context()
-    ctx["attributes"]["email"] = "alice@company.com"
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_in_operator():
-    flag = make_flag("in_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "country", "operator": "in", "value": ["US", "CA", "UK"]}]'
-    )
-
-    ctx = {"user_id": "user_1", "anonymous_id": "", "attributes": {"country": "CA"}}
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_in_operator_no_match():
-    flag = make_flag("in_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "country", "operator": "in", "value": ["US", "CA", "UK"]}]'
-    )
-
-    ctx = {"user_id": "user_1", "anonymous_id": "", "attributes": {"country": "DE"}}
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is False
-
-
-def test_numeric_gt_operator():
-    flag = make_flag("gt_test", True)
-    flag["rules_json"] = '[{"attribute": "age", "operator": "gt", "value": 18}]'
-
-    ctx = {"user_id": "user_1", "anonymous_id": "", "attributes": {"age": "25"}}
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_conditions_and_logic():
-    flag = make_flag("and_test", True)
-    flag["rules_json"] = (
-        '[{"conditions": ['
-        '{"attribute": "plan", "operator": "equals", "value": "pro"},'
-        '{"attribute": "country", "operator": "equals", "value": "US"}'
-        "]}]"
-    )
-
-    ctx = {
-        "user_id": "user_1",
-        "anonymous_id": "",
-        "attributes": {"plan": "pro", "country": "US"},
-    }
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-    # Fails if only one condition matches
-    ctx["attributes"]["country"] = "DE"
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is False
-
-
-def test_rules_or_logic():
-    flag = make_flag("or_test", True)
-    flag["rules_json"] = (
-        "["
-        '{"attribute": "plan", "operator": "equals", "value": "pro"},'
-        '{"attribute": "plan", "operator": "equals", "value": "enterprise"}'
-        "]"
-    )
-
-    ctx = {
-        "user_id": "user_1",
-        "anonymous_id": "",
-        "attributes": {"plan": "enterprise"},
-    }
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_starts_with_operator():
-    flag = make_flag("prefix_test", True)
-    flag["rules_json"] = (
-        '[{"attribute": "email", "operator": "starts_with", "value": "admin"}]'
-    )
-
-    ctx = {
-        "user_id": "user_1",
-        "anonymous_id": "",
-        "attributes": {"email": "admin@example.com"},
-    }
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is True
-
-
-def test_missing_attribute_does_not_match():
-    flag = make_flag("missing_attr", True)
-    flag["rules_json"] = (
-        '[{"attribute": "nonexistent", "operator": "equals", "value": "foo"}]'
-    )
-
-    ctx = make_context()
-    # ctx["attributes"] does not have "nonexistent"
-
-    result = evaluate(flag, ctx)
-    assert result["enabled"] is False
-
-
-# ---- Multi-variate flags ----
-
-
-def test_multi_variate_selection():
-    flag = make_flag("multivar", True)
-    flag["variant_type"] = "string"
-    flag["variants_json"] = (
-        '[{"key": "control", "value": "control", "weight": 50},'
-        '{"key": "variant_a", "value": "variant_a", "weight": 50}]'
-    )
-
-    ctx = make_context("user_for_variant")
-    result = evaluate(flag, ctx)
-
-    assert result["enabled"] is True
-    assert result["value"] in (
-        "control",
-        "variant_a",
-    ), f"Got unexpected variant: {result['value']}"
-
-
-def test_multi_variate_consistency():
-    flag = make_flag("multivar_consistent", True)
-    flag["variant_type"] = "string"
-    flag["variants_json"] = (
-        '[{"key": "a", "value": "a", "weight": 33},'
-        '{"key": "b", "value": "b", "weight": 33},'
-        '{"key": "c", "value": "c", "weight": 34}]'
-    )
-
-    ctx = make_context("stable_user")
-
-    r1 = evaluate(flag, ctx)
-    r2 = evaluate(flag, ctx)
-    r3 = evaluate(flag, ctx)
-
-    assert r1["value"] == r2["value"]
-    assert r2["value"] == r3["value"]
-
-
-# ---- EvaluateAll ----
+def test_condition_operators():
+    operators = [
+        {"attribute": "plan", "operator": "not_equals", "value": "free"},
+        {"attribute": "country", "operator": "in", "value": ["US", "CA"]},
+        {"attribute": "age", "operator": "gte", "value": 18},
+        {"attribute": "missing", "operator": "not_exists"},
+    ]
+
+    for index, condition in enumerate(operators):
+        flag = make_flag({
+            "rules": [{
+                "id": f"rule_{index}",
+                "conditions": [condition],
+                "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+            }],
+        })
+        assert evaluate(flag, make_context())["value"] is True
 
 
 def test_evaluate_all_flags():
-    flags = [
-        make_flag("feature_1", True),
-        make_flag("feature_2", False),
-        make_flag("feature_3", True),
-    ]
+    results = evaluate_all(
+        [
+            make_flag({"key": "one", "fallthrough": {
+                "value": True,
+                "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+            }}),
+            make_flag({"key": "two", "enabled": False}),
+        ],
+        make_context(),
+    )
 
-    ctx = make_context()
-    results = evaluate_all(flags, ctx)
+    assert [result["value"] for result in results] == [True, False]
 
-    assert len(results) == 3
-    assert results[0]["enabled"] is True
-    assert results[1]["enabled"] is False
-    assert results[2]["enabled"] is True
+
+def test_hash_parity_fixtures():
+    fixtures = _load_parity_fixtures()
+
+    for case in fixtures["hash_cases"]:
+        assert hash_bucket(case["flag_key"], case["salt"], case["unit_id"]) == case["hash"]
+        assert percentage_bucket(
+            case["flag_key"],
+            case["salt"],
+            case["unit_id"],
+        ) == case["bucket"]
+
+
+def test_evaluation_parity_fixtures():
+    fixtures = _load_parity_fixtures()
+
+    for case in fixtures["evaluation_cases"]:
+        result = evaluate(case["flag"], case["context"])
+        expected = case["result"]
+
+        assert result == expected
+
+
+def _load_parity_fixtures() -> dict:
+    return json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))

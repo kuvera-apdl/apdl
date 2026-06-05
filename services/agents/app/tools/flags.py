@@ -18,16 +18,16 @@ async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
         return resp.json()
 
 
-async def _post(path: str, payload: dict[str, Any]) -> Any:
+async def _post(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(path, json=payload)
+        resp = await client.post(path, json=payload, params=params)
         resp.raise_for_status()
         return resp.json()
 
 
-async def _put(path: str, payload: dict[str, Any]) -> Any:
+async def _put(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.put(path, json=payload)
+        resp = await client.put(path, json=payload, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -41,71 +41,168 @@ async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of flag configurations.
     """
-    return await _get("/v1/flags", params={"project_id": project_id})
+    response = await _get("/v1/admin/flags", params={"project_id": project_id})
+    return response.get("flags", []) if isinstance(response, dict) else response
 
 
 async def create_flag(
     project_id: str,
     key: str,
-    description: str,
-    variants: list[dict[str, Any]],
-    targeting_rules: list[dict[str, Any]] | None = None,
-    default_variant: str = "control",
-    enabled: bool = False,
+    name: str,
+    description: str = "",
+    state: str | None = None,
+    owners: list[str] | None = None,
+    review_by: str | None = None,
+    enabled: bool | None = None,
+    default_value: bool = False,
+    rules: list[dict[str, Any]] | None = None,
+    fallthrough: dict[str, Any] | None = None,
+    evaluation_mode: str = "client",
+    auto_disable: bool = True,
+    guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a new feature flag.
 
     Args:
         project_id: Project to create the flag in.
         key: Unique flag key (e.g. "exp_checkout_redesign").
+        name: Human-readable flag name.
         description: Human-readable description of the flag.
-        variants: List of variant objects, each with "key" and "weight".
-        targeting_rules: Optional targeting rules for the flag.
-        default_variant: Variant to serve when targeting rules don't match.
-        enabled: Whether the flag is initially enabled.
+        state: Lifecycle state: "draft", "active", or "disabled".
+        owners: Users or teams responsible for reviewing the flag.
+        review_by: ISO date when the flag should next be reviewed.
+        enabled: Whether the flag is initially enabled. Defaults from state when omitted.
+        default_value: Value returned when the flag is disabled or invalid.
+        rules: Ordered canonical gate rules.
+        fallthrough: Canonical fallthrough config.
+        evaluation_mode: One of "client", "server", or "both".
+        auto_disable: Whether guardrail automation may disable this gate.
+        guardrails: Optional guardrail configs.
 
     Returns:
         The created flag configuration.
     """
+    resolved_state = state or ("active" if enabled is True else "draft")
+    resolved_enabled = enabled if enabled is not None else resolved_state == "active"
     payload: dict[str, Any] = {
-        "project_id": project_id,
         "key": key,
+        "name": name,
         "description": description,
-        "variants": variants,
-        "default_variant": default_variant,
-        "enabled": enabled,
+        "state": resolved_state,
+        "owners": owners or [],
+        "review_by": review_by,
+        "enabled": resolved_enabled,
+        "default_value": default_value,
+        "rules": rules or [],
+        "fallthrough": fallthrough or {
+            "value": False,
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+        "evaluation_mode": evaluation_mode,
+        "auto_disable": auto_disable,
+        "guardrails": guardrails or [],
     }
-    if targeting_rules:
-        payload["targeting_rules"] = targeting_rules
-    return await _post("/v1/admin/flags", payload)
+    return await _post("/v1/admin/flags", payload, params={"project_id": project_id})
 
 
 async def update_flag(
+    project_id: str,
     key: str,
+    version: int,
+    state: str | None = None,
+    owners: list[str] | None = None,
+    review_by: str | None = None,
     enabled: bool | None = None,
-    variants: list[dict[str, Any]] | None = None,
-    targeting_rules: list[dict[str, Any]] | None = None,
+    name: str | None = None,
     description: str | None = None,
+    default_value: bool | None = None,
+    rules: list[dict[str, Any]] | None = None,
+    fallthrough: dict[str, Any] | None = None,
+    evaluation_mode: str | None = None,
+    auto_disable: bool | None = None,
+    guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Update an existing feature flag.
 
     Args:
+        project_id: Project containing the flag.
         key: Flag key to update.
+        version: Expected current config version.
+        state: Updated lifecycle state.
+        owners: Updated owner list.
+        review_by: Updated ISO review date.
         enabled: Set flag enabled/disabled state.
-        variants: Updated variant definitions.
-        targeting_rules: Updated targeting rules.
+        name: Updated name.
         description: Updated description.
+        default_value: Updated disabled/invalid fallback.
+        rules: Updated canonical gate rules.
+        fallthrough: Updated fallthrough config.
+        evaluation_mode: Updated evaluation mode.
+        auto_disable: Updated guardrail automation setting.
+        guardrails: Updated guardrail configs.
 
     Returns:
         The updated flag configuration.
     """
-    payload: dict[str, Any] = {}
+    payload: dict[str, Any] = {"version": version}
+    if state is not None:
+        payload["state"] = state
+    if owners is not None:
+        payload["owners"] = owners
+    if review_by is not None:
+        payload["review_by"] = review_by
     if enabled is not None:
         payload["enabled"] = enabled
-    if variants is not None:
-        payload["variants"] = variants
-    if targeting_rules is not None:
-        payload["targeting_rules"] = targeting_rules
+    if name is not None:
+        payload["name"] = name
     if description is not None:
         payload["description"] = description
-    return await _put(f"/v1/admin/flags/{key}", payload)
+    if default_value is not None:
+        payload["default_value"] = default_value
+    if rules is not None:
+        payload["rules"] = rules
+    if fallthrough is not None:
+        payload["fallthrough"] = fallthrough
+    if evaluation_mode is not None:
+        payload["evaluation_mode"] = evaluation_mode
+    if auto_disable is not None:
+        payload["auto_disable"] = auto_disable
+    if guardrails is not None:
+        payload["guardrails"] = guardrails
+    return await _put(f"/v1/admin/flags/{key}", payload, params={"project_id": project_id})
+
+
+async def evaluate_gate(
+    project_id: str,
+    key: str,
+    user_id: str = "",
+    anonymous_id: str = "",
+    attributes: dict[str, Any] | None = None,
+    session_id: str = "",
+    message_id: str = "",
+    page: str = "",
+    component: str = "",
+    log_exposure: bool = True,
+) -> dict[str, Any]:
+    """Evaluate a server-side feature gate through the trusted Config API."""
+    internal_token = os.getenv("APDL_INTERNAL_TOKEN", "")
+    headers = {"X-APDL-Internal-Token": internal_token} if internal_token else {}
+    payload = {
+        "project_id": project_id,
+        "key": key,
+        "context": {
+            "user_id": user_id,
+            "anonymous_id": anonymous_id,
+            "attributes": attributes or {},
+        },
+        "session_id": session_id,
+        "message_id": message_id,
+        "page": page,
+        "component": component,
+        "log_exposure": log_exposure,
+    }
+
+    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+        resp = await client.post("/v1/evaluate", json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()

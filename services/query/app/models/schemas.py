@@ -19,8 +19,12 @@ def _coerce_project_id(value: Any) -> str:
 ProjectId = Annotated[str, BeforeValidator(_coerce_project_id)]
 
 
-_PROPERTY_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$:-]{0,127}$")
+class StrictModel(BaseModel):
+    """Base model for strict public request contracts."""
 
+    model_config = ConfigDict(extra="forbid")
+    
+_PROPERTY_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$:-]{0,127}$")
 
 def _validate_property_name(value: Any) -> str:
     if not isinstance(value, str):
@@ -55,6 +59,16 @@ class AnalysisMethod(str, Enum):
     sequential = "sequential"
 
 
+class GuardrailMetric(str, Enum):
+    """Supported feature-flag guardrail metrics."""
+    frontend_error_rate = "frontend_error_rate"
+    frontend_error_count = "frontend_error_count"
+
+
+class GuardrailThreshold(str, Enum):
+    """Supported feature-flag guardrail thresholds."""
+    two_x_baseline = "2x_baseline"
+    at_least_one = "at_least_one"
 class EventFilterOperator(str, Enum):
     """Supported property filter operators for event selectors."""
     eq = "eq"
@@ -398,6 +412,46 @@ class CohortResponse(BaseModel):
     metric_selector: str
     cohort_property: str
     cohorts: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Feature flag guardrail models
+# ---------------------------------------------------------------------------
+
+class GuardrailConfig(StrictModel):
+    metric: GuardrailMetric
+    threshold: GuardrailThreshold
+    scope: str = ""
+    minimum_exposures: int = Field(default=0, ge=0)
+    window_minutes: int = Field(default=10, ge=1)
+
+    @model_validator(mode="after")
+    def check_guardrail_shape(self) -> "GuardrailConfig":
+        if self.metric == GuardrailMetric.frontend_error_rate:
+            if self.threshold != GuardrailThreshold.two_x_baseline:
+                raise ValueError("frontend_error_rate requires threshold '2x_baseline'")
+        if self.metric == GuardrailMetric.frontend_error_count:
+            if self.threshold != GuardrailThreshold.at_least_one:
+                raise ValueError("frontend_error_count requires threshold 'at_least_one'")
+        if self.scope and not self.scope.startswith("page:"):
+            raise ValueError("guardrail scope must be empty or start with 'page:'")
+        return self
+
+
+class GuardrailEvaluateRequest(StrictModel):
+    project_id: ProjectId
+    flag_key: str = Field(..., min_length=1)
+    guardrail: GuardrailConfig
+
+
+class GuardrailEvaluateResponse(BaseModel):
+    flag_key: str
+    metric: str
+    threshold: str
+    scope: str
+    window_minutes: int
+    tripped: bool
+    evidence: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------

@@ -102,8 +102,6 @@ export class SSEConnection {
     const eventTypes = [
       'config',
       'flag_update',
-      'flags_update',
-      'experiment_update',
       'ui_config',
       'heartbeat',
     ];

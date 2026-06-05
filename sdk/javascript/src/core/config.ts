@@ -19,6 +19,8 @@ export interface AutoCaptureConfig {
   inputChanges?: boolean;
   scrollDepth?: boolean;
   rage_clicks?: boolean;
+  frontend_errors?: boolean;
+  web_vitals?: boolean;
 }
 
 export interface ConsentState {
@@ -55,6 +57,8 @@ const DEFAULT_AUTO_CAPTURE: AutoCaptureConfig = {
   inputChanges: false,
   scrollDepth: true,
   rage_clicks: true,
+  frontend_errors: true,
+  web_vitals: true,
 };
 
 const DEFAULT_CONSENT: ConsentState = {
@@ -77,6 +81,8 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
       inputChanges: false,
       scrollDepth: false,
       rage_clicks: false,
+      frontend_errors: false,
+      web_vitals: false,
     };
   } else if (config.autoCapture === true || config.autoCapture === undefined) {
     autoCapture = { ...DEFAULT_AUTO_CAPTURE };

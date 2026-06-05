@@ -8,18 +8,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.store import postgres as pg_store
-from app.utils import extract_project_id, serialize_flag
+from app.utils import extract_project_id, serialize_flag_collection
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _flags_to_json_array(flags: list[dict]) -> str:
-    """Serialize flags to a JSON array matching C++ flags_to_json_array output."""
-    return json.dumps(
-        [serialize_flag(f, include_description=False) for f in flags], separators=(",", ":")
-    )
+def _flags_to_json(project_id: str, flags: list[dict]) -> str:
+    """Serialize flags to the canonical SDK bootstrap payload."""
+    return json.dumps(serialize_flag_collection(project_id, flags), separators=(",", ":"))
 
 
 @router.get("/v1/stream")
@@ -39,8 +37,8 @@ async def sse_stream(request: Request):
     broadcaster = request.app.state.broadcaster
 
     # Get initial flags from PostgreSQL
-    flags = await pg_store.get_flags(pool, project_id)
-    initial_data = _flags_to_json_array(flags)
+    flags = await pg_store.get_flags(pool, project_id, client_visible_only=True)
+    initial_data = _flags_to_json(project_id, flags)
 
     # Create a queue for this connection
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
@@ -67,7 +65,7 @@ async def sse_stream(request: Request):
                     yield message
                 except asyncio.TimeoutError:
                     # Send a heartbeat if nothing in the queue for 35s
-                    yield ": heartbeat\n\n"
+                    yield "event: heartbeat\ndata: {}\n\n"
                 except asyncio.CancelledError:
                     break
         finally:

@@ -9,6 +9,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 
+from app.sse import broadcaster as broadcaster_module
 from app.sse.broadcaster import SSEBroadcaster
 
 
@@ -185,6 +186,22 @@ async def test_double_stop_is_idempotent(broadcaster):
     await broadcaster.start()
     await broadcaster.stop()
     await broadcaster.stop()  # Should not crash
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_is_typed_sse_event(monkeypatch):
+    monkeypatch.setattr(broadcaster_module, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
+    b = SSEBroadcaster()
+    queue = asyncio.Queue()
+    await b.add_connection("proj_1", queue)
+
+    try:
+        await b.start()
+        msg = await asyncio.wait_for(queue.get(), timeout=0.2)
+    finally:
+        await b.stop()
+
+    assert msg == "event: heartbeat\ndata: {}\n\n"
 
 
 # ---- SSE message format ----

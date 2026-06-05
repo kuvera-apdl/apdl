@@ -16,7 +16,7 @@ apdl/
 │   ├── src/
 │   │   ├── core/            # Config, transport, event queue, storage
 │   │   ├── capture/         # Auto-capture (clicks, pages, forms) + manual tracking
-│   │   ├── flags/           # Client-side feature flag evaluation (MurmurHash3 bucketing)
+│   │   ├── flags/           # Client-side feature gate evaluation (FNV-1a bucketing)
 │   │   ├── sse/             # Real-time flag update stream
 │   │   ├── ui/              # Server-driven UI components (banner, modal, toast, etc.)
 │   │   └── privacy/         # Consent management, PII scrubbing, cookieless mode
@@ -168,21 +168,15 @@ apdl.track('purchase_completed', {
   revenue: 49.99,
 });
 
-// Feature flags (client-side evaluation)
-const flag = apdl.flags.evaluate('new-checkout-flow', {
-  userId: 'user-42',
-  traits: { plan: 'pro', country: 'US' },
-});
-
-if (flag.value) {
-  // flag.variant, flag.payload available for multi-variant experiments
-}
-
-// Identify users
+// Feature gates (client-side evaluation)
 apdl.identify('user-42', {
   email: 'user@example.com',
   plan: 'pro',
 });
+
+if (apdl.checkGate('new-checkout-flow')) {
+  // Show the gated experience.
+}
 ```
 
 ## Agents
