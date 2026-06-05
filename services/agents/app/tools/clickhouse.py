@@ -1,14 +1,41 @@
-"""ClickHouse query tools — thin wrappers around the Query Service HTTP API."""
+"""ClickHouse query tools for the Query Service HTTP API."""
 
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
 import httpx
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 _TIMEOUT = 30.0
+
+FilterOperator: TypeAlias = Literal[
+    "eq",
+    "neq",
+    "in",
+    "not_in",
+    "exists",
+    "not_exists",
+    "contains",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+]
+FilterScalar: TypeAlias = str | int | float | bool
+FilterValue: TypeAlias = FilterScalar | list[FilterScalar]
+
+
+class EventPropertyFilterPayload(TypedDict):
+    property: str
+    operator: FilterOperator
+    value: NotRequired[FilterValue]
+
+
+class EventSelectorPayload(TypedDict):
+    event_name: str
+    filters: list[EventPropertyFilterPayload]
 
 
 async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -23,7 +50,7 @@ async def query_events(
     project_id: str,
     start_date: str,
     end_date: str,
-    event_names: list[str] | None = None,
+    selectors: list[EventSelectorPayload],
 ) -> dict[str, Any]:
     """Query aggregated event counts and unique users.
 
@@ -31,21 +58,19 @@ async def query_events(
         project_id: The project to query.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
-        event_names: Optional list of event names to filter.
+        selectors: Event selectors to count.
     """
-    payload: dict[str, Any] = {
+    return await _post("/v1/query/events/count", {
         "project_id": project_id,
         "start_date": start_date,
         "end_date": end_date,
-    }
-    if event_names:
-        payload["event_names"] = event_names
-    return await _post("/v1/query/events/count", payload)
+        "selectors": selectors,
+    })
 
 
 async def query_timeseries(
     project_id: str,
-    event_name: str,
+    selector: EventSelectorPayload,
     start_date: str,
     end_date: str,
     interval: str = "1 DAY",
@@ -54,14 +79,14 @@ async def query_timeseries(
 
     Args:
         project_id: The project to query.
-        event_name: The event to chart.
+        selector: Event selector to chart.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
         interval: Bucket interval — "1 HOUR", "1 DAY", "1 WEEK", or "1 MONTH".
     """
     return await _post("/v1/query/events/timeseries", {
         "project_id": project_id,
-        "event_name": event_name,
+        "selector": selector,
         "start_date": start_date,
         "end_date": end_date,
         "interval": interval,
@@ -70,7 +95,7 @@ async def query_timeseries(
 
 async def query_funnel(
     project_id: str,
-    steps: list[str],
+    steps: list[EventSelectorPayload],
     start_date: str,
     end_date: str,
     window_days: int = 7,
@@ -79,7 +104,7 @@ async def query_funnel(
 
     Args:
         project_id: The project to query.
-        steps: Ordered list of event names defining the funnel.
+        steps: Ordered list of event selectors defining the funnel.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
         window_days: Max days between first and last step.
@@ -95,8 +120,8 @@ async def query_funnel(
 
 async def query_retention(
     project_id: str,
-    cohort_event: str,
-    return_event: str,
+    cohort_selector: EventSelectorPayload,
+    return_selector: EventSelectorPayload,
     start_date: str,
     end_date: str,
     period: str = "day",
@@ -105,16 +130,16 @@ async def query_retention(
 
     Args:
         project_id: The project to query.
-        cohort_event: Event that defines the cohort (first occurrence).
-        return_event: Event to check for retention.
+        cohort_selector: Selector that defines the cohort (first occurrence).
+        return_selector: Selector to check for retention.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
         period: "day" or "week".
     """
     return await _post("/v1/query/retention", {
         "project_id": project_id,
-        "cohort_event": cohort_event,
-        "return_event": return_event,
+        "cohort_selector": cohort_selector,
+        "return_selector": return_selector,
         "start_date": start_date,
         "end_date": end_date,
         "period": period,
@@ -124,7 +149,7 @@ async def query_retention(
 async def query_cohort(
     project_id: str,
     cohort_property: str,
-    metric_event: str,
+    metric_selector: EventSelectorPayload,
     start_date: str,
     end_date: str,
 ) -> dict[str, Any]:
@@ -133,14 +158,14 @@ async def query_cohort(
     Args:
         project_id: The project to query.
         cohort_property: JSON property to segment users by.
-        metric_event: Event to measure across cohorts.
+        metric_selector: Event selector to measure across cohorts.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
     """
     return await _post("/v1/query/cohort", {
         "project_id": project_id,
         "cohort_property": cohort_property,
-        "metric_event": metric_event,
+        "metric_selector": metric_selector,
         "start_date": start_date,
         "end_date": end_date,
     })
@@ -148,7 +173,7 @@ async def query_cohort(
 
 async def query_breakdown(
     project_id: str,
-    event_name: str,
+    selector: EventSelectorPayload,
     property_name: str,
     start_date: str,
     end_date: str,
@@ -158,7 +183,7 @@ async def query_breakdown(
 
     Args:
         project_id: The project to query.
-        event_name: Event to analyse.
+        selector: Event selector to analyse.
         property_name: JSON property key to break down by.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
@@ -166,7 +191,7 @@ async def query_breakdown(
     """
     return await _post("/v1/query/events/breakdown", {
         "project_id": project_id,
-        "event_name": event_name,
+        "selector": selector,
         "property": property_name,
         "start_date": start_date,
         "end_date": end_date,

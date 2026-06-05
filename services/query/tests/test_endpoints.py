@@ -67,14 +67,18 @@ async def test_readiness_fail(client):
 @pytest.mark.asyncio
 async def test_event_count(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"event_name": "click", "event_count": 100, "unique_users": 50},
-        {"event_name": "view", "event_count": 200, "unique_users": 80},
+        {"selector": "click", "event_name": "click", "event_count": 100, "unique_users": 50},
+        {"selector": "view", "event_name": "view", "event_count": 200, "unique_users": 80},
     ])
 
     resp = await client.post("/v1/query/events/count", json={
         "project_id": PROJECT_ID,
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
+        "selectors": [
+            {"event_name": "click", "filters": []},
+            {"event_name": "view", "filters": []},
+        ],
     })
 
     assert resp.status_code == 200
@@ -85,11 +89,39 @@ async def test_event_count(client):
 
 
 @pytest.mark.asyncio
-async def test_event_count_with_filter(client):
+async def test_event_count_with_selector_filter(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"event_name": "click", "event_count": 100, "unique_users": 50},
+        {
+            "selector": "$click[href eq /pricing]",
+            "event_name": "$click",
+            "event_count": 100,
+            "unique_users": 50,
+        },
     ])
 
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": PROJECT_ID,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [
+            {
+                "event_name": "$click",
+                "filters": [{"property": "href", "operator": "eq", "value": "/pricing"}],
+            }
+        ],
+    })
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_events"] == 100
+    query, params = app.state.ch_client.execute.await_args.args
+    assert "JSONExtractString" in query
+    assert params["count_0_filter_0_property"] == "href"
+    assert params["count_0_filter_0_value"] == "/pricing"
+
+
+@pytest.mark.asyncio
+async def test_event_count_rejects_removed_event_names_field(client):
     resp = await client.post("/v1/query/events/count", json={
         "project_id": PROJECT_ID,
         "start_date": "2025-01-01",
@@ -97,9 +129,7 @@ async def test_event_count_with_filter(client):
         "event_names": ["click"],
     })
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["total_events"] == 100
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -110,6 +140,7 @@ async def test_event_count_coerces_legacy_numeric_project_id(client):
         "project_id": 1,
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
+        "selectors": [{"event_name": "click", "filters": []}],
     })
 
     assert resp.status_code == 200
@@ -126,14 +157,21 @@ async def test_event_timeseries(client):
 
     resp = await client.post("/v1/query/events/timeseries", json={
         "project_id": PROJECT_ID,
-        "event_name": "click",
+        "selector": {
+            "event_name": "click",
+            "filters": [{"property": "country", "operator": "eq", "value": "US"}],
+        },
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["selector"] == "click[country eq US]"
     assert len(body["buckets"]) == 2
+    query, params = app.state.ch_client.execute.await_args.args
+    assert "JSONExtractString" in query
+    assert params["timeseries_filter_0_property"] == "country"
 
 
 @pytest.mark.asyncio
@@ -145,7 +183,10 @@ async def test_event_breakdown(client):
 
     resp = await client.post("/v1/query/events/breakdown", json={
         "project_id": PROJECT_ID,
-        "event_name": "click",
+        "selector": {
+            "event_name": "click",
+            "filters": [{"property": "page.path", "operator": "eq", "value": "/pricing"}],
+        },
         "property": "country",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
@@ -153,7 +194,74 @@ async def test_event_breakdown(client):
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["selector"] == "click[page.path eq /pricing]"
+    assert body["property"] == "country"
     assert len(body["results"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_selector_rejects_invalid_operator(client):
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": PROJECT_ID,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [
+            {
+                "event_name": "$click",
+                "filters": [{"property": "href", "operator": "starts_with", "value": "/"}],
+            }
+        ],
+    })
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_selector_rejects_malformed_selector(client):
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": PROJECT_ID,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [{"filters": []}],
+    })
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_selector_rejects_unsafe_property_name(client):
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": PROJECT_ID,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [
+            {
+                "event_name": "$click",
+                "filters": [
+                    {"property": "href'); DROP", "operator": "eq", "value": "/"}
+                ],
+            }
+        ],
+    })
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_selector_rejects_unsupported_value_type(client):
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": PROJECT_ID,
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [
+            {
+                "event_name": "$click",
+                "filters": [{"property": "href", "operator": "eq", "value": {"url": "/"}}],
+            }
+        ],
+    })
+
+    assert resp.status_code == 422
 
 
 # ------------------------------------------------------------------
@@ -171,7 +279,14 @@ async def test_funnel_analysis(client):
 
     resp = await client.post("/v1/query/funnel", json={
         "project_id": PROJECT_ID,
-        "steps": ["view", "add_to_cart", "purchase"],
+        "steps": [
+            {"event_name": "view", "filters": []},
+            {
+                "event_name": "add_to_cart",
+                "filters": [{"property": "sku", "operator": "exists"}],
+            },
+            {"event_name": "purchase", "filters": []},
+        ],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
@@ -181,24 +296,25 @@ async def test_funnel_analysis(client):
     assert len(body["steps"]) == 3
     assert body["steps"][0]["count"] == 1000
     assert body["steps"][0]["conversion_rate"] == 100.0
+    assert body["steps"][1]["selector"] == "add_to_cart[sku exists]"
     assert body["steps"][2]["count"] == 200
     assert body["overall_conversion"] == 20.0
+    query, params = app.state.ch_client.execute.await_args.args
+    assert "windowFunnel" in query
+    assert params["funnel_step_1_filter_0_property"] == "sku"
 
 
 @pytest.mark.asyncio
 async def test_funnel_too_few_steps(client):
-    """A funnel with fewer than 2 steps returns empty."""
+    """A funnel with fewer than 2 steps is invalid."""
     resp = await client.post("/v1/query/funnel", json={
         "project_id": PROJECT_ID,
-        "steps": ["only_one"],
+        "steps": [{"event_name": "only_one", "filters": []}],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["steps"] == []
-    assert body["overall_conversion"] == 0.0
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -208,7 +324,10 @@ async def test_funnel_no_data(client):
 
     resp = await client.post("/v1/query/funnel", json={
         "project_id": PROJECT_ID,
-        "steps": ["a", "b"],
+        "steps": [
+            {"event_name": "a", "filters": []},
+            {"event_name": "b", "filters": []},
+        ],
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
@@ -233,14 +352,22 @@ async def test_cohort_comparison(client):
     resp = await client.post("/v1/query/cohort", json={
         "project_id": PROJECT_ID,
         "cohort_property": "plan",
-        "metric_event": "purchase",
+        "metric_selector": {
+            "event_name": "purchase",
+            "filters": [{"property": "amount", "operator": "gte", "value": 50}],
+        },
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["metric_selector"] == "purchase[amount gte 50]"
+    assert body["cohort_property"] == "plan"
     assert len(body["cohorts"]) == 2
+    query, params = app.state.ch_client.execute.await_args.args
+    assert "JSONExtractFloat" in query
+    assert params["cohort_metric_filter_0_value"] == 50
 
 
 # ------------------------------------------------------------------
@@ -258,14 +385,19 @@ async def test_retention_analysis(client):
 
     resp = await client.post("/v1/query/retention", json={
         "project_id": PROJECT_ID,
-        "cohort_event": "signup",
-        "return_event": "login",
+        "cohort_selector": {
+            "event_name": "signup",
+            "filters": [{"property": "plan", "operator": "eq", "value": "pro"}],
+        },
+        "return_selector": {"event_name": "login", "filters": []},
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["cohort_selector"] == "signup[plan eq pro]"
+    assert body["return_selector"] == "login"
     assert len(body["cohorts"]) == 1
     cohort = body["cohorts"][0]
     assert cohort["size"] == 100
@@ -284,8 +416,11 @@ async def test_retention_weekly(client):
 
     resp = await client.post("/v1/query/retention", json={
         "project_id": PROJECT_ID,
-        "cohort_event": "signup",
-        "return_event": "login",
+        "cohort_selector": {"event_name": "signup", "filters": []},
+        "return_selector": {
+            "event_name": "login",
+            "filters": [{"property": "device_type", "operator": "neq", "value": "bot"}],
+        },
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
         "period": "week",
