@@ -9,7 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.clickhouse.client import ClickHouseClient
-from app.clickhouse.queries import RETENTION_QUERY_DAY, RETENTION_QUERY_WEEK
+from app.clickhouse.queries import build_retention_query
+from app.clickhouse.selectors import selector_label
 from app.models.schemas import RetentionCohort, RetentionRequest, RetentionResponse
 
 logger = logging.getLogger(__name__)
@@ -24,22 +25,25 @@ def _get_client(request: Request) -> ClickHouseClient:
 async def retention_analysis(body: RetentionRequest, request: Request) -> RetentionResponse:
     """Compute an N-day or N-week retention grid.
 
-    For each cohort (defined by the date a user first performed ``cohort_event``),
-    compute the percentage of users who returned to perform ``return_event``
+    For each cohort (defined by the date a user first matched ``cohort_selector``),
+    compute the percentage of users who returned to match ``return_selector``
     on each subsequent day or week.
     """
     client = _get_client(request)
 
-    query = RETENTION_QUERY_WEEK if body.period == "week" else RETENTION_QUERY_DAY
     date_key = "cohort_week" if body.period == "week" else "cohort_date"
 
     params: dict[str, Any] = {
         "project_id": body.project_id,
-        "cohort_event": body.cohort_event,
-        "return_event": body.return_event,
         "start_date": body.start_date.isoformat(),
         "end_date": body.end_date.isoformat(),
     }
+    query = build_retention_query(
+        body.cohort_selector,
+        body.return_selector,
+        params,
+        period=body.period,
+    )
 
     rows = await client.execute(query, params)
 
@@ -87,4 +91,8 @@ async def retention_analysis(body: RetentionRequest, request: Request) -> Retent
             )
         )
 
-    return RetentionResponse(cohorts=cohorts)
+    return RetentionResponse(
+        cohort_selector=selector_label(body.cohort_selector),
+        return_selector=selector_label(body.return_selector),
+        cohorts=cohorts,
+    )

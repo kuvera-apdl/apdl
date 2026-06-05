@@ -47,7 +47,10 @@ Available analysis types: event counts, timeseries, funnels, retention, cohort c
 
 Return a JSON object with:
 - "queries": list of query specifications to run, each with "type" (event_count|timeseries|funnel|retention|cohort), \
-  and relevant parameters
+  and relevant EventSelector parameters. Use "selectors" for event_count, "selector" for timeseries, \
+  "steps" as a list of selectors for funnel, "cohort_selector" and "return_selector" for retention, \
+  and "metric_selector" for cohort. Do not use legacy top-level event fields such as "event_name", \
+  "event_names", "cohort_event", "return_event", or "metric_event".
 - "rationale": brief explanation of why each query is useful
 - "focus_areas": key areas to investigate based on previous context
 

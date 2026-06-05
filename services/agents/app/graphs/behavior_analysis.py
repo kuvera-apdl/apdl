@@ -122,9 +122,18 @@ class BehaviorAnalysisAgent(BaseAgent):
         start_str, end_str = start.isoformat(), end.isoformat()
         project_id = ctx.project_id
 
+        def _required(q: dict, field: str) -> Any:
+            value = q.get(field)
+            if value is None:
+                raise ValueError(f"Missing required field '{field}' for {q.get('type', 'unknown')} query")
+            return value
+
         async def _run_one(q: dict) -> dict[str, Any]:
-            query_type = q.get("type", "event_count")
+            query_type = q.get("type")
             try:
+                if query_type is None:
+                    raise ValueError("Missing required field 'type' for query")
+
                 if query_type == "event_count":
                     result = await query_events(
                         project_id=project_id,
@@ -135,7 +144,7 @@ class BehaviorAnalysisAgent(BaseAgent):
                 elif query_type == "timeseries":
                     result = await query_timeseries(
                         project_id=project_id,
-                        event_name=q.get("event_name", "page_view"),
+                        selector=_required(q, "selector"),
                         start_date=start_str,
                         end_date=end_str,
                         interval=q.get("interval", "1 DAY"),
@@ -143,15 +152,15 @@ class BehaviorAnalysisAgent(BaseAgent):
                 elif query_type == "funnel":
                     result = await query_funnel(
                         project_id=project_id,
-                        steps=q.get("steps", []),
+                        steps=_required(q, "steps"),
                         start_date=start_str,
                         end_date=end_str,
                     )
                 elif query_type == "retention":
                     result = await query_retention(
                         project_id=project_id,
-                        cohort_event=q.get("cohort_event", "signup"),
-                        return_event=q.get("return_event", "page_view"),
+                        cohort_selector=_required(q, "cohort_selector"),
+                        return_selector=_required(q, "return_selector"),
                         start_date=start_str,
                         end_date=end_str,
                         period=q.get("period", "day"),
@@ -159,8 +168,8 @@ class BehaviorAnalysisAgent(BaseAgent):
                 elif query_type == "cohort":
                     result = await query_cohort(
                         project_id=project_id,
-                        cohort_property=q.get("cohort_property", "plan"),
-                        metric_event=q.get("metric_event", "page_view"),
+                        cohort_property=_required(q, "cohort_property"),
+                        metric_selector=_required(q, "metric_selector"),
                         start_date=start_str,
                         end_date=end_str,
                     )

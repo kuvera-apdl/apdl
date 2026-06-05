@@ -221,11 +221,131 @@ All agent actions go through a safety validator and are recorded in the audit lo
 ### Query Service (`:8082`)
 | Method | Path | Description |
 |---|---|---|
+| `POST` | `/v1/query/events/count` | Count one or more event selectors |
+| `POST` | `/v1/query/events/timeseries` | Time-bucketed counts for one event selector |
+| `POST` | `/v1/query/events/breakdown` | Property breakdown for one event selector |
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
-| `GET` | `/v1/query/cohorts` | Cohort analysis |
-| `GET` | `/v1/query/retention` | Retention curves |
+| `POST` | `/v1/query/cohort` | Cohort analysis |
+| `POST` | `/v1/query/retention` | Retention curves |
 | `GET` | `/v1/query/experiment/:id` | Experiment results with statistical tests |
 | `GET` | `/health` | Health / readiness |
+
+Query endpoints use a strict `EventSelector` shape:
+
+```json
+{
+  "event_name": "$click",
+  "filters": [
+    {"property": "href", "operator": "eq", "value": "/pricing"}
+  ]
+}
+```
+
+Filters inside one selector are combined with `AND`. Supported operators are
+`eq`, `neq`, `in`, `not_in`, `exists`, `not_exists`, `contains`, `gt`, `gte`,
+`lt`, and `lte`.
+
+Count clicks to a specific URL:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "selectors": [
+    {
+      "event_name": "$click",
+      "filters": [{"property": "href", "operator": "eq", "value": "/catalog"}]
+    }
+  ]
+}
+```
+
+Timeseries for one CTA:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "interval": "1 DAY",
+  "selector": {
+    "event_name": "$click",
+    "filters": [{"property": "text", "operator": "eq", "value": "Start free trial"}]
+  }
+}
+```
+
+Breakdown of filtered clicks:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "selector": {
+    "event_name": "$click",
+    "filters": [{"property": "page.path", "operator": "eq", "value": "/pricing"}]
+  },
+  "property": "href",
+  "limit": 20
+}
+```
+
+Page/click-path funnel:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "steps": [
+    {
+      "event_name": "$pageview",
+      "filters": [{"property": "path", "operator": "eq", "value": "/catalog"}]
+    },
+    {
+      "event_name": "$click",
+      "filters": [{"property": "href", "operator": "eq", "value": "/checkout"}]
+    }
+  ],
+  "window_days": 7
+}
+```
+
+Property-filtered retention:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "cohort_selector": {
+    "event_name": "$pageview",
+    "filters": [{"property": "path", "operator": "eq", "value": "/pricing"}]
+  },
+  "return_selector": {
+    "event_name": "$click",
+    "filters": [{"property": "href", "operator": "eq", "value": "/signup"}]
+  },
+  "period": "day"
+}
+```
+
+Filtered cohort comparison:
+
+```json
+{
+  "project_id": "apiasport",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "cohort_property": "plan",
+  "metric_selector": {
+    "event_name": "$click",
+    "filters": [{"property": "href", "operator": "eq", "value": "/checkout"}]
+  }
+}
+```
 
 ### Agents Service (`:8083`)
 | Method | Path | Description |
