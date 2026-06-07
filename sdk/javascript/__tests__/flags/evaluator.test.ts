@@ -116,6 +116,33 @@ describe('FlagEvaluator', () => {
     }
   });
 
+  it('uses presence and non-null value for exists operators', () => {
+    cache.set([makeGate('presence_gate', {
+      rules: [{
+        id: 'rule_presence',
+        name: '',
+        conditions: [
+          { attribute: 'empty_text', operator: 'exists' },
+          { attribute: 'is_beta', operator: 'exists' },
+          { attribute: 'cart_items', operator: 'exists' },
+          { attribute: 'null_trait', operator: 'not_exists' },
+          { attribute: 'missing_trait', operator: 'not_exists' },
+        ],
+        rollout: { percentage: 100, bucket_by: 'anonymous_id' },
+      }],
+    })]);
+
+    expect(evaluator.evaluate('presence_gate', {
+      anonymous_id: 'anon_123',
+      attributes: {
+        empty_text: '',
+        is_beta: false,
+        cart_items: 0,
+        null_trait: null,
+      },
+    })).toMatchObject({ reason: 'rule_match' });
+  });
+
   it('uses anonymous_id only when bucket_by explicitly selects it', () => {
     cache.set([makeGate('anonymous_gate', {
       fallthrough: {

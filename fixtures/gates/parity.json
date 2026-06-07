@@ -284,6 +284,57 @@
         "bucket_by": "user_id",
         "config_version": 5
       }
+    },
+    {
+      "name": "exists treats empty string false and zero as present",
+      "flag": {
+        "key": "presence",
+        "enabled": true,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
+        "salt": "salt_123",
+        "rules": [
+          {
+            "id": "rule_presence",
+            "name": "Present falsy values",
+            "conditions": [
+              { "attribute": "empty_text", "operator": "exists" },
+              { "attribute": "is_beta", "operator": "exists" },
+              { "attribute": "cart_items", "operator": "exists" },
+              { "attribute": "null_trait", "operator": "not_exists" },
+              { "attribute": "missing_trait", "operator": "not_exists" }
+            ],
+            "rollout": { "percentage": 100, "bucket_by": "anonymous_id" }
+          }
+        ],
+        "fallthrough": {
+          "rollout": { "percentage": 0, "bucket_by": "anonymous_id" }
+        },
+        "version": 2
+      },
+      "context": {
+        "anonymous_id": "anon_123",
+        "attributes": {
+          "empty_text": "",
+          "is_beta": false,
+          "cart_items": 0,
+          "null_trait": null
+        }
+      },
+      "result": {
+        "key": "presence",
+        "variant": "control",
+        "reason": "rule_match",
+        "rule_id": "rule_presence",
+        "rollout_bucket": 4.09183746764712,
+        "variant_bucket": 6.23319049045285,
+        "rollout_percentage": 100,
+        "bucket_by": "anonymous_id",
+        "config_version": 2
+      }
     }
   ]
 }

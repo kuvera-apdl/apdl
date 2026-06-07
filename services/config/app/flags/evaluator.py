@@ -34,9 +34,13 @@ def is_in_rollout(flag_key: str, salt: str, unit_id: str, percentage: float) -> 
 
 def _resolve_attribute(attribute: str, ctx: dict) -> tuple[bool, Any]:
     if attribute == "user_id":
-        return True, ctx.get("user_id", "")
+        if "user_id" in ctx:
+            return True, ctx.get("user_id")
+        return False, None
     if attribute == "anonymous_id":
-        return True, ctx.get("anonymous_id", "")
+        if "anonymous_id" in ctx:
+            return True, ctx.get("anonymous_id")
+        return False, None
 
     attributes = ctx.get("attributes", {})
     if isinstance(attributes, dict) and attribute in attributes:
@@ -56,9 +60,9 @@ def matches_condition(condition: dict, ctx: dict) -> bool:
 
     exists, actual = _resolve_attribute(attribute, ctx)
     if operator == "exists":
-        return exists and bool(actual)
+        return exists and actual is not None
     if operator == "not_exists":
-        return not exists or not bool(actual)
+        return not exists or actual is None
     if not exists or "value" not in condition:
         return False
 

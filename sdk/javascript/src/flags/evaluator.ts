@@ -173,10 +173,10 @@ export class FlagEvaluator {
     const actual = this.resolveAttribute(attribute, context);
 
     if (operator === 'exists') {
-      return actual.exists && Boolean(actual.value);
+      return actual.exists && actual.value !== null && actual.value !== undefined;
     }
     if (operator === 'not_exists') {
-      return !actual.exists || !actual.value;
+      return !actual.exists || actual.value === null || actual.value === undefined;
     }
     if (!actual.exists || !Object.prototype.hasOwnProperty.call(condition, 'value')) {
       return false;
@@ -291,11 +291,17 @@ export class FlagEvaluator {
 
   private resolveAttribute(attribute: string, context: EvalContext): ResolvedAttribute {
     if (attribute === 'user_id') {
-      return { exists: true, value: context.user_id ?? '' };
+      if (Object.prototype.hasOwnProperty.call(context, 'user_id')) {
+        return { exists: true, value: context.user_id };
+      }
+      return { exists: false, value: null };
     }
 
     if (attribute === 'anonymous_id') {
-      return { exists: true, value: context.anonymous_id ?? '' };
+      if (Object.prototype.hasOwnProperty.call(context, 'anonymous_id')) {
+        return { exists: true, value: context.anonymous_id };
+      }
+      return { exists: false, value: null };
     }
 
     const attributes = context.attributes ?? {};

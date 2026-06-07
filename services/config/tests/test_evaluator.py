@@ -171,6 +171,35 @@ def test_condition_operators():
         assert evaluate(flag, make_context())["reason"] == "rule_match"
 
 
+def test_exists_uses_presence_and_non_null_value():
+    flag = make_flag({
+        "rules": [{
+            "id": "rule_presence",
+            "name": "",
+            "conditions": [
+                {"attribute": "empty_text", "operator": "exists"},
+                {"attribute": "is_beta", "operator": "exists"},
+                {"attribute": "cart_items", "operator": "exists"},
+                {"attribute": "null_trait", "operator": "not_exists"},
+                {"attribute": "missing_trait", "operator": "not_exists"},
+            ],
+            "rollout": {"percentage": 100.0, "bucket_by": "anonymous_id"},
+        }],
+    })
+
+    result = evaluate(flag, {
+        "anonymous_id": "anon_123",
+        "attributes": {
+            "empty_text": "",
+            "is_beta": False,
+            "cart_items": 0,
+            "null_trait": None,
+        },
+    })
+
+    assert result["reason"] == "rule_match"
+
+
 def test_evaluate_all_flags():
     results = evaluate_all(
         [
