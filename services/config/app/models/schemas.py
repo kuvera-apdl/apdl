@@ -1,5 +1,6 @@
 """Pydantic models for gates and experiments."""
 
+from collections.abc import Mapping
 from datetime import date
 from typing import Any, Literal
 
@@ -57,7 +58,7 @@ class GateCondition(StrictModel):
     @model_validator(mode="after")
     def validate_value(self):
         if self.operator in {"exists", "not_exists"}:
-            if self.value is not None:
+            if "value" in self.model_fields_set:
                 raise ValueError(f"{self.operator} conditions must not include value")
             return self
         if self.value is None:
@@ -67,12 +68,12 @@ class GateCondition(StrictModel):
 
 class RolloutConfig(StrictModel):
     percentage: float = Field(..., ge=0.0, le=100.0)
-    bucket_by: str = Field(default="user_id", min_length=1)
+    bucket_by: str = Field(..., min_length=1)
 
 
 class VariantConfig(StrictModel):
     key: str = Field(..., min_length=1)
-    weight: int = Field(..., ge=0)
+    weight: int = Field(..., ge=0, strict=True)
 
 
 class GateRule(StrictModel):
@@ -83,9 +84,7 @@ class GateRule(StrictModel):
 
 
 class FallthroughConfig(StrictModel):
-    rollout: RolloutConfig = Field(
-        default_factory=lambda: RolloutConfig(percentage=0.0, bucket_by="user_id")
-    )
+    rollout: RolloutConfig
 
 
 class GuardrailConfig(StrictModel):
@@ -136,18 +135,35 @@ def validate_variant_weights(variants: list[VariantConfig]) -> None:
         raise ValueError("variant weights must contain at least one positive weight")
 
 
+def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
+    """Validate the canonical variant fields for a complete flag config."""
+    default_variant = flag.get("default_variant")
+    if not isinstance(default_variant, str) or not default_variant:
+        raise ValueError("default_variant must be a non-empty string")
+
+    variants = flag.get("variants")
+    if not isinstance(variants, list):
+        raise ValueError("variants must contain at least one variant")
+
+    parsed_variants = [
+        variant if isinstance(variant, VariantConfig) else VariantConfig.model_validate(variant)
+        for variant in variants
+    ]
+    validate_variants(parsed_variants, default_variant)
+
+
 class VariantFlagMixin(StrictModel):
-    default_variant: str = Field(default="control", min_length=1)
-    variants: list[VariantConfig] = Field(default_factory=default_variants)
+    default_variant: str = Field(..., min_length=1)
+    variants: list[VariantConfig] = Field(...)
 
     @model_validator(mode="after")
     def validate_variant_config(self):
-        validate_variants(self.variants, self.default_variant)
+        validate_flag_variant_config(self.model_dump(mode="python"))
         return self
 
 
 class FlagConfig(VariantFlagMixin):
-    key: str
+    key: str = Field(..., min_length=1)
     project_id: str = ""
     name: str = ""
     state: FlagState = "draft"
@@ -156,7 +172,7 @@ class FlagConfig(VariantFlagMixin):
     enabled: bool = False
     description: str = ""
     rules: list[GateRule] = Field(default_factory=list)
-    fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
+    fallthrough: FallthroughConfig
     salt: str = ""
     evaluation_mode: EvaluationMode = "client"
     auto_disable: bool = True
@@ -164,10 +180,19 @@ class FlagConfig(VariantFlagMixin):
     disabled_reason: str = ""
     disabled_by: str = ""
     disabled_at: str | None = None
-    version: int = 1
+    version: int = Field(default=1, ge=1)
     created_at: str = ""
     updated_at: str = ""
     archived_at: str | None = None
+
+
+class ClientFlagConfig(VariantFlagMixin):
+    key: str = Field(..., min_length=1)
+    enabled: bool
+    salt: str
+    rules: list[GateRule]
+    fallthrough: FallthroughConfig
+    version: int = Field(..., ge=1)
 
 
 class ExperimentConfig(BaseModel):
@@ -238,7 +263,7 @@ class FlagCreate(VariantFlagMixin):
     enabled: bool = False
     description: str = ""
     rules: list[GateRule] = Field(default_factory=list)
-    fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
+    fallthrough: FallthroughConfig
     evaluation_mode: EvaluationMode = "client"
     auto_disable: bool = True
     guardrails: list[GuardrailConfig] = Field(default_factory=list)

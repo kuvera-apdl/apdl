@@ -5,12 +5,10 @@ from datetime import date, datetime
 
 from fastapi import Request
 
+from app.models.schemas import ClientFlagConfig, FlagConfig
+
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
 SCHEMA_VERSION = 2
-DEFAULT_VARIANTS = [
-    {"key": "control", "weight": 1},
-    {"key": "treatment", "weight": 1},
-]
 
 
 def _json_safe(value):
@@ -21,7 +19,7 @@ def _json_safe(value):
 
 def serialize_flag(f: dict) -> dict:
     """Convert a canonical flag DB row to the full admin API representation."""
-    return {
+    payload = {
         "key": f["key"],
         "project_id": f.get("project_id", ""),
         "name": f.get("name", ""),
@@ -30,10 +28,10 @@ def serialize_flag(f: dict) -> dict:
         "review_by": _json_safe(f.get("review_by")),
         "description": f.get("description", ""),
         "enabled": f["enabled"],
-        "default_variant": f.get("default_variant", "control"),
-        "variants": f.get("variants", DEFAULT_VARIANTS),
+        "default_variant": f["default_variant"],
+        "variants": f["variants"],
         "rules": f.get("rules", []),
-        "fallthrough": f.get("fallthrough", {}),
+        "fallthrough": f["fallthrough"],
         "salt": f.get("salt", ""),
         "evaluation_mode": f.get("evaluation_mode", "client"),
         "auto_disable": f.get("auto_disable", True),
@@ -46,20 +44,22 @@ def serialize_flag(f: dict) -> dict:
         "updated_at": _json_safe(f.get("updated_at", "")),
         "archived_at": _json_safe(f.get("archived_at")),
     }
+    return FlagConfig.model_validate(payload).model_dump(mode="json")
 
 
 def serialize_client_flag(f: dict) -> dict:
     """Convert a canonical flag DB row to the SDK bootstrap representation."""
-    return {
+    payload = {
         "key": f["key"],
         "enabled": f["enabled"],
-        "default_variant": f.get("default_variant", "control"),
-        "variants": f.get("variants", DEFAULT_VARIANTS),
+        "default_variant": f["default_variant"],
+        "variants": f["variants"],
         "salt": f.get("salt", ""),
         "rules": f.get("rules", []),
-        "fallthrough": f.get("fallthrough", {}),
+        "fallthrough": f["fallthrough"],
         "version": f.get("version", 1),
     }
+    return ClientFlagConfig.model_validate(payload).model_dump(mode="json")
 
 
 def serialize_flag_collection(project_id: str, flags: list[dict]) -> dict:

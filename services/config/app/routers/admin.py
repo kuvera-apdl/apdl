@@ -16,8 +16,7 @@ from app.models.schemas import (
     FlagCreate,
     FlagDisable,
     FlagUpdate,
-    VariantConfig,
-    validate_variants,
+    validate_flag_variant_config,
 )
 from app.store import postgres as pg_store
 from app.store import redis_cache
@@ -53,11 +52,7 @@ def _sync_lifecycle_update(updates: dict) -> None:
 
 def _validate_merged_variant_contract(flag: dict) -> str | None:
     try:
-        variants = [
-            VariantConfig.model_validate(variant)
-            for variant in flag.get("variants", [])
-        ]
-        validate_variants(variants, flag.get("default_variant", ""))
+        validate_flag_variant_config(flag)
     except (TypeError, ValueError, ValidationError) as exc:
         return str(exc)
     return None

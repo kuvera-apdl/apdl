@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -5,6 +7,43 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.routers import admin
+
+
+@pytest.mark.asyncio
+async def test_flag_update_broadcast_uses_canonical_client_shape():
+    broadcaster = AsyncMock()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(broadcaster=broadcaster))
+    )
+    flag = {**make_flag(), "evaluation_mode": "both"}
+
+    await admin._broadcast_flag_change(
+        request,
+        "apdl",
+        "flag_updated",
+        flag,
+        "checkout",
+    )
+
+    broadcaster.broadcast.assert_awaited_once()
+    project_id, event_name, data = broadcaster.broadcast.await_args.args
+    payload = json.loads(data)
+    assert project_id == "apdl"
+    assert event_name == "flag_update"
+    assert payload == {
+        "action": "flag_updated",
+        "flag": admin.serialize_client_flag(flag),
+    }
+    assert set(payload["flag"]) == {
+        "key",
+        "enabled",
+        "default_variant",
+        "variants",
+        "salt",
+        "rules",
+        "fallthrough",
+        "version",
+    }
 
 
 @pytest.mark.asyncio

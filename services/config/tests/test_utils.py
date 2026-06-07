@@ -53,6 +53,23 @@ def make_flag() -> dict:
     }
 
 
+def make_create_payload(**overrides) -> dict:
+    payload = {
+        "key": "checkout",
+        "name": "Checkout",
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+        "fallthrough": {
+            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_serialize_flag_returns_full_canonical_admin_shape():
     assert serialize_flag(make_flag()) == make_flag()
 
@@ -84,6 +101,17 @@ def test_serialize_client_flag_returns_sdk_shape_only():
     }
 
 
+def test_serialize_client_flag_rejects_nested_old_fallthrough_value():
+    flag = make_flag()
+    flag["fallthrough"] = {
+        "value": False,
+        "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+    }
+
+    with pytest.raises(ValidationError):
+        serialize_client_flag(flag)
+
+
 def test_serialize_flag_collection_uses_canonical_envelope():
     assert serialize_flag_collection("apdl", [make_flag()]) == {
         "schema_version": 2,
@@ -93,23 +121,14 @@ def test_serialize_flag_collection_uses_canonical_envelope():
 
 
 def test_flag_create_accepts_canonical_evaluation_mode():
-    flag = FlagCreate.model_validate({
-        "key": "checkout",
-        "name": "Checkout",
-        "evaluation_mode": "server",
-    })
+    flag = FlagCreate.model_validate(make_create_payload(evaluation_mode="server"))
 
     assert flag.evaluation_mode == "server"
 
 
 def test_flag_create_rejects_state_enabled_mismatch():
     with pytest.raises(ValidationError):
-        FlagCreate.model_validate({
-            "key": "checkout",
-            "name": "Checkout",
-            "state": "draft",
-            "enabled": True,
-        })
+        FlagCreate.model_validate(make_create_payload(state="draft", enabled=True))
 
 
 def test_flag_update_rejects_state_enabled_mismatch():
@@ -134,15 +153,51 @@ def test_flag_update_rejects_state_enabled_mismatch():
     ],
 )
 def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
-    payload = {
-        "key": "checkout",
-        "name": "Checkout",
-        "rules": [],
-        "fallthrough": {
-            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
-        },
-        legacy_field: "legacy",
-    }
+    payload = make_create_payload()
+    payload[legacy_field] = "legacy"
+
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    [
+        "variant_type",
+        "variants_json",
+        "rollout_percentage",
+        "targeting_rules",
+        "default_value",
+        "defaultVariant",
+        "client_exposed",
+    ],
+)
+def test_flag_update_rejects_legacy_or_unknown_fields(legacy_field):
+    payload = {"version": 4, legacy_field: "legacy"}
+
+    with pytest.raises(ValidationError):
+        FlagUpdate.model_validate(payload)
+
+
+def test_flag_create_requires_default_variant():
+    payload = make_create_payload()
+    payload.pop("default_variant")
+
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(payload)
+
+
+def test_flag_create_requires_variants():
+    payload = make_create_payload()
+    payload.pop("variants")
+
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(payload)
+
+
+def test_flag_create_requires_fallthrough():
+    payload = make_create_payload()
+    payload.pop("fallthrough")
 
     with pytest.raises(ValidationError):
         FlagCreate.model_validate(payload)
@@ -150,38 +205,58 @@ def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
 
 def test_flag_create_rejects_fallthrough_value():
     with pytest.raises(ValidationError):
-        FlagCreate.model_validate({
-            "key": "checkout",
-            "name": "Checkout",
-            "fallthrough": {
+        FlagCreate.model_validate(
+            make_create_payload(fallthrough={
                 "value": False,
                 "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
-            },
-        })
+            })
+        )
+
+
+def test_flag_create_rejects_exists_condition_value():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(rules=[{
+                "id": "rule_present",
+                "name": "",
+                "conditions": [{
+                    "attribute": "plan",
+                    "operator": "exists",
+                    "value": None,
+                }],
+                "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+            }])
+        )
 
 
 def test_flag_create_rejects_decimal_variant_weights():
     with pytest.raises(ValidationError):
-        FlagCreate.model_validate({
-            "key": "checkout",
-            "name": "Checkout",
-            "variants": [
+        FlagCreate.model_validate(
+            make_create_payload(variants=[
                 {"key": "control", "weight": 0.5},
                 {"key": "treatment", "weight": 0.5},
-            ],
-        })
+            ])
+        )
+
+
+def test_flag_create_rejects_negative_variant_weights():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(variants=[
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": -1},
+            ])
+        )
 
 
 def test_flag_create_rejects_all_zero_variant_weights():
     with pytest.raises(ValidationError):
-        FlagCreate.model_validate({
-            "key": "checkout",
-            "name": "Checkout",
-            "variants": [
+        FlagCreate.model_validate(
+            make_create_payload(variants=[
                 {"key": "control", "weight": 0},
                 {"key": "treatment", "weight": 0},
-            ],
-        })
+            ])
+        )
 
 
 def test_flag_update_requires_version():
@@ -201,8 +276,6 @@ def test_flag_disable_accepts_experiment_rollback_reason():
 
 def test_frontend_error_count_guardrail_requires_at_least_one_threshold():
     payload = {
-        "key": "checkout",
-        "name": "Checkout",
         "guardrails": [{
             "metric": "frontend_error_count",
             "threshold": "2x_baseline",
@@ -210,4 +283,4 @@ def test_frontend_error_count_guardrail_requires_at_least_one_threshold():
     }
 
     with pytest.raises(ValidationError):
-        FlagCreate.model_validate(payload)
+        FlagCreate.model_validate(make_create_payload(**payload))
