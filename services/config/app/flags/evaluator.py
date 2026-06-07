@@ -125,13 +125,15 @@ def _unit_id(ctx: dict, bucket_by: str) -> str:
 def _base_result(flag: dict) -> dict:
     return {
         "key": flag.get("key", ""),
-        "value": bool(flag.get("default_value", False)),
+        "variant": flag.get("default_variant", "control"),
         "reason": "",
-        "rule_id": "",
-        "bucket": None,
+        "rule_id": None,
+        "rollout_bucket": None,
+        "variant_bucket": None,
         "rollout_percentage": None,
-        "bucket_by": "",
+        "bucket_by": None,
         "config_version": int(flag.get("version", 0)),
+        "source": None,
     }
 
 
@@ -145,8 +147,49 @@ def _apply_rollout(
     unit_id = _unit_id(ctx, bucket_by)
     if not unit_id:
         return False, None, percentage, bucket_by
-    bucket = percentage_bucket(flag.get("key", ""), flag.get("salt", ""), unit_id)
+    bucket = percentage_bucket(flag.get("key", ""), f"{flag.get('salt', '')}:rollout", unit_id)
     return bucket < percentage, bucket, percentage, bucket_by
+
+
+def assign_weighted_variant(variants: list[dict], variant_bucket: float) -> str | None:
+    total_weight = sum(
+        variant.get("weight", 0)
+        for variant in variants
+        if isinstance(variant, dict) and isinstance(variant.get("weight"), int)
+    )
+    if total_weight <= 0:
+        return None
+
+    target = (variant_bucket / 100.0) * total_weight
+    cumulative = 0
+    last_positive_variant: str | None = None
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        key = variant.get("key")
+        weight = variant.get("weight")
+        if not isinstance(key, str) or not isinstance(weight, int) or weight <= 0:
+            continue
+        last_positive_variant = key
+        cumulative += weight
+        if target < cumulative:
+            return key
+
+    return last_positive_variant
+
+
+def _assign_variant(flag: dict, ctx: dict, bucket_by: str) -> tuple[str, float | None]:
+    default_variant = flag.get("default_variant", "control")
+    unit_id = _unit_id(ctx, bucket_by)
+    if not unit_id:
+        return default_variant, None
+    variant_bucket = percentage_bucket(
+        flag.get("key", ""),
+        f"{flag.get('salt', '')}:variant",
+        unit_id,
+    )
+    variant = assign_weighted_variant(flag.get("variants", []), variant_bucket)
+    return variant or default_variant, variant_bucket
 
 
 def evaluate(flag: dict, ctx: dict) -> dict:
@@ -171,14 +214,14 @@ def evaluate(flag: dict, ctx: dict) -> dict:
             ctx,
         )
         result["rule_id"] = rule.get("id", "")
-        result["bucket"] = bucket
+        result["rollout_bucket"] = bucket
         result["rollout_percentage"] = percentage
         result["bucket_by"] = bucket_by
         if bucket is None:
             result["reason"] = "error"
             return result
         if passed:
-            result["value"] = True
+            result["variant"], result["variant_bucket"] = _assign_variant(flag, ctx, bucket_by)
             result["reason"] = "rule_match"
         else:
             result["reason"] = "rule_rollout"
@@ -190,14 +233,14 @@ def evaluate(flag: dict, ctx: dict) -> dict:
         fallthrough.get("rollout", {}),
         ctx,
     )
-    result["bucket"] = bucket
+    result["rollout_bucket"] = bucket
     result["rollout_percentage"] = percentage
     result["bucket_by"] = bucket_by
     if bucket is None:
         result["reason"] = "error"
         return result
     if passed:
-        result["value"] = bool(fallthrough.get("value", False))
+        result["variant"], result["variant_bucket"] = _assign_variant(flag, ctx, bucket_by)
         result["reason"] = "fallthrough"
     else:
         result["reason"] = "fallthrough_rollout"

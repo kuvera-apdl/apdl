@@ -33,8 +33,8 @@ const ANON_ID_KEY = 'apdl_anonymous_id';
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
 
 interface ActiveFlagState {
-  value: boolean;
-  version: number;
+  variant: string;
+  version: number | null;
 }
 
 /**
@@ -62,6 +62,7 @@ export class APDLClient {
   private consentManager: ConsentManager;
   private scrubber: Scrubber;
   private flagChangeListeners: Map<string, Set<(value: boolean) => void>> = new Map();
+  private variantChangeListeners: Map<string, Set<(variant: string | null) => void>> = new Map();
   private featureFlagExposureKeys: Set<string> = new Set();
   private missingGateWarnings: Set<string> = new Set();
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
@@ -270,21 +271,35 @@ export class APDLClient {
   // ── Feature flags ─────────────────────────────────────────────
 
   /**
+   * Evaluates a feature flag and returns its variant.
+   */
+  getVariant(key: string, options?: GateEvaluationOptions): string | null {
+    return this.getVariantDetails(key, options).variant;
+  }
+
+  /**
+   * Evaluates a feature flag and returns explanation details.
+   */
+  getVariantDetails(key: string, options?: GateEvaluationOptions): GateEvaluationResult {
+    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+    this.warnMissingGate(result);
+    this.rememberActiveFlag(result, options);
+    this.logFeatureFlagExposure(result, options);
+    return result;
+  }
+
+  /**
    * Evaluates a boolean feature gate.
    */
   checkGate(key: string, options?: GateEvaluationOptions): boolean {
-    return this.checkGateDetails(key, options).value;
+    return this.getVariant(key, options) === 'treatment';
   }
 
   /**
    * Evaluates a feature gate and returns explanation details.
    */
   checkGateDetails(key: string, options?: GateEvaluationOptions): GateEvaluationResult {
-    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    this.warnMissingGate(result);
-    this.rememberActiveFlag(result, options);
-    this.logFeatureFlagExposure(result, options);
-    return result;
+    return this.getVariantDetails(key, options);
   }
 
   /**
@@ -302,6 +317,25 @@ export class APDLClient {
       listeners.delete(callback);
       if (listeners.size === 0) {
         this.flagChangeListeners.delete(key);
+      }
+    };
+  }
+
+  /**
+   * Registers a callback for variant changes.
+   * Returns an unsubscribe function.
+   */
+  onVariantChange(key: string, callback: (variant: string | null) => void): () => void {
+    if (!this.variantChangeListeners.has(key)) {
+      this.variantChangeListeners.set(key, new Set());
+    }
+    const listeners = this.variantChangeListeners.get(key)!;
+    listeners.add(callback);
+
+    return () => {
+      listeners.delete(callback);
+      if (listeners.size === 0) {
+        this.variantChangeListeners.delete(key);
       }
     };
   }
@@ -435,7 +469,7 @@ export class APDLClient {
     result: GateEvaluationResult,
     options?: GateEvaluationOptions
   ): void {
-    if (result.reason === 'not_found') {
+    if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
       return;
     }
 
@@ -453,10 +487,11 @@ export class APDLClient {
     this.featureFlagExposureKeys.add(dedupeKey);
     this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
       flag_key: result.key,
-      value: result.value,
+      variant: result.variant,
       reason: result.reason,
       rule_id: result.rule_id,
-      bucket: result.bucket,
+      rollout_bucket: result.rollout_bucket,
+      variant_bucket: result.variant_bucket,
       rollout_percentage: result.rollout_percentage,
       bucket_by: result.bucket_by,
       config_version: result.config_version,
@@ -492,7 +527,7 @@ export class APDLClient {
       identity,
       result.key,
       result.config_version,
-      result.value,
+      result.variant,
       page,
       component,
     ]);
@@ -507,7 +542,18 @@ export class APDLClient {
       const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
       for (const listener of listeners) {
         try {
-          listener(result.value);
+          listener(result.variant === 'treatment');
+        } catch {
+          // Listener errors should not propagate
+        }
+      }
+    }
+
+    for (const [key, listeners] of this.variantChangeListeners) {
+      const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+      for (const listener of listeners) {
+        try {
+          listener(result.variant);
         } catch {
           // Listener errors should not propagate
         }
@@ -522,7 +568,7 @@ export class APDLClient {
     const page = this.currentPagePath(options?.page);
     const pageStates = this.activeFlagStatesByPage.get(page);
 
-    if (result.reason === 'not_found') {
+    if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
       pageStates?.delete(result.key);
       if (pageStates?.size === 0) {
         this.activeFlagStatesByPage.delete(page);
@@ -532,7 +578,7 @@ export class APDLClient {
 
     const targetPageStates = pageStates ?? new Map<string, ActiveFlagState>();
     targetPageStates.set(result.key, {
-      value: result.value,
+      variant: result.variant,
       version: result.config_version,
     });
     this.activeFlagStatesByPage.set(page, targetPageStates);
@@ -542,11 +588,11 @@ export class APDLClient {
     for (const [page, states] of Array.from(this.activeFlagStatesByPage.entries())) {
       for (const key of Array.from(states.keys())) {
         const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-        if (result.reason === 'not_found') {
+        if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
           states.delete(key);
         } else {
           states.set(key, {
-            value: result.value,
+            variant: result.variant,
             version: result.config_version,
           });
         }
@@ -558,16 +604,18 @@ export class APDLClient {
   }
 
   private activeFlagSnapshot(): {
-    active_flags: Record<string, boolean>;
+    active_flags: Record<string, string>;
     active_flag_versions: Record<string, number>;
   } {
-    const activeFlags: Record<string, boolean> = {};
+    const activeFlags: Record<string, string> = {};
     const activeFlagVersions: Record<string, number> = {};
     const pageStates = this.activeFlagStatesByPage.get(this.currentPagePath());
 
     for (const [key, state] of pageStates ?? []) {
-      activeFlags[key] = state.value;
-      activeFlagVersions[key] = state.version;
+      activeFlags[key] = state.variant;
+      if (state.version !== null) {
+        activeFlagVersions[key] = state.version;
+      }
     }
 
     return {

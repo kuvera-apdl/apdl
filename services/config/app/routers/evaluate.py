@@ -60,9 +60,9 @@ async def evaluate(body: GateEvaluateRequest, request: Request):
         )
 
     result = evaluate_gate(flag, body.context.model_dump(mode="json"))
-    response = GateEvaluateResponse(**result, source=SERVER_EXPOSURE_SOURCE)
+    response = GateEvaluateResponse(**{**result, "source": SERVER_EXPOSURE_SOURCE})
 
-    if body.log_exposure and result["reason"] != "not_found":
+    if body.log_exposure and response.variant is not None:
         await _publish_exposure(request, body, response)
 
     return response
@@ -89,10 +89,11 @@ async def _publish_exposure(
         "session_id": session_id,
         "properties": {
             "flag_key": result.key,
-            "value": result.value,
+            "variant": result.variant,
             "reason": result.reason,
             "rule_id": result.rule_id,
-            "bucket": result.bucket,
+            "rollout_bucket": result.rollout_bucket,
+            "variant_bucket": result.variant_bucket,
             "rollout_percentage": result.rollout_percentage,
             "bucket_by": result.bucket_by,
             "config_version": result.config_version,

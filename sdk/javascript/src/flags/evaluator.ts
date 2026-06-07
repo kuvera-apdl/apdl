@@ -5,6 +5,7 @@ import type {
   GateEvaluationResult,
   GateRule,
   RolloutConfig,
+  VariantConfig,
 } from './types';
 import { FlagCache } from './cache';
 import { percentageBucket } from './hash';
@@ -15,7 +16,7 @@ type ResolvedAttribute =
 
 interface RolloutResult {
   passed: boolean;
-  bucket: number | null;
+  rolloutBucket: number | null;
   percentage: number;
   bucketBy: string;
 }
@@ -37,27 +38,29 @@ export class FlagEvaluator {
       if (this.cache.isInvalid(key)) {
         return {
           key,
-          value: false,
+          variant: null,
           reason: 'invalid_config',
-          rule_id: '',
-          bucket: null,
+          rule_id: null,
+          rollout_bucket: null,
+          variant_bucket: null,
           rollout_percentage: null,
-          bucket_by: '',
-          config_version: 0,
-          source: this.cache.getInvalidSource(key),
+          bucket_by: null,
+          config_version: null,
+          source: null,
         };
       }
 
       return {
         key,
-        value: false,
+        variant: null,
         reason: 'not_found',
-        rule_id: '',
-        bucket: null,
+        rule_id: null,
+        rollout_bucket: null,
+        variant_bucket: null,
         rollout_percentage: null,
-        bucket_by: '',
-        config_version: 0,
-        source: 'none',
+        bucket_by: null,
+        config_version: null,
+        source: null,
       };
     }
 
@@ -76,44 +79,71 @@ export class FlagEvaluator {
       }
 
       const rollout = this.applyRollout(flag, rule.rollout, context);
-      if (rollout.bucket === null) {
+      if (rollout.rolloutBucket === null) {
         return {
           ...result,
           reason: 'error',
           rule_id: rule.id,
-          bucket: null,
+          rollout_bucket: null,
+          variant_bucket: null,
           rollout_percentage: rollout.percentage,
           bucket_by: rollout.bucketBy,
         };
       }
 
+      if (!rollout.passed) {
+        return {
+          ...result,
+          reason: 'rule_rollout',
+          rule_id: rule.id,
+          rollout_bucket: rollout.rolloutBucket,
+          rollout_percentage: rollout.percentage,
+          bucket_by: rollout.bucketBy,
+        };
+      }
+
+      const assignment = this.assignWeightedVariant(flag, context, rollout.bucketBy);
       return {
         ...result,
-        value: rollout.passed ? true : flag.default_value,
-        reason: rollout.passed ? 'rule_match' : 'rule_rollout',
+        variant: assignment.variant,
+        reason: 'rule_match',
         rule_id: rule.id,
-        bucket: rollout.bucket,
+        rollout_bucket: rollout.rolloutBucket,
+        variant_bucket: assignment.variantBucket,
         rollout_percentage: rollout.percentage,
         bucket_by: rollout.bucketBy,
       };
     }
 
     const rollout = this.applyRollout(flag, flag.fallthrough.rollout, context);
-    if (rollout.bucket === null) {
+    if (rollout.rolloutBucket === null) {
       return {
         ...result,
         reason: 'error',
-        bucket: null,
+        rollout_bucket: null,
+        variant_bucket: null,
         rollout_percentage: rollout.percentage,
         bucket_by: rollout.bucketBy,
       };
     }
 
+    if (!rollout.passed) {
+      return {
+        ...result,
+        reason: 'fallthrough_rollout',
+        rollout_bucket: rollout.rolloutBucket,
+        rollout_percentage: rollout.percentage,
+        bucket_by: rollout.bucketBy,
+      };
+    }
+
+    const assignment = this.assignWeightedVariant(flag, context, rollout.bucketBy);
     return {
       ...result,
-      value: rollout.passed ? flag.fallthrough.value : flag.default_value,
-      reason: rollout.passed ? 'fallthrough' : 'fallthrough_rollout',
-      bucket: rollout.bucket,
+      variant: assignment.variant,
+      reason: 'fallthrough',
+      rollout_bucket: rollout.rolloutBucket,
+      variant_bucket: assignment.variantBucket,
       rollout_percentage: rollout.percentage,
       bucket_by: rollout.bucketBy,
     };
@@ -122,12 +152,13 @@ export class FlagEvaluator {
   private baseResult(flag: GateConfig): GateEvaluationResult {
     return {
       key: flag.key,
-      value: flag.default_value,
+      variant: flag.default_variant,
       reason: 'error',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
+      bucket_by: null,
       config_version: flag.version,
       source: this.cache.getSource(flag.key),
     };
@@ -214,18 +245,39 @@ export class FlagEvaluator {
     if (!unitId) {
       return {
         passed: false,
-        bucket: null,
+        rolloutBucket: null,
         percentage: rollout.percentage,
         bucketBy: rollout.bucket_by,
       };
     }
 
-    const bucket = percentageBucket(flag.key, flag.salt, unitId);
+    const bucket = percentageBucket(flag.key, `${flag.salt}:rollout`, unitId);
     return {
       passed: bucket < rollout.percentage,
-      bucket,
+      rolloutBucket: bucket,
       percentage: rollout.percentage,
       bucketBy: rollout.bucket_by,
+    };
+  }
+
+  private assignWeightedVariant(
+    flag: GateConfig,
+    context: EvalContext,
+    bucketBy: string
+  ): { variant: string; variantBucket: number | null } {
+    const unitId = this.unitId(context, bucketBy);
+    if (!unitId) {
+      return {
+        variant: flag.default_variant,
+        variantBucket: null,
+      };
+    }
+
+    const variantBucket = percentageBucket(flag.key, `${flag.salt}:variant`, unitId);
+    const assigned = assignWeightedVariant(flag.variants, variantBucket) ?? flag.default_variant;
+    return {
+      variant: assigned,
+      variantBucket,
     };
   }
 
@@ -253,4 +305,32 @@ export class FlagEvaluator {
 
     return { exists: false, value: null };
   }
+}
+
+export function assignWeightedVariant(
+  variants: VariantConfig[],
+  variantBucket: number
+): string | null {
+  const totalWeight = variants.reduce((total, variant) => total + variant.weight, 0);
+  if (totalWeight <= 0) {
+    return null;
+  }
+
+  const target = (variantBucket / 100) * totalWeight;
+  let cumulative = 0;
+  let lastPositiveVariant: string | null = null;
+
+  for (const variant of variants) {
+    if (variant.weight <= 0) {
+      continue;
+    }
+
+    lastPositiveVariant = variant.key;
+    cumulative += variant.weight;
+    if (target < cumulative) {
+      return variant.key;
+    }
+  }
+
+  return lastPositiveVariant;
 }

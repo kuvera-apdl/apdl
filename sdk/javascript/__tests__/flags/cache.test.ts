@@ -59,11 +59,14 @@ function makeGate(): GateConfig {
   return {
     key: 'checkout',
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

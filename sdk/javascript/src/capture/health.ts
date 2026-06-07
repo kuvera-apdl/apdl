@@ -7,7 +7,7 @@ export const FRONTEND_ERROR_EVENT = '$frontend_error';
 export const WEB_VITAL_EVENT = '$web_vital';
 
 type ActiveFlagSnapshot = {
-  active_flags: Record<string, boolean>;
+  active_flags: Record<string, string>;
   active_flag_versions: Record<string, number>;
 };
 

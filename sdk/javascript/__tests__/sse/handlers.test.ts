@@ -11,11 +11,10 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         project_id: 'apdl',
         flags: [makeGate('booking-flow', {
           fallthrough: {
-            value: true,
             rollout: { percentage: 50, bucket_by: 'user_id' },
           },
         })],
@@ -26,7 +25,6 @@ describe('SSEHandlers', () => {
       key: 'booking-flow',
       enabled: true,
       fallthrough: {
-        value: true,
         rollout: { percentage: 50, bucket_by: 'user_id' },
       },
     });
@@ -40,7 +38,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('existing')],
       }),
     });
@@ -51,7 +50,6 @@ describe('SSEHandlers', () => {
         action: 'flag_created',
         flag: makeGate('created', {
           fallthrough: {
-            value: true,
             rollout: { percentage: 20, bucket_by: 'user_id' },
           },
         }),
@@ -74,7 +72,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('delete-me')],
       }),
     });
@@ -97,6 +96,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [{
           key: 'legacy',
           enabled: true,
@@ -119,7 +120,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('existing')],
       }),
     });
@@ -127,7 +129,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [{
           key: 'legacy',
           enabled: true,
@@ -153,7 +156,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('toggle-me')],
       }),
     });
@@ -175,11 +179,14 @@ function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig 
   return {
     key,
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

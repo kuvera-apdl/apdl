@@ -9,7 +9,7 @@ import {
 describe('gate config schema parsing', () => {
   it('extracts canonical gate configs from the SDK envelope', () => {
     const flags = extractFlagConfigs({
-      schema_version: 1,
+      schema_version: 2,
       project_id: 'apdl',
       flags: [makeGate()],
     });
@@ -17,41 +17,46 @@ describe('gate config schema parsing', () => {
     expect(flags).toHaveLength(1);
     expect(flags[0]).toMatchObject({
       key: 'checkout',
-      default_value: false,
+      default_variant: 'control',
+      variants: [
+        { key: 'control', weight: 1 },
+        { key: 'treatment', weight: 1 },
+      ],
       fallthrough: {
-        value: true,
         rollout: { percentage: 100, bucket_by: 'user_id' },
       },
     });
   });
 
-  it('rejects legacy top-level fields', () => {
-    for (const legacyField of [
+  it('rejects old and ambiguous top-level fields', () => {
+    for (const rejectedField of [
+      'default_value',
+      'defaultVariant',
       'variant_type',
-      'variants',
+      'variants_json',
       'rollout_percentage',
       'targeting_rules',
-      'default_variant',
     ]) {
       expect(extractFlagConfig({
         ...makeGate(),
-        [legacyField]: 'legacy',
+        [rejectedField]: 'legacy',
       })).toBeNull();
       expect(extractInvalidFlagKey({
         ...makeGate(),
-        [legacyField]: 'legacy',
+        [rejectedField]: 'legacy',
       })).toBe('checkout');
     }
   });
 
   it('returns invalid keyed records in parse results', () => {
     const result = parseFlagConfigResult({
-      schema_version: 1,
+      schema_version: 2,
+      project_id: 'apdl',
       flags: [
         makeGate({ key: 'valid' }),
         {
           ...makeGate({ key: 'invalid' }),
-          default_value: 'false',
+          default_variant: 'missing',
         },
       ],
     });
@@ -68,6 +73,7 @@ describe('gate config schema parsing', () => {
         id: 'rule_alias',
         conditions: [{ attribute: 'plan', operator: 'eq', value: 'pro' }],
         rollout: { percentage: 100, bucket_by: 'user_id' },
+        name: '',
       }],
     }))).toBeNull();
   });
@@ -75,7 +81,6 @@ describe('gate config schema parsing', () => {
   it('rejects unknown nested fields', () => {
     expect(extractFlagConfig(makeGate({
       fallthrough: {
-        value: true,
         rollout: {
           percentage: 100,
           bucket_by: 'user_id',
@@ -86,16 +91,40 @@ describe('gate config schema parsing', () => {
   });
 
   it('rejects malformed collection envelopes', () => {
+    expect(extractFlagConfigs([makeGate()])).toEqual([]);
+
     expect(extractFlagConfigs({
-      schema_version: 2,
+      schema_version: 1,
+      project_id: 'apdl',
       flags: [makeGate()],
     })).toEqual([]);
 
     expect(extractFlagConfigs({
-      schema_version: 1,
+      schema_version: 2,
       flags: [makeGate()],
       results: [],
     })).toEqual([]);
+  });
+
+  it('rejects non-relative-integer variant weights', () => {
+    expect(extractFlagConfig(makeGate({
+      variants: [
+        { key: 'control', weight: 0.5 },
+        { key: 'treatment', weight: 0.5 },
+      ],
+    }))).toBeNull();
+
+    expect(extractFlagConfig(makeGate({
+      variants: [
+        { key: 'control', weight: 0 },
+        { key: 'treatment', weight: 0 },
+      ],
+    }))).toBeNull();
+  });
+
+  it('rejects zero flag config versions', () => {
+    expect(extractFlagConfig(makeGate({ version: 0 }))).toBeNull();
+    expect(extractInvalidFlagKey(makeGate({ version: 0 }))).toBe('checkout');
   });
 });
 
@@ -103,11 +132,14 @@ function makeGate(overrides: Record<string, unknown> = {}): Record<string, unkno
   return {
     key: 'checkout',
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

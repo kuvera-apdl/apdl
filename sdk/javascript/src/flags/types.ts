@@ -1,16 +1,22 @@
 export interface GateConfig {
   key: string;
   enabled: boolean;
-  default_value: boolean;
+  default_variant: string;
+  variants: VariantConfig[];
   salt: string;
   rules: GateRule[];
   fallthrough: FallthroughConfig;
   version: number;
 }
 
+export interface VariantConfig {
+  key: string;
+  weight: number;
+}
+
 export interface GateRule {
   id: string;
-  name?: string;
+  name: string;
   conditions: GateCondition[];
   rollout: RolloutConfig;
 }
@@ -44,7 +50,6 @@ export interface RolloutConfig {
 }
 
 export interface FallthroughConfig {
-  value: boolean;
   rollout: RolloutConfig;
 }
 
@@ -66,14 +71,15 @@ export type GateEvaluationReason =
 
 export interface GateEvaluationResult {
   key: string;
-  value: boolean;
+  variant: string | null;
   reason: GateEvaluationReason;
-  rule_id: string;
-  bucket: number | null;
+  rule_id: string | null;
+  rollout_bucket: number | null;
+  variant_bucket: number | null;
   rollout_percentage: number | null;
-  bucket_by: string;
-  config_version: number;
-  source: GateConfigSource | 'none';
+  bucket_by: string | null;
+  config_version: number | null;
+  source: GateConfigSource | null;
 }
 
 export interface GateEvaluationOptions {

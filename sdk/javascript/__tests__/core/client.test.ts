@@ -228,9 +228,9 @@ describe('APDLClient', () => {
       expect(client.checkGate('nonexistent')).toBe(false);
       expect(client.checkGateDetails('nonexistent')).toMatchObject({
         key: 'nonexistent',
-        value: false,
+        variant: null,
         reason: 'not_found',
-        source: 'none',
+        source: null,
       });
       expect(featureFlagExposures(client)).toHaveLength(0);
       expect(warn).toHaveBeenCalledTimes(1);
@@ -245,17 +245,10 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [{
-            key: 'new-checkout-flow',
-            enabled: true,
-            default_value: false,
-            salt: 'salt_123',
-            rules: [],
-            fallthrough: {
-              value: true,
-              rollout: { percentage: 100, bucket_by: 'user_id' },
-            },
+            ...makeGate('new-checkout-flow'),
             version: 3,
           }],
         }),
@@ -276,7 +269,7 @@ describe('APDLClient', () => {
 
       expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
       expect(flaggedClient.checkGateDetails('new-checkout-flow')).toMatchObject({
-        value: true,
+        variant: 'treatment',
         reason: 'fallthrough',
         config_version: 3,
         source: 'initial_fetch',
@@ -293,7 +286,8 @@ describe('APDLClient', () => {
 
     it('should restore cached gates in standard localStorage mode', () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('cached-gate')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
@@ -314,13 +308,15 @@ describe('APDLClient', () => {
 
     it('should preserve restored gates when initial fetch returns malformed config', async () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('cached-gate')],
       }));
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [{
             key: 'legacy',
             enabled: true,
@@ -352,7 +348,7 @@ describe('APDLClient', () => {
       expect(cachedClient.checkGate('legacy')).toBe(false);
       expect(cachedClient.checkGateDetails('legacy')).toMatchObject({
         reason: 'invalid_config',
-        source: 'initial_fetch',
+        source: null,
       });
       expect(warn).not.toHaveBeenCalled();
       warn.mockRestore();
@@ -360,7 +356,8 @@ describe('APDLClient', () => {
 
     it('should not restore cached gates in strict privacy mode', () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [makeGate('cached-gate')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
@@ -387,7 +384,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('new-checkout-flow')],
         }),
         status: 200,
@@ -407,16 +405,16 @@ describe('APDLClient', () => {
 
       const gateOptions = { component: 'CheckoutPage' };
       expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
-      expect(flaggedClient.checkGateDetails('new-checkout-flow', gateOptions).value).toBe(true);
+      expect(flaggedClient.checkGateDetails('new-checkout-flow', gateOptions).variant).toBe('treatment');
       expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
 
       const exposures = featureFlagExposures(flaggedClient);
       expect(exposures).toHaveLength(1);
       expect(exposures[0].properties).toMatchObject({
         flag_key: 'new-checkout-flow',
-        value: true,
+        variant: 'treatment',
         reason: 'fallthrough',
-        rule_id: '',
+        rule_id: null,
         rollout_percentage: 100,
         bucket_by: 'user_id',
         config_version: 1,
@@ -424,7 +422,8 @@ describe('APDLClient', () => {
         page: '/checkout',
         component: 'CheckoutPage',
       });
-      expect(exposures[0].properties?.bucket).toBeTypeOf('number');
+      expect(exposures[0].properties?.rollout_bucket).toBeTypeOf('number');
+      expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
     });
 
     it('should log distinct exposures for different components', async () => {
@@ -432,7 +431,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('component-gate')],
         }),
         status: 200,
@@ -462,7 +462,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('pricing-gate')],
         }),
         status: 200,
@@ -494,7 +495,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('consent-gate')],
         }),
         status: 200,
@@ -527,7 +529,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('checkout-gate')],
         }),
         status: 200,
@@ -574,7 +577,7 @@ describe('APDLClient', () => {
         source: 'checkout.js',
         line: 12,
         column: 4,
-        active_flags: { 'checkout-gate': true },
+        active_flags: { 'checkout-gate': 'treatment' },
         active_flag_versions: { 'checkout-gate': 1 },
       });
 
@@ -585,7 +588,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('checkout-gate')],
         }),
         status: 200,
@@ -635,7 +639,8 @@ describe('APDLClient', () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
-          schema_version: 1,
+          schema_version: 2,
+          project_id: 'apdl',
           flags: [makeGate('checkout-gate')],
         }),
         status: 200,
@@ -672,7 +677,6 @@ describe('APDLClient', () => {
           flag: {
             ...makeGate('checkout-gate'),
             enabled: false,
-            default_value: false,
             version: 2,
           },
         }),
@@ -686,7 +690,7 @@ describe('APDLClient', () => {
       const errors = frontendErrors(healthClient);
       expect(errors).toHaveLength(1);
       expect(errors[0].properties).toMatchObject({
-        active_flags: { 'checkout-gate': false },
+        active_flags: { 'checkout-gate': 'control' },
         active_flag_versions: { 'checkout-gate': 2 },
       });
 
@@ -831,11 +835,14 @@ function makeGate(key: string): Record<string, unknown> {
   return {
     key,
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 0 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

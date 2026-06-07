@@ -21,11 +21,14 @@ def make_flag(overrides: dict | None = None) -> dict:
         "state": "active",
         "enabled": True,
         "description": "",
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": [],
         "fallthrough": {
-            "value": False,
-            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
@@ -46,22 +49,22 @@ def make_context(user_id: str = "user_123") -> dict:
     }
 
 
-def test_disabled_flag_returns_default_value():
-    result = evaluate(make_flag({"enabled": False, "default_value": True}), make_context())
+def test_disabled_flag_returns_default_variant():
+    result = evaluate(make_flag({"enabled": False, "default_variant": "treatment"}), make_context())
 
-    assert result["value"] is True
+    assert result["variant"] == "treatment"
     assert result["reason"] == "disabled"
     assert result["config_version"] == 4
 
 
-def test_draft_flag_returns_default_value():
-    result = evaluate(make_flag({"state": "draft", "default_value": True}), make_context())
+def test_draft_flag_returns_default_variant():
+    result = evaluate(make_flag({"state": "draft", "default_variant": "treatment"}), make_context())
 
-    assert result["value"] is True
+    assert result["variant"] == "treatment"
     assert result["reason"] == "disabled"
 
 
-def test_first_matching_rule_serves_true_when_rollout_passes():
+def test_first_matching_rule_assigns_variant_when_rollout_passes():
     flag = make_flag({
         "rules": [{
             "id": "rule_pro",
@@ -73,17 +76,19 @@ def test_first_matching_rule_serves_true_when_rollout_passes():
 
     result = evaluate(flag, make_context())
 
-    assert result["value"] is True
+    assert result["variant"] in {"control", "treatment"}
     assert result["reason"] == "rule_match"
     assert result["rule_id"] == "rule_pro"
+    assert result["rollout_bucket"] is not None
+    assert result["variant_bucket"] is not None
     assert result["rollout_percentage"] == 100.0
 
 
 def test_matching_rule_uses_default_when_rollout_fails():
     flag = make_flag({
-        "default_value": False,
         "rules": [{
             "id": "rule_pro",
+            "name": "Pro users",
             "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         }],
@@ -91,7 +96,7 @@ def test_matching_rule_uses_default_when_rollout_fails():
 
     result = evaluate(flag, make_context())
 
-    assert result["value"] is False
+    assert result["variant"] == "control"
     assert result["reason"] == "rule_rollout"
     assert result["rule_id"] == "rule_pro"
 
@@ -99,11 +104,11 @@ def test_matching_rule_uses_default_when_rollout_fails():
 def test_no_rule_match_uses_fallthrough():
     flag = make_flag({
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
         "rules": [{
             "id": "rule_enterprise",
+            "name": "Enterprise users",
             "conditions": [{
                 "attribute": "plan",
                 "operator": "equals",
@@ -115,36 +120,34 @@ def test_no_rule_match_uses_fallthrough():
 
     result = evaluate(flag, make_context())
 
-    assert result["value"] is True
+    assert result["variant"] in {"control", "treatment"}
     assert result["reason"] == "fallthrough"
+    assert result["variant_bucket"] is not None
 
 
 def test_fallthrough_rollout_returns_default_when_outside_rollout():
     flag = make_flag({
-        "default_value": False,
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
     })
 
     result = evaluate(flag, make_context())
 
-    assert result["value"] is False
+    assert result["variant"] == "control"
     assert result["reason"] == "fallthrough_rollout"
 
 
 def test_missing_bucket_unit_returns_error():
     flag = make_flag({
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "account_id"},
         },
     })
 
     result = evaluate(flag, make_context())
 
-    assert result["value"] is False
+    assert result["variant"] == "control"
     assert result["reason"] == "error"
 
 
@@ -160,18 +163,18 @@ def test_condition_operators():
         flag = make_flag({
             "rules": [{
                 "id": f"rule_{index}",
+                "name": "",
                 "conditions": [condition],
                 "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
             }],
         })
-        assert evaluate(flag, make_context())["value"] is True
+        assert evaluate(flag, make_context())["reason"] == "rule_match"
 
 
 def test_evaluate_all_flags():
     results = evaluate_all(
         [
             make_flag({"key": "one", "fallthrough": {
-                "value": True,
                 "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
             }}),
             make_flag({"key": "two", "enabled": False}),
@@ -179,7 +182,7 @@ def test_evaluate_all_flags():
         make_context(),
     )
 
-    assert [result["value"] for result in results] == [True, False]
+    assert [result["variant"] for result in results] == ["treatment", "control"]
 
 
 def test_hash_parity_fixtures():
@@ -199,7 +202,7 @@ def test_evaluation_parity_fixtures():
 
     for case in fixtures["evaluation_cases"]:
         result = evaluate(case["flag"], case["context"])
-        expected = case["result"]
+        expected = {**case["result"], "source": None}
 
         assert result == expected
 

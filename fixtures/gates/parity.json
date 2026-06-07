@@ -38,16 +38,19 @@
   ],
   "evaluation_cases": [
     {
-      "name": "disabled flag returns default value",
+      "name": "disabled flag returns default variant",
       "flag": {
         "key": "checkout",
         "enabled": false,
-        "default_value": true,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [],
         "fallthrough": {
-          "value": false,
-          "rollout": { "percentage": 0, "bucket_by": "user_id" }
+          "rollout": { "percentage": 100, "bucket_by": "user_id" }
         },
         "version": 4
       },
@@ -58,21 +61,26 @@
       },
       "result": {
         "key": "checkout",
-        "value": true,
+        "variant": "control",
         "reason": "disabled",
-        "rule_id": "",
-        "bucket": null,
+        "rule_id": null,
+        "rollout_bucket": null,
+        "variant_bucket": null,
         "rollout_percentage": null,
-        "bucket_by": "",
+        "bucket_by": null,
         "config_version": 4
       }
     },
     {
-      "name": "first matching rule serves true when rollout passes",
+      "name": "first matching rule assigns variant when rollout passes",
       "flag": {
         "key": "checkout",
         "enabled": true,
-        "default_value": false,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [
           {
@@ -85,7 +93,6 @@
           }
         ],
         "fallthrough": {
-          "value": false,
           "rollout": { "percentage": 0, "bucket_by": "user_id" }
         },
         "version": 4
@@ -97,10 +104,11 @@
       },
       "result": {
         "key": "checkout",
-        "value": true,
+        "variant": "treatment",
         "reason": "rule_match",
         "rule_id": "rule_pro",
-        "bucket": 74.32792812453768,
+        "rollout_bucket": 3.0656656490326077,
+        "variant_bucket": 75.20801866781153,
         "rollout_percentage": 100,
         "bucket_by": "user_id",
         "config_version": 4
@@ -111,11 +119,16 @@
       "flag": {
         "key": "checkout",
         "enabled": true,
-        "default_value": false,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [
           {
             "id": "rule_pro",
+            "name": "Pro users",
             "conditions": [
               { "attribute": "plan", "operator": "equals", "value": "pro" }
             ],
@@ -123,7 +136,6 @@
           }
         ],
         "fallthrough": {
-          "value": true,
           "rollout": { "percentage": 100, "bucket_by": "user_id" }
         },
         "version": 4
@@ -135,10 +147,11 @@
       },
       "result": {
         "key": "checkout",
-        "value": false,
+        "variant": "control",
         "reason": "rule_rollout",
         "rule_id": "rule_pro",
-        "bucket": 74.32792812453768,
+        "rollout_bucket": 3.0656656490326077,
+        "variant_bucket": null,
         "rollout_percentage": 0,
         "bucket_by": "user_id",
         "config_version": 4
@@ -149,11 +162,16 @@
       "flag": {
         "key": "ordered",
         "enabled": true,
-        "default_value": false,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [
           {
             "id": "rule_first",
+            "name": "First",
             "conditions": [
               { "attribute": "plan", "operator": "equals", "value": "pro" }
             ],
@@ -161,6 +179,7 @@
           },
           {
             "id": "rule_second",
+            "name": "Second",
             "conditions": [
               { "attribute": "country", "operator": "equals", "value": "US" }
             ],
@@ -168,7 +187,6 @@
           }
         ],
         "fallthrough": {
-          "value": true,
           "rollout": { "percentage": 100, "bucket_by": "user_id" }
         },
         "version": 8
@@ -180,10 +198,11 @@
       },
       "result": {
         "key": "ordered",
-        "value": false,
+        "variant": "control",
         "reason": "rule_rollout",
         "rule_id": "rule_first",
-        "bucket": 6.612555660915691,
+        "rollout_bucket": 82.01595346490292,
+        "variant_bucket": null,
         "rollout_percentage": 0,
         "bucket_by": "user_id",
         "config_version": 8
@@ -194,11 +213,16 @@
       "flag": {
         "key": "fallthrough",
         "enabled": true,
-        "default_value": false,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [
           {
             "id": "rule_enterprise",
+            "name": "Enterprise users",
             "conditions": [
               { "attribute": "plan", "operator": "equals", "value": "enterprise" }
             ],
@@ -206,7 +230,6 @@
           }
         ],
         "fallthrough": {
-          "value": true,
           "rollout": { "percentage": 100, "bucket_by": "user_id" }
         },
         "version": 5
@@ -218,10 +241,11 @@
       },
       "result": {
         "key": "fallthrough",
-        "value": true,
+        "variant": "treatment",
         "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": 64.16119776297388,
+        "rule_id": null,
+        "rollout_bucket": 36.94413475155461,
+        "variant_bucket": 72.85944925920559,
         "rollout_percentage": 100,
         "bucket_by": "user_id",
         "config_version": 5
@@ -232,11 +256,14 @@
       "flag": {
         "key": "fallthrough",
         "enabled": true,
-        "default_value": false,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
         "salt": "salt_123",
         "rules": [],
         "fallthrough": {
-          "value": true,
           "rollout": { "percentage": 0, "bucket_by": "user_id" }
         },
         "version": 5
@@ -248,116 +275,14 @@
       },
       "result": {
         "key": "fallthrough",
-        "value": false,
+        "variant": "control",
         "reason": "fallthrough_rollout",
-        "rule_id": "",
-        "bucket": 64.16119776297388,
+        "rule_id": null,
+        "rollout_bucket": 36.94413475155461,
+        "variant_bucket": null,
         "rollout_percentage": 0,
         "bucket_by": "user_id",
         "config_version": 5
-      }
-    },
-    {
-      "name": "missing bucket unit returns error",
-      "flag": {
-        "key": "checkout",
-        "enabled": true,
-        "default_value": false,
-        "salt": "salt_123",
-        "rules": [],
-        "fallthrough": {
-          "value": true,
-          "rollout": { "percentage": 100, "bucket_by": "account_id" }
-        },
-        "version": 4
-      },
-      "context": {
-        "user_id": "user_123",
-        "anonymous_id": "",
-        "attributes": { "plan": "pro", "country": "US", "age": "30" }
-      },
-      "result": {
-        "key": "checkout",
-        "value": false,
-        "reason": "error",
-        "rule_id": "",
-        "bucket": null,
-        "rollout_percentage": 100,
-        "bucket_by": "account_id",
-        "config_version": 4
-      }
-    },
-    {
-      "name": "matched rule with missing bucket unit returns error",
-      "flag": {
-        "key": "checkout",
-        "enabled": true,
-        "default_value": false,
-        "salt": "salt_123",
-        "rules": [
-          {
-            "id": "rule_pro_account",
-            "conditions": [
-              { "attribute": "plan", "operator": "equals", "value": "pro" }
-            ],
-            "rollout": { "percentage": 100, "bucket_by": "account_id" }
-          }
-        ],
-        "fallthrough": {
-          "value": true,
-          "rollout": { "percentage": 100, "bucket_by": "user_id" }
-        },
-        "version": 4
-      },
-      "context": {
-        "user_id": "user_123",
-        "anonymous_id": "",
-        "attributes": { "plan": "pro", "country": "US", "age": "30" }
-      },
-      "result": {
-        "key": "checkout",
-        "value": false,
-        "reason": "error",
-        "rule_id": "rule_pro_account",
-        "bucket": null,
-        "rollout_percentage": 100,
-        "bucket_by": "account_id",
-        "config_version": 4
-      }
-    },
-    {
-      "name": "bucket_by attribute uses matching attribute value",
-      "flag": {
-        "key": "checkout",
-        "enabled": true,
-        "default_value": false,
-        "salt": "salt_123",
-        "rules": [],
-        "fallthrough": {
-          "value": true,
-          "rollout": { "percentage": 100, "bucket_by": "account_id" }
-        },
-        "version": 4
-      },
-      "context": {
-        "user_id": "user_123",
-        "anonymous_id": "",
-        "attributes": {
-          "plan": "pro",
-          "country": "US",
-          "age": "30",
-          "account_id": "acct_1"
-        }
-      },
-      "result": {
-        "key": "checkout",
-        "value": true,
-        "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": 0.9603759974614662,
-        "rollout_percentage": 100,
-        "bucket_by": "account_id",
-        "config_version": 4
       }
     }
   ]

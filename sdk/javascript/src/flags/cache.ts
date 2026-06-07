@@ -9,7 +9,7 @@ interface FlagCacheOptions {
 }
 
 const DEFAULT_STORAGE_KEY = 'apdl_flags';
-const STORAGE_SCHEMA_VERSION = 1;
+const STORAGE_SCHEMA_VERSION = 2;
 
 /**
  * In-memory flag configuration store with change notification.
@@ -80,8 +80,8 @@ export class FlagCache {
   /**
    * Returns where a flag configuration most recently came from.
    */
-  getSource(key: string): GateConfigSource | 'none' {
-    return this.sources.get(key) ?? 'none';
+  getSource(key: string): GateConfigSource | null {
+    return this.sources.get(key) ?? null;
   }
 
   /**
@@ -94,8 +94,8 @@ export class FlagCache {
   /**
    * Returns where a malformed flag configuration most recently came from.
    */
-  getInvalidSource(key: string): GateConfigSource | 'none' {
-    return this.invalidSources.get(key) ?? 'none';
+  getInvalidSource(key: string): GateConfigSource | null {
+    return this.invalidSources.get(key) ?? null;
   }
 
   /**
@@ -144,6 +144,7 @@ export class FlagCache {
         this.storageKey,
         JSON.stringify({
           schema_version: STORAGE_SCHEMA_VERSION,
+          project_id: 'local_storage',
           flags: this.getAll(),
         })
       );

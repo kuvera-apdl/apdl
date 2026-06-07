@@ -36,14 +36,15 @@ describe('FlagEvaluator', () => {
       attributes: {},
     })).toEqual({
       key: 'missing',
-      value: false,
+      variant: null,
       reason: 'not_found',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
-      config_version: 0,
-      source: 'none',
+      bucket_by: null,
+      config_version: null,
+      source: null,
     });
   });
 
@@ -56,14 +57,15 @@ describe('FlagEvaluator', () => {
       attributes: {},
     })).toEqual({
       key: 'broken-gate',
-      value: false,
+      variant: null,
       reason: 'invalid_config',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
-      config_version: 0,
-      source: 'initial_fetch',
+      bucket_by: null,
+      config_version: null,
+      source: null,
     });
   });
 
@@ -95,6 +97,7 @@ describe('FlagEvaluator', () => {
       cache.set([makeGate(key, {
         rules: [{
           id: `rule_${index}`,
+          name: '',
           conditions: [condition],
           rollout: { percentage: 100, bucket_by: 'user_id' },
         }],
@@ -109,14 +112,13 @@ describe('FlagEvaluator', () => {
           age: '30',
           email: 'alice@company.com',
         },
-      }).value).toBe(true);
+      })).toMatchObject({ reason: 'rule_match' });
     }
   });
 
   it('uses anonymous_id only when bucket_by explicitly selects it', () => {
     cache.set([makeGate('anonymous_gate', {
       fallthrough: {
-        value: true,
         rollout: { percentage: 100, bucket_by: 'anonymous_id' },
       },
     })]);
@@ -125,7 +127,7 @@ describe('FlagEvaluator', () => {
       anonymous_id: 'anon_123',
       attributes: {},
     })).toMatchObject({
-      value: true,
+      variant: expect.any(String),
       reason: 'fallthrough',
       bucket_by: 'anonymous_id',
     });
@@ -146,11 +148,14 @@ function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig 
   return {
     key,
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,
@@ -161,12 +166,19 @@ function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig 
 function expectResult(actual: GateEvaluationResult, expected: GateEvaluationResult): void {
   expect(actual).toMatchObject({
     ...expected,
-    bucket: actual.bucket,
+    rollout_bucket: actual.rollout_bucket,
+    variant_bucket: actual.variant_bucket,
   });
 
-  if (expected.bucket === null) {
-    expect(actual.bucket).toBeNull();
+  if (expected.rollout_bucket === null) {
+    expect(actual.rollout_bucket).toBeNull();
   } else {
-    expect(actual.bucket).toBeCloseTo(expected.bucket, 10);
+    expect(actual.rollout_bucket).toBeCloseTo(expected.rollout_bucket, 10);
+  }
+
+  if (expected.variant_bucket === null) {
+    expect(actual.variant_bucket).toBeNull();
+  } else {
+    expect(actual.variant_bucket).toBeCloseTo(expected.variant_bucket, 10);
   }
 }

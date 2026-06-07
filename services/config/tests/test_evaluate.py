@@ -55,18 +55,22 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
         )
 
     assert response.status_code == 200
+    response_json = response.json()
     assert response.json() == {
         "key": "checkout",
-        "value": True,
+        "variant": response_json["variant"],
         "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": response.json()["bucket"],
+        "rule_id": None,
+        "rollout_bucket": response_json["rollout_bucket"],
+        "variant_bucket": response_json["variant_bucket"],
         "rollout_percentage": 100.0,
         "bucket_by": "user_id",
         "config_version": 4,
         "source": "server",
     }
-    assert response.json()["bucket"] is not None
+    assert response_json["variant"] in {"control", "treatment"}
+    assert response_json["rollout_bucket"] is not None
+    assert response_json["variant_bucket"] is not None
     redis.xadd.assert_awaited_once()
     args, kwargs = redis.xadd.await_args
     stream_key, fields = args
@@ -81,10 +85,11 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     assert published["session_id"].startswith("server:")
     assert published["properties"] == {
         "flag_key": "checkout",
-        "value": True,
+        "variant": response_json["variant"],
         "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": response.json()["bucket"],
+        "rule_id": None,
+        "rollout_bucket": response_json["rollout_bucket"],
+        "variant_bucket": response_json["variant_bucket"],
         "rollout_percentage": 100.0,
         "bucket_by": "user_id",
         "config_version": 4,
@@ -134,10 +139,13 @@ def make_flag(overrides: dict | None = None) -> dict:
         "review_by": "2099-07-01",
         "description": "Controls checkout.",
         "enabled": True,
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": [],
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",

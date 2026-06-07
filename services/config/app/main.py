@@ -25,9 +25,10 @@ CREATE TABLE IF NOT EXISTS flags (
     review_by TEXT,
     enabled BOOLEAN NOT NULL DEFAULT false,
     description TEXT NOT NULL DEFAULT '',
-    default_value BOOLEAN NOT NULL DEFAULT false,
+    default_variant TEXT NOT NULL DEFAULT 'control',
+    variants JSONB NOT NULL DEFAULT '[{"key":"control","weight":1},{"key":"treatment","weight":1}]'::jsonb,
     rules JSONB NOT NULL DEFAULT '[]'::jsonb,
-    fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb,
+    fallthrough JSONB NOT NULL DEFAULT '{"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb,
     salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text),
     evaluation_mode TEXT NOT NULL DEFAULT 'client'
         CHECK (evaluation_mode IN ('client', 'server', 'both')),
@@ -50,8 +51,10 @@ ALTER TABLE flags ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '';
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'draft';
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS owners JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS review_by TEXT;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS default_variant TEXT NOT NULL DEFAULT 'control';
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS variants JSONB NOT NULL DEFAULT '[{"key":"control","weight":1},{"key":"treatment","weight":1}]'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS rules JSONB NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE flags ADD COLUMN IF NOT EXISTS fallthrough JSONB NOT NULL DEFAULT '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
+ALTER TABLE flags ADD COLUMN IF NOT EXISTS fallthrough JSONB NOT NULL DEFAULT '{"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS salt TEXT NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text);
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS evaluation_mode TEXT NOT NULL DEFAULT 'client';
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS auto_disable BOOLEAN NOT NULL DEFAULT true;
@@ -62,17 +65,16 @@ ALTER TABLE flags ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE flags ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
-ALTER TABLE flags ALTER COLUMN default_value DROP DEFAULT;
-ALTER TABLE flags
-    ALTER COLUMN default_value TYPE BOOLEAN
-    USING CASE WHEN lower(default_value::text) = 'true' THEN true ELSE false END;
-ALTER TABLE flags ALTER COLUMN default_value SET DEFAULT false;
-ALTER TABLE flags ALTER COLUMN default_value SET NOT NULL;
-
 UPDATE flags SET name = key WHERE name = '';
 UPDATE flags
 SET salt = md5(random()::text || clock_timestamp()::text || project_id || key)
 WHERE salt = '';
+UPDATE flags
+SET fallthrough = jsonb_build_object(
+    'rollout',
+    COALESCE(fallthrough->'rollout', jsonb_build_object('percentage', 0, 'bucket_by', 'user_id'))
+)
+WHERE fallthrough ? 'value';
 UPDATE flags
 SET state = CASE
     WHEN archived_at IS NOT NULL THEN 'archived'
@@ -85,113 +87,8 @@ WHERE state = 'draft'
 
 DO $$
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'flags' AND column_name = 'client_exposed'
-    ) THEN
-        UPDATE flags
-        SET evaluation_mode = CASE WHEN client_exposed THEN 'client' ELSE 'server' END;
-    END IF;
-
     IF to_regclass('public.feature_flags') IS NOT NULL THEN
-        INSERT INTO flags (
-            key, project_id, name, state, enabled, description, default_value,
-            rules, fallthrough, salt, evaluation_mode, auto_disable,
-            guardrails, created_at, updated_at
-        )
-        SELECT
-            flag_key,
-            project_id,
-            name,
-            CASE WHEN COALESCE(enabled, false) THEN 'active' ELSE 'draft' END,
-            COALESCE(enabled, false),
-            COALESCE(description, ''),
-            false,
-            COALESCE(rules, '[]'::jsonb),
-            jsonb_build_object(
-                'value', true,
-                'rollout', jsonb_build_object(
-                    'percentage', COALESCE(rollout_percentage, 0),
-                    'bucket_by', 'user_id'
-                )
-            ),
-            salt,
-            'client',
-            true,
-            '[]'::jsonb,
-            COALESCE(created_at, NOW()),
-            COALESCE(updated_at, NOW())
-        FROM feature_flags
-        ON CONFLICT (project_id, key) DO NOTHING;
-
         DROP TABLE feature_flags;
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'flags' AND column_name = 'rollout_percentage'
-    ) THEN
-        EXECUTE $sql$
-            UPDATE flags
-            SET fallthrough = jsonb_build_object(
-                'value', true,
-                'rollout', jsonb_build_object(
-                    'percentage', rollout_percentage,
-                    'bucket_by', 'user_id'
-                )
-            )
-            WHERE fallthrough = '{"value":false,"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb
-        $sql$;
-    END IF;
-
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'flags' AND column_name = 'rules_json'
-    ) AND EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'flags' AND column_name = 'rollout_percentage'
-    ) THEN
-        EXECUTE $sql$
-            WITH migrated AS (
-                SELECT
-                    f.project_id,
-                    f.key,
-                    COALESCE(
-                        jsonb_agg(
-                            jsonb_build_object(
-                                'id', COALESCE(NULLIF(rule->>'id', ''), 'rule_' || ordinality::text),
-                                'name', COALESCE(rule->>'name', ''),
-                                'conditions',
-                                    CASE
-                                        WHEN jsonb_typeof(rule->'conditions') = 'array'
-                                            THEN rule->'conditions'
-                                        ELSE jsonb_build_array(rule - 'id' - 'name' - 'rollout')
-                                    END,
-                                'rollout',
-                                    CASE
-                                        WHEN jsonb_typeof(rule->'rollout') = 'object'
-                                            THEN rule->'rollout'
-                                        ELSE jsonb_build_object(
-                                            'percentage', f.rollout_percentage,
-                                            'bucket_by', 'user_id'
-                                        )
-                                    END
-                            )
-                        ) FILTER (WHERE jsonb_typeof(rule) = 'object'),
-                        '[]'::jsonb
-                    ) AS rules
-                FROM flags f
-                CROSS JOIN LATERAL jsonb_array_elements(f.rules_json::jsonb)
-                    WITH ORDINALITY AS parsed(rule, ordinality)
-                GROUP BY f.project_id, f.key
-            )
-            UPDATE flags f
-            SET rules = migrated.rules
-            FROM migrated
-            WHERE f.project_id = migrated.project_id
-              AND f.key = migrated.key
-              AND f.rules = '[]'::jsonb
-        $sql$;
     END IF;
 END $$;
 
@@ -209,6 +106,7 @@ ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_enabled_check;
 ALTER TABLE flags ADD CONSTRAINT flags_state_enabled_check
     CHECK ((state = 'active') = enabled);
 
+ALTER TABLE flags DROP COLUMN IF EXISTS default_value;
 ALTER TABLE flags DROP COLUMN IF EXISTS variant_type;
 ALTER TABLE flags DROP COLUMN IF EXISTS rules_json;
 ALTER TABLE flags DROP COLUMN IF EXISTS variants_json;

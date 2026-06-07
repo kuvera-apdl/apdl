@@ -31,7 +31,8 @@ def _row_to_flag(row) -> dict:
         "review_by": str(row["review_by"]) if row["review_by"] else None,
         "enabled": row["enabled"],
         "description": row["description"],
-        "default_value": row["default_value"],
+        "default_variant": row["default_variant"],
+        "variants": _json_value(row["variants"], []),
         "rules": _json_value(row["rules"], []),
         "fallthrough": _json_value(row["fallthrough"], {}),
         "salt": row["salt"],
@@ -104,12 +105,12 @@ async def create_flag(pool, flag: dict) -> dict | None:
     sql = """
         INSERT INTO flags (
             key, project_id, name, state, owners, review_by, enabled,
-            description, default_value, rules, fallthrough, salt,
+            description, default_variant, variants, rules, fallthrough, salt,
             evaluation_mode, auto_disable, guardrails
         )
         VALUES (
             $1, $2, $3, $4, $5::jsonb, $6, $7,
-            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15::jsonb
+            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb
         )
         RETURNING *
     """
@@ -124,7 +125,8 @@ async def create_flag(pool, flag: dict) -> dict | None:
             flag.get("review_by"),
             flag.get("enabled", False),
             flag.get("description", ""),
-            flag.get("default_value", False),
+            flag.get("default_variant", "control"),
+            json.dumps(flag.get("variants", []), separators=(",", ":")),
             json.dumps(flag.get("rules", []), separators=(",", ":")),
             json.dumps(flag.get("fallthrough", {}), separators=(",", ":")),
             flag["salt"],
@@ -148,12 +150,13 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             review_by = $7,
             enabled = $8,
             description = $9,
-            default_value = $10,
-            rules = $11::jsonb,
-            fallthrough = $12::jsonb,
-            evaluation_mode = $13,
-            auto_disable = $14,
-            guardrails = $15::jsonb,
+            default_variant = $10,
+            variants = $11::jsonb,
+            rules = $12::jsonb,
+            fallthrough = $13::jsonb,
+            evaluation_mode = $14,
+            auto_disable = $15,
+            guardrails = $16::jsonb,
             version = version + 1,
             updated_at = NOW()
         WHERE project_id = $1
@@ -174,7 +177,8 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             flag.get("review_by"),
             flag["enabled"],
             flag["description"],
-            flag["default_value"],
+            flag["default_variant"],
+            json.dumps(flag["variants"], separators=(",", ":")),
             json.dumps(flag["rules"], separators=(",", ":")),
             json.dumps(flag["fallthrough"], separators=(",", ":")),
             flag["evaluation_mode"],

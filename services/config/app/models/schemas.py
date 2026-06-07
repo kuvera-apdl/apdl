@@ -46,6 +46,8 @@ GateEvaluationReason = Literal[
     "fallthrough_rollout",
 ]
 
+GateConfigSource = Literal["memory", "initial_fetch", "sse", "local_storage", "server"]
+
 
 class GateCondition(StrictModel):
     attribute: str = Field(..., min_length=1)
@@ -68,6 +70,11 @@ class RolloutConfig(StrictModel):
     bucket_by: str = Field(default="user_id", min_length=1)
 
 
+class VariantConfig(StrictModel):
+    key: str = Field(..., min_length=1)
+    weight: int = Field(..., ge=0)
+
+
 class GateRule(StrictModel):
     id: str = Field(..., min_length=1)
     name: str = ""
@@ -76,7 +83,6 @@ class GateRule(StrictModel):
 
 
 class FallthroughConfig(StrictModel):
-    value: bool = False
     rollout: RolloutConfig = Field(
         default_factory=lambda: RolloutConfig(percentage=0.0, bucket_by="user_id")
     )
@@ -98,7 +104,49 @@ class GuardrailConfig(StrictModel):
         return self
 
 
-class FlagConfig(BaseModel):
+def default_variants() -> list[VariantConfig]:
+    return [
+        VariantConfig(key="control", weight=1),
+        VariantConfig(key="treatment", weight=1),
+    ]
+
+
+def validate_variants(
+    variants: list[VariantConfig],
+    default_variant: str,
+) -> None:
+    validate_variant_weights(variants)
+    if default_variant not in {variant.key for variant in variants}:
+        raise ValueError("default_variant must match a variant key")
+
+
+def validate_variant_weights(variants: list[VariantConfig]) -> None:
+    if not variants:
+        raise ValueError("variants must contain at least one variant")
+
+    keys: set[str] = set()
+    total_weight = 0
+    for variant in variants:
+        if variant.key in keys:
+            raise ValueError("variants must contain unique keys")
+        keys.add(variant.key)
+        total_weight += variant.weight
+
+    if total_weight <= 0:
+        raise ValueError("variant weights must contain at least one positive weight")
+
+
+class VariantFlagMixin(StrictModel):
+    default_variant: str = Field(default="control", min_length=1)
+    variants: list[VariantConfig] = Field(default_factory=default_variants)
+
+    @model_validator(mode="after")
+    def validate_variant_config(self):
+        validate_variants(self.variants, self.default_variant)
+        return self
+
+
+class FlagConfig(VariantFlagMixin):
     key: str
     project_id: str = ""
     name: str = ""
@@ -107,7 +155,6 @@ class FlagConfig(BaseModel):
     review_by: date | None = None
     enabled: bool = False
     description: str = ""
-    default_value: bool = False
     rules: list[GateRule] = Field(default_factory=list)
     fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
     salt: str = ""
@@ -143,15 +190,17 @@ class EvalContext(StrictModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class EvalResult(BaseModel):
+class EvalResult(StrictModel):
     key: str
-    value: bool = False
+    variant: str | None = None
     reason: str = ""
-    rule_id: str = ""
-    bucket: float | None = None
+    rule_id: str | None = None
+    rollout_bucket: float | None = None
+    variant_bucket: float | None = None
     rollout_percentage: float | None = None
-    bucket_by: str = ""
-    config_version: int = 0
+    bucket_by: str | None = None
+    config_version: int | None = None
+    source: GateConfigSource | None = None
 
 
 class GateEvaluateRequest(StrictModel):
@@ -167,19 +216,20 @@ class GateEvaluateRequest(StrictModel):
 
 class GateEvaluateResponse(StrictModel):
     key: str
-    value: bool = False
+    variant: str | None = None
     reason: GateEvaluationReason
-    rule_id: str = ""
-    bucket: float | None = None
+    rule_id: str | None = None
+    rollout_bucket: float | None = None
+    variant_bucket: float | None = None
     rollout_percentage: float | None = None
-    bucket_by: str = ""
-    config_version: int = 0
-    source: Literal["server"] = "server"
+    bucket_by: str | None = None
+    config_version: int | None = None
+    source: GateConfigSource | None = None
 
 
 # ---------- Admin request bodies ----------
 
-class FlagCreate(StrictModel):
+class FlagCreate(VariantFlagMixin):
     key: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1)
     state: WritableFlagState = "draft"
@@ -187,7 +237,6 @@ class FlagCreate(StrictModel):
     review_by: date | None = None
     enabled: bool = False
     description: str = ""
-    default_value: bool = False
     rules: list[GateRule] = Field(default_factory=list)
     fallthrough: FallthroughConfig = Field(default_factory=FallthroughConfig)
     evaluation_mode: EvaluationMode = "client"
@@ -209,7 +258,8 @@ class FlagUpdate(StrictModel):
     enabled: bool | None = None
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
-    default_value: bool | None = None
+    default_variant: str | None = Field(default=None, min_length=1)
+    variants: list[VariantConfig] | None = None
     rules: list[GateRule] | None = None
     fallthrough: FallthroughConfig | None = None
     evaluation_mode: EvaluationMode | None = None
@@ -222,6 +272,10 @@ class FlagUpdate(StrictModel):
             validate_owners(self.owners)
         if self.state is not None and self.enabled is not None:
             validate_state_enabled(self.state, self.enabled)
+        if self.variants is not None:
+            validate_variant_weights(self.variants)
+        if self.variants is not None and self.default_variant is not None:
+            validate_variants(self.variants, self.default_variant)
         return self
 
 

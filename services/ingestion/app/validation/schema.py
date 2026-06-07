@@ -39,10 +39,11 @@ FEATURE_FLAG_EXPOSURE_REQUIRED_ENVELOPE_KEYS = frozenset({
 })
 FEATURE_FLAG_EXPOSURE_KEYS = frozenset({
     "flag_key",
-    "value",
+    "variant",
     "reason",
     "rule_id",
-    "bucket",
+    "rollout_bucket",
+    "variant_bucket",
     "rollout_percentage",
     "bucket_by",
     "config_version",
@@ -51,7 +52,6 @@ FEATURE_FLAG_EXPOSURE_KEYS = frozenset({
     "component",
 })
 FEATURE_FLAG_EXPOSURE_REASONS = frozenset({
-    "invalid_config",
     "disabled",
     "error",
     "rule_match",
@@ -389,10 +389,10 @@ def _validate_feature_flag_exposure_types(
             "message": "Property 'flag_key' must be a non-empty string",
         })
 
-    if "value" in properties and not isinstance(properties["value"], bool):
+    if "variant" in properties and not _is_non_empty_string(properties["variant"]):
         errors.append({
-            "field": _join(prefix, "properties.value"),
-            "message": "Property 'value' must be a boolean",
+            "field": _join(prefix, "properties.variant"),
+            "message": "Property 'variant' must be a non-empty string",
         })
 
     if (
@@ -404,8 +404,9 @@ def _validate_feature_flag_exposure_types(
             "message": "Property 'reason' is not a canonical gate evaluation reason",
         })
 
-    _validate_string_property(properties, "rule_id", prefix, errors)
-    _validate_nullable_number_property(properties, "bucket", prefix, errors)
+    _validate_nullable_string_property(properties, "rule_id", prefix, errors)
+    _validate_nullable_number_property(properties, "rollout_bucket", prefix, errors)
+    _validate_nullable_number_property(properties, "variant_bucket", prefix, errors)
     _validate_nullable_number_property(
         properties,
         "rollout_percentage",
@@ -414,7 +415,7 @@ def _validate_feature_flag_exposure_types(
         minimum=0.0,
         maximum=100.0,
     )
-    _validate_string_property(properties, "bucket_by", prefix, errors)
+    _validate_nullable_string_property(properties, "bucket_by", prefix, errors)
 
     if "config_version" in properties and not _is_non_negative_int(
         properties["config_version"]
@@ -431,6 +432,7 @@ def _validate_feature_flag_exposure_types(
         })
 
     _validate_string_property(properties, "page", prefix, errors)
+    _validate_string_property(properties, "component", prefix, errors)
 
 
 def _validate_string_property(
@@ -443,6 +445,19 @@ def _validate_string_property(
         errors.append({
             "field": _join(prefix, f"properties.{key}"),
             "message": f"Property '{key}' must be a string",
+        })
+
+
+def _validate_nullable_string_property(
+    properties: dict,
+    key: str,
+    prefix: str,
+    errors: list[dict],
+) -> None:
+    if key in properties and properties[key] is not None and not isinstance(properties[key], str):
+        errors.append({
+            "field": _join(prefix, f"properties.{key}"),
+            "message": f"Property '{key}' must be a string or null",
         })
 
 
@@ -535,10 +550,10 @@ def _validate_active_flag_properties(
                 "field": _join(prefix, "properties.active_flags"),
                 "message": "Property 'active_flags' keys must be non-empty strings",
             })
-        if not isinstance(value, bool):
+        if not _is_non_empty_string(value):
             errors.append({
                 "field": _join(prefix, f"properties.active_flags.{key}"),
-                "message": "Active flag values must be booleans",
+                "message": "Active flag values must be non-empty variant strings",
             })
 
     for key, value in active_versions.items():

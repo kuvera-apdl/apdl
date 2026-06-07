@@ -6,7 +6,11 @@ from datetime import date, datetime
 from fastapi import Request
 
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+DEFAULT_VARIANTS = [
+    {"key": "control", "weight": 1},
+    {"key": "treatment", "weight": 1},
+]
 
 
 def _json_safe(value):
@@ -26,7 +30,8 @@ def serialize_flag(f: dict) -> dict:
         "review_by": _json_safe(f.get("review_by")),
         "description": f.get("description", ""),
         "enabled": f["enabled"],
-        "default_value": f.get("default_value", False),
+        "default_variant": f.get("default_variant", "control"),
+        "variants": f.get("variants", DEFAULT_VARIANTS),
         "rules": f.get("rules", []),
         "fallthrough": f.get("fallthrough", {}),
         "salt": f.get("salt", ""),
@@ -48,7 +53,8 @@ def serialize_client_flag(f: dict) -> dict:
     return {
         "key": f["key"],
         "enabled": f["enabled"],
-        "default_value": f.get("default_value", False),
+        "default_variant": f.get("default_variant", "control"),
+        "variants": f.get("variants", DEFAULT_VARIANTS),
         "salt": f.get("salt", ""),
         "rules": f.get("rules", []),
         "fallthrough": f.get("fallthrough", {}),

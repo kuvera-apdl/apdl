@@ -15,7 +15,11 @@ def make_flag() -> dict:
         "review_by": "2099-07-01",
         "description": "Controls the checkout redesign.",
         "enabled": True,
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": [{
             "id": "rule_beta",
             "name": "Beta users",
@@ -27,7 +31,6 @@ def make_flag() -> dict:
             "rollout": {"percentage": 25.0, "bucket_by": "user_id"},
         }],
         "fallthrough": {
-            "value": False,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",
@@ -58,7 +61,11 @@ def test_serialize_client_flag_returns_sdk_shape_only():
     assert serialize_client_flag(make_flag()) == {
         "key": "checkout",
         "enabled": True,
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "salt": "salt_123",
         "rules": [{
             "id": "rule_beta",
@@ -71,7 +78,6 @@ def test_serialize_client_flag_returns_sdk_shape_only():
             "rollout": {"percentage": 25.0, "bucket_by": "user_id"},
         }],
         "fallthrough": {
-            "value": False,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "version": 4,
@@ -80,7 +86,7 @@ def test_serialize_client_flag_returns_sdk_shape_only():
 
 def test_serialize_flag_collection_uses_canonical_envelope():
     assert serialize_flag_collection("apdl", [make_flag()]) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "project_id": "apdl",
         "flags": [serialize_client_flag(make_flag())],
     }
@@ -119,10 +125,11 @@ def test_flag_update_rejects_state_enabled_mismatch():
     "legacy_field",
     [
         "variant_type",
-        "variants",
+        "variants_json",
         "rollout_percentage",
         "targeting_rules",
-        "default_variant",
+        "default_value",
+        "defaultVariant",
         "client_exposed",
     ],
 )
@@ -132,7 +139,6 @@ def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
         "name": "Checkout",
         "rules": [],
         "fallthrough": {
-            "value": False,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         legacy_field: "legacy",
@@ -140,6 +146,42 @@ def test_flag_create_rejects_legacy_or_unknown_fields(legacy_field):
 
     with pytest.raises(ValidationError):
         FlagCreate.model_validate(payload)
+
+
+def test_flag_create_rejects_fallthrough_value():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate({
+            "key": "checkout",
+            "name": "Checkout",
+            "fallthrough": {
+                "value": False,
+                "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+            },
+        })
+
+
+def test_flag_create_rejects_decimal_variant_weights():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate({
+            "key": "checkout",
+            "name": "Checkout",
+            "variants": [
+                {"key": "control", "weight": 0.5},
+                {"key": "treatment", "weight": 0.5},
+            ],
+        })
+
+
+def test_flag_create_rejects_all_zero_variant_weights():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate({
+            "key": "checkout",
+            "name": "Checkout",
+            "variants": [
+                {"key": "control", "weight": 0},
+                {"key": "treatment", "weight": 0},
+            ],
+        })
 
 
 def test_flag_update_requires_version():

@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from app.models.schemas import (
     ExperimentCreate,
@@ -15,6 +16,8 @@ from app.models.schemas import (
     FlagCreate,
     FlagDisable,
     FlagUpdate,
+    VariantConfig,
+    validate_variants,
 )
 from app.store import postgres as pg_store
 from app.store import redis_cache
@@ -46,6 +49,18 @@ def _sync_lifecycle_update(updates: dict) -> None:
         updates["enabled"] = _enabled_for_state(updates["state"])
     elif "enabled" in updates and "state" not in updates:
         updates["state"] = "active" if updates["enabled"] else "disabled"
+
+
+def _validate_merged_variant_contract(flag: dict) -> str | None:
+    try:
+        variants = [
+            VariantConfig.model_validate(variant)
+            for variant in flag.get("variants", [])
+        ]
+        validate_variants(variants, flag.get("default_variant", ""))
+    except (TypeError, ValueError, ValidationError) as exc:
+        return str(exc)
+    return None
 
 
 async def _broadcast_flag_change(request: Request, project_id: str, action: str, flag: dict | None, key: str) -> None:
@@ -101,7 +116,7 @@ def _is_cleanup_candidate(flag: dict) -> bool:
         return False
 
     fallthrough = flag.get("fallthrough", {})
-    if not isinstance(fallthrough, dict) or fallthrough.get("value") is not True:
+    if not isinstance(fallthrough, dict):
         return False
     rollout = fallthrough.get("rollout", {})
     if not isinstance(rollout, dict):
@@ -110,7 +125,23 @@ def _is_cleanup_candidate(flag: dict) -> bool:
         percentage = float(rollout.get("percentage", 0.0))
     except (TypeError, ValueError):
         return False
-    return percentage >= 100.0
+    if percentage < 100.0:
+        return False
+
+    default_variant = flag.get("default_variant", "control")
+    variants = flag.get("variants", [])
+    if not isinstance(variants, list):
+        return False
+
+    positive_variants = [
+        variant.get("key")
+        for variant in variants
+        if isinstance(variant, dict)
+        and isinstance(variant.get("key"), str)
+        and isinstance(variant.get("weight"), int)
+        and variant["weight"] > 0
+    ]
+    return len(positive_variants) == 1 and positive_variants[0] != default_variant
 
 
 def _review_date(value) -> date | None:
@@ -273,6 +304,15 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
 
     flag = dict(existing)
     flag.update(updates)
+    variant_error = _validate_merged_variant_contract(flag)
+    if variant_error is not None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "invalid_request",
+                "message": variant_error,
+            },
+        )
 
     updated = await pg_store.update_flag(pool, flag, body.version)
     if updated is None:

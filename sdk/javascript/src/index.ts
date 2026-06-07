@@ -18,6 +18,7 @@ export type {
   FlagResult,
   EvalContext,
   GateConfig,
+  VariantConfig,
   GateRule,
   GateCondition,
   RolloutConfig,
