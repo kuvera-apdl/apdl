@@ -41,6 +41,23 @@ CREATE TABLE IF NOT EXISTS flags (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at TIMESTAMPTZ,
+    CONSTRAINT flags_default_variant_non_empty_check CHECK (
+        default_variant IS NOT NULL AND default_variant <> ''
+    ),
+    CONSTRAINT flags_variants_array_non_empty_check CHECK (
+        CASE
+            WHEN jsonb_typeof(variants) <> 'array' THEN false
+            ELSE jsonb_array_length(variants) > 0
+        END
+    ),
+    CONSTRAINT flags_rules_array_check CHECK (jsonb_typeof(rules) = 'array'),
+    CONSTRAINT flags_fallthrough_rollout_only_check CHECK (
+        CASE
+            WHEN jsonb_typeof(fallthrough) <> 'object' THEN false
+            ELSE (fallthrough ? 'rollout')
+                AND (fallthrough - 'rollout') = '{}'::jsonb
+        END
+    ),
     CONSTRAINT flags_state_enabled_check CHECK ((state = 'active') = enabled),
     PRIMARY KEY (project_id, key)
 );
@@ -69,12 +86,68 @@ UPDATE flags SET name = key WHERE name = '';
 UPDATE flags
 SET salt = md5(random()::text || clock_timestamp()::text || project_id || key)
 WHERE salt = '';
+
+UPDATE flags
+SET default_variant = 'control'
+WHERE default_variant IS NULL OR default_variant = '';
+
+UPDATE flags
+SET variants = '[{"key":"control","weight":1},{"key":"treatment","weight":1}]'::jsonb
+WHERE CASE
+    WHEN variants IS NULL THEN true
+    WHEN jsonb_typeof(variants) <> 'array' THEN true
+    ELSE jsonb_array_length(variants) = 0
+END;
+
+UPDATE flags
+SET default_variant = 'control',
+    variants = '[{"key":"control","weight":1},{"key":"treatment","weight":1}]'::jsonb
+WHERE EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(variants) AS variant(value)
+        WHERE jsonb_typeof(variant.value) <> 'object'
+           OR COALESCE(variant.value->>'key', '') = ''
+           OR COALESCE(variant.value->>'weight', '') !~ '^(0|[1-9][0-9]*)$'
+    )
+   OR NOT EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(variants) AS variant(value)
+        WHERE variant.value->>'key' = default_variant
+    )
+   OR (
+        SELECT COUNT(*)
+        FROM jsonb_array_elements(variants) AS variant(value)
+    ) <> (
+        SELECT COUNT(DISTINCT variant.value->>'key')
+        FROM jsonb_array_elements(variants) AS variant(value)
+    )
+   OR COALESCE((
+        SELECT SUM((variant.value->>'weight')::numeric)
+        FROM jsonb_array_elements(variants) AS variant(value)
+        WHERE COALESCE(variant.value->>'weight', '') ~ '^(0|[1-9][0-9]*)$'
+    ), 0) <= 0;
+
+UPDATE flags
+SET rules = '[]'::jsonb
+WHERE rules IS NULL OR jsonb_typeof(rules) <> 'array';
+
 UPDATE flags
 SET fallthrough = jsonb_build_object(
     'rollout',
-    COALESCE(fallthrough->'rollout', jsonb_build_object('percentage', 0, 'bucket_by', 'user_id'))
+    CASE
+        WHEN fallthrough IS NOT NULL
+         AND jsonb_typeof(fallthrough) = 'object'
+         AND jsonb_typeof(fallthrough->'rollout') = 'object'
+        THEN fallthrough->'rollout'
+        ELSE jsonb_build_object('percentage', 0, 'bucket_by', 'user_id')
+    END
 )
-WHERE fallthrough ? 'value';
+WHERE CASE
+    WHEN fallthrough IS NULL THEN true
+    WHEN jsonb_typeof(fallthrough) <> 'object' THEN true
+    WHEN NOT (fallthrough ? 'rollout') THEN true
+    ELSE (fallthrough - 'rollout') <> '{}'::jsonb
+END;
 UPDATE flags
 SET state = CASE
     WHEN archived_at IS NOT NULL THEN 'archived'
@@ -105,6 +178,37 @@ ALTER TABLE flags ADD CONSTRAINT flags_state_check
 ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_state_enabled_check;
 ALTER TABLE flags ADD CONSTRAINT flags_state_enabled_check
     CHECK ((state = 'active') = enabled);
+ALTER TABLE flags ALTER COLUMN default_variant SET DEFAULT 'control';
+ALTER TABLE flags ALTER COLUMN default_variant SET NOT NULL;
+ALTER TABLE flags ALTER COLUMN variants SET DEFAULT '[{"key":"control","weight":1},{"key":"treatment","weight":1}]'::jsonb;
+ALTER TABLE flags ALTER COLUMN variants SET NOT NULL;
+ALTER TABLE flags ALTER COLUMN rules SET DEFAULT '[]'::jsonb;
+ALTER TABLE flags ALTER COLUMN rules SET NOT NULL;
+ALTER TABLE flags ALTER COLUMN fallthrough SET DEFAULT '{"rollout":{"percentage":0,"bucket_by":"user_id"}}'::jsonb;
+ALTER TABLE flags ALTER COLUMN fallthrough SET NOT NULL;
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_default_variant_non_empty_check;
+ALTER TABLE flags ADD CONSTRAINT flags_default_variant_non_empty_check
+    CHECK (default_variant IS NOT NULL AND default_variant <> '');
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_variants_array_non_empty_check;
+ALTER TABLE flags ADD CONSTRAINT flags_variants_array_non_empty_check
+    CHECK (
+        CASE
+            WHEN jsonb_typeof(variants) <> 'array' THEN false
+            ELSE jsonb_array_length(variants) > 0
+        END
+    );
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_rules_array_check;
+ALTER TABLE flags ADD CONSTRAINT flags_rules_array_check
+    CHECK (jsonb_typeof(rules) = 'array');
+ALTER TABLE flags DROP CONSTRAINT IF EXISTS flags_fallthrough_rollout_only_check;
+ALTER TABLE flags ADD CONSTRAINT flags_fallthrough_rollout_only_check
+    CHECK (
+        CASE
+            WHEN jsonb_typeof(fallthrough) <> 'object' THEN false
+            ELSE (fallthrough ? 'rollout')
+                AND (fallthrough - 'rollout') = '{}'::jsonb
+        END
+    );
 
 ALTER TABLE flags DROP COLUMN IF EXISTS default_value;
 ALTER TABLE flags DROP COLUMN IF EXISTS variant_type;

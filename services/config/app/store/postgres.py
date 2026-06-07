@@ -8,6 +8,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VARIANTS = [
+    {"key": "control", "weight": 1},
+    {"key": "treatment", "weight": 1},
+]
+DEFAULT_FALLTHROUGH = {
+    "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+}
+FLAG_COLUMNS = """
+    key, project_id, name, state, owners, review_by, enabled,
+    description, default_variant, variants, rules, fallthrough, salt,
+    evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+    disabled_at, version, created_at, updated_at, archived_at
+"""
+
 
 def _json_value(value, fallback):
     if value is None:
@@ -83,7 +97,7 @@ async def get_flags(
     if client_visible_only:
         filters.append("evaluation_mode IN ('client', 'both')")
 
-    sql = f"SELECT * FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
+    sql = f"SELECT {FLAG_COLUMNS} FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
     rows = await pool.fetch(sql, project_id)
     return [_row_to_flag(r) for r in rows]
 
@@ -93,7 +107,10 @@ async def get_flag(
 ) -> dict | None:
     """Fetch a single flag by project_id and key."""
     archived_filter = "" if include_archived else " AND archived_at IS NULL"
-    sql = f"SELECT * FROM flags WHERE project_id = $1 AND key = $2{archived_filter}"
+    sql = (
+        f"SELECT {FLAG_COLUMNS} FROM flags "
+        f"WHERE project_id = $1 AND key = $2{archived_filter}"
+    )
     row = await pool.fetchrow(sql, project_id, key)
     if row is None:
         return None
@@ -112,7 +129,11 @@ async def create_flag(pool, flag: dict) -> dict | None:
             $1, $2, $3, $4, $5::jsonb, $6, $7,
             $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb
         )
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(
@@ -126,9 +147,12 @@ async def create_flag(pool, flag: dict) -> dict | None:
             flag.get("enabled", False),
             flag.get("description", ""),
             flag.get("default_variant", "control"),
-            json.dumps(flag.get("variants", []), separators=(",", ":")),
+            json.dumps(flag.get("variants", DEFAULT_VARIANTS), separators=(",", ":")),
             json.dumps(flag.get("rules", []), separators=(",", ":")),
-            json.dumps(flag.get("fallthrough", {}), separators=(",", ":")),
+            json.dumps(
+                flag.get("fallthrough", DEFAULT_FALLTHROUGH),
+                separators=(",", ":"),
+            ),
             flag["salt"],
             flag.get("evaluation_mode", "client"),
             flag.get("auto_disable", True),
@@ -163,7 +187,11 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
           AND key = $2
           AND version = $3
           AND archived_at IS NULL
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(
@@ -209,7 +237,11 @@ async def archive_flag(
             updated_at = NOW()
         WHERE project_id = $1 AND key = $2 AND archived_at IS NULL
     """ + version_filter + """
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         args = (project_id, key) if expected_version is None else (project_id, key, expected_version)
@@ -242,7 +274,11 @@ async def disable_flag(
           AND key = $2
           AND enabled = true
           AND archived_at IS NULL
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(sql, project_id, key, reason, source)
