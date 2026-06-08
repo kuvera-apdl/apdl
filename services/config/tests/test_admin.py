@@ -47,6 +47,41 @@ async def test_flag_update_broadcast_uses_canonical_client_shape():
 
 
 @pytest.mark.asyncio
+async def test_admin_create_and_update_reject_legacy_boolean_fields():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_response = await client.post(
+            "/v1/admin/flags",
+            params={"project_id": "apdl"},
+            json={
+                "key": "checkout",
+                "name": "Checkout",
+                "default_value": False,
+                "default_variant": "control",
+                "variants": [
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
+                "fallthrough": {
+                    "value": True,
+                    "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+                },
+            },
+        )
+        update_response = await client.put(
+            "/v1/admin/flags/checkout",
+            params={"project_id": "apdl"},
+            json={
+                "version": 4,
+                "default_value": False,
+            },
+        )
+
+    assert create_response.status_code == 422
+    assert update_response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_disable_flag_writes_audit_and_broadcasts(monkeypatch):
     existing = make_flag()
     updated = {

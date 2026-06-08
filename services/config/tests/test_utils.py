@@ -229,12 +229,45 @@ def test_flag_create_rejects_exists_condition_value():
         )
 
 
+def test_flag_create_rejects_duplicate_variant_keys():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(variants=[
+                {"key": "control", "weight": 1},
+                {"key": "control", "weight": 1},
+            ])
+        )
+
+
+def test_flag_create_rejects_default_variant_not_present_in_variants():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(
+                default_variant="missing",
+                variants=[
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
+            )
+        )
+
+
 def test_flag_create_rejects_decimal_variant_weights():
     with pytest.raises(ValidationError):
         FlagCreate.model_validate(
             make_create_payload(variants=[
                 {"key": "control", "weight": 0.5},
                 {"key": "treatment", "weight": 0.5},
+            ])
+        )
+
+
+def test_flag_create_rejects_non_integer_variant_weights():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(variants=[
+                {"key": "control", "weight": "1"},
+                {"key": "treatment", "weight": 1},
             ])
         )
 

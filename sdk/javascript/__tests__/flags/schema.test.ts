@@ -106,20 +106,45 @@ describe('flag config schema parsing', () => {
     })).toEqual([]);
   });
 
-  it('rejects non-relative-integer variant weights', () => {
-    expect(extractFlagConfig(makeFlag({
-      variants: [
-        { key: 'control', weight: 0.5 },
-        { key: 'treatment', weight: 0.5 },
-      ],
-    }))).toBeNull();
+  it('rejects invalid variant definitions', () => {
+    const invalidOverrides = [
+      { default_variant: undefined },
+      { default_variant: 'missing' },
+      {
+        variants: [
+          { key: 'control', weight: 1 },
+          { key: 'control', weight: 1 },
+        ],
+      },
+      {
+        variants: [
+          { key: 'control', weight: 0.5 },
+          { key: 'treatment', weight: 0.5 },
+        ],
+      },
+      {
+        variants: [
+          { key: 'control', weight: -1 },
+          { key: 'treatment', weight: 1 },
+        ],
+      },
+      {
+        variants: [
+          { key: 'control', weight: '1' },
+          { key: 'treatment', weight: 1 },
+        ],
+      },
+      {
+        variants: [
+          { key: 'control', weight: 0 },
+          { key: 'treatment', weight: 0 },
+        ],
+      },
+    ];
 
-    expect(extractFlagConfig(makeFlag({
-      variants: [
-        { key: 'control', weight: 0 },
-        { key: 'treatment', weight: 0 },
-      ],
-    }))).toBeNull();
+    for (const overrides of invalidOverrides) {
+      expect(extractFlagConfig(makeFlag(overrides))).toBeNull();
+    }
   });
 
   it('rejects zero flag config versions', () => {

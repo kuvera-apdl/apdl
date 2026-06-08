@@ -38,6 +38,40 @@
   ],
   "evaluation_cases": [
     {
+      "name": "weighted variant assignment",
+      "flag": {
+        "key": "checkout_redesign",
+        "enabled": true,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
+        "salt": "salt",
+        "rules": [],
+        "fallthrough": {
+          "rollout": { "percentage": 100, "bucket_by": "user_id" }
+        },
+        "version": 1
+      },
+      "context": {
+        "user_id": "user_123",
+        "anonymous_id": "",
+        "attributes": {}
+      },
+      "result": {
+        "key": "checkout_redesign",
+        "variant": "treatment",
+        "reason": "fallthrough",
+        "rule_id": null,
+        "rollout_bucket": 20.986559805689975,
+        "variant_bucket": 52.33370076220801,
+        "rollout_percentage": 100,
+        "bucket_by": "user_id",
+        "config_version": 1
+      }
+    },
+    {
       "name": "disabled flag returns default variant",
       "flag": {
         "key": "checkout",
