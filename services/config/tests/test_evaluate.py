@@ -100,6 +100,47 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypatch):
+    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
+    monkeypatch.setattr(
+        evaluate.pg_store,
+        "get_flag",
+        AsyncMock(return_value=make_flag({"evaluation_mode": "server"})),
+    )
+    redis = AsyncMock()
+    redis.xadd = AsyncMock(return_value=b"1234567890-0")
+    app.state.pg_pool = object()
+    app.state.redis = redis
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/evaluate",
+            headers={"X-APDL-Internal-Token": "secret"},
+            json={
+                "project_id": "apdl",
+                "key": "checkout",
+                "context": {"anonymous_id": "anon_123", "attributes": {}},
+            },
+        )
+
+    assert response.status_code == 200
+    redis.xadd.assert_awaited_once()
+
+    args, _ = redis.xadd.await_args
+    _, fields = args
+    published = json.loads(fields["event_json"])
+    assert published["anonymous_id"] == "anon_123"
+    assert published["message_id"].startswith("srv_")
+    assert published["session_id"] == f"server:{published['message_id']}"
+    assert published["properties"]["source"] == "server"
+    assert published["properties"]["page"] == ""
+    assert published["properties"]["component"] == ""
+    assert "value" not in published["properties"]
+    assert "bucket" not in published["properties"]
+
+
+@pytest.mark.asyncio
 async def test_evaluate_rejects_client_only_gate(monkeypatch):
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
     monkeypatch.setattr(

@@ -213,6 +213,51 @@ class TestSingleEventValidation:
         assert result["valid"] is False
         assert any(error["field"] == "properties.value" for error in result["errors"])
 
+    def test_feature_flag_exposure_rejects_legacy_bucket_property(self):
+        event = feature_flag_exposure_event()
+        properties = event["properties"]
+        properties.pop("rollout_bucket")
+        properties["bucket"] = 7.31
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "properties.rollout_bucket" in fields
+        assert "properties.bucket" in fields
+
+    def test_feature_flag_exposure_requires_canonical_metadata(self):
+        event = feature_flag_exposure_event()
+        event["properties"].pop("source")
+        event["properties"].pop("page")
+        event["properties"].pop("component")
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "properties.source" in fields
+        assert "properties.page" in fields
+        assert "properties.component" in fields
+
+    def test_feature_flag_exposure_allows_empty_page_and_component(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["page"] = ""
+        event["properties"]["component"] = ""
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is True
+
+    def test_feature_flag_exposure_requires_non_empty_variant(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["variant"] = ""
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.variant" for error in result["errors"])
+
     def test_feature_flag_exposure_requires_track_type(self):
         event = feature_flag_exposure_event()
         event["type"] = "page"

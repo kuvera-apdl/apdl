@@ -487,6 +487,59 @@ describe('APDLClient', () => {
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
     });
 
+    it('should send canonical exposure payloads to ingestion', async () => {
+      window.history.pushState({}, '', '/checkout');
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('transport-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+
+      await flushAsync();
+      flaggedClient.identify('user_123');
+      flaggedClient.getVariant('transport-flag', { component: 'CheckoutPage' });
+      await flaggedClient.debug.flush();
+
+      const eventPost = fetchMock.mock.calls.find(([url]) => {
+        return url === 'https://ingest.test.dev/v1/events';
+      });
+      expect(eventPost).toBeDefined();
+
+      const [, init] = eventPost as [string, RequestInit];
+      const payload = JSON.parse(String(init.body)) as {
+        events: Array<{ event?: string; properties?: Record<string, unknown> }>;
+      };
+      const exposure = payload.events.find(
+        (event) => event.event === '$feature_flag_exposure'
+      );
+
+      expect(exposure?.properties).toMatchObject({
+        flag_key: 'transport-flag',
+        variant: 'treatment',
+        reason: 'fallthrough',
+        source: 'initial_fetch',
+        page: '/checkout',
+        component: 'CheckoutPage',
+      });
+      expect(exposure?.properties?.rollout_bucket).toBeTypeOf('number');
+      expect(exposure?.properties?.variant_bucket).toBeTypeOf('number');
+      expect(exposure?.properties).not.toHaveProperty('value');
+      expect(exposure?.properties).not.toHaveProperty('bucket');
+    });
+
     it('should log distinct exposures for different components', async () => {
       window.history.pushState({}, '', '/checkout');
       fetchMock.mockResolvedValueOnce({
