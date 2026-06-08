@@ -438,7 +438,33 @@ class GuardrailConfig(StrictModel):
         return self
 
 
-class GuardrailEvaluateRequest(StrictModel):
+class GuardrailVariantConfig(StrictModel):
+    key: str = Field(..., min_length=1)
+    weight: int = Field(..., ge=0, strict=True)
+
+
+class GuardrailVariantContext(StrictModel):
+    default_variant: str = Field(..., min_length=1)
+    variants: list[GuardrailVariantConfig] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def check_variant_context(self) -> "GuardrailVariantContext":
+        keys: set[str] = set()
+        total_weight = 0
+        for variant in self.variants:
+            if variant.key in keys:
+                raise ValueError("variants must contain unique keys")
+            keys.add(variant.key)
+            total_weight += variant.weight
+
+        if total_weight <= 0:
+            raise ValueError("variant weights must contain at least one positive weight")
+        if self.default_variant not in keys:
+            raise ValueError("default_variant must match a variant key")
+        return self
+
+
+class GuardrailEvaluateRequest(GuardrailVariantContext):
     project_id: ProjectId
     flag_key: str = Field(..., min_length=1)
     guardrail: GuardrailConfig

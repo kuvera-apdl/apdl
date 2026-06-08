@@ -7,6 +7,7 @@ from app.clickhouse.queries import (
     EXPERIMENT_EXPOSURES_QUERY,
     EXPERIMENT_METRICS_QUERY,
     build_event_count_query,
+    build_feature_flag_frontend_error_guardrail_query,
     build_funnel_query,
 )
 from app.clickhouse.selectors import build_selector_condition, selector_label
@@ -198,3 +199,18 @@ class TestQueryBuilders:
         assert "ev.anonymous_id = e.assignment_id" in EXPERIMENT_METRICS_QUERY
         assert "$experiment_exposure" not in combined_sql
         assert "JSONExtractString(properties, 'experiment_id')" not in combined_sql
+
+    def test_guardrail_query_compares_variants_against_default(self):
+        sql = build_feature_flag_frontend_error_guardrail_query(
+            exposure_scope_filter="AND page = %(page_scope)s",
+            health_scope_filter="AND f.page = %(page_scope)s",
+        )
+
+        assert "FROM feature_flag_exposures" in sql
+        assert "v.variant AS variant" in sql
+        assert "%(default_variant)s AS default_variant" in sql
+        assert "WHERE variant = %(default_variant)s" in sql
+        assert "JSONExtractString(f.active_flags, %(flag_key)s) = e.variant" in sql
+        assert "JSONExtractBool(f.active_flags, %(flag_key)s)" not in sql
+        assert " e.value" not in sql
+        assert " value" not in sql

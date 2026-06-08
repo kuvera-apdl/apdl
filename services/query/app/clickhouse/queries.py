@@ -330,20 +330,21 @@ WITH
     exposures AS (
         SELECT
             session_id,
-            value,
+            variant,
             min(first_exposure) AS exposure_time
         FROM feature_flag_exposures
         WHERE project_id = %(project_id)s
           AND flag_key = %(flag_key)s
+          AND variant != ''
           AND first_exposure >= subtractMinutes(now(), %(window_minutes)s)
           AND event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
           {exposure_scope_filter}
-        GROUP BY session_id, value
+        GROUP BY session_id, variant
     ),
     exposure_failures AS (
         SELECT
             e.session_id AS session_id,
-            e.value AS value,
+            e.variant AS variant,
             countIf(
                 f.timestamp >= e.exposure_time
                 AND f.timestamp >= subtractMinutes(now(), %(window_minutes)s)
@@ -355,16 +356,49 @@ WITH
            AND f.session_id = e.session_id
            AND f.event_name = '$frontend_error'
            AND JSONHas(f.active_flags, %(flag_key)s)
-           AND toBool(JSONExtractBool(f.active_flags, %(flag_key)s)) = e.value
+           AND JSONExtractString(f.active_flags, %(flag_key)s) = e.variant
            {health_scope_filter}
-        GROUP BY e.session_id, e.value
+        GROUP BY e.session_id, e.variant
+    ),
+    variant_stats AS (
+        SELECT
+            variant,
+            count() AS sessions,
+            countIf(failure_count > 0) AS failure_sessions,
+            sum(failure_count) AS failures
+        FROM exposure_failures
+        GROUP BY variant
+    ),
+    default_stats AS (
+        SELECT
+            sessions AS default_sessions,
+            failure_sessions AS default_failure_sessions,
+            failures AS default_failures
+        FROM variant_stats
+        WHERE variant = %(default_variant)s
     )
 SELECT
-    countIf(value = 1) AS exposed_sessions,
-    countIf(value = 0) AS baseline_sessions,
-    countIf(value = 1 AND failure_count > 0) AS exposed_failure_sessions,
-    countIf(value = 0 AND failure_count > 0) AS baseline_failure_sessions,
-    sumIf(failure_count, value = 1) AS exposed_failures,
-    sumIf(failure_count, value = 0) AS baseline_failures
-FROM exposure_failures
+    v.variant AS variant,
+    %(default_variant)s AS default_variant,
+    v.sessions AS variant_sessions,
+    ifNull(d.default_sessions, 0) AS default_sessions,
+    v.failure_sessions AS variant_failure_sessions,
+    ifNull(d.default_failure_sessions, 0) AS default_failure_sessions,
+    v.failures AS variant_failures,
+    ifNull(d.default_failures, 0) AS default_failures
+FROM variant_stats v
+LEFT JOIN default_stats d ON 1 = 1
+ORDER BY v.variant
 """
+
+
+def build_feature_flag_frontend_error_guardrail_query(
+    *,
+    exposure_scope_filter: str = "",
+    health_scope_filter: str = "",
+) -> str:
+    """Build the variant-vs-default frontend health guardrail query."""
+    return FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY.format(
+        exposure_scope_filter=exposure_scope_filter,
+        health_scope_filter=health_scope_filter,
+    )

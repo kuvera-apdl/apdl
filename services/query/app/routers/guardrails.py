@@ -7,12 +7,13 @@ from typing import Any
 from fastapi import APIRouter, Request
 
 from app.clickhouse.client import ClickHouseClient
-from app.clickhouse.queries import FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY
+from app.clickhouse.queries import build_feature_flag_frontend_error_guardrail_query
 from app.models.schemas import (
     GuardrailConfig,
     GuardrailEvaluateRequest,
     GuardrailEvaluateResponse,
     GuardrailMetric,
+    GuardrailVariantConfig,
 )
 
 router = APIRouter(prefix="/v1/query/guardrails", tags=["guardrails"])
@@ -32,6 +33,8 @@ async def evaluate_guardrail_endpoint(
         _get_client(request),
         project_id=body.project_id,
         flag_key=body.flag_key,
+        default_variant=body.default_variant,
+        variants=body.variants,
         guardrail=body.guardrail,
     )
 
@@ -41,6 +44,8 @@ async def evaluate_guardrail(
     *,
     project_id: str,
     flag_key: str,
+    default_variant: str,
+    variants: list[GuardrailVariantConfig],
     guardrail: GuardrailConfig,
 ) -> GuardrailEvaluateResponse:
     """Evaluate a frontend health guardrail against ClickHouse data."""
@@ -50,6 +55,7 @@ async def evaluate_guardrail(
     params: dict[str, Any] = {
         "project_id": project_id,
         "flag_key": flag_key,
+        "default_variant": default_variant,
         "window_minutes": guardrail.window_minutes,
     }
 
@@ -58,60 +64,27 @@ async def evaluate_guardrail(
         health_scope_filter = "AND f.page = %(page_scope)s"
         params["page_scope"] = page_scope
 
-    query = FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY.format(
+    query = build_feature_flag_frontend_error_guardrail_query(
         exposure_scope_filter=exposure_scope_filter,
         health_scope_filter=health_scope_filter,
     )
     rows = await client.execute(query, params)
-    row = rows[0] if rows else {}
-
-    exposed_sessions = _as_int(row.get("exposed_sessions"))
-    baseline_sessions = _as_int(row.get("baseline_sessions"))
-    exposed_failure_sessions = _as_int(row.get("exposed_failure_sessions"))
-    baseline_failure_sessions = _as_int(row.get("baseline_failure_sessions"))
-    exposed_failures = _as_int(row.get("exposed_failures"))
-    baseline_failures = _as_int(row.get("baseline_failures"))
-
-    exposed_rate = (
-        exposed_failure_sessions / exposed_sessions
-        if exposed_sessions > 0
-        else 0.0
+    variant_results = _variant_guardrail_results(
+        rows,
+        default_variant=default_variant,
+        variants=variants,
+        guardrail=guardrail,
     )
-    baseline_rate = (
-        baseline_failure_sessions / baseline_sessions
-        if baseline_sessions > 0
-        else 0.0
+    tripped_result = next(
+        (result for result in variant_results if result["tripped"]),
+        None,
     )
-
-    if guardrail.metric == GuardrailMetric.frontend_error_count:
-        tripped = exposed_failures >= 1
-    else:
-        has_minimum_exposures = (
-            exposed_sessions >= guardrail.minimum_exposures
-            and baseline_sessions >= guardrail.minimum_exposures
-        )
-        if not has_minimum_exposures:
-            tripped = False
-        elif baseline_rate == 0:
-            tripped = exposed_rate > 0
-        else:
-            tripped = exposed_rate >= baseline_rate * 2
-
-    evidence: dict[str, Any] = {
-        "metric": guardrail.metric.value,
-        "threshold": guardrail.threshold.value,
-        "scope": guardrail.scope,
-        "window_minutes": guardrail.window_minutes,
-        "minimum_exposures": guardrail.minimum_exposures,
-        "exposed_sessions": exposed_sessions,
-        "baseline_sessions": baseline_sessions,
-        "exposed_failure_sessions": exposed_failure_sessions,
-        "baseline_failure_sessions": baseline_failure_sessions,
-        "exposed_failures": exposed_failures,
-        "baseline_failures": baseline_failures,
-        "exposed_error_rate": exposed_rate,
-        "baseline_error_rate": baseline_rate,
-    }
+    evidence = _guardrail_evidence(
+        guardrail,
+        default_variant=default_variant,
+        tripped_result=tripped_result,
+        variant_results=variant_results,
+    )
 
     return GuardrailEvaluateResponse(
         flag_key=flag_key,
@@ -119,9 +92,119 @@ async def evaluate_guardrail(
         threshold=guardrail.threshold.value,
         scope=guardrail.scope,
         window_minutes=guardrail.window_minutes,
-        tripped=tripped,
+        tripped=tripped_result is not None,
         evidence=evidence,
     )
+
+
+def _variant_guardrail_results(
+    rows: list[dict[str, Any]],
+    *,
+    default_variant: str,
+    variants: list[GuardrailVariantConfig],
+    guardrail: GuardrailConfig,
+) -> list[dict[str, Any]]:
+    rows_by_variant = {
+        str(row.get("variant")): row
+        for row in rows
+        if row.get("variant") not in (None, "")
+    }
+    default_counts = _default_counts(rows_by_variant.get(default_variant, {}))
+
+    return [
+        _variant_guardrail_result(
+            variant.key,
+            default_variant=default_variant,
+            row={**default_counts, **rows_by_variant.get(variant.key, {})},
+            guardrail=guardrail,
+        )
+        for variant in variants
+        if variant.key != default_variant
+    ]
+
+
+def _variant_guardrail_result(
+    variant: str,
+    *,
+    default_variant: str,
+    row: dict[str, Any],
+    guardrail: GuardrailConfig,
+) -> dict[str, Any]:
+    variant_sessions = _as_int(row.get("variant_sessions"))
+    default_sessions = _as_int(row.get("default_sessions"))
+    variant_failure_sessions = _as_int(row.get("variant_failure_sessions"))
+    default_failure_sessions = _as_int(row.get("default_failure_sessions"))
+    variant_failures = _as_int(row.get("variant_failures"))
+    default_failures = _as_int(row.get("default_failures"))
+
+    variant_rate = (
+        variant_failure_sessions / variant_sessions
+        if variant_sessions > 0
+        else 0.0
+    )
+    default_rate = (
+        default_failure_sessions / default_sessions
+        if default_sessions > 0
+        else 0.0
+    )
+
+    if guardrail.metric == GuardrailMetric.frontend_error_count:
+        tripped = variant_failures >= 1
+    else:
+        has_minimum_exposures = (
+            variant_sessions >= guardrail.minimum_exposures
+            and default_sessions >= guardrail.minimum_exposures
+        )
+        if not has_minimum_exposures:
+            tripped = False
+        elif default_rate == 0:
+            tripped = variant_rate > 0
+        else:
+            tripped = variant_rate >= default_rate * 2
+
+    return {
+        "variant": variant,
+        "default_variant": default_variant,
+        "variant_sessions": variant_sessions,
+        "default_sessions": default_sessions,
+        "variant_failure_sessions": variant_failure_sessions,
+        "default_failure_sessions": default_failure_sessions,
+        "variant_failures": variant_failures,
+        "default_failures": default_failures,
+        "variant_error_rate": variant_rate,
+        "default_error_rate": default_rate,
+        "tripped": tripped,
+    }
+
+
+def _default_counts(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "default_sessions": row.get("default_sessions"),
+        "default_failure_sessions": row.get("default_failure_sessions"),
+        "default_failures": row.get("default_failures"),
+    }
+
+
+def _guardrail_evidence(
+    guardrail: GuardrailConfig,
+    *,
+    default_variant: str,
+    tripped_result: dict[str, Any] | None,
+    variant_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "metric": guardrail.metric.value,
+        "threshold": guardrail.threshold.value,
+        "scope": guardrail.scope,
+        "window_minutes": guardrail.window_minutes,
+        "minimum_exposures": guardrail.minimum_exposures,
+        "variant": tripped_result["variant"] if tripped_result else None,
+        "default_variant": default_variant,
+        "variant_results": variant_results,
+    }
+    if tripped_result is not None:
+        evidence.update(tripped_result)
+    return evidence
 
 
 def _page_scope(scope: str) -> str | None:
