@@ -48,6 +48,194 @@ _MAX_ACTIONS_PER_HOUR: dict[ActionType, int] = {
     ActionType.feature_proposal: 3,
 }
 
+_REJECTED_FLAG_FIELDS = {
+    "default_value",
+    "variant_type",
+    "variants_json",
+    "defaultVariant",
+    "targeting_rules",
+    "rollout_percentage",
+}
+
+
+def _validate_variant_flag_config(
+    config: dict[str, Any],
+    *,
+    require_complete: bool,
+) -> str | None:
+    rejected = sorted(field for field in _REJECTED_FLAG_FIELDS if field in config)
+    if rejected:
+        return f"Flag config contains non-canonical field(s): {', '.join(rejected)}."
+
+    fallthrough = config.get("fallthrough")
+    if isinstance(fallthrough, dict) and "value" in fallthrough:
+        return "fallthrough.value is not canonical; use fallthrough.rollout only."
+
+    if require_complete:
+        for field in ("default_variant", "variants", "rules", "fallthrough"):
+            if field not in config:
+                return f"flag_config.{field} is required."
+
+    default_variant = config.get("default_variant")
+    variants = config.get("variants")
+
+    if default_variant is not None:
+        if not isinstance(default_variant, str) or not default_variant:
+            return "default_variant must be a non-empty string."
+    elif require_complete:
+        return "default_variant must be a non-empty string."
+
+    if variants is not None:
+        error = _validate_variants(variants, default_variant)
+        if error is not None:
+            return error
+    elif require_complete:
+        return "variants must contain at least one variant."
+
+    rules = config.get("rules")
+    if rules is not None:
+        if not isinstance(rules, list):
+            return "rules must be a list."
+        for rule in rules:
+            if not isinstance(rule, dict):
+                return "rules must contain objects."
+            if "variants" in rule or "default_variant" in rule:
+                return "rules must not define variants or default_variant."
+            rollout_error = _validate_rollout(rule.get("rollout"), "rules.rollout")
+            if rollout_error is not None:
+                return rollout_error
+
+    if fallthrough is not None:
+        error = _validate_fallthrough(fallthrough)
+        if error is not None:
+            return error
+
+    return None
+
+
+def _validate_variants(variants: Any, default_variant: Any) -> str | None:
+    if not isinstance(variants, list) or not variants:
+        return "variants must contain at least one variant."
+
+    keys: set[str] = set()
+    total_weight = 0
+    for variant in variants:
+        if not isinstance(variant, dict):
+            return "variants must contain objects."
+        extra_fields = set(variant) - {"key", "weight"}
+        if extra_fields:
+            return (
+                "variants must contain only canonical key and weight fields; "
+                f"found: {', '.join(sorted(extra_fields))}."
+            )
+
+        key = variant.get("key")
+        if not isinstance(key, str) or not key:
+            return "variant key must be a non-empty string."
+        if key in keys:
+            return "variants must contain unique keys."
+        keys.add(key)
+
+        weight = variant.get("weight")
+        if not isinstance(weight, int) or isinstance(weight, bool):
+            return "variant weights must be non-negative integers."
+        if weight < 0:
+            return "variant weights must be non-negative integers."
+        total_weight += weight
+
+    if total_weight <= 0:
+        return "variant weights must contain at least one positive weight."
+
+    if default_variant is not None and default_variant not in keys:
+        return "default_variant must match a variant key."
+
+    return None
+
+
+def _validate_fallthrough(fallthrough: Any) -> str | None:
+    if not isinstance(fallthrough, dict):
+        return "fallthrough must be an object."
+    extra_fields = set(fallthrough) - {"rollout"}
+    if extra_fields:
+        return (
+            "fallthrough must contain only canonical rollout field; "
+            f"found: {', '.join(sorted(extra_fields))}."
+        )
+
+    return _validate_rollout(fallthrough.get("rollout"), "fallthrough.rollout")
+
+
+def _validate_rollout(rollout: Any, field_name: str) -> str | None:
+    if not isinstance(rollout, dict):
+        return f"{field_name} must be an object."
+    extra_rollout_fields = set(rollout) - {"percentage", "bucket_by"}
+    if extra_rollout_fields:
+        return (
+            f"{field_name} must contain only percentage and bucket_by; "
+            f"found: {', '.join(sorted(extra_rollout_fields))}."
+        )
+
+    percentage = rollout.get("percentage")
+    if (
+        not isinstance(percentage, int | float)
+        or isinstance(percentage, bool)
+        or percentage < 0
+        or percentage > 100
+    ):
+        return f"{field_name}.percentage must be a number from 0 to 100."
+
+    bucket_by = rollout.get("bucket_by")
+    if not isinstance(bucket_by, str) or not bucket_by:
+        return f"{field_name}.bucket_by must be a non-empty string."
+
+    return None
+
+
+def _variant_weights(variants: Any) -> dict[str, int]:
+    if not isinstance(variants, list):
+        return {}
+
+    weights: dict[str, int] = {}
+    for variant in variants:
+        if not isinstance(variant, dict):
+            return {}
+        key = variant.get("key")
+        weight = variant.get("weight")
+        if not isinstance(key, str) or not isinstance(weight, int) or isinstance(weight, bool):
+            return {}
+        weights[key] = weight
+    return weights
+
+
+def _max_rollout_percentage(config: dict[str, Any]) -> float | None:
+    percentages = []
+
+    fallthrough = config.get("fallthrough")
+    if isinstance(fallthrough, dict):
+        fallthrough_percentage = _rollout_percentage(fallthrough.get("rollout"))
+        if fallthrough_percentage is not None:
+            percentages.append(fallthrough_percentage)
+
+    rules = config.get("rules", [])
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                return None
+            rule_percentage = _rollout_percentage(rule.get("rollout"))
+            if rule_percentage is not None:
+                percentages.append(rule_percentage)
+
+    return max(percentages) if percentages else None
+
+
+def _rollout_percentage(rollout: Any) -> float | None:
+    if not isinstance(rollout, dict):
+        return None
+    percentage = rollout.get("percentage")
+    if not isinstance(percentage, int | float) or isinstance(percentage, bool):
+        return None
+    return float(percentage)
+
 
 class SafetyValidator:
     """Validates agent actions against safety rules before execution.
@@ -67,6 +255,7 @@ class SafetyValidator:
         checks: list[dict[str, Any]] = [
             self._check_rate_limits(action),
             self._check_conflicts(action),
+            self._check_variant_config(action),
             self._check_blast_radius(action),
             self._check_guardrails(action),
         ]
@@ -166,50 +355,123 @@ class SafetyValidator:
             "message": "No conflicts detected.",
         }
 
+    def _check_variant_config(self, action: AgentAction) -> dict[str, Any]:
+        """Validate canonical variant flag fields for flag-changing actions."""
+        if action.type == ActionType.create_experiment:
+            flag_config = action.config.get("flag_config")
+            if not isinstance(flag_config, dict):
+                return {
+                    "name": "variant_config",
+                    "passed": False,
+                    "message": "Experiment design must include canonical flag_config.",
+                }
+
+            error = _validate_variant_flag_config(flag_config, require_complete=True)
+            if error is not None:
+                return {
+                    "name": "variant_config",
+                    "passed": False,
+                    "message": error,
+                }
+
+            return {
+                "name": "variant_config",
+                "passed": True,
+                "message": "Canonical variant flag config is valid.",
+            }
+
+        if action.type == ActionType.update_flag:
+            error = _validate_variant_flag_config(action.config, require_complete=False)
+            if error is not None:
+                return {
+                    "name": "variant_config",
+                    "passed": False,
+                    "message": error,
+                }
+
+        return {
+            "name": "variant_config",
+            "passed": True,
+            "message": "No variant config changes require validation.",
+        }
+
     def _check_blast_radius(self, action: AgentAction) -> dict[str, Any]:
         """Ensure the action does not affect too many users at once.
 
-        For experiments, the total traffic allocation across all variants
-        should not exceed 100%, and no single variant should get more than
-        50% for new experiments (to ensure a control group).
+        For experiments, variant weights are relative. Traffic allocation is
+        controlled by the canonical fallthrough rollout percentage, and variant
+        exposure share is derived from rollout percentage multiplied by the
+        normalized non-default variant weight.
         """
         config = action.config
 
         if action.type == ActionType.create_experiment:
-            variants = config.get("variants", [])
-            total_weight = sum(v.get("weight", 0) for v in variants)
-
-            if total_weight > 100:
+            flag_config = config.get("flag_config", {})
+            if not isinstance(flag_config, dict):
                 return {
                     "name": "blast_radius",
                     "passed": False,
-                    "message": f"Total variant weight is {total_weight}%, exceeding 100%.",
+                    "message": "Cannot assess blast radius without canonical flag_config.",
                 }
 
-            # Check that there's a reasonable control group
-            control_variants = [v for v in variants if v.get("key") == "control"]
-            if not control_variants:
+            default_variant = flag_config.get("default_variant", "")
+            variant_weights = _variant_weights(flag_config.get("variants", []))
+            total_weight = sum(variant_weights.values())
+            if not default_variant or total_weight <= 0 or default_variant not in variant_weights:
                 return {
                     "name": "blast_radius",
                     "passed": False,
-                    "message": "No control variant found. Every experiment must have a control group.",
+                    "message": "Cannot assess blast radius until variant config is valid.",
                 }
 
-            control_weight = control_variants[0].get("weight", 0)
-            if control_weight < 10:
+            rollout_percentage = _max_rollout_percentage(flag_config)
+            if rollout_percentage is None:
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": "Cannot assess blast radius without rule or fallthrough rollout percentage.",
+                }
+            if rollout_percentage > 100:
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": f"Rollout percentage is {rollout_percentage}%, exceeding 100%.",
+                }
+
+            default_share = (variant_weights[default_variant] / total_weight) * 100.0
+            if default_share < 10:
                 return {
                     "name": "blast_radius",
                     "passed": False,
                     "message": (
-                        f"Control group weight is only {control_weight}%. "
+                        f"Default variant share is only {default_share:.1f}%. "
                         "Must be at least 10% for statistical validity."
+                    ),
+                }
+
+            non_default_exposure_shares = [
+                (weight / total_weight) * rollout_percentage
+                for key, weight in variant_weights.items()
+                if key != default_variant
+            ]
+            max_non_default_exposure = max(non_default_exposure_shares, default=0.0)
+            if max_non_default_exposure > 50:
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": (
+                        f"A non-default variant would reach {max_non_default_exposure:.1f}% "
+                        "of users, exceeding the 50% safety limit."
                     ),
                 }
 
             return {
                 "name": "blast_radius",
                 "passed": True,
-                "message": f"Traffic allocation is safe: {total_weight}% total, {control_weight}% control.",
+                "message": (
+                    f"Traffic allocation is safe: {rollout_percentage:.1f}% rollout, "
+                    f"{default_share:.1f}% default variant share."
+                ),
             }
 
         if action.type == ActionType.update_ui_config:

@@ -54,14 +54,15 @@ async def create_flag(
     owners: list[str] | None = None,
     review_by: str | None = None,
     enabled: bool | None = None,
-    default_value: bool = False,
+    default_variant: str = "control",
+    variants: list[dict[str, Any]] | None = None,
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
     evaluation_mode: str = "client",
     auto_disable: bool = True,
     guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Create a new feature flag.
+    """Create a new canonical variant feature flag.
 
     Args:
         project_id: Project to create the flag in.
@@ -72,11 +73,12 @@ async def create_flag(
         owners: Users or teams responsible for reviewing the flag.
         review_by: ISO date when the flag should next be reviewed.
         enabled: Whether the flag is initially enabled. Defaults from state when omitted.
-        default_value: Value returned when the flag is disabled or invalid.
-        rules: Ordered canonical gate rules.
-        fallthrough: Canonical fallthrough config.
+        default_variant: Variant returned when the flag is disabled or invalid.
+        variants: Canonical variant definitions with "key" and relative integer "weight".
+        rules: Ordered canonical variant flag rules.
+        fallthrough: Canonical fallthrough config containing only "rollout".
         evaluation_mode: One of "client", "server", or "both".
-        auto_disable: Whether guardrail automation may disable this gate.
+        auto_disable: Whether guardrail automation may disable this flag.
         guardrails: Optional guardrail configs.
 
     Returns:
@@ -92,10 +94,13 @@ async def create_flag(
         "owners": owners or [],
         "review_by": review_by,
         "enabled": resolved_enabled,
-        "default_value": default_value,
+        "default_variant": default_variant,
+        "variants": variants if variants is not None else [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": rules or [],
-        "fallthrough": fallthrough or {
-            "value": False,
+        "fallthrough": fallthrough if fallthrough is not None else {
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "evaluation_mode": evaluation_mode,
@@ -115,7 +120,8 @@ async def update_flag(
     enabled: bool | None = None,
     name: str | None = None,
     description: str | None = None,
-    default_value: bool | None = None,
+    default_variant: str | None = None,
+    variants: list[dict[str, Any]] | None = None,
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
     evaluation_mode: str | None = None,
@@ -134,8 +140,9 @@ async def update_flag(
         enabled: Set flag enabled/disabled state.
         name: Updated name.
         description: Updated description.
-        default_value: Updated disabled/invalid fallback.
-        rules: Updated canonical gate rules.
+        default_variant: Updated disabled/invalid fallback variant.
+        variants: Updated canonical variant definitions.
+        rules: Updated canonical variant flag rules.
         fallthrough: Updated fallthrough config.
         evaluation_mode: Updated evaluation mode.
         auto_disable: Updated guardrail automation setting.
@@ -157,8 +164,10 @@ async def update_flag(
         payload["name"] = name
     if description is not None:
         payload["description"] = description
-    if default_value is not None:
-        payload["default_value"] = default_value
+    if default_variant is not None:
+        payload["default_variant"] = default_variant
+    if variants is not None:
+        payload["variants"] = variants
     if rules is not None:
         payload["rules"] = rules
     if fallthrough is not None:
