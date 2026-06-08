@@ -272,41 +272,52 @@ ORDER BY cohort_value, day
 # ---------------------------------------------------------------------------
 
 EXPERIMENT_EXPOSURES_QUERY = """
+WITH
+    exposures AS (
+        SELECT
+            if(user_id != '', user_id, anonymous_id) AS assignment_id,
+            variant,
+            min(first_exposure) AS first_exposure
+        FROM feature_flag_exposures
+        WHERE project_id = %(project_id)s
+          AND flag_key = %(flag_key)s
+          AND (user_id != '' OR anonymous_id != '')
+        GROUP BY assignment_id, variant
+    )
 SELECT
-    user_id,
-    JSONExtractString(properties, 'variant') AS variant,
-    min(timestamp) AS first_exposure
-FROM events
-WHERE project_id = %(project_id)s
-  AND event_name = '$experiment_exposure'
-  AND JSONExtractString(properties, 'experiment_id') = %(experiment_id)s
-GROUP BY user_id, variant
+    assignment_id AS user_id,
+    variant,
+    first_exposure
+FROM exposures
 """
 
 EXPERIMENT_METRICS_QUERY = """
 WITH
     exposures AS (
         SELECT
-            user_id,
-            JSONExtractString(properties, 'variant') AS variant,
-            min(timestamp) AS first_exposure
-        FROM events
+            if(user_id != '', user_id, anonymous_id) AS assignment_id,
+            variant,
+            min(first_exposure) AS first_exposure
+        FROM feature_flag_exposures
         WHERE project_id = %(project_id)s
-          AND event_name = '$experiment_exposure'
-          AND JSONExtractString(properties, 'experiment_id') = %(experiment_id)s
-        GROUP BY user_id, variant
+          AND flag_key = %(flag_key)s
+          AND (user_id != '' OR anonymous_id != '')
+        GROUP BY assignment_id, variant
     )
 SELECT
     e.variant,
-    e.user_id,
+    e.assignment_id AS user_id,
     count() AS metric_value
 FROM exposures e
 INNER JOIN events ev
-    ON e.user_id = ev.user_id
-    AND ev.timestamp >= e.first_exposure
-    AND ev.event_name = %(metric)s
-    AND ev.project_id = %(project_id)s
-GROUP BY e.variant, e.user_id
+    ON ev.project_id = %(project_id)s
+   AND (
+       ev.user_id = e.assignment_id
+       OR ev.anonymous_id = e.assignment_id
+   )
+   AND ev.timestamp >= e.first_exposure
+   AND ev.event_name = %(metric)s
+GROUP BY e.variant, e.assignment_id
 """
 
 

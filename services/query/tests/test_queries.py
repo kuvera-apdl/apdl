@@ -3,7 +3,12 @@
 import pytest
 from pydantic import ValidationError
 
-from app.clickhouse.queries import build_event_count_query, build_funnel_query
+from app.clickhouse.queries import (
+    EXPERIMENT_EXPOSURES_QUERY,
+    EXPERIMENT_METRICS_QUERY,
+    build_event_count_query,
+    build_funnel_query,
+)
 from app.clickhouse.selectors import build_selector_condition, selector_label
 from app.models.schemas import EventSelector
 
@@ -181,3 +186,15 @@ class TestQueryBuilders:
         assert "funnel_step_1_filter_0_value" in params
         assert "/checkout" not in sql
         assert "OR" in sql
+
+    def test_experiment_queries_use_feature_flag_exposures(self):
+        combined_sql = f"{EXPERIMENT_EXPOSURES_QUERY}\n{EXPERIMENT_METRICS_QUERY}"
+
+        assert "FROM feature_flag_exposures" in EXPERIMENT_EXPOSURES_QUERY
+        assert "FROM feature_flag_exposures" in EXPERIMENT_METRICS_QUERY
+        assert "flag_key = %(flag_key)s" in combined_sql
+        assert "variant" in combined_sql
+        assert "ev.user_id = e.assignment_id" in EXPERIMENT_METRICS_QUERY
+        assert "ev.anonymous_id = e.assignment_id" in EXPERIMENT_METRICS_QUERY
+        assert "$experiment_exposure" not in combined_sql
+        assert "JSONExtractString(properties, 'experiment_id')" not in combined_sql

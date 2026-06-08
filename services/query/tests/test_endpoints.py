@@ -616,6 +616,7 @@ async def test_experiment_results_frequentist(client):
         "/v1/query/experiment/exp_123",
         params={
             "metric": "purchase",
+            "flag_key": "checkout-experiment",
             "method": "frequentist",
             "project_id": PROJECT_ID,
         },
@@ -624,10 +625,19 @@ async def test_experiment_results_frequentist(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["experiment_id"] == "exp_123"
+    assert body["flag_key"] == "checkout-experiment"
     assert body["metric"] == "purchase"
     assert body["method"] == "frequentist"
     assert len(body["variants"]) == 2
     assert body["is_significant"] is True
+    metric_call = app.state.ch_client.execute.await_args_list[0]
+    exposure_call = app.state.ch_client.execute.await_args_list[1]
+    assert "FROM feature_flag_exposures" in metric_call.args[0]
+    assert "FROM feature_flag_exposures" in exposure_call.args[0]
+    assert "$experiment_exposure" not in metric_call.args[0]
+    assert metric_call.args[1]["flag_key"] == "checkout-experiment"
+    assert exposure_call.args[1]["flag_key"] == "checkout-experiment"
+    assert "experiment_id" not in metric_call.args[1]
 
 
 @pytest.mark.asyncio
@@ -637,7 +647,11 @@ async def test_experiment_no_data_returns_404(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_missing",
-        params={"metric": "purchase", "project_id": PROJECT_ID},
+        params={
+            "metric": "purchase",
+            "flag_key": "checkout-experiment",
+            "project_id": PROJECT_ID,
+        },
     )
 
     assert resp.status_code == 404
@@ -655,7 +669,22 @@ async def test_experiment_single_variant_returns_400(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_single",
-        params={"metric": "purchase", "project_id": PROJECT_ID},
+        params={
+            "metric": "purchase",
+            "flag_key": "checkout-experiment",
+            "project_id": PROJECT_ID,
+        },
     )
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_experiment_requires_flag_key(client):
+    """Experiment analysis requires canonical flag metadata."""
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"metric": "purchase", "project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 422

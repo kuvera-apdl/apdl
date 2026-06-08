@@ -458,9 +458,10 @@ class GuardrailEvaluateResponse(BaseModel):
 # Experiment models
 # ---------------------------------------------------------------------------
 
-class ExperimentResultsRequest(BaseModel):
-    experiment_id: str
-    metric: str
+class ExperimentResultsRequest(StrictModel):
+    experiment_id: str = Field(..., min_length=1)
+    flag_key: str = Field(..., min_length=1)
+    metric: str = Field(..., min_length=1)
     method: AnalysisMethod = AnalysisMethod.frequentist
 
 
@@ -474,6 +475,7 @@ class VariantResult(BaseModel):
 
 class ExperimentResult(BaseModel):
     experiment_id: str
+    flag_key: str
     metric: str
     method: str
     variants: list[VariantResult]
