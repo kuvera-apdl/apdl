@@ -3,13 +3,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FlagEvaluator } from '../../src/flags/evaluator';
 import { FlagCache } from '../../src/flags/cache';
-import type { EvalContext, GateConfig, GateEvaluationResult } from '../../src/flags/types';
+import type { EvalContext, FlagConfig, FlagEvaluationResult } from '../../src/flags/types';
 
 interface EvaluationFixture {
   name: string;
-  flag: GateConfig;
+  flag: FlagConfig;
   context: EvalContext;
-  result: Omit<GateEvaluationResult, 'source'>;
+  result: Omit<FlagEvaluationResult, 'source'>;
 }
 
 interface ParityFixture {
@@ -29,7 +29,7 @@ describe('FlagEvaluator', () => {
     evaluator = new FlagEvaluator(cache);
   });
 
-  it('returns not_found for unknown gates', () => {
+  it('returns not_found for unknown flags', () => {
     expect(evaluator.evaluate('missing', {
       user_id: 'user_123',
       anonymous_id: '',
@@ -48,15 +48,15 @@ describe('FlagEvaluator', () => {
     });
   });
 
-  it('returns invalid_config for malformed keyed gate configs', () => {
-    cache.markInvalid(['broken-gate'], 'initial_fetch');
+  it('returns invalid_config for malformed keyed flag configs', () => {
+    cache.markInvalid(['broken-flag'], 'initial_fetch');
 
-    expect(evaluator.evaluate('broken-gate', {
+    expect(evaluator.evaluate('broken-flag', {
       user_id: 'user_123',
       anonymous_id: '',
       attributes: {},
     })).toEqual({
-      key: 'broken-gate',
+      key: 'broken-flag',
       variant: null,
       reason: 'invalid_config',
       rule_id: null,
@@ -94,7 +94,7 @@ describe('FlagEvaluator', () => {
 
     for (const [index, condition] of conditions.entries()) {
       const key = `operator_${index}`;
-      cache.set([makeGate(key, {
+      cache.set([makeFlag(key, {
         rules: [{
           id: `rule_${index}`,
           name: '',
@@ -117,7 +117,7 @@ describe('FlagEvaluator', () => {
   });
 
   it('uses presence and non-null value for exists operators', () => {
-    cache.set([makeGate('presence_gate', {
+    cache.set([makeFlag('presence_flag', {
       rules: [{
         id: 'rule_presence',
         name: '',
@@ -132,7 +132,7 @@ describe('FlagEvaluator', () => {
       }],
     })]);
 
-    expect(evaluator.evaluate('presence_gate', {
+    expect(evaluator.evaluate('presence_flag', {
       anonymous_id: 'anon_123',
       attributes: {
         empty_text: '',
@@ -144,13 +144,13 @@ describe('FlagEvaluator', () => {
   });
 
   it('uses anonymous_id only when bucket_by explicitly selects it', () => {
-    cache.set([makeGate('anonymous_gate', {
+    cache.set([makeFlag('anonymous_flag', {
       fallthrough: {
         rollout: { percentage: 100, bucket_by: 'anonymous_id' },
       },
     })]);
 
-    expect(evaluator.evaluate('anonymous_gate', {
+    expect(evaluator.evaluate('anonymous_flag', {
       anonymous_id: 'anon_123',
       attributes: {},
     })).toMatchObject({
@@ -161,9 +161,9 @@ describe('FlagEvaluator', () => {
   });
 
   it('returns source details from the cache', () => {
-    cache.set([makeGate('source_gate')], 'sse');
+    cache.set([makeFlag('source_flag')], 'sse');
 
-    expect(evaluator.evaluate('source_gate', {
+    expect(evaluator.evaluate('source_flag', {
       user_id: 'user_123',
       anonymous_id: '',
       attributes: {},
@@ -171,7 +171,7 @@ describe('FlagEvaluator', () => {
   });
 });
 
-function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig {
+function makeFlag(key: string, overrides: Partial<FlagConfig> = {}): FlagConfig {
   return {
     key,
     enabled: true,
@@ -190,7 +190,7 @@ function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig 
   };
 }
 
-function expectResult(actual: GateEvaluationResult, expected: GateEvaluationResult): void {
+function expectResult(actual: FlagEvaluationResult, expected: FlagEvaluationResult): void {
   expect(actual).toMatchObject({
     ...expected,
     rollout_bucket: actual.rollout_bucket,

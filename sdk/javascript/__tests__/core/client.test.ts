@@ -5,7 +5,11 @@ import { hashBucket } from '../../src/flags/hash';
 // Mock fetch globally
 const fetchMock = vi.fn().mockResolvedValue({
   ok: true,
-  json: () => Promise.resolve({ flags: [] }),
+  json: () => Promise.resolve({
+    schema_version: 2,
+    project_id: 'apdl',
+    flags: [],
+  }),
   status: 200,
   headers: new Headers(),
 });
@@ -221,12 +225,12 @@ describe('APDLClient', () => {
     });
   });
 
-  describe('checkGate()', () => {
-    it('should return false and details when gate not found', () => {
+  describe('getVariant()', () => {
+    it('should return null and details when flag not found', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-      expect(client.checkGate('nonexistent')).toBe(false);
-      expect(client.checkGateDetails('nonexistent')).toMatchObject({
+      expect(client.getVariant('nonexistent')).toBeNull();
+      expect(client.getVariantDetails('nonexistent')).toMatchObject({
         key: 'nonexistent',
         variant: null,
         reason: 'not_found',
@@ -235,20 +239,20 @@ describe('APDLClient', () => {
       expect(featureFlagExposures(client)).toHaveLength(0);
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "APDL: Feature gate 'nonexistent' is missing or archived; returning false."
+        "APDL: Feature flag 'nonexistent' is missing or archived; returning null variant."
       );
 
       warn.mockRestore();
     });
 
-    it('should evaluate gates from initial fetch', async () => {
+    it('should evaluate flags from initial fetch', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
           flags: [{
-            ...makeGate('new-checkout-flow'),
+            ...makeFlag('new-checkout-flow'),
             version: 3,
           }],
         }),
@@ -267,8 +271,8 @@ describe('APDLClient', () => {
       await flushAsync();
       flaggedClient.identify('user_123');
 
-      expect(flaggedClient.checkGate('new-checkout-flow')).toBe(true);
-      expect(flaggedClient.checkGateDetails('new-checkout-flow')).toMatchObject({
+      expect(flaggedClient.getVariant('new-checkout-flow')).toBe('treatment');
+      expect(flaggedClient.getVariantDetails('new-checkout-flow')).toMatchObject({
         variant: 'treatment',
         reason: 'fallthrough',
         config_version: 3,
@@ -276,19 +280,76 @@ describe('APDLClient', () => {
       });
     });
 
-    it('should not expose removed legacy gate APIs', () => {
+    it('should not expose removed legacy flag APIs', () => {
       const api = client as unknown as Record<string, unknown>;
 
+      expect(api.checkGate).toBeUndefined();
+      expect(api.checkGateDetails).toBeUndefined();
+      expect(api.onFlagChange).toBeUndefined();
       expect(api.flag).toBeUndefined();
       expect(api.flagPayload).toBeUndefined();
       expect(api.experiment).toBeUndefined();
     });
 
-    it('should restore cached gates in standard localStorage mode', () => {
+    it('should notify variant listeners with variant strings after flag updates', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const variantClient = new APDLClient({
+        apiKey: 'test-key-123',
+        host: 'https://ingest.test.dev',
+        configHost: 'https://config.test.dev',
+        autoCapture: false,
+        persistence: 'memory',
+      });
+      await flushAsync();
+      variantClient.identify('user_123');
+
+      const callback = vi.fn();
+      const unsubscribe = variantClient.onVariantChange('listener-flag', callback);
+
+      const source = MockEventSource.instances.at(-1);
+      source?.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({
+          type: 'flag_update',
+          action: 'flag_created',
+          flag: makeFlag('listener-flag'),
+        }),
+      }));
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith('treatment');
+
+      unsubscribe();
+      source?.onmessage?.(new MessageEvent('message', {
+        data: JSON.stringify({
+          type: 'flag_update',
+          action: 'flag_updated',
+          flag: {
+            ...makeFlag('listener-flag'),
+            enabled: false,
+            version: 2,
+          },
+        }),
+      }));
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      await variantClient.shutdown();
+    });
+
+    it('should restore cached flags in standard localStorage mode', () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
-        flags: [makeGate('cached-gate')],
+        flags: [makeFlag('cached-flag')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
@@ -302,15 +363,15 @@ describe('APDLClient', () => {
       });
       cachedClient.identify('user_123');
 
-      expect(cachedClient.checkGate('cached-gate')).toBe(true);
-      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
+      expect(cachedClient.getVariant('cached-flag')).toBe('treatment');
+      expect(cachedClient.getVariantDetails('cached-flag').source).toBe('local_storage');
     });
 
-    it('should preserve restored gates when initial fetch returns malformed config', async () => {
+    it('should preserve restored flags when initial fetch returns malformed config', async () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
-        flags: [makeGate('cached-gate')],
+        flags: [makeFlag('cached-flag')],
       }));
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -343,10 +404,10 @@ describe('APDLClient', () => {
       cachedClient.identify('user_123');
 
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(cachedClient.checkGate('cached-gate')).toBe(true);
-      expect(cachedClient.checkGateDetails('cached-gate').source).toBe('local_storage');
-      expect(cachedClient.checkGate('legacy')).toBe(false);
-      expect(cachedClient.checkGateDetails('legacy')).toMatchObject({
+      expect(cachedClient.getVariant('cached-flag')).toBe('treatment');
+      expect(cachedClient.getVariantDetails('cached-flag').source).toBe('local_storage');
+      expect(cachedClient.getVariant('legacy')).toBeNull();
+      expect(cachedClient.getVariantDetails('legacy')).toMatchObject({
         reason: 'invalid_config',
         source: null,
       });
@@ -354,11 +415,11 @@ describe('APDLClient', () => {
       warn.mockRestore();
     });
 
-    it('should not restore cached gates in strict privacy mode', () => {
+    it('should not restore cached flags in strict privacy mode', () => {
       localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
-        flags: [makeGate('cached-gate')],
+        flags: [makeFlag('cached-flag')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
@@ -373,20 +434,20 @@ describe('APDLClient', () => {
       strictClient.identify('user_123');
 
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(strictClient.checkGate('cached-gate')).toBe(false);
-      expect(strictClient.checkGateDetails('cached-gate').reason).toBe('not_found');
+      expect(strictClient.getVariant('cached-flag')).toBeNull();
+      expect(strictClient.getVariantDetails('cached-flag').reason).toBe('not_found');
       expect(warn).toHaveBeenCalledTimes(1);
       warn.mockRestore();
     });
 
-    it('should log one deduplicated exposure for repeated gate checks', async () => {
+    it('should log one deduplicated exposure for repeated variant checks', async () => {
       window.history.pushState({}, '', '/checkout');
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('new-checkout-flow')],
+          flags: [makeFlag('new-checkout-flow')],
         }),
         status: 200,
         headers: new Headers(),
@@ -403,10 +464,10 @@ describe('APDLClient', () => {
       await flushAsync();
       flaggedClient.identify('user_123');
 
-      const gateOptions = { component: 'CheckoutPage' };
-      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
-      expect(flaggedClient.checkGateDetails('new-checkout-flow', gateOptions).variant).toBe('treatment');
-      expect(flaggedClient.checkGate('new-checkout-flow', gateOptions)).toBe(true);
+      const flagOptions = { component: 'CheckoutPage' };
+      expect(flaggedClient.getVariant('new-checkout-flow', flagOptions)).toBe('treatment');
+      expect(flaggedClient.getVariantDetails('new-checkout-flow', flagOptions).variant).toBe('treatment');
+      expect(flaggedClient.getVariant('new-checkout-flow', flagOptions)).toBe('treatment');
 
       const exposures = featureFlagExposures(flaggedClient);
       expect(exposures).toHaveLength(1);
@@ -433,7 +494,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('component-gate')],
+          flags: [makeFlag('component-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -450,8 +511,8 @@ describe('APDLClient', () => {
       await flushAsync();
       flaggedClient.identify('user_123');
 
-      flaggedClient.checkGate('component-gate', { component: 'HeaderCTA' });
-      flaggedClient.checkGate('component-gate', { component: 'FooterCTA' });
+      flaggedClient.getVariant('component-flag', { component: 'HeaderCTA' });
+      flaggedClient.getVariant('component-flag', { component: 'FooterCTA' });
 
       const exposureComponents = featureFlagExposures(flaggedClient)
         .map((event) => event.properties?.component);
@@ -464,7 +525,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('pricing-gate')],
+          flags: [makeFlag('pricing-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -482,9 +543,9 @@ describe('APDLClient', () => {
       flaggedClient.identify('user_123');
 
       window.history.pushState({}, '', '/checkout');
-      flaggedClient.checkGate('pricing-gate');
+      flaggedClient.getVariant('pricing-flag');
       window.history.pushState({}, '', '/pricing');
-      flaggedClient.checkGate('pricing-gate');
+      flaggedClient.getVariant('pricing-flag');
 
       const exposurePages = featureFlagExposures(flaggedClient)
         .map((event) => event.properties?.page);
@@ -497,7 +558,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('consent-gate')],
+          flags: [makeFlag('consent-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -514,11 +575,11 @@ describe('APDLClient', () => {
 
       await flushAsync();
       flaggedClient.identify('user_123');
-      flaggedClient.checkGate('consent-gate');
+      flaggedClient.getVariant('consent-flag');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
 
       flaggedClient.consent.update({ analytics: true });
-      flaggedClient.checkGate('consent-gate');
+      flaggedClient.getVariant('consent-flag');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
     });
   });
@@ -531,7 +592,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('checkout-gate')],
+          flags: [makeFlag('checkout-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -556,7 +617,7 @@ describe('APDLClient', () => {
 
       await flushAsync();
       healthClient.identify('user_123');
-      healthClient.checkGate('checkout-gate');
+      healthClient.getVariant('checkout-flag');
 
       window.dispatchEvent(new ErrorEvent('error', {
         message: 'Checkout exploded',
@@ -577,8 +638,8 @@ describe('APDLClient', () => {
         source: 'checkout.js',
         line: 12,
         column: 4,
-        active_flags: { 'checkout-gate': 'treatment' },
-        active_flag_versions: { 'checkout-gate': 1 },
+        active_flags: { 'checkout-flag': 'treatment' },
+        active_flag_versions: { 'checkout-flag': 1 },
       });
 
       await healthClient.shutdown();
@@ -590,7 +651,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('checkout-gate')],
+          flags: [makeFlag('checkout-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -616,7 +677,7 @@ describe('APDLClient', () => {
       await flushAsync();
       healthClient.identify('user_123');
       window.history.pushState({}, '', '/checkout');
-      healthClient.checkGate('checkout-gate');
+      healthClient.getVariant('checkout-flag');
       window.history.pushState({}, '', '/pricing');
 
       window.dispatchEvent(new ErrorEvent('error', {
@@ -641,7 +702,7 @@ describe('APDLClient', () => {
         json: () => Promise.resolve({
           schema_version: 2,
           project_id: 'apdl',
-          flags: [makeGate('checkout-gate')],
+          flags: [makeFlag('checkout-flag')],
         }),
         status: 200,
         headers: new Headers(),
@@ -667,7 +728,7 @@ describe('APDLClient', () => {
       await flushAsync();
       healthClient.identify('user_123');
       window.history.pushState({}, '', '/checkout');
-      healthClient.checkGate('checkout-gate');
+      healthClient.getVariant('checkout-flag');
 
       const source = MockEventSource.instances.at(-1);
       source?.onmessage?.(new MessageEvent('message', {
@@ -675,7 +736,7 @@ describe('APDLClient', () => {
           type: 'flag_update',
           action: 'flag_updated',
           flag: {
-            ...makeGate('checkout-gate'),
+            ...makeFlag('checkout-flag'),
             enabled: false,
             version: 2,
           },
@@ -690,8 +751,8 @@ describe('APDLClient', () => {
       const errors = frontendErrors(healthClient);
       expect(errors).toHaveLength(1);
       expect(errors[0].properties).toMatchObject({
-        active_flags: { 'checkout-gate': 'control' },
-        active_flag_versions: { 'checkout-gate': 2 },
+        active_flags: { 'checkout-flag': 'control' },
+        active_flag_versions: { 'checkout-flag': 2 },
       });
 
       await healthClient.shutdown();
@@ -812,7 +873,7 @@ async function flushAsync(): Promise<void> {
 }
 
 function flagStorageKey(apiKey: string): string {
-  return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', apiKey).toString(16)}`;
+  return `apdl_flags_${hashBucket('sdk_flag_cache', 'v2', apiKey).toString(16)}`;
 }
 
 function featureFlagExposures(
@@ -831,7 +892,7 @@ function frontendErrors(
     .filter((event) => event.event === '$frontend_error');
 }
 
-function makeGate(key: string): Record<string, unknown> {
+function makeFlag(key: string): Record<string, unknown> {
   return {
     key,
     enabled: true,

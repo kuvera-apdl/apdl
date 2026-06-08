@@ -19,7 +19,7 @@ const fixtures = JSON.parse(
   readFileSync(resolve(process.cwd(), '../../fixtures/gates/parity.json'), 'utf8')
 ) as ParityFixture;
 
-describe('FNV-1a gate hashing', () => {
+describe('FNV-1a flag hashing', () => {
   it('matches config-service golden hash values', () => {
     for (const fixture of fixtures.hash_cases) {
       expect(hashBucket(fixture.flag_key, fixture.salt, fixture.unit_id)).toBe(fixture.hash);

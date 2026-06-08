@@ -12,7 +12,7 @@ import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
 import { hashBucket } from '../flags/hash';
 import { parseFlagConfigResult } from '../flags/schema';
-import type { EvalContext, GateEvaluationOptions, GateEvaluationResult } from '../flags/types';
+import type { EvalContext, FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
 import { ComponentRegistry } from '../ui/registry';
@@ -61,10 +61,9 @@ export class APDLClient {
   private slotManager: SlotManager;
   private consentManager: ConsentManager;
   private scrubber: Scrubber;
-  private flagChangeListeners: Map<string, Set<(value: boolean) => void>> = new Map();
   private variantChangeListeners: Map<string, Set<(variant: string | null) => void>> = new Map();
   private featureFlagExposureKeys: Set<string> = new Set();
-  private missingGateWarnings: Set<string> = new Set();
+  private missingFlagWarnings: Set<string> = new Set();
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
 
   /** UI namespace */
@@ -273,52 +272,19 @@ export class APDLClient {
   /**
    * Evaluates a feature flag and returns its variant.
    */
-  getVariant(key: string, options?: GateEvaluationOptions): string | null {
+  getVariant(key: string, options?: FlagEvaluationOptions): string | null {
     return this.getVariantDetails(key, options).variant;
   }
 
   /**
    * Evaluates a feature flag and returns explanation details.
    */
-  getVariantDetails(key: string, options?: GateEvaluationOptions): GateEvaluationResult {
+  getVariantDetails(key: string, options?: FlagEvaluationOptions): FlagEvaluationResult {
     const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-    this.warnMissingGate(result);
+    this.warnMissingFlag(result);
     this.rememberActiveFlag(result, options);
     this.logFeatureFlagExposure(result, options);
     return result;
-  }
-
-  /**
-   * Evaluates a boolean feature gate.
-   */
-  checkGate(key: string, options?: GateEvaluationOptions): boolean {
-    return this.getVariant(key, options) === 'treatment';
-  }
-
-  /**
-   * Evaluates a feature gate and returns explanation details.
-   */
-  checkGateDetails(key: string, options?: GateEvaluationOptions): GateEvaluationResult {
-    return this.getVariantDetails(key, options);
-  }
-
-  /**
-   * Registers a callback for flag value changes.
-   * Returns an unsubscribe function.
-   */
-  onFlagChange(key: string, callback: (value: boolean) => void): () => void {
-    if (!this.flagChangeListeners.has(key)) {
-      this.flagChangeListeners.set(key, new Set());
-    }
-    const listeners = this.flagChangeListeners.get(key)!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-      if (listeners.size === 0) {
-        this.flagChangeListeners.delete(key);
-      }
-    };
   }
 
   /**
@@ -466,8 +432,8 @@ export class APDLClient {
   }
 
   private logFeatureFlagExposure(
-    result: GateEvaluationResult,
-    options?: GateEvaluationOptions
+    result: FlagEvaluationResult,
+    options?: FlagEvaluationOptions
   ): void {
     if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
       return;
@@ -501,19 +467,19 @@ export class APDLClient {
     });
   }
 
-  private warnMissingGate(result: GateEvaluationResult): void {
-    if (result.reason !== 'not_found' || this.missingGateWarnings.has(result.key)) {
+  private warnMissingFlag(result: FlagEvaluationResult): void {
+    if (result.reason !== 'not_found' || this.missingFlagWarnings.has(result.key)) {
       return;
     }
 
-    this.missingGateWarnings.add(result.key);
+    this.missingFlagWarnings.add(result.key);
     console.warn(
-      `APDL: Feature gate '${result.key}' is missing or archived; returning false.`
+      `APDL: Feature flag '${result.key}' is missing or archived; returning null variant.`
     );
   }
 
   private featureFlagExposureKey(
-    result: GateEvaluationResult,
+    result: FlagEvaluationResult,
     page: string,
     component: string
   ): string {
@@ -538,17 +504,6 @@ export class APDLClient {
   }
 
   private notifyFlagListeners(): void {
-    for (const [key, listeners] of this.flagChangeListeners) {
-      const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
-      for (const listener of listeners) {
-        try {
-          listener(result.variant === 'treatment');
-        } catch {
-          // Listener errors should not propagate
-        }
-      }
-    }
-
     for (const [key, listeners] of this.variantChangeListeners) {
       const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
       for (const listener of listeners) {
@@ -562,8 +517,8 @@ export class APDLClient {
   }
 
   private rememberActiveFlag(
-    result: GateEvaluationResult,
-    options?: GateEvaluationOptions
+    result: FlagEvaluationResult,
+    options?: FlagEvaluationOptions
   ): void {
     const page = this.currentPagePath(options?.page);
     const pageStates = this.activeFlagStatesByPage.get(page);
@@ -630,7 +585,7 @@ export class APDLClient {
   }
 
   private flagStorageKey(): string {
-    return `apdl_flags_${hashBucket('sdk_flag_cache', 'v1', this.config.apiKey).toString(16)}`;
+    return `apdl_flags_${hashBucket('sdk_flag_cache', 'v2', this.config.apiKey).toString(16)}`;
   }
 
   private registerBuiltInComponents(): void {

@@ -1,9 +1,9 @@
 import type {
   ConditionOperator,
   FallthroughConfig,
-  GateCondition,
-  GateConfig,
-  GateRule,
+  FlagCondition,
+  FlagConfig,
+  FlagRule,
   RolloutConfig,
   VariantConfig,
 } from './types';
@@ -11,7 +11,7 @@ import type {
 type RawRecord = Record<string, unknown>;
 
 export interface FlagConfigParseResult {
-  flags: GateConfig[];
+  flags: FlagConfig[];
   invalid_keys: string[];
 }
 
@@ -59,11 +59,11 @@ const REJECTED_GATE_KEYS = new Set([
   'targeting_rules',
 ]);
 
-export function extractFlagConfigs(input: unknown): GateConfig[] {
+export function extractFlagConfigs(input: unknown): FlagConfig[] {
   return parseFlagConfigs(input) ?? [];
 }
 
-export function parseFlagConfigs(input: unknown): GateConfig[] | null {
+export function parseFlagConfigs(input: unknown): FlagConfig[] | null {
   const result = parseFlagConfigResult(input);
   if (!result || result.invalid_keys.length > 0) {
     return null;
@@ -78,7 +78,7 @@ export function parseFlagConfigResult(input: unknown): FlagConfigParseResult | n
     return null;
   }
 
-  const flags: GateConfig[] = [];
+  const flags: FlagConfig[] = [];
   const invalidKeys: string[] = [];
 
   for (const candidate of candidates) {
@@ -100,7 +100,7 @@ export function parseFlagConfigResult(input: unknown): FlagConfigParseResult | n
   };
 }
 
-export function extractFlagConfig(input: unknown): GateConfig | null {
+export function extractFlagConfig(input: unknown): FlagConfig | null {
   return isFlagConfig(input) ? input : null;
 }
 
@@ -118,7 +118,7 @@ export function extractInvalidFlagKey(input: unknown): string | null {
   return null;
 }
 
-export function isFlagConfig(input: unknown): input is GateConfig {
+export function isFlagConfig(input: unknown): input is FlagConfig {
   return isRecord(input)
     && hasOnlyKeys(input, GATE_KEYS)
     && typeof input.key === 'string'
@@ -130,7 +130,7 @@ export function isFlagConfig(input: unknown): input is GateConfig {
     && isVariantList(input.variants, input.default_variant)
     && typeof input.salt === 'string'
     && Array.isArray(input.rules)
-    && input.rules.every(isGateRule)
+    && input.rules.every(isFlagRule)
     && isFallthroughConfig(input.fallthrough)
     && typeof input.version === 'number'
     && Number.isInteger(input.version)
@@ -152,18 +152,18 @@ function extractCandidates(input: unknown): unknown[] | null {
   return null;
 }
 
-function isGateRule(input: unknown): input is GateRule {
+function isFlagRule(input: unknown): input is FlagRule {
   return isRecord(input)
     && hasOnlyKeys(input, RULE_KEYS)
     && typeof input.id === 'string'
     && input.id.length > 0
     && typeof input.name === 'string'
     && Array.isArray(input.conditions)
-    && input.conditions.every(isGateCondition)
+    && input.conditions.every(isFlagCondition)
     && isRolloutConfig(input.rollout);
 }
 
-function isGateCondition(input: unknown): input is GateCondition {
+function isFlagCondition(input: unknown): input is FlagCondition {
   if (
     !isRecord(input)
     || !hasOnlyKeys(input, CONDITION_KEYS)

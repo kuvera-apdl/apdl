@@ -1,9 +1,9 @@
 import type {
   EvalContext,
-  GateCondition,
-  GateConfig,
-  GateEvaluationResult,
-  GateRule,
+  FlagCondition,
+  FlagConfig,
+  FlagEvaluationResult,
+  FlagRule,
   RolloutConfig,
   VariantConfig,
 } from './types';
@@ -22,7 +22,7 @@ interface RolloutResult {
 }
 
 /**
- * Canonical local feature gate evaluator matching the config service contract.
+ * Canonical local feature flag evaluator matching the config service contract.
  */
 export class FlagEvaluator {
   private cache: FlagCache;
@@ -31,7 +31,7 @@ export class FlagEvaluator {
     this.cache = cache;
   }
 
-  evaluate(key: string, context: EvalContext): GateEvaluationResult {
+  evaluate(key: string, context: EvalContext): FlagEvaluationResult {
     const flag = this.cache.get(key);
 
     if (!flag) {
@@ -149,7 +149,7 @@ export class FlagEvaluator {
     };
   }
 
-  private baseResult(flag: GateConfig): GateEvaluationResult {
+  private baseResult(flag: FlagConfig): FlagEvaluationResult {
     return {
       key: flag.key,
       variant: flag.default_variant,
@@ -164,11 +164,11 @@ export class FlagEvaluator {
     };
   }
 
-  private matchesRule(rule: GateRule, context: EvalContext): boolean {
+  private matchesRule(rule: FlagRule, context: EvalContext): boolean {
     return rule.conditions.every((condition) => this.matchesCondition(condition, context));
   }
 
-  private matchesCondition(condition: GateCondition, context: EvalContext): boolean {
+  private matchesCondition(condition: FlagCondition, context: EvalContext): boolean {
     const { attribute, operator } = condition;
     const actual = this.resolveAttribute(attribute, context);
 
@@ -237,7 +237,7 @@ export class FlagEvaluator {
   }
 
   private applyRollout(
-    flag: GateConfig,
+    flag: FlagConfig,
     rollout: RolloutConfig,
     context: EvalContext
   ): RolloutResult {
@@ -261,7 +261,7 @@ export class FlagEvaluator {
   }
 
   private assignWeightedVariant(
-    flag: GateConfig,
+    flag: FlagConfig,
     context: EvalContext,
     bucketBy: string
   ): { variant: string; variantBucket: number | null } {

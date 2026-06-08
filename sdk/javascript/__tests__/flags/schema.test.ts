@@ -6,12 +6,12 @@ import {
   parseFlagConfigResult,
 } from '../../src/flags/schema';
 
-describe('gate config schema parsing', () => {
-  it('extracts canonical gate configs from the SDK envelope', () => {
+describe('flag config schema parsing', () => {
+  it('extracts canonical flag configs from the SDK envelope', () => {
     const flags = extractFlagConfigs({
       schema_version: 2,
       project_id: 'apdl',
-      flags: [makeGate()],
+      flags: [makeFlag()],
     });
 
     expect(flags).toHaveLength(1);
@@ -38,11 +38,11 @@ describe('gate config schema parsing', () => {
       'targeting_rules',
     ]) {
       expect(extractFlagConfig({
-        ...makeGate(),
+        ...makeFlag(),
         [rejectedField]: 'legacy',
       })).toBeNull();
       expect(extractInvalidFlagKey({
-        ...makeGate(),
+        ...makeFlag(),
         [rejectedField]: 'legacy',
       })).toBe('checkout');
     }
@@ -53,22 +53,22 @@ describe('gate config schema parsing', () => {
       schema_version: 2,
       project_id: 'apdl',
       flags: [
-        makeGate({ key: 'valid' }),
+        makeFlag({ key: 'valid' }),
         {
-          ...makeGate({ key: 'invalid' }),
+          ...makeFlag({ key: 'invalid' }),
           default_variant: 'missing',
         },
       ],
     });
 
     expect(result).toEqual({
-      flags: [makeGate({ key: 'valid' })],
+      flags: [makeFlag({ key: 'valid' })],
       invalid_keys: ['invalid'],
     });
   });
 
   it('rejects non-canonical condition aliases', () => {
-    expect(extractFlagConfig(makeGate({
+    expect(extractFlagConfig(makeFlag({
       rules: [{
         id: 'rule_alias',
         conditions: [{ attribute: 'plan', operator: 'eq', value: 'pro' }],
@@ -79,7 +79,7 @@ describe('gate config schema parsing', () => {
   });
 
   it('rejects unknown nested fields', () => {
-    expect(extractFlagConfig(makeGate({
+    expect(extractFlagConfig(makeFlag({
       fallthrough: {
         rollout: {
           percentage: 100,
@@ -91,30 +91,30 @@ describe('gate config schema parsing', () => {
   });
 
   it('rejects malformed collection envelopes', () => {
-    expect(extractFlagConfigs([makeGate()])).toEqual([]);
+    expect(extractFlagConfigs([makeFlag()])).toEqual([]);
 
     expect(extractFlagConfigs({
       schema_version: 1,
       project_id: 'apdl',
-      flags: [makeGate()],
+      flags: [makeFlag()],
     })).toEqual([]);
 
     expect(extractFlagConfigs({
       schema_version: 2,
-      flags: [makeGate()],
+      flags: [makeFlag()],
       results: [],
     })).toEqual([]);
   });
 
   it('rejects non-relative-integer variant weights', () => {
-    expect(extractFlagConfig(makeGate({
+    expect(extractFlagConfig(makeFlag({
       variants: [
         { key: 'control', weight: 0.5 },
         { key: 'treatment', weight: 0.5 },
       ],
     }))).toBeNull();
 
-    expect(extractFlagConfig(makeGate({
+    expect(extractFlagConfig(makeFlag({
       variants: [
         { key: 'control', weight: 0 },
         { key: 'treatment', weight: 0 },
@@ -123,12 +123,12 @@ describe('gate config schema parsing', () => {
   });
 
   it('rejects zero flag config versions', () => {
-    expect(extractFlagConfig(makeGate({ version: 0 }))).toBeNull();
-    expect(extractInvalidFlagKey(makeGate({ version: 0 }))).toBe('checkout');
+    expect(extractFlagConfig(makeFlag({ version: 0 }))).toBeNull();
+    expect(extractInvalidFlagKey(makeFlag({ version: 0 }))).toBe('checkout');
   });
 });
 
-function makeGate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function makeFlag(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     key: 'checkout',
     enabled: true,

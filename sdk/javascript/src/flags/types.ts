@@ -1,10 +1,10 @@
-export interface GateConfig {
+export interface FlagConfig {
   key: string;
   enabled: boolean;
   default_variant: string;
   variants: VariantConfig[];
   salt: string;
-  rules: GateRule[];
+  rules: FlagRule[];
   fallthrough: FallthroughConfig;
   version: number;
 }
@@ -14,14 +14,14 @@ export interface VariantConfig {
   weight: number;
 }
 
-export interface GateRule {
+export interface FlagRule {
   id: string;
   name: string;
-  conditions: GateCondition[];
+  conditions: FlagCondition[];
   rollout: RolloutConfig;
 }
 
-export interface GateCondition {
+export interface FlagCondition {
   attribute: string;
   operator: ConditionOperator;
   value?: unknown;
@@ -53,13 +53,14 @@ export interface FallthroughConfig {
   rollout: RolloutConfig;
 }
 
-export type GateConfigSource =
+export type FlagConfigSource =
   | 'memory'
   | 'initial_fetch'
   | 'sse'
-  | 'local_storage';
+  | 'local_storage'
+  | 'server';
 
-export type GateEvaluationReason =
+export type FlagEvaluationReason =
   | 'not_found'
   | 'invalid_config'
   | 'disabled'
@@ -69,20 +70,20 @@ export type GateEvaluationReason =
   | 'fallthrough'
   | 'fallthrough_rollout';
 
-export interface GateEvaluationResult {
+export interface FlagEvaluationResult {
   key: string;
   variant: string | null;
-  reason: GateEvaluationReason;
+  reason: FlagEvaluationReason;
   rule_id: string | null;
   rollout_bucket: number | null;
   variant_bucket: number | null;
   rollout_percentage: number | null;
   bucket_by: string | null;
   config_version: number | null;
-  source: GateConfigSource | null;
+  source: FlagConfigSource | null;
 }
 
-export interface GateEvaluationOptions {
+export interface FlagEvaluationOptions {
   page?: string;
   component?: string;
 }
@@ -92,8 +93,3 @@ export interface EvalContext {
   anonymous_id: string;
   attributes?: Record<string, unknown>;
 }
-
-export type FlagConfig = GateConfig;
-export type TargetingRule = GateRule;
-export type Condition = GateCondition;
-export type FlagResult = GateEvaluationResult;
