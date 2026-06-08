@@ -1,4 +1,4 @@
-"""Canonical feature gate evaluation engine."""
+"""Canonical feature flag evaluation engine."""
 
 import logging
 import re
@@ -10,7 +10,7 @@ _UINT32_MAX = 0xFFFFFFFF
 
 
 def hash_bucket(flag_key: str, salt: str, unit_id: str) -> int:
-    """FNV-1a 32-bit hash for deterministic gate bucketing."""
+    """FNV-1a 32-bit hash for deterministic flag bucketing."""
     data = f"{flag_key}:{salt}:{unit_id}"
     h = 2166136261
     for char in data.encode("utf-8"):
@@ -108,7 +108,7 @@ def matches_condition(condition: dict, ctx: dict) -> bool:
             logger.warning("Invalid regex in flag rule: %s", expected)
             return False
 
-    logger.debug("Unknown operator '%s' in gate rule", operator)
+    logger.debug("Unknown operator '%s' in flag rule", operator)
     return False
 
 
@@ -197,7 +197,7 @@ def _assign_variant(flag: dict, ctx: dict, bucket_by: str) -> tuple[str, float |
 
 
 def evaluate(flag: dict, ctx: dict) -> dict:
-    """Evaluate one canonical gate config against a context."""
+    """Evaluate one canonical flag config against a context."""
     result = _base_result(flag)
 
     if flag.get("state", "active") != "active":
@@ -252,5 +252,5 @@ def evaluate(flag: dict, ctx: dict) -> dict:
 
 
 def evaluate_all(flags: list[dict], ctx: dict) -> list[dict]:
-    """Evaluate all canonical gates against a context."""
+    """Evaluate all canonical flags against a context."""
     return [evaluate(flag, ctx) for flag in flags]

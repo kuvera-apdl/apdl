@@ -23,7 +23,7 @@ FLAG_COLUMNS = """
 """
 
 
-def _json_value(value, fallback):
+def _json_field(value, fallback):
     if value is None:
         return fallback
     if isinstance(value, str):
@@ -41,18 +41,18 @@ def _row_to_flag(row) -> dict:
         "project_id": row["project_id"],
         "name": row["name"],
         "state": row["state"],
-        "owners": _json_value(row["owners"], []),
+        "owners": _json_field(row["owners"], []),
         "review_by": str(row["review_by"]) if row["review_by"] else None,
         "enabled": row["enabled"],
         "description": row["description"],
         "default_variant": row["default_variant"],
-        "variants": _json_value(row["variants"], []),
-        "rules": _json_value(row["rules"], []),
-        "fallthrough": _json_value(row["fallthrough"], {}),
+        "variants": _json_field(row["variants"], []),
+        "rules": _json_field(row["rules"], []),
+        "fallthrough": _json_field(row["fallthrough"], {}),
         "salt": row["salt"],
         "evaluation_mode": row["evaluation_mode"],
         "auto_disable": row["auto_disable"],
-        "guardrails": _json_value(row["guardrails"], []),
+        "guardrails": _json_field(row["guardrails"], []),
         "disabled_reason": row["disabled_reason"],
         "disabled_by": row["disabled_by"],
         "disabled_at": str(row["disabled_at"]) if row["disabled_at"] else None,
@@ -349,9 +349,9 @@ async def get_flag_audit_entries(
             "actor": row["actor"],
             "previous_version": row["previous_version"],
             "new_version": row["new_version"],
-            "before": _json_value(row["before"], None),
-            "after": _json_value(row["after"], None),
-            "evidence": _json_value(row["evidence"], {}),
+            "before": _json_field(row["before"], None),
+            "after": _json_field(row["after"], None),
+            "evidence": _json_field(row["evidence"], {}),
             "reason": row["reason"],
             "created_at": str(row["created_at"]),
         }

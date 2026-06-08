@@ -33,7 +33,7 @@ const CONDITION_OPERATORS = new Set<ConditionOperator>([
   'not_exists',
 ]);
 
-const GATE_KEYS = new Set([
+const FLAG_KEYS = new Set([
   'key',
   'enabled',
   'default_variant',
@@ -50,7 +50,7 @@ const ROLLOUT_KEYS = new Set(['percentage', 'bucket_by']);
 const FALLTHROUGH_KEYS = new Set(['rollout']);
 const VARIANT_KEYS = new Set(['key', 'weight']);
 const COLLECTION_KEYS = new Set(['schema_version', 'project_id', 'flags']);
-const REJECTED_GATE_KEYS = new Set([
+const REJECTED_FLAG_KEYS = new Set([
   'default_value',
   'defaultVariant',
   'variant_type',
@@ -110,7 +110,7 @@ export function extractInvalidFlagKey(input: unknown): string | null {
     && typeof input.key === 'string'
     && input.key.length > 0
     && !isFlagConfig(input)
-    && (hasAnyKey(input, REJECTED_GATE_KEYS) || hasAllKeys(input, GATE_KEYS))
+    && (hasAnyKey(input, REJECTED_FLAG_KEYS) || hasAllKeys(input, FLAG_KEYS))
   ) {
     return input.key;
   }
@@ -120,7 +120,7 @@ export function extractInvalidFlagKey(input: unknown): string | null {
 
 export function isFlagConfig(input: unknown): input is FlagConfig {
   return isRecord(input)
-    && hasOnlyKeys(input, GATE_KEYS)
+    && hasOnlyKeys(input, FLAG_KEYS)
     && typeof input.key === 'string'
     && input.key.length > 0
     && typeof input.enabled === 'boolean'

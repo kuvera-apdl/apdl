@@ -1,4 +1,4 @@
-"""Trusted server-side feature gate evaluation."""
+"""Trusted server-side feature flag evaluation."""
 
 import json
 import logging
@@ -38,7 +38,7 @@ def _is_trusted_request(request: Request) -> bool:
 
 @router.post("/v1/evaluate", response_model=GateEvaluateResponse)
 async def evaluate(body: GateEvaluateRequest, request: Request):
-    """Evaluate a server-side gate without exposing rules to browser clients."""
+    """Evaluate a server-side flag without exposing rules to browser clients."""
     if not _is_trusted_request(request):
         return _unauthorized()
 

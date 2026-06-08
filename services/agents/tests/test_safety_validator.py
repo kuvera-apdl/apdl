@@ -175,7 +175,7 @@ def test_create_experiment_treats_variant_weights_as_relative():
                     "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
                 },
             },
-            "fallthrough.value",
+            "fallthrough must only contain rollout",
         ),
     ],
 )

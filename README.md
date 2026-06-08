@@ -16,7 +16,7 @@ apdl/
 │   ├── src/
 │   │   ├── core/            # Config, transport, event queue, storage
 │   │   ├── capture/         # Auto-capture (clicks, pages, forms) + manual tracking
-│   │   ├── flags/           # Client-side feature gate evaluation (FNV-1a bucketing)
+│   │   ├── flags/           # Client-side feature flag variant evaluation (FNV-1a bucketing)
 │   │   ├── sse/             # Real-time flag update stream
 │   │   ├── ui/              # Server-driven UI components (banner, modal, toast, etc.)
 │   │   └── privacy/         # Consent management, PII scrubbing, cookieless mode
@@ -48,7 +48,7 @@ apdl/
 ├── pipeline/
 │   ├── redis/               # Redis Streams → ClickHouse event writer
 │   ├── kafka/               # Kafka topic definitions (Phase 3+ migration)
-│   └── clickhouse/          # Schemas + migrations (events, sessions, experiments, materialized views)
+│   └── clickhouse/          # Schemas + migrations (events, sessions, feature flags, materialized views)
 │
 ├── infra/
 │   └── docker/              # Docker Compose (deps + full stack)
@@ -168,14 +168,16 @@ apdl.track('purchase_completed', {
   revenue: 49.99,
 });
 
-// Feature gates (client-side evaluation)
+// Feature flags (client-side variant evaluation)
 apdl.identify('user-42', {
   email: 'user@example.com',
   plan: 'pro',
 });
 
-if (apdl.checkGate('new-checkout-flow')) {
-  // Show the gated experience.
+const checkoutVariant = apdl.getVariant('new-checkout-flow');
+
+if (checkoutVariant === 'treatment') {
+  // Show the treatment experience.
 }
 ```
 

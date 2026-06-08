@@ -193,7 +193,7 @@ async def evaluate_gate(
     component: str = "",
     log_exposure: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate a server-side feature gate through the trusted Config API."""
+    """Evaluate a server-side feature flag through the trusted Config API."""
     internal_token = os.getenv("APDL_INTERNAL_TOKEN", "")
     headers = {"X-APDL-Internal-Token": internal_token} if internal_token else {}
     payload = {

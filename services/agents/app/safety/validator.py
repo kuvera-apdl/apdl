@@ -68,8 +68,10 @@ def _validate_variant_flag_config(
         return f"Flag config contains non-canonical field(s): {', '.join(rejected)}."
 
     fallthrough = config.get("fallthrough")
-    if isinstance(fallthrough, dict) and "value" in fallthrough:
-        return "fallthrough.value is not canonical; use fallthrough.rollout only."
+    if isinstance(fallthrough, dict) and (
+        "value" in fallthrough
+    ):
+        return "fallthrough must only contain rollout."
 
     if require_complete:
         for field in ("default_variant", "variants", "rules", "fallthrough"):

@@ -158,7 +158,7 @@
   <rect x="82" y="554" width="624" height="36" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2" filter="url(#shadow)"/>
   <text x="180" y="577" text-anchor="middle" font-size="14" font-weight="700" fill="#9a3412">ClickHouse</text>
   <text x="460" y="570" text-anchor="middle" font-size="10" fill="#c2410c">:8123 (HTTP)  ·  :9000 (native)</text>
-  <text x="500" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events  ·  sessions  ·  experiment_exposures  ·  MVs: event_counts (hourly / daily)  ·  experiment_metrics</text>
+  <text x="500" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events  ·  sessions  ·  feature_flag_exposures  ·  MVs: event_counts (hourly / daily)</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ANALYTICS LAYER — Query Service

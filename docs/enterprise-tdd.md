@@ -125,7 +125,7 @@ Anything that does not fit cleanly in one of these three is a supporting service
 **Responsibilities:**
 1. Authenticate the API key, mint a short-lived JWT carrying `tenant_id`, `project_id`, `plan_tier`.
 2. Apply per-tenant rate limits via Redis token bucket.
-3. Validate against the **input** schema (looser than the canonical schema; we accept and normalize known variants).
+3. Validate against the canonical input schema for that event contract. Unknown aliases and duplicate shapes are rejected instead of normalized.
 4. Stamp `ingested_at_ms`, `ingestion_node_id`, `tenant_id` into the message.
 5. Push to SQS `events.raw.{tier}.{region}` via `SendMessageBatch` (10 messages per call, with in-memory 50ms micro-batching).
 6. Return `202 Accepted` with the assigned `event_id`. Never blocks on downstream.
@@ -402,7 +402,7 @@ A new sub-graph in the Agent's LangGraph supervisor. Its job is policy: who to a
 2. Tenant-wide: ClickHouse MVs are already updated. The Agent periodically (hourly) scans the aggregate for newly-significant signals.
 3. Stated-vs-revealed reconciliation: the Agent reads `preference_vs_behavior_mv` and writes a `source='reconciled'` row to `user_preferences` when both align, or flags disagreement for the dashboard when they don't.
 
-**Action proposals:** when an aggregate response crosses a significance threshold (existing experiment-stats code computes the CI), the Agent can propose flag or experiment changes through the same safety-validator + approval flow every other agent action uses. Example proposal: *"73% of mobile-active users in the EU prefer dark mode default (n=412, CI ±4.2%). Propose rolling out flag `dark_mode_default=true` to that cohort."*
+**Action proposals:** when an aggregate response crosses a significance threshold (existing experiment-stats code computes the CI), the Agent can propose flag or experiment changes through the same safety-validator + approval flow every other agent action uses. Example proposal: *"73% of mobile-active users in the EU prefer dark mode default (n=412, CI ±4.2%). Propose rolling out variant `treatment` for flag `dark_mode_default` to that cohort, against default variant `control`."*
 
 #### 4.6.6 Bias mitigations (the honest part)
 

@@ -1,4 +1,4 @@
-"""Tests for canonical feature gate evaluation."""
+"""Tests for canonical feature flag evaluation."""
 
 import json
 from pathlib import Path
