@@ -34,7 +34,7 @@ jobs:
         working-directory: sdk/python
       - run: ruff check apdl/ tests/
         working-directory: sdk/python
-      - run: python -m pytest -q
+      - run: python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88
         working-directory: sdk/python
 
   query-service:

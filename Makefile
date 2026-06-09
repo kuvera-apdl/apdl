@@ -62,7 +62,7 @@ lint-sdk:
 # ─── SDK (Python) ────────────────────────────────────────────
 
 test-sdk-python:
-	cd sdk/python && .venv/bin/python -m pytest -q
+	cd sdk/python && .venv/bin/python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88
 
 lint-sdk-python:
 	cd sdk/python && .venv/bin/ruff check apdl/ tests/

@@ -114,9 +114,14 @@ is_in_rollout("new-checkout", "salt", "u_123", 25.0)  # -> bool
 ```bash
 cd sdk/python
 uv venv && uv pip install -e ".[dev]"
-.venv/bin/python -m pytest      # tests
-.venv/bin/ruff check apdl/      # lint
+.venv/bin/python -m pytest                                    # tests
+.venv/bin/python -m pytest --cov=apdl --cov-report=term-missing  # tests + coverage
+.venv/bin/ruff check apdl/ tests/                             # lint
 ```
+
+CI runs the suite with `--cov-fail-under=88`; keep coverage at or above that
+threshold. Dependency updates for the SDK arrive via Dependabot
+(`.github/dependabot.yml`).
 
 The test suite pins golden hash values produced by the canonical config-service
 implementation, guaranteeing this SDK buckets identically to the server and the
