@@ -4,14 +4,20 @@ import { Transport } from '../../src/core/transport';
 import { OfflineStorage } from '../../src/core/storage';
 import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
-import type { ResolvedConfig } from '../../src/core/config';
+import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
 import type { TrackEvent } from '../../src/core/types';
 
+const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+
 function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
-  return {
-    apiKey: 'test-key',
-    host: 'https://ingest.test.dev',
-    configHost: 'https://config.test.dev',
+  const base = resolveConfig({
+    endpoints: {
+      ingestion: 'https://ingest.test.dev',
+      config: 'https://config.test.dev',
+    },
+    auth: {
+      clientKey: CLIENT_KEY,
+    },
     autoCapture: {
       pageViews: false,
       clicks: false,
@@ -27,7 +33,27 @@ function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
     persistence: 'memory',
     maxQueueSize: 100,
     debug: false,
+  });
+
+  return {
+    ...base,
     ...overrides,
+    endpoints: {
+      ...base.endpoints,
+      ...(overrides?.endpoints ?? {}),
+    },
+    auth: {
+      ...base.auth,
+      ...(overrides?.auth ?? {}),
+    },
+    autoCapture: {
+      ...base.autoCapture,
+      ...(overrides?.autoCapture ?? {}),
+    },
+    consent: {
+      ...base.consent,
+      ...(overrides?.consent ?? {}),
+    },
   };
 }
 
@@ -55,7 +81,7 @@ describe('EventQueue', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     config = createConfig();
-    transport = new Transport('test-key');
+    transport = new Transport(CLIENT_KEY);
     storage = new OfflineStorage();
     scrubber = new Scrubber(false); // No built-in scrubbers for testing
     consentManager = new ConsentManager(

@@ -10,7 +10,6 @@ import { AutoCapture } from '../capture/auto-capture';
 import { HealthCapture } from '../capture/health';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
-import { hashBucket } from '../flags/hash';
 import { parseFlagConfigResult } from '../flags/schema';
 import type { EvalContext, FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
@@ -105,7 +104,7 @@ export class APDLClient {
     this.scrubber = new Scrubber(this.config.privacyMode !== 'standard');
 
     // Core transport
-    this.transport = new Transport(this.config.apiKey, {
+    this.transport = new Transport(this.config.auth.clientKey, {
       debug: this.config.debug,
     });
     this.storage = new OfflineStorage();
@@ -173,10 +172,10 @@ export class APDLClient {
     this.slotManager = new SlotManager();
 
     // SSE
-    const sseUrl = `${this.config.configHost}/v1/stream`;
+    const sseUrl = `${this.config.endpoints.config}/v1/stream`;
     this.sseConnection = new SSEConnection(
       sseUrl,
-      this.config.apiKey,
+      this.config.auth.clientKey,
       this.config.debug
     );
     this.sseHandlers = new SSEHandlers(
@@ -350,10 +349,10 @@ export class APDLClient {
 
   private async fetchInitialFlags(): Promise<void> {
     try {
-      const url = `${this.config.configHost}/v1/flags`;
+      const url = `${this.config.endpoints.config}/v1/flags`;
       const response = await fetch(url, {
         headers: {
-          'X-API-Key': this.config.apiKey,
+          'X-API-Key': this.config.auth.clientKey,
           'X-APDL-SDK': 'js/0.1.0',
         },
       });
@@ -378,7 +377,7 @@ export class APDLClient {
 
   private async setupCookielessId(): Promise<void> {
     try {
-      const cookieless = new CookielessIdentity(this.config.apiKey);
+      const cookieless = new CookielessIdentity(this.config.auth.clientKey);
       const anonId = await cookieless.generateAnonymousId();
       this.manualCapture.setAnonymousId(anonId);
     } catch {
@@ -585,7 +584,7 @@ export class APDLClient {
   }
 
   private flagStorageKey(): string {
-    return `apdl_flags_${hashBucket('sdk_flag_cache', 'v2', this.config.apiKey).toString(16)}`;
+    return `apdl_flags_${this.config.projectId}`;
   }
 
   private registerBuiltInComponents(): void {

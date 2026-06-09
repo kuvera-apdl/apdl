@@ -104,7 +104,7 @@ export class EventQueue {
     const batch = this.queue.splice(0, this.config.batchSize);
 
     try {
-      const url = `${this.config.host}/v1/events`;
+      const url = `${this.config.endpoints.ingestion}/v1/events`;
       const payload = {
         events: batch.map((event) => this.toIngestionEvent(event)),
       };
@@ -140,7 +140,7 @@ export class EventQueue {
     if (this.queue.length === 0) return;
 
     const batch = this.queue.splice(0);
-    const url = `${this.config.host}/v1/events`;
+    const url = `${this.config.endpoints.ingestion}/v1/events`;
     const payload = {
       events: batch.map((event) => this.toIngestionEvent(event)),
     };

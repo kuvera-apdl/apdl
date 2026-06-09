@@ -1,6 +1,43 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
-import { hashBucket } from '../../src/flags/hash';
+import { resolveConfig, type APDLConfig } from '../../src/core/config';
+
+const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+const INGESTION_ENDPOINT = 'https://ingest.test.dev';
+const CONFIG_ENDPOINT = 'https://config.test.dev';
+
+type ClientConfigOverrides = Partial<Omit<APDLConfig, 'endpoints' | 'auth'>> & {
+  endpoints?: Partial<APDLConfig['endpoints']>;
+  auth?: Partial<APDLConfig['auth']>;
+};
+
+function createClientConfig(overrides: ClientConfigOverrides = {}): APDLConfig {
+  const base: APDLConfig = {
+    endpoints: {
+      ingestion: INGESTION_ENDPOINT,
+      config: CONFIG_ENDPOINT,
+    },
+    auth: {
+      clientKey: CLIENT_KEY,
+    },
+    autoCapture: false,
+    persistence: 'memory',
+  };
+  const { endpoints, auth, ...rest } = overrides;
+
+  return {
+    ...base,
+    ...rest,
+    endpoints: {
+      ...base.endpoints,
+      ...endpoints,
+    },
+    auth: {
+      ...base.auth,
+      ...auth,
+    },
+  };
+}
 
 // Mock fetch globally
 const fetchMock = vi.fn().mockResolvedValue({
@@ -59,13 +96,7 @@ describe('APDLClient', () => {
     MockEventSource.instances = [];
     localStorage.clear();
 
-    client = new APDLClient({
-      apiKey: 'test-key-123',
-      host: 'https://ingest.test.dev',
-      configHost: 'https://config.test.dev',
-      autoCapture: false,
-      persistence: 'memory',
-    });
+    client = new APDLClient(createClientConfig());
   });
 
   afterEach(() => {
@@ -77,8 +108,58 @@ describe('APDLClient', () => {
       expect(client).toBeInstanceOf(APDLClient);
     });
 
-    it('should throw on missing apiKey', () => {
-      expect(() => new APDLClient({ apiKey: '' })).toThrow('apiKey is required');
+    it('should resolve canonical config and derive project ID from client key', () => {
+      const resolved = resolveConfig(createClientConfig());
+
+      expect(resolved).toMatchObject({
+        projectId: 'apdl',
+        endpoints: {
+          ingestion: INGESTION_ENDPOINT,
+          config: CONFIG_ENDPOINT,
+        },
+        auth: {
+          clientKey: CLIENT_KEY,
+        },
+      });
+    });
+
+    it('should throw on missing ingestion endpoint', () => {
+      expect(() => resolveConfig(createClientConfig({
+        endpoints: { ingestion: '' },
+      }))).toThrow('endpoints.ingestion is required');
+    });
+
+    it('should throw on missing config endpoint', () => {
+      expect(() => resolveConfig(createClientConfig({
+        endpoints: { config: '' },
+      }))).toThrow('endpoints.config is required');
+    });
+
+    it('should throw on missing client key', () => {
+      expect(() => new APDLClient(createClientConfig({
+        auth: { clientKey: '' },
+      }))).toThrow('auth.clientKey is required');
+    });
+
+    it('should throw when client key does not match the APDL format', () => {
+      expect(() => resolveConfig(createClientConfig({
+        auth: { clientKey: 'bad_key' },
+      }))).toThrow('proj_{project_id}_{secret}');
+    });
+
+    it.each([
+      ['apiKey', CLIENT_KEY],
+      ['host', INGESTION_ENDPOINT],
+      ['configHost', CONFIG_ENDPOINT],
+      ['projectId', 'apdl'],
+    ])('should reject removed top-level config field %s', (field, value) => {
+      const config = {
+        ...createClientConfig(),
+        [field]: value,
+      };
+
+      expect(() => resolveConfig(config as unknown as APDLConfig))
+        .toThrow(`config.${field} is no longer supported`);
     });
 
     it('should expose public namespaces', () => {
@@ -260,13 +341,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const flaggedClient = new APDLClient(createClientConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -303,13 +378,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const variantClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const variantClient = new APDLClient(createClientConfig());
       await flushAsync();
       variantClient.identify('user_123');
 
@@ -346,21 +415,17 @@ describe('APDLClient', () => {
     });
 
     it('should restore cached flags in standard localStorage mode', () => {
-      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
         flags: [makeFlag('cached-flag')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
-      const cachedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
+      const cachedClient = new APDLClient(createClientConfig({
         persistence: 'localStorage',
         privacyMode: 'standard',
-      });
+      }));
       cachedClient.identify('user_123');
 
       expect(cachedClient.getVariant('cached-flag')).toBe('treatment');
@@ -368,7 +433,7 @@ describe('APDLClient', () => {
     });
 
     it('should preserve restored flags when initial fetch returns malformed config', async () => {
-      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
         flags: [makeFlag('cached-flag')],
@@ -392,14 +457,10 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const cachedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
+      const cachedClient = new APDLClient(createClientConfig({
         persistence: 'localStorage',
         privacyMode: 'standard',
-      });
+      }));
       await flushAsync();
       cachedClient.identify('user_123');
 
@@ -416,21 +477,17 @@ describe('APDLClient', () => {
     });
 
     it('should not restore cached flags in strict privacy mode', () => {
-      localStorage.setItem(flagStorageKey('test-key-123'), JSON.stringify({
+      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
         schema_version: 2,
         project_id: 'apdl',
         flags: [makeFlag('cached-flag')],
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
-      const strictClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
+      const strictClient = new APDLClient(createClientConfig({
         persistence: 'localStorage',
         privacyMode: 'strict',
-      });
+      }));
       strictClient.identify('user_123');
 
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -453,13 +510,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const flaggedClient = new APDLClient(createClientConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -500,13 +551,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const flaggedClient = new APDLClient(createClientConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -553,13 +598,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const flaggedClient = new APDLClient(createClientConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -584,13 +623,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
-      });
+      const flaggedClient = new APDLClient(createClientConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -617,14 +650,9 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
-        autoCapture: false,
-        persistence: 'memory',
+      const flaggedClient = new APDLClient(createClientConfig({
         consent: { analytics: false, personalization: true, experiments: true },
-      });
+      }));
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -651,10 +679,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
+      const healthClient = new APDLClient(createClientConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -665,8 +690,7 @@ describe('APDLClient', () => {
           frontend_errors: true,
           web_vitals: false,
         },
-        persistence: 'memory',
-      });
+      }));
 
       await flushAsync();
       healthClient.identify('user_123');
@@ -710,10 +734,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
+      const healthClient = new APDLClient(createClientConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -724,8 +745,7 @@ describe('APDLClient', () => {
           frontend_errors: true,
           web_vitals: false,
         },
-        persistence: 'memory',
-      });
+      }));
 
       await flushAsync();
       healthClient.identify('user_123');
@@ -761,10 +781,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
+      const healthClient = new APDLClient(createClientConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -775,8 +792,7 @@ describe('APDLClient', () => {
           frontend_errors: true,
           web_vitals: false,
         },
-        persistence: 'memory',
-      });
+      }));
 
       await flushAsync();
       healthClient.identify('user_123');
@@ -812,10 +828,7 @@ describe('APDLClient', () => {
     });
 
     it('should capture component render failures as frontend errors', async () => {
-      const healthClient = new APDLClient({
-        apiKey: 'test-key-123',
-        host: 'https://ingest.test.dev',
-        configHost: 'https://config.test.dev',
+      const healthClient = new APDLClient(createClientConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -826,8 +839,7 @@ describe('APDLClient', () => {
           frontend_errors: true,
           web_vitals: false,
         },
-        persistence: 'memory',
-      });
+      }));
       healthClient.ui.register({
         name: 'broken-card',
         schema: { type: 'object', properties: {} },
@@ -925,8 +937,8 @@ async function flushAsync(): Promise<void> {
   }
 }
 
-function flagStorageKey(apiKey: string): string {
-  return `apdl_flags_${hashBucket('sdk_flag_cache', 'v2', apiKey).toString(16)}`;
+function flagStorageKey(projectId: string): string {
+  return `apdl_flags_${projectId}`;
 }
 
 function featureFlagExposures(
