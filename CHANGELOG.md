@@ -15,6 +15,22 @@ Releases are cut by pushing a `v*` git tag, which publishes `@apdl/sdk` to npm,
   browser and Python examples
 - JS SDK: top-level `init` export, so the IIFE (script-tag) bundle supports
   `APDL.init(...)` directly instead of `APDL.APDL.init(...)`
+- Per-service READMEs (ingestion, config, query, agents) and a pipeline README,
+  plus a written architecture walkthrough at `docs/architecture.md`
+- `scripts/dev.sh` — master dev script (`setup`, `up`, `up-full`, `status`,
+  `smoke`, `check`, `down`, `reset`) with `make status` / `make smoke` aliases
+
+### Changed
+- Architecture diagram now shows both SDKs, the ETL framework, and the
+  agents → config feedback loop (the diagram is a hand-maintained SVG;
+  the stale Excalidraw source was removed)
+
+### Fixed
+- `make setup` now sets up *all* Python packages — it previously skipped the
+  ingestion service, config service, Python SDK, and ETL framework
+- Main README: corrected agents-service routes
+  (`/v1/agents/:run_id/status|approve`) and documented the guardrails and
+  `/v1/evaluate` endpoints
 
 ## [0.1.0]
 

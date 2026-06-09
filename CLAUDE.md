@@ -17,11 +17,18 @@ make setup              # Full local dev setup (uv venvs, npm install, Docker de
 make build              # Build SDK
 make test               # Run all tests
 make lint               # Run all linters
+make check              # Lint + test every package in parallel (local CI mirror)
+make fmt                # Auto-format all packages (ruff format + autofix)
 make dev                # Start Docker deps only (Redis, ClickHouse, PostgreSQL)
 make dev-all            # Start full stack via Docker Compose
 make dev-down           # Stop all containers
+make status             # Container status + service health endpoints
+make smoke              # End-to-end smoke test against the running stack
 make migrate-clickhouse # Apply ClickHouse SQL migrations
 ```
+
+`scripts/dev.sh` is the master entry point wrapping all of the above
+(`setup`, `up`, `up-full`, `status`, `smoke`, `check`, `down`, `reset`).
 
 ### Running individual services (with hot-reload)
 

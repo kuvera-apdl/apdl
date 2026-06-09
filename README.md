@@ -8,6 +8,9 @@
   <img src="docs/architecture.svg" alt="APDL Architecture" width="900"/>
 </p>
 
+For a written walkthrough of the components and the three data flows (events,
+flags, and the agent feedback loop), see [docs/architecture.md](docs/architecture.md).
+
 ## Project Structure
 
 ```
@@ -53,15 +56,27 @@ apdl/
 │
 ├── pipeline/
 │   ├── redis/               # Redis Streams → ClickHouse event writer
+│   ├── etl/                 # Custom-events ETL framework (canonical envelope → v2 tables)
 │   ├── kafka/               # Kafka topic definitions (Phase 3+ migration)
 │   └── clickhouse/          # Schemas + migrations (events, sessions, experiments, materialized views)
+│
+├── examples/                # Runnable browser + Python end-to-end samples
+├── fixtures/                # Cross-SDK golden values (gate bucketing parity)
+├── scripts/                 # dev.sh (master setup/run/test), check.sh, fmt.sh, migrations
 │
 ├── infra/
 │   └── docker/              # Docker Compose (deps + full stack)
 │
-├── .github/workflows/       # CI (lint + test) and Release (npm publish + Docker images)
+├── .github/workflows/       # CI (lint + test) and Release (npm + PyPI publish + Docker images)
 └── Makefile                 # Build, test, lint, migrate, and dev orchestration
 ```
+
+Each service and the pipeline have their own README:
+[ingestion](services/ingestion/README.md) ·
+[config](services/config/README.md) ·
+[query](services/query/README.md) ·
+[agents](services/agents/README.md) ·
+[pipeline](pipeline/README.md)
 
 ## Tech Stack
 
@@ -95,11 +110,22 @@ make setup
 ```
 
 This single command will:
-1. Create isolated Python virtualenvs (via `uv`) for each service
+1. Create isolated Python virtualenvs (via `uv`) for every service, SDK, and pipeline package
 2. Install all Python and Node.js dependencies
 3. Start infrastructure containers (Redis, ClickHouse, PostgreSQL)
 4. Run ClickHouse migrations
 5. Copy `.env.example` → `.env` (edit to add API keys)
+
+Everything for local development is also available through one script:
+
+```bash
+scripts/dev.sh setup     # same as make setup
+scripts/dev.sh up-full   # full stack in Docker (detached) + migrations
+scripts/dev.sh status    # container status + service health endpoints
+scripts/dev.sh smoke     # end-to-end smoke test: ingest event → create flag → query
+scripts/dev.sh check     # lint + test every package in parallel
+scripts/dev.sh down      # stop everything   (reset also wipes volumes)
+```
 
 ### Running Services
 
@@ -131,6 +157,10 @@ make build-sdk      # SDK only
 ```bash
 make test           # Run all tests
 make lint           # Run all linters
+make check          # Lint + test every package in parallel (local CI mirror)
+make fmt            # Auto-format all packages
+make smoke          # End-to-end smoke test against the running stack
+make status         # Container + service health overview
 
 make test-sdk       # SDK unit tests
 make test-ingestion # Ingestion service tests (pytest)
@@ -233,24 +263,28 @@ All agent actions go through a safety validator and are recorded in the audit lo
 
 ## API Endpoints
 
-### Ingestion Service (`:8080`)
+### Ingestion Service (`:8080`) — [full docs](services/ingestion/README.md)
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/events` | Ingest event batch |
+| `POST` | `/v1/events` | Ingest event batch (1–500 events, returns `202`) |
 | `GET` | `/health` | Health check |
 
-### Config Service (`:8081`)
+### Config Service (`:8081`) — [full docs](services/config/README.md)
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/v1/flags` | Get flags for a project (SDK polling) |
+| `GET` | `/v1/flags` | Get flags for a project (SDK polling, Redis-cached) |
 | `GET` | `/v1/stream` | SSE stream for real-time flag updates |
+| `POST` | `/v1/evaluate` | Server-side gate evaluation (internal token) |
 | `GET/POST` | `/v1/admin/flags` | List / create flags |
-| `PUT/DELETE` | `/v1/admin/flags/:key` | Update / delete flag |
+| `PUT/DELETE` | `/v1/admin/flags/:key` | Update / archive flag |
 | `GET/POST` | `/v1/admin/experiments` | List / create experiments |
 | `PUT/DELETE` | `/v1/admin/experiments/:key` | Update / delete experiment |
 | `GET` | `/health` | Health check |
 
-### Query Service (`:8082`)
+The admin API also covers stale-flag reports, system disable, cleanup, and
+per-flag audit history — see the [config service README](services/config/README.md).
+
+### Query Service (`:8082`) — [full docs](services/query/README.md)
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/query/events/count` | Count one or more event selectors |
@@ -260,7 +294,8 @@ All agent actions go through a safety validator and are recorded in the audit lo
 | `POST` | `/v1/query/cohort` | Cohort analysis |
 | `POST` | `/v1/query/retention` | Retention curves |
 | `GET` | `/v1/query/experiment/:id` | Experiment results with statistical tests |
-| `GET` | `/health` | Health / readiness |
+| `POST` | `/v1/query/guardrails/evaluate` | Evaluate flag guardrails (error rate / health) |
+| `GET` | `/health`, `/ready` | Health / readiness |
 
 Query endpoints use a strict `EventSelector` shape:
 
@@ -379,13 +414,13 @@ Filtered cohort comparison:
 }
 ```
 
-### Agents Service (`:8083`)
+### Agents Service (`:8083`) — [full docs](services/agents/README.md)
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/agents/trigger` | Start an agent run |
-| `GET` | `/v1/agents/status/:run_id` | Check run status |
-| `POST` | `/v1/agents/approve/:action_id` | Approve a pending agent action |
-| `GET` | `/health` | Health / readiness |
+| `GET` | `/v1/agents/:run_id/status` | Check run status |
+| `POST` | `/v1/agents/:run_id/approve` | Approve a run's pending actions |
+| `GET` | `/health`, `/ready` | Health / readiness |
 
 ## Infrastructure
 

@@ -21,9 +21,12 @@ PostgreSQL), runs ClickHouse migrations, and copies `.env.example` → `.env`.
 Verify your environment works before making changes:
 
 ```bash
-make test
-make lint
+make check    # lint + test every package in parallel
 ```
+
+`scripts/dev.sh` is the master entry point for everything local —
+`scripts/dev.sh help` lists setup, stack lifecycle (`up`, `up-full`, `down`,
+`reset`), `status`, and an end-to-end `smoke` test.
 
 ## Repository layout
 
