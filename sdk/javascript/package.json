@@ -18,12 +18,17 @@
     "dist"
   ],
   "scripts": {
+    "setup": "npm ci",
+    "clean": "rm -rf dist",
     "build": "rollup -c rollup.config.ts --configPlugin typescript",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "pack:dry-run": "npm pack --dry-run",
+    "release:check": "npm run lint && npm test && npm run build && npm run pack:dry-run",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "web-vitals": "^5.3.0"

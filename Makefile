@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse
+.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse setup-sdk release-sdk
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -48,6 +48,9 @@ clean: clean-sdk
 build-sdk:
 	cd sdk/javascript && npm run build
 
+setup-sdk:
+	cd sdk/javascript && npm run setup
+
 test-sdk:
 	cd sdk/javascript && npm test
 
@@ -56,6 +59,9 @@ clean-sdk:
 
 lint-sdk:
 	cd sdk/javascript && npm run lint
+
+release-sdk:
+	cd sdk/javascript && npm run release:check
 
 # ─── Ingestion Service (Python) ─────────────────────────────
 
