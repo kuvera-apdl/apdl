@@ -182,6 +182,84 @@ describe('APDLClient', () => {
         .toThrow(`config.${field} is no longer supported`);
     });
 
+    it('should reject unsupported top-level config fields', () => {
+      const config = {
+        ...createClientConfig(),
+        apiBaseUrl: INGESTION_ENDPOINT,
+      };
+
+      expect(() => resolveConfig(config as unknown as APDLConfig))
+        .toThrow('config.apiBaseUrl is not supported');
+    });
+
+    it('should reject unsupported endpoint and auth fields', () => {
+      const endpointConfig = {
+        ...createClientConfig(),
+        endpoints: {
+          ingestion: INGESTION_ENDPOINT,
+          config: CONFIG_ENDPOINT,
+          flags: CONFIG_ENDPOINT,
+        },
+      };
+      const authConfig = {
+        ...createClientConfig(),
+        auth: {
+          clientKey: CLIENT_KEY,
+          projectId: 'apdl',
+        },
+      };
+
+      expect(() => resolveConfig(endpointConfig as unknown as APDLConfig))
+        .toThrow('endpoints.flags is not supported');
+      expect(() => resolveConfig(authConfig as unknown as APDLConfig))
+        .toThrow('auth.projectId is not supported');
+    });
+
+    it('should reject unsupported autoCapture and consent fields', () => {
+      const autoCaptureConfig = {
+        ...createClientConfig(),
+        autoCapture: {
+          pageViews: true,
+          frontendErrors: true,
+        },
+      };
+      const consentConfig = {
+        ...createClientConfig(),
+        consent: {
+          analytics: true,
+          personalization: true,
+          experiments: true,
+          marketing: true,
+        },
+      };
+
+      expect(() => resolveConfig(autoCaptureConfig as unknown as APDLConfig))
+        .toThrow('autoCapture.frontendErrors is not supported');
+      expect(() => resolveConfig(consentConfig as unknown as APDLConfig))
+        .toThrow('consent.marketing is not supported');
+    });
+
+    it('should reject invalid autoCapture and consent values', () => {
+      const autoCaptureConfig = {
+        ...createClientConfig(),
+        autoCapture: {
+          pageViews: 'yes',
+        },
+      };
+      const consentConfig = {
+        ...createClientConfig(),
+        consent: {
+          analytics: true,
+          personalization: true,
+        },
+      };
+
+      expect(() => resolveConfig(autoCaptureConfig as unknown as APDLConfig))
+        .toThrow('autoCapture.pageViews is required and must be a boolean');
+      expect(() => resolveConfig(consentConfig as unknown as APDLConfig))
+        .toThrow('consent.experiments is required and must be a boolean');
+    });
+
     it('should expose public namespaces', () => {
       expect(client.ui).toBeDefined();
       expect(client.ui.register).toBeTypeOf('function');

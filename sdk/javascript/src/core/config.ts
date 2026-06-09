@@ -70,6 +70,23 @@ const SUPPORTED_CONFIG_FIELDS = new Set([
   'debug',
 ]);
 
+const SUPPORTED_AUTO_CAPTURE_FIELDS: Array<keyof AutoCaptureConfig> = [
+  'pageViews',
+  'clicks',
+  'formSubmissions',
+  'inputChanges',
+  'scrollDepth',
+  'rage_clicks',
+  'frontend_errors',
+  'web_vitals',
+];
+
+const SUPPORTED_CONSENT_FIELDS: Array<keyof ConsentState> = [
+  'analytics',
+  'personalization',
+  'experiments',
+];
+
 const REMOVED_CONFIG_FIELDS: Record<string, string> = {
   apiKey: 'auth.clientKey',
   host: 'endpoints.ingestion',
@@ -120,26 +137,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
   }
   const projectId = keyMatch[1];
 
-  let autoCapture: AutoCaptureConfig;
-  if (config.autoCapture === false) {
-    autoCapture = {
-      pageViews: false,
-      clicks: false,
-      formSubmissions: false,
-      inputChanges: false,
-      scrollDepth: false,
-      rage_clicks: false,
-      frontend_errors: false,
-      web_vitals: false,
-    };
-  } else if (config.autoCapture === true || config.autoCapture === undefined) {
-    autoCapture = { ...DEFAULT_AUTO_CAPTURE };
-  } else {
-    autoCapture = {
-      ...DEFAULT_AUTO_CAPTURE,
-      ...config.autoCapture,
-    };
-  }
+  const autoCapture = resolveAutoCapture(input.autoCapture);
 
   let batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
   if (batchSize < 1) batchSize = 1;
@@ -147,6 +145,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
 
   const flushInterval = config.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
   const maxQueueSize = config.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
+  const consent = resolveConsent(input.consent);
 
   return {
     projectId,
@@ -161,10 +160,60 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
     batchSize,
     flushInterval,
     privacyMode: config.privacyMode ?? 'standard',
-    consent: config.consent ? { ...config.consent } : { ...DEFAULT_CONSENT },
+    consent,
     persistence: config.persistence ?? 'localStorage',
     maxQueueSize,
     debug: config.debug ?? false,
+  };
+}
+
+function resolveAutoCapture(value: unknown): AutoCaptureConfig {
+  if (value === false) {
+    return {
+      pageViews: false,
+      clicks: false,
+      formSubmissions: false,
+      inputChanges: false,
+      scrollDepth: false,
+      rage_clicks: false,
+      frontend_errors: false,
+      web_vitals: false,
+    };
+  }
+
+  if (value === true || value === undefined) {
+    return { ...DEFAULT_AUTO_CAPTURE };
+  }
+
+  const input = assertObject(value, 'autoCapture');
+  assertSupportedNestedFields(input, SUPPORTED_AUTO_CAPTURE_FIELDS, 'autoCapture');
+
+  const autoCapture = { ...DEFAULT_AUTO_CAPTURE };
+  for (const field of SUPPORTED_AUTO_CAPTURE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(input, field)) {
+      continue;
+    }
+    autoCapture[field] = requireBoolean(input[field], `autoCapture.${field}`);
+  }
+
+  return autoCapture;
+}
+
+function resolveConsent(value: unknown): ConsentState {
+  if (value === undefined) {
+    return { ...DEFAULT_CONSENT };
+  }
+
+  const input = assertObject(value, 'consent');
+  assertSupportedNestedFields(input, SUPPORTED_CONSENT_FIELDS, 'consent');
+
+  return {
+    analytics: requireBoolean(input.analytics, 'consent.analytics'),
+    personalization: requireBoolean(
+      input.personalization,
+      'consent.personalization'
+    ),
+    experiments: requireBoolean(input.experiments, 'consent.experiments'),
   };
 }
 
@@ -193,7 +242,7 @@ function rejectUnsupportedTopLevelFields(config: Record<string, unknown>): void 
 
 function assertSupportedNestedFields(
   config: Record<string, unknown>,
-  supportedFields: string[],
+  supportedFields: readonly string[],
   path: string
 ): void {
   const supported = new Set(supportedFields);
@@ -209,6 +258,14 @@ function requireNonEmptyString(value: unknown, path: string): string {
     throw new Error(
       `APDL: ${path} is required and must be a non-empty string`
     );
+  }
+
+  return value;
+}
+
+function requireBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw new Error(`APDL: ${path} is required and must be a boolean`);
   }
 
   return value;
