@@ -77,7 +77,8 @@ make run-pipeline   # ClickHouse Writer, Redis Streams consumer
 
 | Service | Test | Lint |
 |---------|------|------|
-| SDK | `make test-sdk` | `make lint-sdk` |
+| SDK (JS) | `make test-sdk` | `make lint-sdk` |
+| SDK (Python) | `make test-sdk-python` | `make lint-sdk-python` |
 | Ingestion | `make test-ingestion` | `make lint-ingestion` |
 | Config | `make test-config` | `make lint-config` |
 | Query | `make test-query` | `make lint-query` |
@@ -86,8 +87,11 @@ make run-pipeline   # ClickHouse Writer, Redis Streams consumer
 ### Running a single test
 
 ```bash
-# SDK (Vitest)
+# SDK - JavaScript (Vitest)
 cd sdk/javascript && npm test -- core/client.test.ts
+
+# SDK - Python (pytest)
+cd sdk/python && .venv/bin/python -m pytest tests/test_evaluator.py -v
 
 # Python services (pytest)
 cd services/ingestion && .venv/bin/python -m pytest tests/test_events.py -v
@@ -98,8 +102,8 @@ cd services/agents && .venv/bin/python -m pytest tests/test_supervisor.py::test_
 
 ## Architecture Overview
 
-The system is a monorepo with four Python services, a data pipeline, and a
-client SDK:
+The system is a monorepo with four Python services, a data pipeline, and two
+client SDKs (a browser TypeScript SDK and a server-side Python SDK):
 
 ```text
 SDK (TypeScript) --POST /v1/events--> Ingestion (Python/FastAPI :8080) --> Redis Streams
@@ -123,8 +127,10 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
    1000 events or a 5 second flush, then writes to ClickHouse.
 3. **Flag distribution:** Config Service stores flags/experiments in PostgreSQL,
    caches in Redis, and pushes updates via SSE to SDK.
-4. **Flag evaluation:** SDK evaluates flags client-side using MurmurHash3
-   bucketing, with no server round-trip for evaluation.
+4. **Flag evaluation:** SDKs evaluate flags locally using FNV-1a bucketing, with
+   no server round-trip for evaluation. The JS SDK, the Python SDK, and the
+   Config Service share a byte-for-byte identical hash, so a user buckets
+   identically everywhere.
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts,
    retention, and experiment stats.
 6. **Autonomous agents:** A lightweight graph runner orchestrates LLM-driven
@@ -134,7 +140,9 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
 
 ### Tech Stack by Service
 
-- **SDK** (`sdk/javascript/`): TypeScript, Rollup, Vitest.
+- **SDK - JS** (`sdk/javascript/`): TypeScript, Rollup, Vitest.
+- **SDK - Python** (`sdk/python/`): Python 3.12, server-side client, httpx,
+  Pydantic, uv, pytest, ruff.
 - **Ingestion** (`services/ingestion/`): Python 3.12, FastAPI, redis, Pydantic,
   uv, pytest, ruff.
 - **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis,
@@ -164,11 +172,11 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
   its own `.venv/` directory.
 - **Python linting:** `ruff check app/` (default config, no pyproject.toml
   overrides).
-- **SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params).
-- **SDK test pattern:** `__tests__/**/*.test.ts`.
-- **Python test pattern:** `tests/` directory in each service.
-- **CI runs on push/PR to main:** SDK tests + build, Python linting for all four
-  services.
+- **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params).
+- **JS SDK test pattern:** `__tests__/**/*.test.ts`.
+- **Python test pattern:** `tests/` directory in each service and in `sdk/python/`.
+- **CI runs on push/PR to main:** JS SDK tests + build, Python SDK lint + tests
+  (ruff + pytest), and Python linting (ruff) for all four services.
 - **Releases:** git tags matching `v*` trigger npm publish + Docker image builds
   to GHCR.
 
