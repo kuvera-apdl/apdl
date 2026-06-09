@@ -11,7 +11,7 @@ export type {
   ResolvedConfig,
 } from './core/config';
 
-export type { TrackEvent, EventContext } from './core/types';
+export type { TrackEvent, EventContext, ExperimentContext } from './core/types';
 
 export type {
   FlagConfig,

@@ -197,6 +197,11 @@ describe('APDLClient', () => {
       expect(client.privacy.addScrubber).toBeTypeOf('function');
       expect(client.privacy.removeScrubber).toBeTypeOf('function');
 
+      expect(client.experiments).toBeDefined();
+      expect(client.experiments.setContext).toBeTypeOf('function');
+      expect(client.experiments.getContext).toBeTypeOf('function');
+      expect(client.experiments.clearContext).toBeTypeOf('function');
+
       expect(client.debug).toBeDefined();
       expect(client.debug.enable).toBeTypeOf('function');
       expect(client.debug.disable).toBeTypeOf('function');
@@ -323,6 +328,163 @@ describe('APDLClient', () => {
         (e: unknown) => (e as Record<string, unknown>).event === 'after_reset'
       ) as Record<string, unknown> | undefined;
       expect(afterReset?.userId).toBeUndefined();
+    });
+  });
+
+  describe('experiments', () => {
+    it('should set, return, and clear canonical experiment context', () => {
+      expect(client.experiments.getContext()).toEqual({ attributes: {} });
+
+      client.experiments.setContext({
+        attributes: {
+          plan: 'pro',
+          region: 'us',
+        },
+      });
+
+      const context = client.experiments.getContext();
+      expect(context).toEqual({
+        attributes: {
+          plan: 'pro',
+          region: 'us',
+        },
+      });
+
+      context.attributes.plan = 'free';
+      expect(client.experiments.getContext().attributes.plan).toBe('pro');
+
+      client.experiments.clearContext();
+      expect(client.experiments.getContext()).toEqual({ attributes: {} });
+    });
+
+    it('should defensively copy nested experiment context attributes', () => {
+      const input = {
+        profile: {
+          plan: 'pro',
+          team: { id: 'growth' },
+        },
+        segments: ['beta'],
+      };
+
+      client.experiments.setContext({ attributes: input });
+      input.profile.team.id = 'sales';
+      input.segments.push('internal');
+
+      const stored = client.experiments.getContext().attributes as {
+        profile: { team: { id: string } };
+        segments: string[];
+      };
+      expect(stored.profile.team.id).toBe('growth');
+      expect(stored.segments).toEqual(['beta']);
+
+      stored.profile.team.id = 'support';
+      stored.segments.push('enterprise');
+
+      const reread = client.experiments.getContext().attributes as {
+        profile: { team: { id: string } };
+        segments: string[];
+      };
+      expect(reread.profile.team.id).toBe('growth');
+      expect(reread.segments).toEqual(['beta']);
+    });
+
+    it('should reject non-canonical experiment context shapes', () => {
+      const setContext = client.experiments.setContext as (context: unknown) => void;
+      class Attributes {
+        plan = 'pro';
+      }
+
+      expect(() => setContext({ attributes: {}, scope: 'checkout' }))
+        .toThrow('APDL: experiments context.scope is not supported');
+      expect(() => setContext({ attributes: [] }))
+        .toThrow('APDL: experiments context.attributes is required and must be an object');
+      expect(() => setContext({}))
+        .toThrow('APDL: experiments context.attributes is required and must be an object');
+      expect(() => setContext(new Date()))
+        .toThrow('APDL: experiments context is required and must be an object');
+      expect(() => setContext({ attributes: new Date() }))
+        .toThrow('APDL: experiments context.attributes is required and must be an object');
+      expect(() => setContext({ attributes: new Map([['plan', 'pro']]) }))
+        .toThrow('APDL: experiments context.attributes is required and must be an object');
+      expect(() => setContext({ attributes: new Attributes() }))
+        .toThrow('APDL: experiments context.attributes is required and must be an object');
+    });
+
+    it('should merge experiment context attributes into flag evaluation attributes', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('plan-flag', {
+            rules: [{
+              id: 'rule_plan',
+              name: 'Plan targeting',
+              conditions: [
+                { attribute: 'plan', operator: 'equals', value: 'pro' },
+              ],
+              rollout: { percentage: 100, bucket_by: 'user_id' },
+            }],
+            fallthrough: {
+              rollout: { percentage: 0, bucket_by: 'user_id' },
+            },
+          })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const experimentClient = new APDLClient(createClientConfig());
+
+      await flushAsync();
+      experimentClient.identify('user_123');
+      expect(experimentClient.getVariant('plan-flag')).toBe('control');
+
+      experimentClient.experiments.setContext({
+        attributes: { plan: 'pro' },
+      });
+
+      expect(experimentClient.getVariant('plan-flag')).toBe('treatment');
+      await experimentClient.shutdown();
+    });
+
+    it('should include stable experiment context metadata on exposure events', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('context-exposure-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const experimentClient = new APDLClient(createClientConfig());
+
+      await flushAsync();
+      experimentClient.identify('user_123');
+      experimentClient.experiments.setContext({
+        attributes: {
+          plan: 'pro',
+          region: 'us',
+        },
+      });
+      experimentClient.getVariant('context-exposure-flag', { component: 'PricingCTA' });
+
+      const exposures = featureFlagExposures(experimentClient);
+      expect(exposures).toHaveLength(1);
+      expect(exposures[0].properties).toMatchObject({
+        flag_key: 'context-exposure-flag',
+        experiment_context: {
+          attributes: {
+            plan: 'pro',
+            region: 'us',
+          },
+        },
+      });
+
+      await experimentClient.shutdown();
     });
   });
 
@@ -1005,7 +1167,10 @@ function frontendErrors(
     .filter((event) => event.event === '$frontend_error');
 }
 
-function makeFlag(key: string): Record<string, unknown> {
+function makeFlag(
+  key: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
   return {
     key,
     enabled: true,
@@ -1020,5 +1185,6 @@ function makeFlag(key: string): Record<string, unknown> {
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,
+    ...overrides,
   };
 }

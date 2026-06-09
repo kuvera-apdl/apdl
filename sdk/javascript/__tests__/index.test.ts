@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APDL, APDLClient, type APDLConfig } from '../src';
+import { APDL, APDLClient, type APDLConfig, type ExperimentContext } from '../src';
 
 const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
 const INGESTION_ENDPOINT = 'https://ingest.public-api.test';
@@ -89,6 +89,20 @@ describe('public SDK entrypoint', () => {
     clients.push(client);
 
     expect(client).toBeInstanceOf(APDLClient);
+  });
+
+  it('exports the ExperimentContext type from the public entrypoint', () => {
+    const context: ExperimentContext = {
+      attributes: {
+        plan: 'pro',
+      },
+    };
+    const client = APDL.init(createConfig());
+    clients.push(client);
+
+    client.experiments.setContext(context);
+
+    expect(client.experiments.getContext()).toEqual(context);
   });
 
   it('applies the canonical endpoints and auth config contract', async () => {

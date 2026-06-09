@@ -51,6 +51,10 @@ export interface EventContext {
   };
 }
 
+export interface ExperimentContext {
+  attributes: Record<string, unknown>;
+}
+
 /**
  * Generates a UUID v4 using crypto.getRandomValues when available,
  * with a Math.random fallback.
