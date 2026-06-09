@@ -153,11 +153,19 @@ make dev-down       # Stop all Docker containers
 
 ## SDK Usage
 
+For full SDK usage, see [`sdk/javascript/README.md`](sdk/javascript/README.md).
+
 ```typescript
 import { APDL } from '@apdl/sdk';
 
-const apdl = new APDL({
-  apiKey: 'your-api-key',
+const apdl = APDL.init({
+  endpoints: {
+    ingestion: 'http://localhost:8080',
+    config: 'http://localhost:8081',
+  },
+  auth: {
+    clientKey: 'proj_apdl_0123456789abcdef',
+  },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
   privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
 });
