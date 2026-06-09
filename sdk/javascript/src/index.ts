@@ -45,14 +45,17 @@ export { APDLClient };
 export { hashBucket, isInRollout, percentageBucket } from './flags/hash';
 
 /**
+ * Initializes the APDL SDK and returns a client instance.
+ *
+ * Exported at the top level so the IIFE bundle's global supports
+ * `APDL.init(...)` directly, matching the documented module usage.
+ */
+export function init(config: APDLConfig): APDLClient {
+  return new APDLClient(config);
+}
+
+/**
  * APDL namespace — the primary entry point for the SDK.
  * Use APDL.init(config) to create a client instance.
  */
-export const APDL = {
-  /**
-   * Initializes the APDL SDK and returns a client instance.
-   */
-  init(config: APDLConfig): APDLClient {
-    return new APDLClient(config);
-  },
-};
+export const APDL = { init };
