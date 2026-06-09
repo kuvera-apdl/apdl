@@ -8,7 +8,7 @@ interface PackageJson {
 }
 
 const packageJson = JSON.parse(
-  readFileSync(resolve(__dirname, '../package.json'), 'utf8')
+  readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')
 ) as PackageJson;
 
 describe('package workflow scripts', () => {
