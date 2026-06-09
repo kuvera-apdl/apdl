@@ -22,6 +22,12 @@ apdl/
 │   │   └── privacy/         # Consent management, PII scrubbing, cookieless mode
 │   └── package.json
 │
+├── sdk/python/              # apdl-sdk — server-side Python client SDK
+│   ├── apdl/                # Client, batching event queue, transport
+│   │   └── flags/           # Local feature gate evaluation (FNV-1a bucketing)
+│   ├── tests/               # pytest unit tests
+│   └── pyproject.toml
+│
 ├── services/
 │   ├── ingestion/           # Python (FastAPI) — event ingestion + validation
 │   │   ├── app/             # HTTP handlers, schema validation, Redis Streams producer
