@@ -2,6 +2,22 @@
   "name": "@apdl/sdk",
   "version": "0.1.0",
   "description": "Client SDK for the Autonomous Product Development Loop platform",
+  "keywords": [
+    "analytics",
+    "feature-flags",
+    "experiments",
+    "ab-testing",
+    "apdl"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JahaanRawat/apdl.git",
+    "directory": "sdk/javascript"
+  },
+  "homepage": "https://github.com/JahaanRawat/apdl/tree/main/sdk/javascript#readme",
+  "bugs": {
+    "url": "https://github.com/JahaanRawat/apdl/issues"
+  },
   "type": "module",
   "main": "dist/apdl.cjs.js",
   "module": "dist/apdl.esm.js",

@@ -159,13 +159,18 @@ make dev-down       # Stop all Docker containers
 
 ## SDK Usage
 
+API keys follow `proj_{project_id}_{secret}` (secret: 16+ alphanumeric characters).
+Runnable end-to-end samples live in [`examples/`](examples/).
+
+### JavaScript (browser) — [`@apdl/sdk`](sdk/javascript/)
+
 ```typescript
 import { APDL } from '@apdl/sdk';
 
-const apdl = new APDL({
-  apiKey: 'your-api-key',
+const apdl = APDL.init({
+  apiKey: 'proj_demo_0123456789abcdef',
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
-  privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
+  privacyMode: 'standard',               // 'standard' | 'cookieless' | 'strict'
 });
 
 // Manual event tracking
@@ -184,6 +189,27 @@ if (apdl.checkGate('new-checkout-flow')) {
   // Show the gated experience.
 }
 ```
+
+See the [JavaScript SDK README](sdk/javascript/README.md) for configuration,
+privacy controls, server-driven UI, and real-time flag subscriptions.
+
+### Python (server-side) — [`apdl-sdk`](sdk/python/)
+
+```python
+from apdl import APDL
+
+with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
+    client.track("order_completed", {"total": 42.0}, user_id="u_123")
+    client.identify("u_123", {"plan": "pro"})
+
+    if client.check_gate("new-checkout", user_id="u_123"):
+        ...  # gated experience
+```
+
+See the [Python SDK README](sdk/python/README.md) for batching, gate-result
+explanations, and configuration. Both SDKs and the Config Service share a
+byte-for-byte identical FNV-1a bucketing hash, so a user buckets identically
+everywhere a gate is evaluated.
 
 ## Agents
 
@@ -389,6 +415,13 @@ services process requests or events.
 
 See `infra/docker/` for the full configuration.
 
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
+conventions, and the PR workflow, and [SECURITY.md](SECURITY.md) for how to
+report vulnerabilities. Notable changes are tracked in
+[CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)
