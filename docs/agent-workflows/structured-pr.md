@@ -66,8 +66,9 @@ git diff main...HEAD --stat
 
 ## Phase 1 - Lint and test before committing
 
-CI runs `ruff` on all four Python services and `tsc` on the SDK. Run the
-relevant linter for each touched area:
+CI runs `ruff` on the four Python services and the Python SDK, `pytest` on the
+Python SDK, and `tsc` on the JS SDK. Run the relevant linter for each touched
+area:
 
 | Touched path | Lint command |
 |---|---|
@@ -76,6 +77,7 @@ relevant linter for each touched area:
 | `services/query/` | `cd services/query && .venv/bin/ruff check app/` |
 | `services/agents/` | `cd services/agents && .venv/bin/ruff check app/` |
 | `sdk/javascript/` | `cd sdk/javascript && npx tsc --noEmit` |
+| `sdk/python/` | `cd sdk/python && .venv/bin/ruff check apdl/ tests/` |
 
 Run the relevant tests too if the change is non-trivial, using
 `make test-<service>` or the single-test commands in the repo agent guidance.
