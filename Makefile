@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse
+.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -34,12 +34,14 @@ deps:
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
 	@echo "==> Setting up ETL framework"
 	cd pipeline/etl && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up Python SDK"
+	cd sdk/python && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
 build: build-sdk
 
-test: test-sdk test-ingestion test-config test-query test-agents test-etl
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-etl
 
-lint: lint-sdk lint-ingestion lint-config lint-query lint-agents lint-etl
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl
 
 clean: clean-sdk
 
@@ -56,6 +58,14 @@ clean-sdk:
 
 lint-sdk:
 	cd sdk/javascript && npm run lint
+
+# ─── SDK (Python) ────────────────────────────────────────────
+
+test-sdk-python:
+	cd sdk/python && .venv/bin/python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88
+
+lint-sdk-python:
+	cd sdk/python && .venv/bin/ruff check apdl/ tests/
 
 # ─── Ingestion Service (Python) ─────────────────────────────
 
@@ -137,4 +147,4 @@ dev-down:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-ingestion lint-config lint-query lint-agents lint-etl test-etl
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl test-etl

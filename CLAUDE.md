@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Shared Agent Workflows
+
+- Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the user asks to create a PR, open a pull request, raise a PR, make commits for a PR branch, or ship the current branch or changes.
+
 ## What is APDL?
 
 Autonomous Product Development Loop — a self-optimizing product analytics and experimentation platform. It ingests user behavior events, runs analytics queries, evaluates feature flags and A/B experiments, and uses LLM-powered agents to autonomously generate insights, design experiments, and personalize user experiences.
@@ -33,7 +37,8 @@ make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 
 | Service | Test | Lint |
 |---------|------|------|
-| SDK | `make test-sdk` | `make lint-sdk` |
+| SDK (JS) | `make test-sdk` | `make lint-sdk` |
+| SDK (Python) | `make test-sdk-python` | `make lint-sdk-python` |
 | Ingestion | `make test-ingestion` | `make lint-ingestion` |
 | Config | `make test-config` | `make lint-config` |
 | Query | `make test-query` | `make lint-query` |
@@ -42,8 +47,11 @@ make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 ### Running a single test
 
 ```bash
-# SDK (Vitest)
+# SDK — JavaScript (Vitest)
 cd sdk/javascript && npm test -- core/client.test.ts
+
+# SDK — Python (pytest)
+cd sdk/python && .venv/bin/python -m pytest tests/test_evaluator.py -v
 
 # Python services (pytest)
 cd services/ingestion && .venv/bin/python -m pytest tests/test_events.py -v
@@ -54,7 +62,7 @@ cd services/agents && .venv/bin/python -m pytest tests/test_supervisor.py::test_
 
 ## Architecture Overview
 
-The system is a monorepo with four Python services, a data pipeline, and a client SDK:
+The system is a monorepo with four Python services, a data pipeline, and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
 
 ```
 SDK (TypeScript) ──POST /v1/events──→ Ingestion (Python/FastAPI :8080) ──→ Redis Streams
@@ -73,13 +81,14 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 1. **Event ingestion:** SDK → Ingestion Service (auth, rate-limit, schema validation) → Redis Streams (`events:raw:{project_id}`)
 2. **Event pipeline:** ClickHouse Writer consumes Redis Streams in batches (1000 events or 5s flush) → ClickHouse (MergeTree tables, materialized views)
 3. **Flag distribution:** Config Service stores flags/experiments in PostgreSQL, caches in Redis, pushes updates via SSE to SDK
-4. **Flag evaluation:** SDK evaluates flags client-side using MurmurHash3 bucketing (no server round-trip for evaluation)
+4. **Flag evaluation:** SDKs evaluate flags locally using FNV-1a bucketing (no server round-trip for evaluation). The JS SDK, the Python SDK, and the Config Service share a byte-for-byte identical hash so a user buckets identically everywhere
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
 6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
 
 ### Tech Stack by Service
 
-- **SDK** (`sdk/javascript/`): TypeScript, Rollup (ESM/CJS/IIFE), Vitest (jsdom)
+- **SDK — JS** (`sdk/javascript/`): TypeScript, Rollup (ESM/CJS/IIFE), Vitest (jsdom)
+- **SDK — Python** (`sdk/python/`): Python 3.12, server-side client, httpx, Pydantic — uv, pytest, ruff
 - **Ingestion** (`services/ingestion/`): Python 3.12, FastAPI, redis (hiredis), Pydantic — uv, pytest, ruff
 - **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis (hiredis), sse-starlette, Pydantic — uv, pytest, ruff
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
@@ -102,10 +111,10 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 
 - **Python package management:** `uv` (not pip directly). Each Python service has its own `.venv/` directory
 - **Python linting:** `ruff check app/` (default config, no pyproject.toml overrides)
-- **SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
-- **SDK test pattern:** `__tests__/**/*.test.ts`
-- **Python test pattern:** `tests/` directory in each service
-- **CI runs on push/PR to main:** SDK tests + build, Python linting (ruff) for all four services
+- **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
+- **JS SDK test pattern:** `__tests__/**/*.test.ts`
+- **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
+- **CI runs on push/PR to main:** JS SDK tests + build, Python SDK lint + tests (ruff + pytest), Python linting (ruff) for all four services
 - **Releases:** git tags matching `v*` trigger npm publish + Docker image builds to GHCR
 
 ## Environment Variables
