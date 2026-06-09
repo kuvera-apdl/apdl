@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Transport } from '../../src/core/transport';
 
+const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+
 describe('Transport', () => {
   let transport: Transport;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    transport = new Transport('test-api-key', { timeout: 5000 });
+    transport = new Transport(CLIENT_KEY, { timeout: 5000 });
   });
 
   afterEach(() => {
@@ -36,7 +38,7 @@ describe('Transport', () => {
         method: 'POST',
         headers: expect.objectContaining({
           'Content-Type': 'application/json',
-          'X-API-Key': 'test-api-key',
+          'X-API-Key': CLIENT_KEY,
         }),
         body: JSON.stringify({ data: 'test' }),
       });
@@ -189,7 +191,7 @@ describe('Transport', () => {
       expect(sendBeaconMock).toHaveBeenCalledTimes(1);
 
       const url = sendBeaconMock.mock.calls[0][0] as string;
-      expect(url).toContain('api_key=test-api-key');
+      expect(url).toContain(`api_key=${CLIENT_KEY}`);
 
       const blob = sendBeaconMock.mock.calls[0][1] as Blob;
       expect(blob).toBeInstanceOf(Blob);

@@ -123,6 +123,26 @@ describe('APDLClient', () => {
       });
     });
 
+    it('should fetch initial flags from the config endpoint with client key auth', () => {
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+
+      expect(url).toBe(`${CONFIG_ENDPOINT}/v1/flags`);
+      expect(init.headers).toMatchObject({
+        'X-API-Key': CLIENT_KEY,
+        'X-APDL-SDK': 'js/0.1.0',
+      });
+    });
+
+    it('should open the SSE stream from the config endpoint with client key query auth', () => {
+      const source = MockEventSource.instances.at(-1);
+      expect(source).toBeDefined();
+
+      const url = new URL(source!.url);
+      expect(`${url.origin}${url.pathname}`).toBe(`${CONFIG_ENDPOINT}/v1/stream`);
+      expect(url.searchParams.get('api_key')).toBe(CLIENT_KEY);
+      expect(url.searchParams.has('project_id')).toBe(false);
+    });
+
     it('should throw on missing ingestion endpoint', () => {
       expect(() => resolveConfig(createClientConfig({
         endpoints: { ingestion: '' },
@@ -430,6 +450,34 @@ describe('APDLClient', () => {
 
       expect(cachedClient.getVariant('cached-flag')).toBe('treatment');
       expect(cachedClient.getVariantDetails('cached-flag').source).toBe('local_storage');
+    });
+
+    it('should scope cached flags by project ID derived from the client key', () => {
+      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('apdl-only')],
+      }));
+      localStorage.setItem(flagStorageKey('projectb'), JSON.stringify({
+        schema_version: 2,
+        project_id: 'projectb',
+        flags: [makeFlag('projectb-only')],
+      }));
+      fetchMock.mockRejectedValueOnce(new Error('offline'));
+
+      const projectClient = new APDLClient(createClientConfig({
+        auth: { clientKey: 'proj_projectb_0123456789abcdef' },
+        persistence: 'localStorage',
+        privacyMode: 'standard',
+      }));
+      projectClient.identify('user_123');
+
+      expect(projectClient.getVariant('projectb-only')).toBe('treatment');
+
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(projectClient.getVariant('apdl-only')).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
     });
 
     it('should preserve restored flags when initial fetch returns malformed config', async () => {
