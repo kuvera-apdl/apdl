@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Shared Agent Workflows
+
+- Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the user asks to create a PR, open a pull request, raise a PR, make commits for a PR branch, or ship the current branch or changes.
+
 ## What is APDL?
 
 Autonomous Product Development Loop — a self-optimizing product analytics and experimentation platform. It ingests user behavior events, runs analytics queries, evaluates feature flags and A/B experiments, and uses LLM-powered agents to autonomously generate insights, design experiments, and personalize user experiences.
