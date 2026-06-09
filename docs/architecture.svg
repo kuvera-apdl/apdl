@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1010" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+<!-- Hand-maintained SVG (no external source file) — edit this file directly. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1170 1010" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
   <defs>
     <!-- Arrow markers -->
     <marker id="arr-gray"   markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
@@ -21,11 +22,11 @@
   </defs>
 
   <!-- ─── Background ─────────────────────────────────────────── -->
-  <rect width="1100" height="1010" fill="url(#bg)" rx="12"/>
+  <rect width="1170" height="1010" fill="url(#bg)" rx="12"/>
 
   <!-- ─── Title ──────────────────────────────────────────────── -->
   <text x="550" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a" letter-spacing="0.5">APDL Architecture</text>
-  <text x="550" y="54" text-anchor="middle" font-size="11" fill="#94a3b8">Autonomous Product Development Loop — Unified Python 3.12 / FastAPI Backend</text>
+  <text x="550" y="54" text-anchor="middle" font-size="11" fill="#94a3b8">Autonomous Product Development Loop — events in · analytics out · agents act on flags &amp; experiments</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        LAYER BANDS  (tinted background panels)
@@ -65,21 +66,33 @@
   <!-- ═══════════════════════════════════════════════════════════
        CLIENT LAYER — SDK
   ══════════════════════════════════════════════════════════════ -->
-  <rect x="200" y="78" width="700" height="76" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
-  <text x="550" y="106" text-anchor="middle" font-size="16" font-weight="700" fill="#1e40af">@apdl/sdk</text>
-  <text x="550" y="124" text-anchor="middle" font-size="11" fill="#3b82f6">TypeScript  ·  Auto-capture  ·  Client-side Flag Eval (FNV-1a)  ·  SSE  ·  Privacy</text>
-  <text x="550" y="142" text-anchor="middle" font-size="10" fill="#93c5fd">Rollup → ESM / CJS / IIFE</text>
+  <!-- SDK container: both clients share byte-identical FNV-1a bucketing -->
+  <rect x="140" y="72" width="820" height="88" rx="10" fill="#eff6ff" fill-opacity="0.5" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="398" y="63" width="304" height="18" rx="5" fill="#3b82f6"/>
+  <text x="550" y="76" text-anchor="middle" font-size="9" font-weight="700" fill="#fff" letter-spacing="0.8">CLIENT SDKs — BYTE-IDENTICAL FNV-1a BUCKETING</text>
+
+  <rect x="152" y="86" width="392" height="66" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="348" y="108" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">@apdl/sdk — browser</text>
+  <text x="348" y="125" text-anchor="middle" font-size="10" fill="#3b82f6">TypeScript · Auto-capture · Local flag eval · SSE · Privacy</text>
+  <text x="348" y="141" text-anchor="middle" font-size="9.5" fill="#93c5fd">Rollup → ESM / CJS / IIFE</text>
+
+  <rect x="556" y="86" width="392" height="66" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="752" y="108" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">apdl-sdk — server-side</text>
+  <text x="752" y="125" text-anchor="middle" font-size="10" fill="#3b82f6">Python 3.12 · Batching queue · Local flag eval · Flag polling</text>
+  <text x="752" y="141" text-anchor="middle" font-size="9.5" fill="#93c5fd">httpx · Pydantic · py.typed</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ARROWS: SDK → Ingestion  and  SDK ↔ Config
   ══════════════════════════════════════════════════════════════ -->
-  <!-- SDK left edge → down then right to Ingestion -->
-  <polyline points="350,154 350,164 250,164 250,182" fill="none" stroke="#3b82f6" stroke-width="1.8" marker-end="url(#arr-blue)"/>
-  <text x="280" y="161" text-anchor="middle" font-size="9" font-weight="600" fill="#3b82f6">POST /v1/events</text>
+  <!-- SDK container left → down then left to Ingestion -->
+  <polyline points="350,160 350,168 250,168 250,182" fill="none" stroke="#3b82f6" stroke-width="1.8" marker-end="url(#arr-blue)"/>
+  <rect x="248" y="162" width="86" height="12" rx="3" fill="#f8fafc"/>
+  <text x="291" y="171" text-anchor="middle" font-size="9" font-weight="600" fill="#3b82f6">POST /v1/events</text>
 
-  <!-- SDK right edge → down then right to Config -->
-  <polyline points="750,154 750,164 870,164 870,182" fill="none" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arr-indigo)"/>
-  <text x="840" y="161" text-anchor="middle" font-size="9" font-weight="600" fill="#6366f1">GET /v1/flags · SSE /v1/stream</text>
+  <!-- SDK container right → down then right to Config -->
+  <polyline points="750,160 750,168 870,168 870,182" fill="none" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arr-indigo)"/>
+  <rect x="762" y="162" width="158" height="12" rx="3" fill="#f8fafc"/>
+  <text x="841" y="171" text-anchor="middle" font-size="9" font-weight="600" fill="#6366f1">GET /v1/flags · SSE /v1/stream</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        API LAYER — Ingestion + Config
@@ -154,6 +167,13 @@
   <!-- Writer → ClickHouse -->
   <line x1="232" y1="518" x2="232" y2="552" stroke="#f97316" stroke-width="1.8" marker-end="url(#arr-orange)"/>
 
+  <!-- ETL framework (standalone transforms) → ClickHouse -->
+  <rect x="392" y="458" width="294" height="60" rx="9" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="6,4" filter="url(#shadow)"/>
+  <text x="539" y="481" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">ETL Framework</text>
+  <text x="539" y="496" text-anchor="middle" font-size="9.5" fill="#7c3aed">canonical envelope → events_v2 · decisions_v2 · feeds_v2</text>
+  <text x="539" y="509" text-anchor="middle" font-size="9" fill="#a78bfa">live traffic · backfills · replays  (pipeline/etl)</text>
+  <line x1="539" y1="518" x2="539" y2="552" stroke="#f97316" stroke-width="1.8" marker-end="url(#arr-orange)"/>
+
   <!-- ClickHouse (analytics DB) spanning across -->
   <rect x="82" y="554" width="624" height="36" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2" filter="url(#shadow)"/>
   <text x="180" y="577" text-anchor="middle" font-size="14" font-weight="700" fill="#9a3412">ClickHouse</text>
@@ -180,6 +200,14 @@
   <polyline points="1000,370 1060,370 1060,752" fill="none" stroke="#22c55e" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arr-green)"/>
   <!-- label alongside the rail, horizontal -->
   <text x="1068" y="580" text-anchor="start" font-size="9" fill="#16a34a" transform="rotate(90,1068,580)">pgvector memory</text>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       FEEDBACK LOOP — Agents → Config (the "Loop" in APDL)
+       Agents create/update flags & experiments, which flow back
+       to the SDKs via SSE — closing the autonomous loop.
+  ══════════════════════════════════════════════════════════════ -->
+  <polyline points="1042,780 1120,780 1120,225 1022,225" fill="none" stroke="#a855f7" stroke-width="2.2" marker-end="url(#arr-violet)"/>
+  <text x="1134" y="502" text-anchor="middle" font-size="10" font-weight="600" fill="#9333ea" transform="rotate(-90,1134,502)">agents create &amp; update flags / experiments — the loop</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ARROW: Query Service → Agents Service
@@ -259,7 +287,7 @@
   <!-- ═══════════════════════════════════════════════════════════
        LEGEND (footer strip, below all layer bands)
   ══════════════════════════════════════════════════════════════ -->
-  <rect x="18" y="972" width="540" height="28" rx="7" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="18" y="972" width="710" height="28" rx="7" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
   <text x="28" y="984" font-size="9" font-weight="700" fill="#64748b" letter-spacing="0.8">LEGEND</text>
 
   <line x1="80" y1="986" x2="100" y2="986" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr-blue)"/>
@@ -273,5 +301,8 @@
 
   <line x1="432" y1="986" x2="452" y2="986" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arr-purple)"/>
   <text x="456" y="989" font-size="9" fill="#64748b">ClickHouse / analytics</text>
+
+  <line x1="566" y1="986" x2="586" y2="986" stroke="#a855f7" stroke-width="2.2" marker-end="url(#arr-violet)"/>
+  <text x="590" y="989" font-size="9" fill="#64748b">agent actions — the loop</text>
 
 </svg>
