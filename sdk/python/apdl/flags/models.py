@@ -1,8 +1,12 @@
-"""Pydantic models for canonical feature gate configuration and evaluation.
+"""Pydantic models for canonical variant feature flag config and evaluation.
 
-The validation rules deliberately mirror ``sdk/javascript/src/flags/schema.ts``:
-unknown keys are rejected (``extra="forbid"``), and a condition's ``value`` must
-be present for value operators and absent for ``exists``/``not_exists``.
+The validation rules deliberately mirror ``sdk/javascript/src/flags/schema.ts`` and
+``services/config/app/models/schemas.py``: unknown keys are rejected
+(``extra="forbid"``), a condition's ``value`` must be present for value operators and
+absent for ``exists``/``not_exists``, and every flag carries a non-empty ``variants``
+list whose weights are relative non-negative integers and whose keys are unique, with a
+``default_variant`` drawn from them. There is no boolean flag type: a binary flag is two
+variants (``control``/``treatment``).
 """
 
 from __future__ import annotations
@@ -10,7 +14,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ConditionOperator(str, Enum):
@@ -68,40 +72,73 @@ class GateRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
-    name: str | None = None
+    name: str = ""
     conditions: list[GateCondition]
     rollout: RolloutConfig
+
+
+class VariantConfig(BaseModel):
+    """One weighted variant. Weights are relative non-negative integers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1)
+    # ``strict`` rejects floats (incl. ``1.0``), booleans, and numeric strings,
+    # matching ``services/config/app/models/schemas.py``.
+    weight: int = Field(ge=0, strict=True)
 
 
 class FallthroughConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    value: bool
     rollout: RolloutConfig
 
 
+def validate_variants(variants: list[VariantConfig], default_variant: str) -> None:
+    """Enforce the canonical variant invariants for a flag config.
+
+    Shared by :class:`GateConfig`; mirrors ``validate_variants`` in the config
+    service so the SDK and server agree on what a valid variant set is.
+    """
+    if not variants:
+        raise ValueError("variants must contain at least one variant")
+
+    keys: set[str] = set()
+    total_weight = 0
+    for variant in variants:
+        if variant.key in keys:
+            raise ValueError("variants must contain unique keys")
+        keys.add(variant.key)
+        total_weight += variant.weight
+
+    if total_weight <= 0:
+        raise ValueError("variant weights must contain at least one positive weight")
+    if default_variant not in keys:
+        raise ValueError("default_variant must match a variant key")
+
+
 class GateConfig(BaseModel):
-    """A single canonical feature gate definition."""
+    """A single canonical variant feature flag definition."""
 
     model_config = ConfigDict(extra="forbid")
 
     key: str = Field(min_length=1)
     enabled: bool
-    default_value: bool
+    default_variant: str = Field(min_length=1)
+    variants: list[VariantConfig]
     salt: str
     rules: list[GateRule]
     fallthrough: FallthroughConfig
-    version: int = Field(ge=0)
+    # ``strict`` rejects booleans and floats; ``ge=1`` matches the JS parser.
+    version: int = Field(ge=1, strict=True)
 
-    @field_validator("version")
-    @classmethod
-    def _version_is_int(cls, v: int) -> int:
-        if isinstance(v, bool):  # bool is a subclass of int — reject it
-            raise ValueError("version must be an integer")
-        return v
+    @model_validator(mode="after")
+    def _validate_variant_config(self) -> GateConfig:
+        validate_variants(self.variants, self.default_variant)
+        return self
 
 
-GateConfigSource = Literal["memory", "initial_fetch", "sse", "local_storage", "none"]
+GateConfigSource = Literal["memory", "initial_fetch", "sse", "local_storage", "server"]
 
 GateEvaluationReason = Literal[
     "not_found",
@@ -116,7 +153,7 @@ GateEvaluationReason = Literal[
 
 
 class EvalContext(BaseModel):
-    """The identity + attributes a gate is evaluated against."""
+    """The identity + attributes a flag is evaluated against."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -126,16 +163,21 @@ class EvalContext(BaseModel):
 
 
 class GateEvaluationResult(BaseModel):
-    """The fully-explained outcome of evaluating a single gate."""
+    """The fully-explained outcome of evaluating a single flag.
+
+    Detail fields use ``None`` (never ``""``/``0`` sentinels) when they do not
+    apply. ``variant`` is ``None`` only for ``not_found`` and ``invalid_config``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     key: str
-    value: bool
+    variant: str | None = None
     reason: GateEvaluationReason
-    rule_id: str = ""
-    bucket: float | None = None
+    rule_id: str | None = None
+    rollout_bucket: float | None = None
+    variant_bucket: float | None = None
     rollout_percentage: float | None = None
-    bucket_by: str = ""
-    config_version: int = 0
-    source: GateConfigSource = "none"
+    bucket_by: str | None = None
+    config_version: int | None = None
+    source: GateConfigSource | None = None
