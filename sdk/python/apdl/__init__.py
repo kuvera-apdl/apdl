@@ -7,7 +7,7 @@ Quick start::
     client = APDL.init(api_key="proj_demo_secret")
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
 
-    if client.check_gate("new-checkout", user_id="u_123"):
+    if client.get_variant("new-checkout", user_id="u_123") == "treatment":
         ...
 
     client.shutdown()
@@ -34,6 +34,8 @@ from .flags import (
     GateEvaluationResult,
     GateRule,
     RolloutConfig,
+    VariantConfig,
+    assign_weighted_variant,
     hash_bucket,
     is_in_rollout,
     parse_flag_config_result,
@@ -76,6 +78,8 @@ __all__ = [
     "GateEvaluationResult",
     "GateRule",
     "RolloutConfig",
+    "VariantConfig",
+    "assign_weighted_variant",
     "hash_bucket",
     "is_in_rollout",
     "percentage_bucket",
