@@ -6,14 +6,13 @@ import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
 import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
 import type { TrackEvent } from '../../src/core/types';
-
-const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+import { CLIENT_KEY, CONFIG_ENDPOINT, INGESTION_ENDPOINT } from '../helpers';
 
 function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   const base = resolveConfig({
     endpoints: {
-      ingestion: 'https://ingest.test.dev',
-      config: 'https://config.test.dev',
+      ingestion: INGESTION_ENDPOINT,
+      config: CONFIG_ENDPOINT,
     },
     auth: {
       clientKey: CLIENT_KEY,
@@ -167,7 +166,7 @@ describe('EventQueue', () => {
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const call = sendSpy.mock.calls[0];
-      expect(call[0]).toBe('https://ingest.test.dev/v1/events');
+      expect(call[0]).toBe(`${INGESTION_ENDPOINT}/v1/events`);
       const payload = call[1] as { events: Array<Record<string, unknown>> };
       expect(payload.events).toHaveLength(2);
       expect(payload.events[0]).toMatchObject({

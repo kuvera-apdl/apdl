@@ -1,49 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { APDL, APDLClient, type APDLConfig, type ExperimentContext } from '../src';
-
-const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
-const INGESTION_ENDPOINT = 'https://ingest.public-api.test';
-const CONFIG_ENDPOINT = 'https://config.public-api.test';
-
-function createConfig(overrides: Partial<APDLConfig> = {}): APDLConfig {
-  const { endpoints, auth, ...rest } = overrides;
-
-  return {
-    ...rest,
-    endpoints: {
-      ingestion: INGESTION_ENDPOINT,
-      config: CONFIG_ENDPOINT,
-      ...endpoints,
-    },
-    auth: {
-      clientKey: CLIENT_KEY,
-      ...auth,
-    },
-    autoCapture: false,
-    persistence: 'memory',
-  };
-}
+import {
+  CLIENT_KEY,
+  CONFIG_ENDPOINT,
+  INGESTION_ENDPOINT,
+  MockEventSource,
+  createTestConfig,
+  emptyFlagsResponse,
+} from './helpers';
 
 const fetchMock = vi.fn();
-
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  onopen: ((ev: Event) => void) | null = null;
-  onmessage: ((ev: MessageEvent) => void) | null = null;
-  onerror: ((ev: Event) => void) | null = null;
-
-  constructor(public url: string) {
-    MockEventSource.instances.push(this);
-  }
-
-  addEventListener() {
-    // The public API tests only assert connection construction.
-  }
-
-  close() {
-    // No-op for test cleanup.
-  }
-}
 
 describe('public SDK entrypoint', () => {
   const clients: APDLClient[] = [];
@@ -51,16 +17,7 @@ describe('public SDK entrypoint', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fetchMock.mockReset();
-    fetchMock.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        schema_version: 2,
-        project_id: 'apdl',
-        flags: [],
-      }),
-      status: 200,
-      headers: new Headers(),
-    });
+    fetchMock.mockResolvedValue(emptyFlagsResponse());
     MockEventSource.instances = [];
     vi.stubGlobal('fetch', fetchMock);
     vi.stubGlobal('EventSource', MockEventSource);
@@ -85,7 +42,7 @@ describe('public SDK entrypoint', () => {
   });
 
   it('returns an APDLClient from APDL.init', () => {
-    const client = APDL.init(createConfig());
+    const client = APDL.init(createTestConfig());
     clients.push(client);
 
     expect(client).toBeInstanceOf(APDLClient);
@@ -97,7 +54,7 @@ describe('public SDK entrypoint', () => {
         plan: 'pro',
       },
     };
-    const client = APDL.init(createConfig());
+    const client = APDL.init(createTestConfig());
     clients.push(client);
 
     client.experiments.setContext(context);
@@ -106,7 +63,7 @@ describe('public SDK entrypoint', () => {
   });
 
   it('applies the canonical endpoints and auth config contract', async () => {
-    const client = APDL.init(createConfig({
+    const client = APDL.init(createTestConfig({
       batchSize: 1,
     }));
     clients.push(client);
@@ -141,7 +98,7 @@ describe('public SDK entrypoint', () => {
 
   it('rejects removed top-level config fields through APDL.init', () => {
     const config = {
-      ...createConfig(),
+      ...createTestConfig(),
       apiKey: CLIENT_KEY,
     };
 

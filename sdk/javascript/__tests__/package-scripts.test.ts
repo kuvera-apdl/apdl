@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { SDK_VERSION } from '../src/core/constants';
 
 interface PackageJson {
+  version?: string;
   files?: string[];
   scripts?: Record<string, string>;
 }
@@ -19,7 +21,7 @@ describe('package workflow scripts', () => {
       build: 'rollup -c rollup.config.ts --configPlugin typescript',
       test: 'vitest run',
       typecheck: 'tsc --noEmit',
-      lint: 'tsc --noEmit',
+      lint: 'npm run typecheck && tsc -p __tests__/tsconfig.json --noEmit',
       'pack:dry-run': 'npm pack --dry-run',
       prepack: 'npm run build',
     });
@@ -32,5 +34,9 @@ describe('package workflow scripts', () => {
 
   it('packages the built dist artifacts only', () => {
     expect(packageJson.files).toEqual(['dist']);
+  });
+
+  it('keeps the SDK version constant in sync with package.json', () => {
+    expect(SDK_VERSION).toBe(packageJson.version);
   });
 });

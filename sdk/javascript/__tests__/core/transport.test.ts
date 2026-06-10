@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Transport } from '../../src/core/transport';
-
-const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+import { CLIENT_KEY } from '../helpers';
 
 describe('Transport', () => {
   let transport: Transport;

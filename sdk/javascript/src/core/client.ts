@@ -1,4 +1,5 @@
 import { type APDLConfig, type ConsentState, resolveConfig, type ResolvedConfig } from './config';
+import { API_KEY_HEADER, SDK_IDENTIFIER, SDK_IDENTIFIER_HEADER } from './constants';
 import { generateId, type ExperimentContext } from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
@@ -153,10 +154,7 @@ export class APDLClient {
     this.flagEvaluator = new FlagEvaluator(this.flagCache);
 
     // Wire up flag change notifications to per-key listeners
-    this.flagCache.onChange(() => {
-      this.refreshActiveFlagStates();
-      this.notifyFlagListeners();
-    });
+    this.flagCache.onChange(() => this.onEvaluationContextChanged());
 
     // Health capture
     this.healthCapture = new HealthCapture(
@@ -221,14 +219,12 @@ export class APDLClient {
     this.experiments = {
       setContext: (context: ExperimentContext) => {
         this.experimentContext = this.normalizeExperimentContext(context);
-        this.refreshActiveFlagStates();
-        this.notifyFlagListeners();
+        this.onEvaluationContextChanged();
       },
       getContext: () => this.copyExperimentContext(this.experimentContext),
       clearContext: () => {
         this.experimentContext = { attributes: {} };
-        this.refreshActiveFlagStates();
-        this.notifyFlagListeners();
+        this.onEvaluationContextChanged();
       },
     };
 
@@ -374,8 +370,8 @@ export class APDLClient {
       const url = `${this.config.endpoints.config}/v1/flags`;
       const response = await fetch(url, {
         headers: {
-          'X-API-Key': this.config.auth.clientKey,
-          'X-APDL-SDK': 'js/0.1.0',
+          [API_KEY_HEADER]: this.config.auth.clientKey,
+          [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
         },
       });
 
@@ -566,6 +562,12 @@ export class APDLClient {
       version: result.config_version,
     });
     this.activeFlagStatesByPage.set(page, targetPageStates);
+  }
+
+  /** Re-evaluates remembered flags and notifies listeners after anything that can change evaluation results. */
+  private onEvaluationContextChanged(): void {
+    this.refreshActiveFlagStates();
+    this.notifyFlagListeners();
   }
 
   private refreshActiveFlagStates(): void {

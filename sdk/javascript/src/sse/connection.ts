@@ -1,3 +1,5 @@
+import { API_KEY_QUERY_PARAM } from '../core/constants';
+
 type MessageCallback = (event: { type: string; data: string; id?: string }) => void;
 
 const INITIAL_RECONNECT_DELAY = 1000;
@@ -70,7 +72,7 @@ export class SSEConnection {
 
     // Build URL with client key and last event ID
     const connectUrl = new URL(this.url);
-    connectUrl.searchParams.set('api_key', this.clientKey);
+    connectUrl.searchParams.set(API_KEY_QUERY_PARAM, this.clientKey);
     if (this.lastEventId) {
       connectUrl.searchParams.set('last_event_id', this.lastEventId);
     }

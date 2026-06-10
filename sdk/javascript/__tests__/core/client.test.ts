@@ -1,90 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
-
-const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
-const INGESTION_ENDPOINT = 'https://ingest.test.dev';
-const CONFIG_ENDPOINT = 'https://config.test.dev';
-
-type ClientConfigOverrides = Partial<Omit<APDLConfig, 'endpoints' | 'auth'>> & {
-  endpoints?: Partial<APDLConfig['endpoints']>;
-  auth?: Partial<APDLConfig['auth']>;
-};
-
-function createClientConfig(overrides: ClientConfigOverrides = {}): APDLConfig {
-  const base: APDLConfig = {
-    endpoints: {
-      ingestion: INGESTION_ENDPOINT,
-      config: CONFIG_ENDPOINT,
-    },
-    auth: {
-      clientKey: CLIENT_KEY,
-    },
-    autoCapture: false,
-    persistence: 'memory',
-  };
-  const { endpoints, auth, ...rest } = overrides;
-
-  return {
-    ...base,
-    ...rest,
-    endpoints: {
-      ...base.endpoints,
-      ...endpoints,
-    },
-    auth: {
-      ...base.auth,
-      ...auth,
-    },
-  };
-}
+import {
+  CLIENT_KEY,
+  CONFIG_ENDPOINT,
+  INGESTION_ENDPOINT,
+  MockEventSource,
+  createTestConfig,
+  emptyFlagsResponse,
+} from '../helpers';
 
 // Mock fetch globally
-const fetchMock = vi.fn().mockResolvedValue({
-  ok: true,
-  json: () => Promise.resolve({
-    schema_version: 2,
-    project_id: 'apdl',
-    flags: [],
-  }),
-  status: 200,
-  headers: new Headers(),
-});
+const fetchMock = vi.fn().mockResolvedValue(emptyFlagsResponse());
 
 vi.stubGlobal('fetch', fetchMock);
-
-// Mock EventSource
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  onopen: ((ev: Event) => void) | null = null;
-  onmessage: ((ev: MessageEvent) => void) | null = null;
-  onerror: ((ev: Event) => void) | null = null;
-  readyState = 0;
-  private listeners: Map<string, Set<(ev: MessageEvent) => void>> = new Map();
-
-  constructor(public url: string) {
-    MockEventSource.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: EventListener) {
-    if (!this.listeners.has(type)) {
-      this.listeners.set(type, new Set());
-    }
-    this.listeners.get(type)!.add(listener as (ev: MessageEvent) => void);
-  }
-
-  emit(type: string, data: string) {
-    const event = new MessageEvent(type, { data });
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener(event);
-    }
-  }
-
-  close() {
-    this.readyState = 2;
-  }
-}
-
 vi.stubGlobal('EventSource', MockEventSource);
 
 describe('APDLClient', () => {
@@ -96,7 +25,7 @@ describe('APDLClient', () => {
     MockEventSource.instances = [];
     localStorage.clear();
 
-    client = new APDLClient(createClientConfig());
+    client = new APDLClient(createTestConfig());
   });
 
   afterEach(() => {
@@ -109,7 +38,7 @@ describe('APDLClient', () => {
     });
 
     it('should resolve canonical config and derive project ID from client key', () => {
-      const resolved = resolveConfig(createClientConfig());
+      const resolved = resolveConfig(createTestConfig());
 
       expect(resolved).toMatchObject({
         projectId: 'apdl',
@@ -144,25 +73,25 @@ describe('APDLClient', () => {
     });
 
     it('should throw on missing ingestion endpoint', () => {
-      expect(() => resolveConfig(createClientConfig({
+      expect(() => resolveConfig(createTestConfig({
         endpoints: { ingestion: '' },
       }))).toThrow('endpoints.ingestion is required');
     });
 
     it('should throw on missing config endpoint', () => {
-      expect(() => resolveConfig(createClientConfig({
+      expect(() => resolveConfig(createTestConfig({
         endpoints: { config: '' },
       }))).toThrow('endpoints.config is required');
     });
 
     it('should throw on missing client key', () => {
-      expect(() => new APDLClient(createClientConfig({
+      expect(() => new APDLClient(createTestConfig({
         auth: { clientKey: '' },
       }))).toThrow('auth.clientKey is required');
     });
 
     it('should throw when client key does not match the APDL format', () => {
-      expect(() => resolveConfig(createClientConfig({
+      expect(() => resolveConfig(createTestConfig({
         auth: { clientKey: 'bad_key' },
       }))).toThrow('proj_{project_id}_{secret}');
     });
@@ -174,7 +103,7 @@ describe('APDLClient', () => {
       ['projectId', 'apdl'],
     ])('should reject removed top-level config field %s', (field, value) => {
       const config = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         [field]: value,
       };
 
@@ -184,7 +113,7 @@ describe('APDLClient', () => {
 
     it('should reject unsupported top-level config fields', () => {
       const config = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         apiBaseUrl: INGESTION_ENDPOINT,
       };
 
@@ -194,7 +123,7 @@ describe('APDLClient', () => {
 
     it('should reject unsupported endpoint and auth fields', () => {
       const endpointConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         endpoints: {
           ingestion: INGESTION_ENDPOINT,
           config: CONFIG_ENDPOINT,
@@ -202,7 +131,7 @@ describe('APDLClient', () => {
         },
       };
       const authConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         auth: {
           clientKey: CLIENT_KEY,
           projectId: 'apdl',
@@ -217,14 +146,14 @@ describe('APDLClient', () => {
 
     it('should reject unsupported autoCapture and consent fields', () => {
       const autoCaptureConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         autoCapture: {
           pageViews: true,
           frontendErrors: true,
         },
       };
       const consentConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         consent: {
           analytics: true,
           personalization: true,
@@ -241,13 +170,13 @@ describe('APDLClient', () => {
 
     it('should reject invalid autoCapture and consent values', () => {
       const autoCaptureConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         autoCapture: {
           pageViews: 'yes',
         },
       };
       const consentConfig = {
-        ...createClientConfig(),
+        ...createTestConfig(),
         consent: {
           analytics: true,
           personalization: true,
@@ -512,7 +441,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const experimentClient = new APDLClient(createClientConfig());
+      const experimentClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       experimentClient.identify('user_123');
@@ -538,7 +467,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const experimentClient = new APDLClient(createClientConfig());
+      const experimentClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       experimentClient.identify('user_123');
@@ -601,7 +530,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig());
+      const flaggedClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -638,7 +567,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const variantClient = new APDLClient(createClientConfig());
+      const variantClient = new APDLClient(createTestConfig());
       await flushAsync();
       variantClient.identify('user_123');
 
@@ -682,7 +611,7 @@ describe('APDLClient', () => {
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
-      const cachedClient = new APDLClient(createClientConfig({
+      const cachedClient = new APDLClient(createTestConfig({
         persistence: 'localStorage',
         privacyMode: 'standard',
       }));
@@ -705,7 +634,7 @@ describe('APDLClient', () => {
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
-      const projectClient = new APDLClient(createClientConfig({
+      const projectClient = new APDLClient(createTestConfig({
         auth: { clientKey: 'proj_projectb_0123456789abcdef' },
         persistence: 'localStorage',
         privacyMode: 'standard',
@@ -745,7 +674,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const cachedClient = new APDLClient(createClientConfig({
+      const cachedClient = new APDLClient(createTestConfig({
         persistence: 'localStorage',
         privacyMode: 'standard',
       }));
@@ -772,7 +701,7 @@ describe('APDLClient', () => {
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
-      const strictClient = new APDLClient(createClientConfig({
+      const strictClient = new APDLClient(createTestConfig({
         persistence: 'localStorage',
         privacyMode: 'strict',
       }));
@@ -798,7 +727,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig());
+      const flaggedClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -839,7 +768,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig());
+      const flaggedClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -847,7 +776,7 @@ describe('APDLClient', () => {
       await flaggedClient.debug.flush();
 
       const eventPost = fetchMock.mock.calls.find(([url]) => {
-        return url === 'https://ingest.test.dev/v1/events';
+        return url === `${INGESTION_ENDPOINT}/v1/events`;
       });
       expect(eventPost).toBeDefined();
 
@@ -886,7 +815,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig());
+      const flaggedClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -911,7 +840,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig());
+      const flaggedClient = new APDLClient(createTestConfig());
 
       await flushAsync();
       flaggedClient.identify('user_123');
@@ -938,7 +867,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const flaggedClient = new APDLClient(createClientConfig({
+      const flaggedClient = new APDLClient(createTestConfig({
         consent: { analytics: false, personalization: true, experiments: true },
       }));
 
@@ -967,7 +896,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient(createClientConfig({
+      const healthClient = new APDLClient(createTestConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -1022,7 +951,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient(createClientConfig({
+      const healthClient = new APDLClient(createTestConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -1069,7 +998,7 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
 
-      const healthClient = new APDLClient(createClientConfig({
+      const healthClient = new APDLClient(createTestConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,
@@ -1116,7 +1045,7 @@ describe('APDLClient', () => {
     });
 
     it('should capture component render failures as frontend errors', async () => {
-      const healthClient = new APDLClient(createClientConfig({
+      const healthClient = new APDLClient(createTestConfig({
         autoCapture: {
           pageViews: false,
           clicks: false,

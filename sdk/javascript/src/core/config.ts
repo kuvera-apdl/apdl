@@ -112,10 +112,9 @@ const DEFAULT_CONSENT: ConsentState = {
 };
 
 export function resolveConfig(config: APDLConfig): ResolvedConfig {
-  const input = assertObject(config, 'config');
-  rejectUnsupportedTopLevelFields(input);
+  rejectUnsupportedTopLevelFields(assertObject(config, 'config'));
 
-  const endpoints = assertObject(input.endpoints, 'endpoints');
+  const endpoints = assertObject(config.endpoints, 'endpoints');
   assertSupportedNestedFields(endpoints, ['ingestion', 'config'], 'endpoints');
   const ingestionEndpoint = requireNonEmptyString(
     endpoints.ingestion,
@@ -126,7 +125,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
     'endpoints.config'
   );
 
-  const auth = assertObject(input.auth, 'auth');
+  const auth = assertObject(config.auth, 'auth');
   assertSupportedNestedFields(auth, ['clientKey'], 'auth');
   const clientKey = requireNonEmptyString(auth.clientKey, 'auth.clientKey');
   const keyMatch = CLIENT_KEY_PATTERN.exec(clientKey);
@@ -137,7 +136,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
   }
   const projectId = keyMatch[1];
 
-  const autoCapture = resolveAutoCapture(input.autoCapture);
+  const autoCapture = resolveAutoCapture(config.autoCapture);
 
   let batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
   if (batchSize < 1) batchSize = 1;
@@ -145,7 +144,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
 
   const flushInterval = config.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
   const maxQueueSize = config.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
-  const consent = resolveConsent(input.consent);
+  const consent = resolveConsent(config.consent);
 
   return {
     projectId,
