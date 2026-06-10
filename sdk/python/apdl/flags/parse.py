@@ -1,10 +1,11 @@
-"""Parsing of raw config-service payloads into validated gate configs.
+"""Parsing of raw config-service payloads into validated flag configs.
 
 Port of ``parseFlagConfigResult`` from ``sdk/javascript/src/flags/schema.ts``.
-A payload may be either a bare list of gates or an envelope
-``{schema_version?, project_id?, flags: [...]}``. Individual malformed gates
-that still carry a ``key`` are surfaced as ``invalid_keys`` rather than failing
-the whole batch; a structurally unrecognizable payload yields ``None``.
+A payload must be the canonical collection envelope
+``{schema_version: 2, project_id: <non-empty>, flags: [...]}``; bare lists and
+the legacy ``schema_version: 1`` envelope are rejected. Individual malformed
+flags that still carry a ``key`` are surfaced as ``invalid_keys`` rather than
+failing the whole batch; a structurally unrecognizable payload yields ``None``.
 """
 
 from __future__ import annotations
@@ -26,22 +27,17 @@ class FlagConfigParseResult:
 
 
 def _extract_candidates(data: Any) -> list[Any] | None:
-    if isinstance(data, list):
-        return data
-
-    if isinstance(data, dict) and set(data.keys()) <= _COLLECTION_KEYS:
-        flags = data.get("flags")
-        if not isinstance(flags, list):
-            return None
-        schema_version = data.get("schema_version")
-        if schema_version is not None and schema_version != 1:
-            return None
-        project_id = data.get("project_id")
-        if project_id is not None and not isinstance(project_id, str):
-            return None
-        return flags
-
-    return None
+    if not isinstance(data, dict) or not set(data.keys()) <= _COLLECTION_KEYS:
+        return None
+    if data.get("schema_version") != 2:
+        return None
+    project_id = data.get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return None
+    flags = data.get("flags")
+    if not isinstance(flags, list):
+        return None
+    return flags
 
 
 def parse_flag_config_result(data: Any) -> FlagConfigParseResult | None:
