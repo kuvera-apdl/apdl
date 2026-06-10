@@ -1,9 +1,11 @@
-"""Canonical local feature gate evaluator.
+"""Canonical local variant feature flag evaluator.
 
-Ported from ``services/config/app/flags/evaluator.py`` (condition semantics) and
+Ported from ``services/config/app/flags/evaluator.py`` (condition semantics,
+namespaced bucketing, weighted variant assignment) and
 ``sdk/javascript/src/flags/evaluator.ts`` (result shape, ``source``/``reason``
-fields, invalid-config handling). Evaluating a gate here yields the same value
-the config service would return for the same context.
+fields, invalid-config handling). Evaluating a flag here yields the same variant
+the config service would return for the same context — the shared
+``fixtures/gates/parity.json`` pins this.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from .models import (
     GateConfig,
     GateEvaluationResult,
     RolloutConfig,
+    VariantConfig,
 )
 
 logger = logging.getLogger("apdl")
@@ -31,6 +34,34 @@ _NUMERIC_OPS = {
     ConditionOperator.LT,
     ConditionOperator.LTE,
 }
+
+
+def assign_weighted_variant(
+    variants: list[VariantConfig], variant_bucket: float
+) -> str | None:
+    """Map a ``0..100`` variant bucket onto relative integer weights.
+
+    Returns the key of the first variant whose cumulative weight interval
+    contains ``(variant_bucket / 100) * total_weight``, clamping to the last
+    positive-weight variant at the upper boundary. Zero-weight variants are
+    never assigned. Returns ``None`` when the total weight is not positive.
+    """
+    total_weight = sum(variant.weight for variant in variants)
+    if total_weight <= 0:
+        return None
+
+    target = (variant_bucket / 100.0) * total_weight
+    cumulative = 0
+    last_positive_variant: str | None = None
+    for variant in variants:
+        if variant.weight <= 0:
+            continue
+        last_positive_variant = variant.key
+        cumulative += variant.weight
+        if target < cumulative:
+            return variant.key
+
+    return last_positive_variant
 
 
 class FlagEvaluator:
@@ -44,20 +75,21 @@ class FlagEvaluator:
             if self._cache.is_invalid(key):
                 return GateEvaluationResult(
                     key=key,
-                    value=False,
+                    variant=None,
                     reason="invalid_config",
                     source=self._cache.get_invalid_source(key),
                 )
             return GateEvaluationResult(
-                key=key, value=False, reason="not_found", source="none"
+                key=key, variant=None, reason="not_found", source=None
             )
 
         source = self._cache.get_source(flag.key)
+        default = flag.default_variant
 
         if not flag.enabled:
             return GateEvaluationResult(
                 key=flag.key,
-                value=flag.default_value,
+                variant=default,
                 reason="disabled",
                 config_version=flag.version,
                 source=source,
@@ -73,7 +105,7 @@ class FlagEvaluator:
             if bucket is None:
                 return GateEvaluationResult(
                     key=flag.key,
-                    value=flag.default_value,
+                    variant=default,
                     reason="error",
                     rule_id=rule.id,
                     rollout_percentage=percentage,
@@ -81,12 +113,26 @@ class FlagEvaluator:
                     config_version=flag.version,
                     source=source,
                 )
+            if passed:
+                variant, variant_bucket = self._assign_variant(flag, context, bucket_by)
+                return GateEvaluationResult(
+                    key=flag.key,
+                    variant=variant,
+                    reason="rule_match",
+                    rule_id=rule.id,
+                    rollout_bucket=bucket,
+                    variant_bucket=variant_bucket,
+                    rollout_percentage=percentage,
+                    bucket_by=bucket_by,
+                    config_version=flag.version,
+                    source=source,
+                )
             return GateEvaluationResult(
                 key=flag.key,
-                value=True if passed else flag.default_value,
-                reason="rule_match" if passed else "rule_rollout",
+                variant=default,
+                reason="rule_rollout",
                 rule_id=rule.id,
-                bucket=bucket,
+                rollout_bucket=bucket,
                 rollout_percentage=percentage,
                 bucket_by=bucket_by,
                 config_version=flag.version,
@@ -99,8 +145,21 @@ class FlagEvaluator:
         if bucket is None:
             return GateEvaluationResult(
                 key=flag.key,
-                value=flag.default_value,
+                variant=default,
                 reason="error",
+                rollout_percentage=percentage,
+                bucket_by=bucket_by,
+                config_version=flag.version,
+                source=source,
+            )
+        if passed:
+            variant, variant_bucket = self._assign_variant(flag, context, bucket_by)
+            return GateEvaluationResult(
+                key=flag.key,
+                variant=variant,
+                reason="fallthrough",
+                rollout_bucket=bucket,
+                variant_bucket=variant_bucket,
                 rollout_percentage=percentage,
                 bucket_by=bucket_by,
                 config_version=flag.version,
@@ -108,9 +167,9 @@ class FlagEvaluator:
             )
         return GateEvaluationResult(
             key=flag.key,
-            value=flag.fallthrough.value if passed else flag.default_value,
-            reason="fallthrough" if passed else "fallthrough_rollout",
-            bucket=bucket,
+            variant=default,
+            reason="fallthrough_rollout",
+            rollout_bucket=bucket,
             rollout_percentage=percentage,
             bucket_by=bucket_by,
             config_version=flag.version,
@@ -126,10 +185,11 @@ class FlagEvaluator:
         exists, actual = self._resolve_attribute(condition.attribute, ctx)
         op = condition.operator
 
+        # Presence is "resolved and non-null"; "", 0, and False are present.
         if op is ConditionOperator.EXISTS:
-            return exists and bool(actual)
+            return exists and actual is not None
         if op is ConditionOperator.NOT_EXISTS:
-            return not exists or not bool(actual)
+            return not exists or actual is None
         if not exists:
             return False
 
@@ -180,7 +240,7 @@ class FlagEvaluator:
             return a < b
         return a <= b
 
-    # ── Rollout ───────────────────────────────────────────────────
+    # ── Rollout / variant assignment ──────────────────────────────
 
     def _apply_rollout(
         self, flag: GateConfig, rollout: RolloutConfig, ctx: EvalContext
@@ -188,8 +248,18 @@ class FlagEvaluator:
         unit_id = self._unit_id(ctx, rollout.bucket_by)
         if not unit_id:
             return False, None, rollout.percentage, rollout.bucket_by
-        bucket = percentage_bucket(flag.key, flag.salt, unit_id)
+        bucket = percentage_bucket(flag.key, f"{flag.salt}:rollout", unit_id)
         return bucket < rollout.percentage, bucket, rollout.percentage, rollout.bucket_by
+
+    def _assign_variant(
+        self, flag: GateConfig, ctx: EvalContext, bucket_by: str
+    ) -> tuple[str, float | None]:
+        unit_id = self._unit_id(ctx, bucket_by)
+        if not unit_id:
+            return flag.default_variant, None
+        variant_bucket = percentage_bucket(flag.key, f"{flag.salt}:variant", unit_id)
+        variant = assign_weighted_variant(flag.variants, variant_bucket)
+        return (variant or flag.default_variant), variant_bucket
 
     def _unit_id(self, ctx: EvalContext, bucket_by: str) -> str:
         exists, value = self._resolve_attribute(bucket_by, ctx)
@@ -199,10 +269,15 @@ class FlagEvaluator:
 
     @staticmethod
     def _resolve_attribute(attribute: str, ctx: EvalContext) -> tuple[bool, Any]:
+        # Identity that the caller did not provide (None) is absent, not "".
         if attribute == "user_id":
-            return True, ctx.user_id or ""
+            if ctx.user_id is not None:
+                return True, ctx.user_id
+            return False, None
         if attribute == "anonymous_id":
-            return True, ctx.anonymous_id or ""
+            if ctx.anonymous_id is not None:
+                return True, ctx.anonymous_id
+            return False, None
         if attribute in ctx.attributes:
             return True, ctx.attributes[attribute]
         return False, None
