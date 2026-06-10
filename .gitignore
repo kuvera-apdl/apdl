@@ -67,5 +67,4 @@ redis-data/
 # Postgres data
 postgres-data/
 
-AGENTS.md
 local-files/
