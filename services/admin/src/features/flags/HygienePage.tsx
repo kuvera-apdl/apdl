@@ -147,8 +147,8 @@ export function HygienePage() {
       />
 
       <p className="text-xs text-muted-foreground">
-        The cleanup action (archive a fully-rolled-out flag) ships with the flag-write phase; until
-        then use the API's <code className="font-mono">POST /v1/admin/flags/{'{key}'}/cleanup</code>.
+        Flags marked "cleanup recommended" can be archived from their detail page via the
+        <span className="font-medium"> Clean up…</span> action.
       </p>
     </div>
   )

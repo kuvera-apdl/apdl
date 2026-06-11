@@ -4,11 +4,36 @@ import type { CurlSpec } from '@/lib/curl'
 
 import { buildUrl, request, type ServiceConnection } from './http'
 import {
+  flagArchiveResponseSchema,
   flagAuditResponseSchema,
+  flagCleanupResponseSchema,
+  flagCleanupSchema,
+  flagCreateResponseSchema,
+  flagCreateSchema,
+  flagDisableResponseSchema,
+  flagDisableSchema,
   flagsListResponseSchema,
+  flagUpdateResponseSchema,
+  flagUpdateSchema,
+  gateEvaluateResponseSchema,
   staleFlagsResponseSchema,
 } from './schemas/flags'
-import type { FlagAuditResponse, FlagsListResponse, StaleFlagsResponse } from './types/flags'
+import type {
+  FlagArchiveResponse,
+  FlagAuditResponse,
+  FlagCleanup,
+  FlagCleanupResponse,
+  FlagCreate,
+  FlagCreateResponse,
+  FlagDisable,
+  FlagDisableResponse,
+  FlagsListResponse,
+  FlagUpdate,
+  FlagUpdateResponse,
+  GateEvaluateRequest,
+  GateEvaluateResponse,
+  StaleFlagsResponse,
+} from './types/flags'
 
 export const AUDIT_LIMIT_DEFAULT = 50
 export const AUDIT_LIMIT_MAX = 200
@@ -47,6 +72,78 @@ export function flagAudit(
   })
 }
 
+// ---------- Flag writes (Phase 2) ----------
+// Outgoing payloads are parsed against the canonical zod mirrors before they
+// leave the client — a malformed payload fails fast and locally.
+
+export function createFlag(conn: ServiceConnection, body: FlagCreate): Promise<FlagCreateResponse> {
+  return request(conn, '/v1/admin/flags', {
+    method: 'POST',
+    body: flagCreateSchema.parse(body),
+    schema: flagCreateResponseSchema,
+  })
+}
+
+export function updateFlag(
+  conn: ServiceConnection,
+  key: string,
+  body: FlagUpdate,
+): Promise<FlagUpdateResponse> {
+  return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    body: flagUpdateSchema.parse(body),
+    schema: flagUpdateResponseSchema,
+  })
+}
+
+export function disableFlag(
+  conn: ServiceConnection,
+  key: string,
+  body: FlagDisable,
+): Promise<FlagDisableResponse> {
+  return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}/disable`, {
+    method: 'POST',
+    body: flagDisableSchema.parse(body),
+    schema: flagDisableResponseSchema,
+  })
+}
+
+export function archiveFlag(conn: ServiceConnection, key: string): Promise<FlagArchiveResponse> {
+  return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+    schema: flagArchiveResponseSchema,
+  })
+}
+
+export function cleanupFlag(
+  conn: ServiceConnection,
+  key: string,
+  body: FlagCleanup,
+): Promise<FlagCleanupResponse> {
+  return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}/cleanup`, {
+    method: 'POST',
+    body: flagCleanupSchema.parse(body),
+    schema: flagCleanupResponseSchema,
+  })
+}
+
+/**
+ * Server-verified evaluation (AD-4, optional): requires the workspace's
+ * internal token; the server 403s for evaluation_mode "client" flags.
+ */
+export function evaluateFlagOnServer(
+  conn: ServiceConnection,
+  internalToken: string,
+  body: GateEvaluateRequest,
+): Promise<GateEvaluateResponse> {
+  return request(conn, '/v1/evaluate', {
+    method: 'POST',
+    body,
+    headers: { 'x-apdl-internal-token': internalToken },
+    schema: gateEvaluateResponseSchema,
+  })
+}
+
 function adminCurl(conn: ServiceConnection, path: string, query?: Record<string, string | number | boolean>): CurlSpec {
   return {
     method: 'GET',
@@ -67,7 +164,41 @@ export function flagAuditCurl(conn: ServiceConnection, key: string, limit = AUDI
   return adminCurl(conn, `/v1/admin/flags/${encodeURIComponent(key)}/audit`, { limit })
 }
 
-/** Example create call shown on empty states (creating flags lands in Phase 2). */
+export function writeCurl(
+  conn: ServiceConnection,
+  method: 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+): CurlSpec {
+  const headers: Record<string, string> = {
+    'X-API-Key': conn.apiKey,
+    'x-apdl-actor': conn.actor,
+  }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  return { method, url: buildUrl(conn.baseUrl, path), headers, ...(body !== undefined ? { body } : {}) }
+}
+
+export function createFlagCurl(conn: ServiceConnection, body: FlagCreate): CurlSpec {
+  return writeCurl(conn, 'POST', '/v1/admin/flags', body)
+}
+
+export function updateFlagCurl(conn: ServiceConnection, key: string, body: FlagUpdate): CurlSpec {
+  return writeCurl(conn, 'PUT', `/v1/admin/flags/${encodeURIComponent(key)}`, body)
+}
+
+export function disableFlagCurl(conn: ServiceConnection, key: string, body: FlagDisable): CurlSpec {
+  return writeCurl(conn, 'POST', `/v1/admin/flags/${encodeURIComponent(key)}/disable`, body)
+}
+
+export function archiveFlagCurl(conn: ServiceConnection, key: string): CurlSpec {
+  return writeCurl(conn, 'DELETE', `/v1/admin/flags/${encodeURIComponent(key)}`)
+}
+
+export function cleanupFlagCurl(conn: ServiceConnection, key: string, body: FlagCleanup): CurlSpec {
+  return writeCurl(conn, 'POST', `/v1/admin/flags/${encodeURIComponent(key)}/cleanup`, body)
+}
+
+/** Example create call shown on empty states. */
 export function createFlagExampleCurl(conn: ServiceConnection): CurlSpec {
   return {
     method: 'POST',

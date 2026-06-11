@@ -1,10 +1,10 @@
 import { createColumnHelper, type ColumnDef } from '@tanstack/react-table'
-import { MoreHorizontal, Search } from 'lucide-react'
-import { useMemo } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { MoreHorizontal, Plus, Search } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
+import { listFlagsCurl } from '@/api/config'
 import type { FlagConfig, FlagState } from '@/api/types/flags'
 import { CopyButton } from '@/components/shared/CopyButton'
 import { CurlButton } from '@/components/shared/CurlButton'
@@ -26,6 +26,7 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { useFlagsQuery } from '@/features/flags/hooks'
+import { LifecycleDialog, type LifecycleAction } from '@/features/flags/LifecycleDialog'
 import { formatPercent, isPastDate, parseServerDate, variantSummary } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -33,7 +34,14 @@ const FLAG_STATES: FlagState[] = ['draft', 'active', 'disabled', 'archived']
 
 const columnHelper = createColumnHelper<FlagConfig>()
 
-function RowMenu({ flag, onViewAudit }: { flag: FlagConfig; onViewAudit: () => void }) {
+interface RowMenuProps {
+  flag: FlagConfig
+  onViewAudit: () => void
+  onEdit: () => void
+  onLifecycle: (action: LifecycleAction) => void
+}
+
+function RowMenu({ flag, onViewAudit, onEdit, onLifecycle }: RowMenuProps) {
   const copy = async (value: string, what: string) => {
     try {
       await navigator.clipboard.writeText(value)
@@ -42,6 +50,7 @@ function RowMenu({ flag, onViewAudit }: { flag: FlagConfig; onViewAudit: () => v
       toast.error('Clipboard unavailable')
     }
   }
+  const archived = flag.state === 'archived'
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -56,6 +65,13 @@ function RowMenu({ flag, onViewAudit }: { flag: FlagConfig; onViewAudit: () => v
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
+        {!archived ? <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem> : null}
+        {flag.state === 'active' ? (
+          <DropdownMenuItem onSelect={() => onLifecycle('disable')}>Disable…</DropdownMenuItem>
+        ) : null}
+        {!archived ? (
+          <DropdownMenuItem onSelect={() => onLifecycle('archive')}>Archive…</DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onSelect={() => void copy(flag.key, 'Key')}>Copy key</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => void copy(JSON.stringify(flag, null, 2), 'Flag JSON')}>
           Copy flag JSON
@@ -71,6 +87,7 @@ export function FlagListPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const flagsQuery = useFlagsQuery()
+  const [lifecycle, setLifecycle] = useState<{ flag: FlagConfig; action: LifecycleAction } | null>(null)
 
   const search = searchParams.get('q') ?? ''
   const showArchived = searchParams.get('archived') === '1'
@@ -195,7 +212,12 @@ export function FlagListPage() {
         columnHelper.display({
           id: 'actions',
           cell: ({ row }) => (
-            <RowMenu flag={row.original} onViewAudit={() => openDetail(row.original, 'audit')} />
+            <RowMenu
+              flag={row.original}
+              onViewAudit={() => openDetail(row.original, 'audit')}
+              onEdit={() => navigate(`/flags/${encodeURIComponent(row.original.key)}/edit`)}
+              onLifecycle={(action) => setLifecycle({ flag: row.original, action })}
+            />
           ),
         }),
       ] as ColumnDef<FlagConfig, unknown>[],
@@ -214,8 +236,26 @@ export function FlagListPage() {
             ? `${filtered.length} of ${allFlags.length} flags`
             : undefined
         }
-        actions={conn ? <CurlButton spec={listFlagsCurl(conn, showArchived)} title="List flags" /> : null}
+        actions={
+          <>
+            {conn ? <CurlButton spec={listFlagsCurl(conn, showArchived)} title="List flags" /> : null}
+            <Button size="sm" asChild>
+              <Link to="/flags/new">
+                <Plus />
+                New flag
+              </Link>
+            </Button>
+          </>
+        }
       />
+
+      {lifecycle ? (
+        <LifecycleDialog
+          flag={lifecycle.flag}
+          action={lifecycle.action}
+          onClose={() => setLifecycle(null)}
+        />
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative">
@@ -268,11 +308,13 @@ export function FlagListPage() {
         rowClassName={(flag) => (flag.state === 'archived' ? 'opacity-60' : undefined)}
         emptyState={
           allFlags !== undefined && allFlags.length === 0 ? (
-            <EmptyState
-              title="No flags yet"
-              description="Create the first flag via the API — the console's create form lands in the flag-write phase."
-            >
-              {conn ? <CurlButton spec={createFlagExampleCurl(conn)} title="Create a flag" /> : null}
+            <EmptyState title="No flags yet" description="Create your first flag to start the Loop.">
+              <Button size="sm" asChild>
+                <Link to="/flags/new">
+                  <Plus />
+                  New flag
+                </Link>
+              </Button>
             </EmptyState>
           ) : (
             'No flags match the current filters.'

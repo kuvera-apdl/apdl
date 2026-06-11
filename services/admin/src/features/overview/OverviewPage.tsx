@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
 import { RelativeTime } from '@/components/shared/RelativeTime'
 import { StatePill } from '@/components/shared/StatePill'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useLive } from '@/core/live'
@@ -80,11 +81,11 @@ function FlagsSummaryCard() {
         ) : flagsQuery.error ? (
           <ErrorState error={flagsQuery.error} onRetry={() => void flagsQuery.refetch()} />
         ) : flags.length === 0 ? (
-          <EmptyState
-            title="No flags yet"
-            description="Create the first flag via the API — the console's create form lands in the flag-write phase."
-          >
-            {conn ? <CurlButton spec={createFlagExampleCurl(conn)} title="Create a flag" /> : null}
+          <EmptyState title="No flags yet" description="Create your first flag to start the Loop.">
+            <Button size="sm" asChild>
+              <Link to="/flags/new">New flag</Link>
+            </Button>
+            {conn ? <CurlButton spec={createFlagExampleCurl(conn)} title="Create via API" /> : null}
           </EmptyState>
         ) : (
           <>

@@ -5,8 +5,21 @@ import type { z } from 'zod'
 import type {
   clientFlagConfigSchema,
   conditionOperatorSchema,
+  evalContextSchema,
   evaluationModeSchema,
   experimentUpdatePayloadSchema,
+  flagArchiveResponseSchema,
+  flagCleanupResponseSchema,
+  flagCleanupSchema,
+  flagCreateResponseSchema,
+  flagCreateSchema,
+  flagDisableResponseSchema,
+  flagDisableSchema,
+  flagUpdateResponseSchema,
+  flagUpdateSchema,
+  gateEvaluateRequestSchema,
+  gateEvaluateResponseSchema,
+  writableFlagStateSchema,
   fallthroughConfigSchema,
   flagAuditActionSchema,
   flagAuditEntrySchema,
@@ -51,3 +64,17 @@ export type ClientFlagConfig = z.infer<typeof clientFlagConfigSchema>
 export type FlagCollection = z.infer<typeof flagCollectionSchema>
 export type FlagUpdatePayload = z.infer<typeof flagUpdatePayloadSchema>
 export type ExperimentUpdatePayload = z.infer<typeof experimentUpdatePayloadSchema>
+
+export type WritableFlagState = z.infer<typeof writableFlagStateSchema>
+export type FlagCreate = z.infer<typeof flagCreateSchema>
+export type FlagUpdate = z.infer<typeof flagUpdateSchema>
+export type FlagDisable = z.infer<typeof flagDisableSchema>
+export type FlagCleanup = z.infer<typeof flagCleanupSchema>
+export type FlagCreateResponse = z.infer<typeof flagCreateResponseSchema>
+export type FlagUpdateResponse = z.infer<typeof flagUpdateResponseSchema>
+export type FlagDisableResponse = z.infer<typeof flagDisableResponseSchema>
+export type FlagArchiveResponse = z.infer<typeof flagArchiveResponseSchema>
+export type FlagCleanupResponse = z.infer<typeof flagCleanupResponseSchema>
+export type EvalContext = z.infer<typeof evalContextSchema>
+export type GateEvaluateRequest = z.infer<typeof gateEvaluateRequestSchema>
+export type GateEvaluateResponse = z.infer<typeof gateEvaluateResponseSchema>

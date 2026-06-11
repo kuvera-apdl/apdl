@@ -18,6 +18,8 @@ export interface RequestOptions<T> {
   query?: QueryParams
   body?: unknown
   signal?: AbortSignal
+  /** Extra headers (e.g. x-apdl-internal-token); win over the canonical set. */
+  headers?: Record<string, string>
   /** Canonical response mirror; a mismatch throws ApiError(code: "schema_mismatch"). */
   schema?: ZodType<T>
 }
@@ -97,6 +99,7 @@ export async function request<T>(
   if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
   if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  Object.assign(headers, options.headers)
 
   const maxAttempts = method === 'GET' ? GET_RETRIES + 1 : 1
   let lastError: unknown = null

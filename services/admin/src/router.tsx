@@ -3,6 +3,7 @@ import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
 import { EmptyState } from '@/components/shared/PanelStates'
 import { useWorkspace } from '@/core/workspace'
+import { FlagEditorPage } from '@/features/flags/editor/FlagEditorPage'
 import { FlagDetailPage } from '@/features/flags/FlagDetailPage'
 import { FlagListPage } from '@/features/flags/FlagListPage'
 import { HygienePage } from '@/features/flags/HygienePage'
@@ -32,8 +33,10 @@ export function createRouter() {
           children: [
             { path: '/', element: <OverviewPage /> },
             { path: '/flags', element: <FlagListPage /> },
+            { path: '/flags/new', element: <FlagEditorPage /> },
             { path: '/flags/hygiene', element: <HygienePage /> },
             { path: '/flags/:key', element: <FlagDetailPage /> },
+            { path: '/flags/:key/edit', element: <FlagEditorPage /> },
             { path: '/system/health', element: <HealthPage /> },
           ],
         },

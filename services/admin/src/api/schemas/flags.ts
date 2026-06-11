@@ -292,3 +292,161 @@ export const experimentUpdatePayloadSchema = z
     status: z.string().optional(),
   })
   .strict()
+
+// ---------- Admin write payloads (FlagCreate / FlagUpdate / …) ----------
+
+export const writableFlagStateSchema = z.enum(['draft', 'active', 'disabled'])
+
+// DB invariant: (state = 'active') = enabled — never two independent toggles.
+function stateEnabledInvariant(
+  flag: { state?: string; enabled?: boolean },
+  ctx: z.RefinementCtx,
+): void {
+  if (flag.state === undefined || flag.enabled === undefined) return
+  const expected = flag.state === 'active'
+  if (flag.enabled !== expected) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['enabled'],
+      message: `state '${flag.state}' requires enabled=${expected}`,
+    })
+  }
+}
+
+export const flagCreateSchema = z
+  .object({
+    key: z.string().min(1),
+    name: z.string().min(1),
+    state: writableFlagStateSchema,
+    owners: z.array(z.string().min(1)),
+    // Omitted entirely when unset — the server create path runs exclude_none.
+    review_by: z.string().optional(),
+    enabled: z.boolean(),
+    description: z.string(),
+    default_variant: z.string().min(1),
+    variants: z.array(variantConfigSchema),
+    rules: z.array(gateRuleSchema),
+    fallthrough: fallthroughConfigSchema,
+    evaluation_mode: evaluationModeSchema,
+    auto_disable: z.boolean(),
+    guardrails: z.array(guardrailConfigSchema),
+  })
+  .strict()
+  .superRefine(variantInvariants)
+  .superRefine(stateEnabledInvariant)
+
+export const flagUpdateSchema = z
+  .object({
+    version: z.number().int().min(1),
+    state: writableFlagStateSchema.optional(),
+    owners: z.array(z.string().min(1)).optional(),
+    review_by: z.string().optional(),
+    enabled: z.boolean().optional(),
+    name: z.string().min(1).optional(),
+    description: z.string().optional(),
+    default_variant: z.string().min(1).optional(),
+    variants: z.array(variantConfigSchema).optional(),
+    rules: z.array(gateRuleSchema).optional(),
+    fallthrough: fallthroughConfigSchema.optional(),
+    evaluation_mode: evaluationModeSchema.optional(),
+    auto_disable: z.boolean().optional(),
+    guardrails: z.array(guardrailConfigSchema).optional(),
+  })
+  .strict()
+  .superRefine((update, ctx) => {
+    stateEnabledInvariant(update, ctx)
+    if (update.variants !== undefined && update.default_variant !== undefined) {
+      variantInvariants({ default_variant: update.default_variant, variants: update.variants }, ctx)
+    } else if (update.variants !== undefined) {
+      const total = update.variants.reduce((sum, variant) => sum + variant.weight, 0)
+      if (update.variants.length === 0 || total <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['variants'],
+          message: 'variants must contain at least one positive weight',
+        })
+      }
+    }
+  })
+
+export const flagDisableSchema = z
+  .object({
+    reason: z.enum(['guardrail_failed', 'experiment_rollback']),
+    source: z.enum(['system', 'admin']),
+    evidence: z.record(z.unknown()),
+  })
+  .strict()
+
+export const flagCleanupSchema = z
+  .object({
+    version: z.number().int().min(1),
+    source: z.enum(['admin', 'system']),
+    evidence: z.record(z.unknown()),
+  })
+  .strict()
+
+// Write response envelopes.
+export const flagCreateResponseSchema = z
+  .object({ created: z.boolean(), flag: flagConfigSchema })
+  .strict()
+export const flagUpdateResponseSchema = z
+  .object({ updated: z.boolean(), flag: flagConfigSchema })
+  .strict()
+export const flagDisableResponseSchema = z
+  .object({ disabled: z.boolean(), flag: flagConfigSchema })
+  .strict()
+export const flagArchiveResponseSchema = z
+  .object({ archived: z.boolean(), flag: flagConfigSchema })
+  .strict()
+export const flagCleanupResponseSchema = z
+  .object({ cleaned_up: z.boolean(), cleanup_reasons: z.array(z.string()), flag: flagConfigSchema })
+  .strict()
+
+// ---------- Server-side evaluation (POST /v1/evaluate) ----------
+
+export const evalContextSchema = z
+  .object({
+    user_id: z.string(),
+    anonymous_id: z.string(),
+    attributes: z.record(z.unknown()),
+  })
+  .strict()
+
+export const gateEvaluateRequestSchema = z
+  .object({
+    project_id: z.string().min(1),
+    key: z.string().min(1),
+    context: evalContextSchema,
+    log_exposure: z.boolean(),
+    session_id: z.string().optional(),
+    message_id: z.string().optional(),
+    page: z.string().optional(),
+    component: z.string().optional(),
+  })
+  .strict()
+
+export const gateEvaluationReasonSchema = z.enum([
+  'not_found',
+  'invalid_config',
+  'disabled',
+  'error',
+  'rule_match',
+  'rule_rollout',
+  'fallthrough',
+  'fallthrough_rollout',
+])
+
+export const gateEvaluateResponseSchema = z
+  .object({
+    key: z.string(),
+    variant: z.string().nullable(),
+    reason: gateEvaluationReasonSchema,
+    rule_id: z.string().nullable(),
+    rollout_bucket: z.number().nullable(),
+    variant_bucket: z.number().nullable(),
+    rollout_percentage: z.number().nullable(),
+    bucket_by: z.string().nullable(),
+    config_version: z.number().int().nullable(),
+    source: z.enum(['memory', 'initial_fetch', 'sse', 'local_storage', 'server']).nullable(),
+  })
+  .strict()

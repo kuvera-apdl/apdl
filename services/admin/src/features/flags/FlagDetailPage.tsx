@@ -1,6 +1,6 @@
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, Pencil } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import { AUDIT_LIMIT_DEFAULT } from '@/api/config'
 import type { FlagConfig } from '@/api/types/flags'
@@ -16,14 +16,21 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useFlagAuditQuery, useFlagsQuery } from '@/features/flags/hooks'
+import {
+  ACTION_LABELS,
+  availableActions,
+  LifecycleDialog,
+  type LifecycleAction,
+} from '@/features/flags/LifecycleDialog'
 import { AuditTab } from '@/features/flags/tabs/AuditTab'
 import { GuardrailsTab } from '@/features/flags/tabs/GuardrailsTab'
 import { TargetingTab } from '@/features/flags/tabs/TargetingTab'
+import { TesterTab } from '@/features/flags/tabs/TesterTab'
 import { JsonView } from '@/components/shared/JsonView'
 import { formatDateTime, isPastDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-const TABS = ['overview', 'targeting', 'guardrails', 'audit'] as const
+const TABS = ['overview', 'targeting', 'guardrails', 'audit', 'tester'] as const
 type TabName = (typeof TABS)[number]
 
 function SaltField({ salt }: { salt: string }) {
@@ -135,6 +142,7 @@ export function FlagDetailPage() {
   const flagsQuery = useFlagsQuery()
   const [auditLimit, setAuditLimit] = useState(AUDIT_LIMIT_DEFAULT)
   const auditQuery = useFlagAuditQuery(key, auditLimit)
+  const [lifecycleAction, setLifecycleAction] = useState<LifecycleAction | null>(null)
 
   const tabParam = searchParams.get('tab')
   const tab: TabName = TABS.includes(tabParam as TabName) ? (tabParam as TabName) : 'overview'
@@ -195,7 +203,33 @@ export function FlagDetailPage() {
           </span>
         }
         description={flag.name}
+        actions={
+          flag.state !== 'archived' ? (
+            <>
+              <Button variant="outline" size="sm" asChild>
+                <Link to={`/flags/${encodeURIComponent(flag.key)}/edit`}>
+                  <Pencil />
+                  Edit
+                </Link>
+              </Button>
+              {availableActions(flag).map((action) => (
+                <Button
+                  key={action}
+                  variant={action === 'disable' || action === 'archive' ? 'destructive' : 'outline'}
+                  size="sm"
+                  onClick={() => setLifecycleAction(action)}
+                >
+                  {ACTION_LABELS[action]}
+                </Button>
+              ))}
+            </>
+          ) : null
+        }
       />
+
+      {lifecycleAction ? (
+        <LifecycleDialog flag={flag} action={lifecycleAction} onClose={() => setLifecycleAction(null)} />
+      ) : null}
 
       {flag.state === 'disabled' ? (
         <div className="space-y-2 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm dark:border-amber-900 dark:bg-amber-950/30">
@@ -252,6 +286,7 @@ export function FlagDetailPage() {
           <TabsTrigger value="targeting">Targeting</TabsTrigger>
           <TabsTrigger value="guardrails">Guardrails</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
+          <TabsTrigger value="tester">Tester</TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab flag={flag} />
@@ -269,6 +304,9 @@ export function FlagDetailPage() {
             limit={auditLimit}
             onLoadMore={() => setAuditLimit((limit) => Math.min(limit + 50, 200))}
           />
+        </TabsContent>
+        <TabsContent value="tester">
+          <TesterTab flag={flag} />
         </TabsContent>
       </Tabs>
     </div>

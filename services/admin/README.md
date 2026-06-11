@@ -7,7 +7,7 @@ backend of its own and persists nothing server-side; all configuration
 "workspaces".
 
 Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan.md`
-(vault). This package currently implements **Phases 0–1**:
+(vault). This package currently implements **Phases 0–3**:
 
 - App shell: sidebar navigation, workspace switcher, SSE liveness indicator,
   dark mode.
@@ -15,16 +15,26 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   `project_id` derivation from the API key, per-service health test.
 - Overview (`/`): service health strip (10s poll), flag state summary, realtime
   stream status.
-- Feature flags, read-only: list with search/state/archived filters
-  (`/flags`), detail tabs Overview · Targeting · Guardrails · Audit
+- Feature flags, full lifecycle: list with search/state/archived filters
+  (`/flags`), detail tabs Overview · Targeting · Guardrails · Audit · Tester
   (`/flags/:key`), stale-flag hygiene report (`/flags/hygiene`).
+- Flag writes (`/flags/new`, `/flags/:key/edit`): react-hook-form + zod editor
+  mirroring FlagCreate/FlagUpdate (changed-fields-only PUTs, `enabled` derived
+  from state), pre-submit review sheet (payload + curl), 409 version-conflict
+  rebase dialog, and lifecycle actions — activate / deactivate / disable (kill
+  switch with reason + evidence) / archive (typed confirmation) / cleanup.
+- Evaluation tester (Tester tab): local FNV-1a evaluator **parity-tested
+  against `fixtures/gates/parity.json`** (the same golden values the SDKs and
+  config service pin), rule-by-rule trace with bucket bars, optional
+  server-side verification via `POST /v1/evaluate` (internal token), 10k-user
+  population simulator (also available pre-save in the editor), and a
+  served-config panel showing the exact SSE payload SDKs receive.
 - Live updates: one `EventSource` on `GET /v1/stream` per workspace; SSE events
   invalidate TanStack Query caches (admin views re-fetch rather than trusting
-  the client payload).
-- Every list/audit panel has a **"curl" button** reproducing its exact API call.
+  the client payload). Toasts announce changes made outside this console.
+- Every panel and write dialog reproduces its exact API call as **curl**.
 
-Flag writes (editor, lifecycle actions, conflict dialog), the evaluation
-tester, analytics, experiments, and agent screens are later phases.
+Analytics, experiments, and agent screens are later phases (plan §11).
 
 ## Stack
 
@@ -58,7 +68,8 @@ seed different defaults.
 ```
 src/
 ├── api/          # http wrapper, SSE lifecycle, zod schemas, typed clients
-├── core/         # workspace context, query client + keys, theme, live (SSE→cache)
+├── core/         # workspace context, query client + keys, theme, live (SSE→cache),
+│                 # evaluator/ (FNV-1a port, parity-tested against repo fixtures)
 ├── components/
 │   ├── ui/       # shadcn-style primitives (button, dialog, table, …)
 │   ├── shared/   # reusable wrappers: DataTable, StatePill, JsonDiff, CurlButton, …
