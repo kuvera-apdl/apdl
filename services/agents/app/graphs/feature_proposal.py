@@ -52,7 +52,10 @@ class FeatureProposalAgent(BaseAgent):
                 return None
             try:
                 return await get_experiment_results(
-                    experiment_id=exp_id, metric=metric, project_id=ctx.project_id
+                    experiment_id=exp_id,
+                    metric=metric,
+                    project_id=ctx.project_id,
+                    flag_key=exp.get("flag_key") or exp_id,
                 )
             except Exception as exc:
                 logger.debug("Could not fetch results for %s: %s", exp_id, exc)

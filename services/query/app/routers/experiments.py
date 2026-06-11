@@ -50,6 +50,13 @@ async def experiment_results(
 
     Fetches feature-flag variant assignments and per-user metric values from
     ClickHouse, then runs the selected statistical test.
+
+    Contract note: ``flag_key`` is **required** — exposures are stored and joined
+    by flag key (``feature_flag_exposures.flag_key``), so it identifies the data
+    to analyse. ``experiment_id`` is a path label only and no longer filters the
+    query; callers must supply the flag key that produced the exposures (by
+    convention this equals the experiment id — see the agents service's
+    ``create_experiment_config``). Omitting ``flag_key`` returns ``422``.
     """
     client = _get_client(request)
     pid = project_id if project_id is not None else DEFAULT_PROJECT_ID
