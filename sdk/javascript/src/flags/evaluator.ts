@@ -290,26 +290,31 @@ export class FlagEvaluator {
   }
 
   private resolveAttribute(attribute: string, context: EvalContext): ResolvedAttribute {
+    // Presence contract — canonical, must match services/config/app/flags/
+    // evaluator.py and sdk/python/apdl/flags/evaluator.py byte-for-byte: an
+    // attribute is *present* only when its value is non-null. A null/undefined
+    // value (an explicit `user_id: null` identity or a `null` trait) is ABSENT,
+    // like a missing key — it is never stringified into a value comparison, so
+    // the three evaluators stay in lockstep (a null would otherwise compare
+    // against `String(null)` = "null" here vs `str(None)` = "None" in Python).
+    // Falsy non-null values (`''`, `0`, `false`) stay present. See parity.json.
     if (attribute === 'user_id') {
-      if (Object.prototype.hasOwnProperty.call(context, 'user_id')) {
-        return { exists: true, value: context.user_id };
-      }
-      return { exists: false, value: null };
+      return context.user_id != null
+        ? { exists: true, value: context.user_id }
+        : { exists: false, value: null };
     }
 
     if (attribute === 'anonymous_id') {
-      if (Object.prototype.hasOwnProperty.call(context, 'anonymous_id')) {
-        return { exists: true, value: context.anonymous_id };
-      }
-      return { exists: false, value: null };
+      return context.anonymous_id != null
+        ? { exists: true, value: context.anonymous_id }
+        : { exists: false, value: null };
     }
 
     const attributes = context.attributes ?? {};
-    if (Object.prototype.hasOwnProperty.call(attributes, attribute)) {
-      return { exists: true, value: attributes[attribute] };
-    }
-
-    return { exists: false, value: null };
+    const value = attributes[attribute];
+    return value != null
+      ? { exists: true, value }
+      : { exists: false, value: null };
   }
 }
 
