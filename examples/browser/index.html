@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>APDL Browser SDK Example</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    button { font-size: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    #gate-status { font-weight: bold; }
+    #log { background: #f8f8f8; border: 1px solid #ddd; padding: 0.75rem; min-height: 6rem; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>APDL Browser SDK Example</h1>
+  <p>
+    Auto-capture is on: clicks, page views, scroll depth, and web vitals are
+    tracked automatically. Prerequisites are in <code>examples/README.md</code>
+    (stack running via <code>make dev-all</code>, SDK built via
+    <code>make build-sdk</code>, <code>new-checkout</code> flag created).
+  </p>
+
+  <p>
+    Gate <code>new-checkout</code>:
+    <span id="gate-status">checking…</span>
+  </p>
+
+  <p>
+    <button id="buy">Complete purchase ($49.99)</button>
+  </p>
+
+  <div id="log"></div>
+
+  <!-- IIFE bundle exposes a global `APDL` -->
+  <script src="../../sdk/javascript/dist/apdl.iife.js"></script>
+  <script>
+    const logEl = document.getElementById('log');
+    const log = (msg) => { logEl.textContent += msg + '\n'; };
+
+    const apdl = APDL.init({
+      apiKey: 'proj_demo_0123456789abcdef',
+      host: 'http://localhost:8080',
+      configHost: 'http://localhost:8081',
+      autoCapture: true,
+      debug: true,
+    });
+
+    apdl.identify('user-42', { plan: 'pro' });
+    log('identified user-42');
+
+    // Manual event tracking
+    document.getElementById('buy').addEventListener('click', () => {
+      apdl.track('purchase_completed', { product_id: 'sku-123', revenue: 49.99 });
+      log('tracked purchase_completed');
+    });
+
+    // Feature gate, evaluated locally once flags load
+    const renderGate = () => {
+      const result = apdl.checkGateDetails('new-checkout');
+      document.getElementById('gate-status').textContent =
+        `${result.value} (reason: ${result.reason})`;
+    };
+    setTimeout(renderGate, 500); // give the initial flag fetch a moment
+
+    // Live updates over SSE — toggle the flag via the admin API and watch
+    apdl.onFlagChange('new-checkout', (value) => {
+      log(`flag update over SSE: new-checkout -> ${value}`);
+      renderGate();
+    });
+  </script>
+</body>
+</html>

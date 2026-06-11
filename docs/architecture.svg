@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 1010" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+<!-- Hand-maintained SVG (no external source file) — edit this file directly. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1170 1010" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
   <defs>
     <!-- Arrow markers -->
     <marker id="arr-gray"   markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
@@ -21,11 +22,11 @@
   </defs>
 
   <!-- ─── Background ─────────────────────────────────────────── -->
-  <rect width="1100" height="1010" fill="url(#bg)" rx="12"/>
+  <rect width="1170" height="1010" fill="url(#bg)" rx="12"/>
 
   <!-- ─── Title ──────────────────────────────────────────────── -->
   <text x="550" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a" letter-spacing="0.5">APDL Architecture</text>
-  <text x="550" y="54" text-anchor="middle" font-size="11" fill="#94a3b8">Autonomous Product Development Loop — Unified Python 3.12 / FastAPI Backend</text>
+  <text x="550" y="54" text-anchor="middle" font-size="11" fill="#94a3b8">Autonomous Product Development Loop — events in · analytics out · agents act on flags &amp; experiments</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        LAYER BANDS  (tinted background panels)
@@ -65,21 +66,31 @@
   <!-- ═══════════════════════════════════════════════════════════
        CLIENT LAYER — SDK
   ══════════════════════════════════════════════════════════════ -->
-  <rect x="200" y="78" width="700" height="76" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
-  <text x="550" y="106" text-anchor="middle" font-size="16" font-weight="700" fill="#1e40af">@apdl/sdk</text>
-  <text x="550" y="124" text-anchor="middle" font-size="11" fill="#3b82f6">TypeScript  ·  Auto-capture  ·  Client-side Flag Eval (FNV-1a)  ·  SSE  ·  Privacy</text>
-  <text x="550" y="142" text-anchor="middle" font-size="10" fill="#93c5fd">Rollup → ESM / CJS / IIFE</text>
+  <!-- SDK container: both clients share byte-identical FNV-1a bucketing -->
+  <rect x="140" y="72" width="820" height="88" rx="10" fill="#eff6ff" fill-opacity="0.5" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="398" y="63" width="304" height="18" rx="5" fill="#3b82f6"/>
+  <text x="550" y="76" text-anchor="middle" font-size="9" font-weight="700" fill="#fff" letter-spacing="0.8">CLIENT SDKs — BYTE-IDENTICAL FNV-1a BUCKETING</text>
+
+  <rect x="152" y="86" width="392" height="66" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="348" y="108" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">@apdl/sdk — browser</text>
+  <text x="348" y="125" text-anchor="middle" font-size="10" fill="#3b82f6">TypeScript · Auto-capture · Local flag eval · SSE · Privacy</text>
+  <text x="348" y="141" text-anchor="middle" font-size="9.5" fill="#93c5fd">Rollup → ESM / CJS / IIFE</text>
+
+  <rect x="556" y="86" width="392" height="66" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="752" y="108" text-anchor="middle" font-size="14" font-weight="700" fill="#1e40af">apdl-sdk — server-side</text>
+  <text x="752" y="125" text-anchor="middle" font-size="10" fill="#3b82f6">Python 3.12 · Batching queue · Local flag eval · Flag polling</text>
+  <text x="752" y="141" text-anchor="middle" font-size="9.5" fill="#93c5fd">httpx · Pydantic · py.typed</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ARROWS: SDK → Ingestion  and  SDK ↔ Config
   ══════════════════════════════════════════════════════════════ -->
-  <!-- SDK left edge → down then right to Ingestion -->
-  <polyline points="350,154 350,164 250,164 250,182" fill="none" stroke="#3b82f6" stroke-width="1.8" marker-end="url(#arr-blue)"/>
-  <text x="280" y="161" text-anchor="middle" font-size="9" font-weight="600" fill="#3b82f6">POST /v1/events</text>
+  <!-- SDK container → Ingestion (straight drop) -->
+  <line x1="250" y1="160" x2="250" y2="182" stroke="#3b82f6" stroke-width="1.8" marker-end="url(#arr-blue)"/>
+  <text x="260" y="174" text-anchor="start" font-size="9" font-weight="600" fill="#3b82f6">POST /v1/events</text>
 
-  <!-- SDK right edge → down then right to Config -->
-  <polyline points="750,154 750,164 870,164 870,182" fill="none" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arr-indigo)"/>
-  <text x="840" y="161" text-anchor="middle" font-size="9" font-weight="600" fill="#6366f1">GET /v1/flags · SSE /v1/stream</text>
+  <!-- SDK container → Config (straight drop) -->
+  <line x1="870" y1="160" x2="870" y2="182" stroke="#6366f1" stroke-width="1.8" marker-end="url(#arr-indigo)"/>
+  <text x="860" y="174" text-anchor="end" font-size="9" font-weight="600" fill="#6366f1">GET /v1/flags · SSE /v1/stream</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        API LAYER — Ingestion + Config
@@ -100,17 +111,17 @@
   <!-- ═══════════════════════════════════════════════════════════
        ARROWS: API → DATA
   ══════════════════════════════════════════════════════════════ -->
-  <!-- Ingestion → Redis Streams (orthogonal down) -->
-  <line x1="210" y1="266" x2="210" y2="356" stroke="#ef4444" stroke-width="1.8" marker-end="url(#arr-red)"/>
-  <text x="224" y="315" text-anchor="start" font-size="9" fill="#94a3b8">XADD</text>
+  <!-- Ingestion → Redis Streams (straight down, right of the Redis badge) -->
+  <line x1="300" y1="266" x2="300" y2="318" stroke="#ef4444" stroke-width="1.8" marker-end="url(#arr-red)"/>
+  <text x="310" y="296" text-anchor="start" font-size="9" fill="#94a3b8">XADD</text>
 
-  <!-- Config → Redis Cache (orthogonal: right then down) -->
-  <polyline points="768,266 768,320 640,320 640,356" fill="none" stroke="#ef4444" stroke-width="1.8" marker-end="url(#arr-red)"/>
-  <text x="680" y="316" text-anchor="middle" font-size="9" fill="#94a3b8">cache · 60s TTL</text>
+  <!-- Config (left edge) → Redis Cache -->
+  <polyline points="678,240 539,240 539,318" fill="none" stroke="#ef4444" stroke-width="1.8" marker-end="url(#arr-red)"/>
+  <text x="548" y="296" text-anchor="start" font-size="9" fill="#94a3b8">cache · 60s TTL</text>
 
   <!-- Config → PostgreSQL (straight down, right side) -->
-  <line x1="950" y1="266" x2="950" y2="356" stroke="#22c55e" stroke-width="1.8" marker-end="url(#arr-green)"/>
-  <text x="964" y="315" text-anchor="start" font-size="9" fill="#94a3b8">asyncpg</text>
+  <line x1="950" y1="266" x2="950" y2="320" stroke="#22c55e" stroke-width="1.8" marker-end="url(#arr-green)"/>
+  <text x="962" y="287" text-anchor="start" font-size="9" fill="#94a3b8">asyncpg</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        DATA LAYER — Redis cluster, PostgreSQL, ClickHouse Writer, ClickHouse
@@ -154,11 +165,18 @@
   <!-- Writer → ClickHouse -->
   <line x1="232" y1="518" x2="232" y2="552" stroke="#f97316" stroke-width="1.8" marker-end="url(#arr-orange)"/>
 
+  <!-- ETL framework (standalone transforms) → ClickHouse -->
+  <rect x="392" y="458" width="294" height="60" rx="9" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="6,4" filter="url(#shadow)"/>
+  <text x="539" y="481" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">ETL Framework</text>
+  <text x="539" y="496" text-anchor="middle" font-size="9.5" fill="#7c3aed">canonical envelope → events_v2 · decisions_v2 · feeds_v2</text>
+  <text x="539" y="509" text-anchor="middle" font-size="9" fill="#a78bfa">live traffic · backfills · replays  (pipeline/etl)</text>
+  <line x1="539" y1="518" x2="539" y2="552" stroke="#f97316" stroke-width="1.8" marker-end="url(#arr-orange)"/>
+
   <!-- ClickHouse (analytics DB) spanning across -->
-  <rect x="82" y="554" width="624" height="36" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2" filter="url(#shadow)"/>
-  <text x="180" y="577" text-anchor="middle" font-size="14" font-weight="700" fill="#9a3412">ClickHouse</text>
-  <text x="460" y="570" text-anchor="middle" font-size="10" fill="#c2410c">:8123 (HTTP)  ·  :9000 (native)</text>
-  <text x="500" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events  ·  sessions  ·  feature_flag_exposures  ·  MVs: event_counts (hourly / daily)</text>
+  <rect x="82" y="554" width="924" height="36" rx="8" fill="#fff7ed" stroke="#f97316" stroke-width="2" filter="url(#shadow)"/>
+  <text x="170" y="577" text-anchor="middle" font-size="14" font-weight="700" fill="#9a3412">ClickHouse</text>
+  <text x="600" y="570" text-anchor="middle" font-size="10" fill="#c2410c">:8123 (HTTP)  ·  :9000 (native)</text>
+  <text x="600" y="583" text-anchor="middle" font-size="9" fill="#ea580c">events · sessions · feature_flag_exposures · MVs: event_counts (hourly / daily)</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ANALYTICS LAYER — Query Service
@@ -167,99 +185,106 @@
   <line x1="350" y1="590" x2="350" y2="622" stroke="#f97316" stroke-width="1.8" marker-end="url(#arr-orange)"/>
   <text x="366" y="610" text-anchor="start" font-size="9" fill="#94a3b8">async queries</text>
 
-  <rect x="82" y="624" width="640" height="74" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
-  <text x="402" y="652" text-anchor="middle" font-size="16" font-weight="700" fill="#065f46">Query Service</text>
-  <text x="402" y="670" text-anchor="middle" font-size="11" fill="#059669">Python 3.12 / FastAPI  · :8082</text>
-  <text x="402" y="686" text-anchor="middle" font-size="10" fill="#10b981">Event analytics (count / timeseries / breakdown)  ·  Funnels (windowFunnel)  ·  Cohorts  ·  Retention  ·  Experiments (freq · Bayes · sequential)</text>
+  <rect x="82" y="624" width="924" height="74" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="544" y="652" text-anchor="middle" font-size="16" font-weight="700" fill="#065f46">Query Service</text>
+  <text x="544" y="670" text-anchor="middle" font-size="11" fill="#059669">Python 3.12 / FastAPI  · :8082</text>
+  <text x="544" y="686" text-anchor="middle" font-size="10" fill="#10b981">Counts / timeseries / breakdowns  ·  Funnels (windowFunnel)  ·  Cohorts  ·  Retention  ·  Experiment stats (freq · Bayes · sequential)</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        RIGHT-SIDE RAIL — PostgreSQL → Agents Service
        Single dashed green vertical line at x=1060
   ══════════════════════════════════════════════════════════════ -->
   <!-- Down from PostgreSQL right edge (865+135=1000 → route via x=1060) -->
-  <polyline points="1000,370 1060,370 1060,752" fill="none" stroke="#22c55e" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arr-green)"/>
+  <polyline points="1000,370 1060,370 1060,748" fill="none" stroke="#22c55e" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arr-green)"/>
   <!-- label alongside the rail, horizontal -->
-  <text x="1068" y="580" text-anchor="start" font-size="9" fill="#16a34a" transform="rotate(90,1068,580)">pgvector memory</text>
+  <text x="1075" y="430" text-anchor="start" font-size="9" fill="#16a34a" transform="rotate(90,1075,430)">pgvector memory</text>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       FEEDBACK LOOP — Agents → Config (the "Loop" in APDL)
+       Agents create/update flags & experiments, which flow back
+       to the SDKs via SSE — closing the autonomous loop.
+  ══════════════════════════════════════════════════════════════ -->
+  <polyline points="1042,780 1120,780 1120,225 1022,225" fill="none" stroke="#a855f7" stroke-width="2.2" marker-end="url(#arr-violet)"/>
+  <text x="1134" y="502" text-anchor="middle" font-size="10" font-weight="600" fill="#9333ea" transform="rotate(-90,1134,502)">agents create &amp; update flags / experiments — the loop</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        ARROW: Query Service → Agents Service
   ══════════════════════════════════════════════════════════════ -->
-  <line x1="402" y1="698" x2="402" y2="748" stroke="#8b5cf6" stroke-width="1.8" marker-end="url(#arr-purple)"/>
-  <text x="418" y="728" text-anchor="start" font-size="9" fill="#94a3b8">analytics data</text>
+  <line x1="544" y1="698" x2="544" y2="748" stroke="#8b5cf6" stroke-width="1.8" marker-end="url(#arr-purple)"/>
+  <text x="558" y="728" text-anchor="start" font-size="9" fill="#94a3b8">analytics data</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        AI LAYER — Agents Service (large box)
   ══════════════════════════════════════════════════════════════ -->
   <rect x="82" y="750" width="960" height="212" rx="12" fill="#fdf4ff" stroke="#a855f7" stroke-width="2" filter="url(#shadow)"/>
 
-  <!-- Agents header -->
-  <text x="470" y="778" text-anchor="middle" font-size="16" font-weight="700" fill="#6b21a8">Agents Service</text>
-  <text x="470" y="796" text-anchor="middle" font-size="11" fill="#9333ea">Python 3.12 / FastAPI  · :8083</text>
+  <!-- Agents header (centered between the two corner boxes) -->
+  <text x="550" y="776" text-anchor="middle" font-size="16" font-weight="700" fill="#6b21a8">Agents Service</text>
+  <text x="550" y="793" text-anchor="middle" font-size="11" fill="#9333ea">Python 3.12 / FastAPI  · :8083</text>
 
-  <!-- LLM Router (now inside Agents box, top-right) -->
-  <rect x="780" y="756" width="248" height="72" rx="9" fill="#faf5ff" stroke="#c084fc" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="904" y="779" text-anchor="middle" font-size="13" font-weight="700" fill="#7e22ce">LLM Router</text>
-  <text x="904" y="796" text-anchor="middle" font-size="10" fill="#a855f7">OpenAI  ·  Anthropic</text>
-  <text x="904" y="811" text-anchor="middle" font-size="10" fill="#a855f7">Google GenAI  ·  Local LLM</text>
-  <!-- LLM Router → Supervisor connector (dashed, inside box) -->
-  <line x1="780" y1="792" x2="680" y2="792" stroke="#c084fc" stroke-width="1.4" stroke-dasharray="4,3" marker-end="url(#arr-violet)"/>
-  <text x="728" y="787" text-anchor="middle" font-size="8" fill="#a855f7">LLM calls</text>
+  <!-- LLM Router (top-right corner) -->
+  <rect x="800" y="756" width="228" height="60" rx="9" fill="#faf5ff" stroke="#c084fc" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="914" y="777" text-anchor="middle" font-size="13" font-weight="700" fill="#7e22ce">LLM Router</text>
+  <text x="914" y="793" text-anchor="middle" font-size="10" fill="#a855f7">OpenAI · Anthropic · Google · Local</text>
+  <text x="914" y="807" text-anchor="middle" font-size="9" fill="#c084fc">serves every pipeline</text>
 
-  <!-- Config note inside Agents box -->
+  <!-- Config note (top-left corner) -->
   <rect x="94" y="756" width="228" height="38" rx="6" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1"/>
   <text x="208" y="771" text-anchor="middle" font-size="9" font-weight="600" fill="#4338ca">Config Service (flag/experiment tools)</text>
   <text x="208" y="785" text-anchor="middle" font-size="9" fill="#6366f1">read via internal API call at runtime</text>
 
   <!-- Supervisor sub-box -->
-  <rect x="340" y="756" width="420" height="38" rx="7" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.5"/>
-  <text x="550" y="780" text-anchor="middle" font-size="12" font-weight="700" fill="#6d28d9">Supervisor  — routes to agent pipelines</text>
+  <rect x="340" y="802" width="420" height="34" rx="7" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="550" y="824" text-anchor="middle" font-size="12" font-weight="700" fill="#6d28d9">Supervisor  — routes to agent pipelines</text>
+
+  <!-- Fan-out bus: supervisor → all five pipelines -->
+  <line x1="550" y1="836" x2="550" y2="844" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="177" y1="844" x2="845" y2="844" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="177" y1="844" x2="177" y2="852" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="347" y1="844" x2="347" y2="852" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="511" y1="844" x2="511" y2="852" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="675" y1="844" x2="675" y2="852" stroke="#a78bfa" stroke-width="1.4"/>
+  <line x1="845" y1="844" x2="845" y2="852" stroke="#a78bfa" stroke-width="1.4"/>
 
   <!-- Agent pipeline pills (row) -->
-  <rect x="100" y="808" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
-  <text x="177" y="826" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Behavior Analysis</text>
-  <text x="177" y="837" text-anchor="middle" font-size="9" fill="#a855f7">event patterns + LLM</text>
+  <rect x="100" y="852" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
+  <text x="177" y="868" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Behavior Analysis</text>
+  <text x="177" y="880" text-anchor="middle" font-size="9" fill="#a855f7">event patterns + LLM</text>
 
-  <rect x="270" y="808" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
-  <text x="347" y="826" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Experiment Design</text>
-  <text x="347" y="837" text-anchor="middle" font-size="9" fill="#a855f7">hypothesis + power calc</text>
+  <rect x="270" y="852" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
+  <text x="347" y="868" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Experiment Design</text>
+  <text x="347" y="880" text-anchor="middle" font-size="9" fill="#a855f7">hypothesis + power calc</text>
 
-  <rect x="440" y="808" width="142" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
-  <text x="511" y="826" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Personalization</text>
-  <text x="511" y="837" text-anchor="middle" font-size="9" fill="#a855f7">flag targeting rules</text>
+  <rect x="440" y="852" width="142" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
+  <text x="511" y="868" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Personalization</text>
+  <text x="511" y="880" text-anchor="middle" font-size="9" fill="#a855f7">flag targeting rules</text>
 
-  <rect x="598" y="808" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
-  <text x="675" y="826" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Feature Proposals</text>
-  <text x="675" y="837" text-anchor="middle" font-size="9" fill="#a855f7">roadmap + signals</text>
+  <rect x="598" y="852" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
+  <text x="675" y="868" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Feature Proposals</text>
+  <text x="675" y="880" text-anchor="middle" font-size="9" fill="#a855f7">roadmap + signals</text>
 
-  <rect x="768" y="808" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
-  <text x="845" y="826" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Safety + Rollback</text>
-  <text x="845" y="837" text-anchor="middle" font-size="9" fill="#a855f7">validation + audit</text>
-
-  <!-- Supervisor arrows to each pipeline pill -->
-  <line x1="380" y1="794" x2="177" y2="808" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-violet)"/>
-  <line x1="440" y1="794" x2="347" y2="808" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-violet)"/>
-  <line x1="550" y1="794" x2="511" y2="808" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-violet)"/>
-  <line x1="660" y1="794" x2="675" y2="808" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-violet)"/>
-  <line x1="720" y1="794" x2="845" y2="808" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-violet)"/>
+  <rect x="768" y="852" width="154" height="34" rx="7" fill="#f3e8ff" stroke="#c084fc" stroke-width="1.2"/>
+  <text x="845" y="868" text-anchor="middle" font-size="11" font-weight="600" fill="#7e22ce">Safety + Rollback</text>
+  <text x="845" y="880" text-anchor="middle" font-size="9" fill="#a855f7">validation + audit</text>
 
   <!-- Bottom metadata row inside Agents box -->
-  <line x1="100" y1="854" x2="928" y2="854" stroke="#e9d5ff" stroke-width="1"/>
-  <text x="210" y="869" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Autonomy L1→L4</text>
-  <text x="210" y="882" text-anchor="middle" font-size="9" fill="#a855f7">suggest → full auto</text>
-  <circle cx="338" cy="874" r="2.5" fill="#c084fc"/>
-  <text x="440" y="869" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Audit Log</text>
-  <text x="440" y="882" text-anchor="middle" font-size="9" fill="#a855f7">all agent actions recorded</text>
-  <circle cx="554" cy="874" r="2.5" fill="#c084fc"/>
-  <text x="690" y="869" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Approval Queue</text>
-  <text x="690" y="882" text-anchor="middle" font-size="9" fill="#a855f7">human-in-the-loop gate (L1–L3)</text>
-  <circle cx="836" cy="874" r="2.5" fill="#c084fc"/>
-  <text x="900" y="869" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">pgvector</text>
-  <text x="900" y="882" text-anchor="middle" font-size="9" fill="#a855f7">memory search</text>
+  <line x1="100" y1="900" x2="1010" y2="900" stroke="#e9d5ff" stroke-width="1"/>
+  <text x="210" y="921" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Autonomy L1→L4</text>
+  <text x="210" y="934" text-anchor="middle" font-size="9" fill="#a855f7">suggest → full auto</text>
+  <circle cx="338" cy="926" r="2.5" fill="#c084fc"/>
+  <text x="440" y="921" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Audit Log</text>
+  <text x="440" y="934" text-anchor="middle" font-size="9" fill="#a855f7">all agent actions recorded</text>
+  <circle cx="554" cy="926" r="2.5" fill="#c084fc"/>
+  <text x="690" y="921" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">Approval Queue</text>
+  <text x="690" y="934" text-anchor="middle" font-size="9" fill="#a855f7">human-in-the-loop gate (L1–L3)</text>
+  <circle cx="836" cy="926" r="2.5" fill="#c084fc"/>
+  <text x="900" y="921" text-anchor="middle" font-size="10" fill="#9333ea" font-weight="600">pgvector</text>
+  <text x="900" y="934" text-anchor="middle" font-size="9" fill="#a855f7">memory search</text>
 
   <!-- ═══════════════════════════════════════════════════════════
        LEGEND (footer strip, below all layer bands)
   ══════════════════════════════════════════════════════════════ -->
-  <rect x="18" y="972" width="540" height="28" rx="7" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="18" y="972" width="710" height="28" rx="7" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
   <text x="28" y="984" font-size="9" font-weight="700" fill="#64748b" letter-spacing="0.8">LEGEND</text>
 
   <line x1="80" y1="986" x2="100" y2="986" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr-blue)"/>
@@ -273,5 +298,8 @@
 
   <line x1="432" y1="986" x2="452" y2="986" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arr-purple)"/>
   <text x="456" y="989" font-size="9" fill="#64748b">ClickHouse / analytics</text>
+
+  <line x1="566" y1="986" x2="586" y2="986" stroke="#a855f7" stroke-width="2.2" marker-end="url(#arr-violet)"/>
+  <text x="590" y="989" font-size="9" fill="#64748b">agent actions — the loop</text>
 
 </svg>
