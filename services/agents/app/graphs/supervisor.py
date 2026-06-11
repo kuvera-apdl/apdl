@@ -10,6 +10,7 @@ for every agent.
 
 from __future__ import annotations
 
+import json
 import logging
 import traceback
 from typing import Any
@@ -47,6 +48,35 @@ async def _update_run(
             insights_count,
             experiments_count,
         )
+
+
+async def _persist_results(
+    pool: asyncpg.Pool,
+    run_id: str,
+    agent_name: str,
+    produces: str,
+    output: Any,
+) -> None:
+    """Persist an agent's output at phase completion (admin-plan gap G3).
+
+    Best-effort: persistence failures are logged and must never kill a run.
+    """
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_run_results (run_id, agent_name, produces, output)
+                VALUES ($1, $2, $3, $4::jsonb)
+                ON CONFLICT (run_id, agent_name)
+                DO UPDATE SET output = EXCLUDED.output, created_at = now()
+                """,
+                run_id,
+                agent_name,
+                produces,
+                json.dumps(output if isinstance(output, list) else [output], default=str),
+            )
+    except Exception:
+        logger.exception("[%s] Failed to persist %s results", run_id, agent_name)
 
 
 async def run_supervisor(
@@ -124,6 +154,7 @@ async def run_supervisor(
             try:
                 result = await agent.run(ctx, state)
                 state[agent.produces] = result.output
+                await _persist_results(pool, run_id, agent.name, agent.produces, result.output)
 
                 await audit.log(run_id, f"{agent.name}_complete", {
                     "produced": agent.produces,

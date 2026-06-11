@@ -1,0 +1,140 @@
+"""Run introspection endpoints — list, results, and audit.
+
+Closes the admin-console plan's §8 gaps that made agent runs opaque over
+HTTP: G1 (no way to list runs), G3 (per-agent outputs lived only in the
+in-process state dict, leaving approvals blind), and G2 (the audit trail was
+queryable only in-process via AuditLogger).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+import asyncpg
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
+
+from app.routers.status import RunStatus
+from app.safety.audit import AuditLogger
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/v1/agents", tags=["agents"])
+
+RESULT_KEYS = ("insights", "experiment_designs", "personalizations", "feature_proposals")
+
+
+class RunListResponse(BaseModel):
+    runs: list[RunStatus]
+    count: int
+
+
+class RunResults(BaseModel):
+    run_id: str
+    insights: list[Any]
+    experiment_designs: list[Any]
+    personalizations: list[Any]
+    feature_proposals: list[Any]
+
+
+class RunAuditResponse(BaseModel):
+    run_id: str
+    audit: list[dict[str, Any]]
+    count: int
+
+
+def _row_to_status(row: Any) -> RunStatus:
+    return RunStatus(
+        run_id=row["run_id"],
+        project_id=row["project_id"],
+        status=row["status"],
+        phase=row["phase"],
+        insights_count=row["insights_count"],
+        experiments_count=row["experiments_count"],
+        started_at=row["started_at"].isoformat(),
+        updated_at=row["updated_at"].isoformat(),
+    )
+
+
+@router.get("/runs", response_model=RunListResponse)
+async def list_runs(
+    request: Request,
+    project_id: str = Query(..., min_length=1),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> RunListResponse:
+    """List agent runs for a project, newest first (gap G1)."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+
+    base = """
+        SELECT run_id, project_id, status, phase, insights_count,
+               experiments_count, started_at, updated_at
+        FROM agent_runs
+        WHERE project_id = $1
+    """
+    async with pool.acquire() as conn:
+        if status is not None:
+            rows = await conn.fetch(
+                base + " AND status = $2 ORDER BY started_at DESC LIMIT $3",
+                project_id,
+                status,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                base + " ORDER BY started_at DESC LIMIT $2",
+                project_id,
+                limit,
+            )
+
+    runs = [_row_to_status(row) for row in rows]
+    return RunListResponse(runs=runs, count=len(runs))
+
+
+async def _require_run(pool: asyncpg.Pool, run_id: str) -> None:
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM agent_runs WHERE run_id = $1", run_id)
+    if exists is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+
+@router.get("/{run_id}/results", response_model=RunResults)
+async def get_run_results(run_id: str, request: Request) -> RunResults:
+    """Per-agent outputs persisted at phase completion (gap G3).
+
+    Keys with no persisted output (agent skipped, still running, or the run
+    predates result persistence) are empty lists.
+    """
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    await _require_run(pool, run_id)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT produces, output FROM agent_run_results WHERE run_id = $1",
+            run_id,
+        )
+
+    payload: dict[str, list[Any]] = {key: [] for key in RESULT_KEYS}
+    for row in rows:
+        output = row["output"]
+        if isinstance(output, str):
+            output = json.loads(output)
+        if row["produces"] in payload and isinstance(output, list):
+            payload[row["produces"]] = output
+
+    return RunResults(run_id=run_id, **payload)
+
+
+@router.get("/{run_id}/audit", response_model=RunAuditResponse)
+async def get_run_audit(
+    run_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> RunAuditResponse:
+    """The run's audit trail over HTTP, newest first (gap G2)."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    await _require_run(pool, run_id)
+
+    entries = await AuditLogger(pool).get_run_audit_trail(run_id, limit=limit)
+    return RunAuditResponse(run_id=run_id, audit=entries, count=len(entries))

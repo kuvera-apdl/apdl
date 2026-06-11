@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.memory.pgvector_store import PgVectorStore
-from app.routers import approvals, status, triggers
+from app.routers import approvals, runs, status, triggers
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,16 @@ async def lifespan(application: FastAPI):
                 created_at TIMESTAMPTZ DEFAULT now()
             );
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_run_results (
+                run_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                produces TEXT NOT NULL,
+                output JSONB DEFAULT '[]',
+                created_at TIMESTAMPTZ DEFAULT now(),
+                PRIMARY KEY (run_id, agent_name)
+            );
+        """)
 
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store
@@ -98,6 +108,7 @@ app.add_middleware(
 app.include_router(triggers.router)
 app.include_router(status.router)
 app.include_router(approvals.router)
+app.include_router(runs.router)
 
 
 @app.get("/health")
