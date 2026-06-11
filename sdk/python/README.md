@@ -26,7 +26,7 @@ cd sdk/python && uv pip install -e ".[dev]"
 ```python
 from apdl import APDL
 
-client = APDL.init(api_key="proj_<project>_<secret>")
+client = APDL.init(api_key="proj_<project>_<secret>")  # secret: 16+ alphanumeric chars
 
 # Track events (identity is explicit per call — servers handle many users)
 client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -44,7 +44,7 @@ client.shutdown()  # flushes pending events and stops background threads
 Or as a context manager (auto-shutdown):
 
 ```python
-with APDL.init(api_key="proj_demo_secret") as client:
+with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
     client.track("signup", user_id="u_999")
 ```
 
@@ -56,7 +56,7 @@ Pass keyword args to `APDL.init(...)` or build an `APDLConfig`:
 from apdl import APDL, APDLConfig
 
 client = APDL.init(APDLConfig(
-    api_key="proj_demo_secret",
+    api_key="proj_demo_0123456789abcdef",
     host="https://ingest.apdl.dev",       # event ingestion endpoint
     config_host="https://config.apdl.dev",# flag config endpoint
     batch_size=20,                         # 1..100
@@ -128,8 +128,7 @@ uv venv && uv pip install -e ".[dev]"
 ```
 
 CI runs the suite with `--cov-fail-under=88`; keep coverage at or above that
-threshold. Dependency updates for the SDK arrive via Dependabot
-(`.github/dependabot.yml`).
+threshold.
 
 The test suite pins golden hash values produced by the canonical config-service
 implementation, guaranteeing this SDK buckets identically to the server and the

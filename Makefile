@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python status smoke
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -44,6 +44,17 @@ test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents
 lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl
 
 clean: clean-sdk
+
+# Parallel local CI mirror: lint + test every package at once.
+check:
+	@bash scripts/check.sh
+
+# Auto-format all packages (ruff format + autofix; JS formatter if present).
+fmt:
+	@bash scripts/fmt.sh
+
+fmt-check:
+	@bash scripts/fmt.sh --check
 
 # ─── SDK ─────────────────────────────────────────────────────
 
@@ -144,6 +155,14 @@ dev-all:
 dev-down:
 	docker compose -f infra/docker/docker-compose.yml down
 	docker compose -f infra/docker/docker-compose.deps.yml down
+
+# Container status + service health endpoints.
+status:
+	@bash scripts/dev.sh status
+
+# End-to-end smoke test against the running stack (event → flag → query).
+smoke:
+	@bash scripts/dev.sh smoke
 
 # ─── CI ──────────────────────────────────────────────────────
 
