@@ -7,6 +7,9 @@ import { CohortsPage } from '@/features/analytics/CohortsPage'
 import { EventsExplorerPage } from '@/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '@/features/analytics/FunnelsPage'
 import { RetentionPage } from '@/features/analytics/RetentionPage'
+import { RunMonitorPage } from '@/features/agents/RunMonitorPage'
+import { RunsPage } from '@/features/agents/RunsPage'
+import { TriggerPage } from '@/features/agents/TriggerPage'
 import {
   ExperimentCreatePage,
   ExperimentDetailPage,
@@ -54,6 +57,9 @@ export function createRouter() {
             { path: '/experiments', element: <ExperimentListPage /> },
             { path: '/experiments/new', element: <ExperimentCreatePage /> },
             { path: '/experiments/:key', element: <ExperimentDetailPage /> },
+            { path: '/agents', element: <RunsPage /> },
+            { path: '/agents/trigger', element: <TriggerPage /> },
+            { path: '/agents/runs/:runId', element: <RunMonitorPage /> },
             { path: '/settings/verify', element: <VerificationPage /> },
             { path: '/system/health', element: <HealthPage /> },
           ],

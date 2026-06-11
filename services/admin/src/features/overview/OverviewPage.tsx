@@ -12,8 +12,14 @@ import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useQuery } from '@tanstack/react-query'
+
+import { runStatus } from '@/api/agents'
+import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
 import { useLive } from '@/core/live'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { loadTrackedRuns } from '@/features/agents/runHistory'
+import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
 import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
@@ -299,6 +305,59 @@ function ExperimentsCard() {
   )
 }
 
+function AgentsCard() {
+  const { active } = useWorkspace()
+  const latest = active ? (loadTrackedRuns(active.id)[0] ?? null) : null
+
+  const statusQuery = useQuery({
+    queryKey: [active?.id ?? 'none', 'agent-run-overview', latest?.run_id ?? 'none'],
+    enabled: active !== null && latest !== null,
+    queryFn: ({ signal }) => runStatus(serviceConnection(active!, 'agents'), latest!.run_id, { signal }),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status && TERMINAL_RUN_STATUSES.has(status) ? false : 10_000
+    },
+  })
+
+  const status = statusQuery.data?.status ?? latest?.last_status ?? null
+  const awaitingApproval = status === 'waiting_approval'
+
+  return (
+    <Card className={awaitingApproval ? 'border-amber-400 dark:border-amber-700' : undefined}>
+      <CardHeader>
+        <CardTitle>Agents</CardTitle>
+        <CardDescription>
+          {latest ? 'Latest run triggered from this browser.' : 'The autonomous loop, on demand.'}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {awaitingApproval && latest ? (
+          <Link
+            to={`/agents/runs/${encodeURIComponent(latest.run_id)}`}
+            className="block rounded-md border border-amber-400 bg-amber-50 p-3 font-medium text-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            ⏳ Awaiting your approval — review the run →
+          </Link>
+        ) : null}
+        {latest ? (
+          <Link
+            to={`/agents/runs/${encodeURIComponent(latest.run_id)}`}
+            className="flex items-center justify-between gap-2 hover:underline"
+          >
+            <code className="font-mono text-xs">{latest.run_id.slice(0, 8)}…</code>
+            {status ? <RunStatusPill status={status} /> : null}
+          </Link>
+        ) : (
+          <p className="text-muted-foreground">No runs yet.</p>
+        )}
+        <Link to="/agents/trigger" className="block text-sm font-medium underline underline-offset-4">
+          Trigger a run →
+        </Link>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function OverviewPage() {
   return (
     <div className="space-y-6">
@@ -313,7 +372,10 @@ export function OverviewPage() {
       </div>
       <div className="grid items-start gap-4 lg:grid-cols-3">
         <FlagsSummaryCard />
-        <LiveStreamCard />
+        <div className="space-y-4">
+          <AgentsCard />
+          <LiveStreamCard />
+        </div>
       </div>
     </div>
   )
