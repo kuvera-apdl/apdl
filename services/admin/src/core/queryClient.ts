@@ -27,4 +27,5 @@ export const queryKeys = {
   staleFlagsPrefix: (wsId: string) => [wsId, 'flags-stale'] as const,
   staleFlags: (wsId: string, olderThanDays: number) => [wsId, 'flags-stale', olderThanDays] as const,
   serviceHealth: (wsId: string, service: string) => [wsId, 'health', service] as const,
+  experiments: (wsId: string) => [wsId, 'experiments'] as const,
 }

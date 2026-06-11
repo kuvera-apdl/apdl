@@ -73,6 +73,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           } else {
             toast.message('Flag configuration changed', { description: 'Views refreshed.' })
           }
+          return
+        }
+        if (name === 'experiment_update') {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.experiments(wsId) })
         }
       },
     })

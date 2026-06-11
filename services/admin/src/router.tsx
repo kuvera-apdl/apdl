@@ -7,7 +7,13 @@ import { CohortsPage } from '@/features/analytics/CohortsPage'
 import { EventsExplorerPage } from '@/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '@/features/analytics/FunnelsPage'
 import { RetentionPage } from '@/features/analytics/RetentionPage'
+import {
+  ExperimentCreatePage,
+  ExperimentDetailPage,
+} from '@/features/experiments/ExperimentDetailPage'
+import { ExperimentListPage } from '@/features/experiments/ExperimentListPage'
 import { FlagEditorPage } from '@/features/flags/editor/FlagEditorPage'
+import { VerificationPage } from '@/features/verify/VerificationPage'
 import { FlagDetailPage } from '@/features/flags/FlagDetailPage'
 import { FlagListPage } from '@/features/flags/FlagListPage'
 import { HygienePage } from '@/features/flags/HygienePage'
@@ -45,6 +51,10 @@ export function createRouter() {
             { path: '/analytics/funnels', element: <FunnelsPage /> },
             { path: '/analytics/retention', element: <RetentionPage /> },
             { path: '/analytics/cohorts', element: <CohortsPage /> },
+            { path: '/experiments', element: <ExperimentListPage /> },
+            { path: '/experiments/new', element: <ExperimentCreatePage /> },
+            { path: '/experiments/:key', element: <ExperimentDetailPage /> },
+            { path: '/settings/verify', element: <VerificationPage /> },
             { path: '/system/health', element: <HealthPage /> },
           ],
         },

@@ -1,10 +1,12 @@
 import {
   Activity,
+  BadgeCheck,
   BarChart3,
   Check,
   ChevronsUpDown,
   Filter,
   Flag,
+  FlaskConical,
   Grid3x3,
   LayoutDashboard,
   Monitor,
@@ -73,6 +75,17 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    label: 'Experiments',
+    items: [
+      {
+        to: '/experiments',
+        label: 'Experiments',
+        icon: FlaskConical,
+        isActive: (path) => path === '/experiments' || path.startsWith('/experiments/'),
+      },
+    ],
+  },
+  {
     label: 'Analytics',
     items: [
       {
@@ -109,6 +122,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'System health',
         icon: Activity,
         isActive: (path) => path === '/system/health',
+      },
+      {
+        to: '/settings/verify',
+        label: 'Verify integration',
+        icon: BadgeCheck,
+        isActive: (path) => path === '/settings/verify',
       },
       {
         to: '/settings/workspace',

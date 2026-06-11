@@ -2,6 +2,7 @@ import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
 import { SERVICE_DESCRIPTORS } from '@/api/health'
+import { countEvents, timeseriesEvents } from '@/api/query'
 import type { FlagState } from '@/api/types/flags'
 import { CurlButton } from '@/components/shared/CurlButton'
 import { PageHeader } from '@/components/shared/PageHeader'
@@ -13,6 +14,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { useLive } from '@/core/live'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { TimeseriesChart } from '@/features/analytics/charts'
+import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
+import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
+import { useExperimentsQuery } from '@/features/experiments/hooks'
+import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 import { useFlagsQuery } from '@/features/flags/hooks'
 import { ServiceHealthCard } from '@/features/system/ServiceHealthCard'
 import { useServiceHealthQuery } from '@/features/system/hooks'
@@ -183,6 +189,116 @@ function LiveStreamCard() {
   )
 }
 
+function ThroughputCard() {
+  const { projectId } = useWorkspace()
+  const tsBody = projectId
+    ? {
+        project_id: projectId,
+        ...lastDays(2),
+        selector: { event_name: '$pageview', filters: [] },
+        interval: '1 HOUR' as const,
+      }
+    : null
+  const tsQuery = useAnalyticsQuery('overview-throughput', tsBody, timeseriesEvents)
+  const countBody = projectId
+    ? {
+        project_id: projectId,
+        ...lastDays(1),
+        selectors: COMMON_EVENTS.map((event) => ({ event_name: event, filters: [] })),
+      }
+    : null
+  const countQuery = useAnalyticsQuery('overview-counts', countBody, countEvents)
+
+  const totalToday = countQuery.data?.total_events ?? null
+  const buckets = tsQuery.data?.buckets ?? []
+
+  return (
+    <Card className="lg:col-span-2">
+      <CardHeader>
+        <CardTitle>Event throughput</CardTitle>
+        <CardDescription>
+          {totalToday !== null
+            ? `${totalToday.toLocaleString()} events today across known event names · hourly $pageview below`
+            : 'Hourly $pageview volume (the API has no match-all selector yet — gap G4).'}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {tsQuery.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : tsQuery.error ? (
+          <ErrorState error={tsQuery.error} onRetry={() => void tsQuery.refetch()} />
+        ) : buckets.length === 0 && (totalToday === null || totalToday === 0) ? (
+          <EmptyState title="No events in the last 24h" description="Is the SDK wired up?">
+            <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
+              Verify your integration →
+            </Link>
+          </EmptyState>
+        ) : (
+          <TimeseriesChart buckets={buckets} mode="bar" />
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function daysSince(date: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+  const start = new Date(`${date}T00:00:00`)
+  if (Number.isNaN(start.getTime())) return null
+  return Math.max(0, Math.floor((Date.now() - start.getTime()) / 86_400_000))
+}
+
+function ExperimentsCard() {
+  const experimentsQuery = useExperimentsQuery()
+  const experiments = experimentsQuery.data?.experiments ?? []
+  const running = experiments.filter((experiment) => experiment.status === 'running')
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Experiments</CardTitle>
+        <CardDescription>
+          {running.length} running · {experiments.length} total
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {experimentsQuery.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : running.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Nothing running.{' '}
+            <Link to="/experiments" className="font-medium underline underline-offset-4">
+              All experiments →
+            </Link>
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {running.slice(0, 5).map((experiment) => {
+              const days = daysSince(experiment.start_date)
+              return (
+                <li key={experiment.key}>
+                  <Link
+                    to={`/experiments/${encodeURIComponent(experiment.key)}`}
+                    className="flex items-center justify-between gap-2 py-2 hover:bg-accent/40"
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <code className="truncate font-mono text-sm">{experiment.key}</code>
+                      <ExperimentStatusPill status={experiment.status} />
+                    </span>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {days !== null ? `day ${days + 1}` : ''}
+                    </span>
+                  </Link>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export function OverviewPage() {
   return (
     <div className="space-y-6">
@@ -191,6 +307,10 @@ export function OverviewPage() {
         description="Is the Loop alive — service health, flag state, and live distribution at a glance."
       />
       <HealthStrip />
+      <div className="grid items-start gap-4 lg:grid-cols-3">
+        <ThroughputCard />
+        <ExperimentsCard />
+      </div>
       <div className="grid items-start gap-4 lg:grid-cols-3">
         <FlagsSummaryCard />
         <LiveStreamCard />
