@@ -3,6 +3,10 @@ import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
 import { EmptyState } from '@/components/shared/PanelStates'
 import { useWorkspace } from '@/core/workspace'
+import { CohortsPage } from '@/features/analytics/CohortsPage'
+import { EventsExplorerPage } from '@/features/analytics/EventsExplorerPage'
+import { FunnelsPage } from '@/features/analytics/FunnelsPage'
+import { RetentionPage } from '@/features/analytics/RetentionPage'
 import { FlagEditorPage } from '@/features/flags/editor/FlagEditorPage'
 import { FlagDetailPage } from '@/features/flags/FlagDetailPage'
 import { FlagListPage } from '@/features/flags/FlagListPage'
@@ -37,6 +41,10 @@ export function createRouter() {
             { path: '/flags/hygiene', element: <HygienePage /> },
             { path: '/flags/:key', element: <FlagDetailPage /> },
             { path: '/flags/:key/edit', element: <FlagEditorPage /> },
+            { path: '/analytics/events', element: <EventsExplorerPage /> },
+            { path: '/analytics/funnels', element: <FunnelsPage /> },
+            { path: '/analytics/retention', element: <RetentionPage /> },
+            { path: '/analytics/cohorts', element: <CohortsPage /> },
             { path: '/system/health', element: <HealthPage /> },
           ],
         },

@@ -3,6 +3,8 @@
 // semantic, never transient).
 import type { ZodType } from 'zod'
 
+import type { CurlSpec } from '@/lib/curl'
+
 export interface ServiceConnection {
   baseUrl: string
   apiKey: string
@@ -59,6 +61,25 @@ interface ErrorEnvelope {
   error?: unknown
   message?: unknown
   detail?: unknown
+}
+
+/** CurlSpec mirroring exactly what request() would send. */
+export function apiCurl(
+  conn: ServiceConnection,
+  method: HttpMethod,
+  path: string,
+  options: { query?: QueryParams; body?: unknown } = {},
+): CurlSpec {
+  const headers: Record<string, string> = {}
+  if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
+  if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  return {
+    method,
+    url: buildUrl(conn.baseUrl, path, options.query),
+    headers,
+    ...(options.body !== undefined ? { body: options.body } : {}),
+  }
 }
 
 export function errorFromResponse(status: number, body: unknown, statusText: string): ApiError {
