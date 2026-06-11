@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "../src/**/*.ts",
+    "../src/**/*.tsx",
+    "../vite.config.ts",
+    "../vitest.config.ts",
+    "../tailwind.config.ts"
+  ]
+}

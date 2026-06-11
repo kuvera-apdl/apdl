@@ -1,0 +1,44 @@
+import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
+
+import { AppShell } from '@/components/layout/AppShell'
+import { EmptyState } from '@/components/shared/PanelStates'
+import { useWorkspace } from '@/core/workspace'
+import { FlagDetailPage } from '@/features/flags/FlagDetailPage'
+import { FlagListPage } from '@/features/flags/FlagListPage'
+import { HygienePage } from '@/features/flags/HygienePage'
+import { OverviewPage } from '@/features/overview/OverviewPage'
+import { WorkspaceSettingsPage } from '@/features/settings/WorkspaceSettingsPage'
+import { HealthPage } from '@/features/system/HealthPage'
+
+// First-run gate (plan §5.1): no workspace → settings.
+function RequireWorkspace() {
+  const { active } = useWorkspace()
+  if (!active) return <Navigate to="/settings/workspace" replace />
+  return <Outlet />
+}
+
+function NotFoundPage() {
+  return <EmptyState title="Page not found" description="This route does not exist." />
+}
+
+export function createRouter() {
+  return createBrowserRouter([
+    {
+      element: <AppShell />,
+      children: [
+        { path: '/settings/workspace', element: <WorkspaceSettingsPage /> },
+        {
+          element: <RequireWorkspace />,
+          children: [
+            { path: '/', element: <OverviewPage /> },
+            { path: '/flags', element: <FlagListPage /> },
+            { path: '/flags/hygiene', element: <HygienePage /> },
+            { path: '/flags/:key', element: <FlagDetailPage /> },
+            { path: '/system/health', element: <HealthPage /> },
+          ],
+        },
+        { path: '*', element: <NotFoundPage /> },
+      ],
+    },
+  ])
+}

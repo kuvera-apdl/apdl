@@ -23,6 +23,23 @@ jobs:
       - run: npm run build
         working-directory: sdk/javascript
 
+  admin-console:
+    name: Admin Console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+        working-directory: services/admin
+      - run: npm run lint
+        working-directory: services/admin
+      - run: npm test
+        working-directory: services/admin
+      - run: npm run build
+        working-directory: services/admin
+
   python-sdk:
     name: Python SDK
     runs-on: ubuntu-latest

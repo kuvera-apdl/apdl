@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -22,6 +22,8 @@ lint-staged:
 deps:
 	@echo "==> Installing SDK dependencies"
 	cd sdk/javascript && npm install
+	@echo "==> Installing Admin Console dependencies"
+	cd services/admin && npm install
 	@echo "==> Setting up Ingestion service"
 	cd services/ingestion && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Config service"
@@ -37,13 +39,13 @@ deps:
 	@echo "==> Setting up Python SDK"
 	cd sdk/python && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
-build: build-sdk
+build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-etl
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-etl test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl lint-admin
 
-clean: clean-sdk
+clean: clean-sdk clean-admin
 
 # Parallel local CI mirror: lint + test every package at once.
 check:
@@ -75,6 +77,24 @@ lint-sdk:
 
 release-sdk:
 	cd sdk/javascript && npm run release:check
+
+# ─── Admin Console (TypeScript) ──────────────────────────────
+
+run-admin:
+	cd services/admin && npm run dev
+
+build-admin:
+	cd services/admin && npm run build
+
+test-admin:
+	cd services/admin && npm test
+
+lint-admin:
+	cd services/admin && npm run lint
+
+clean-admin:
+	rm -rf services/admin/dist services/admin/node_modules
+
 # ─── SDK (Python) ────────────────────────────────────────────
 
 test-sdk-python:
@@ -171,4 +191,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl test-etl
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl test-etl lint-admin test-admin
