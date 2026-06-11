@@ -33,18 +33,27 @@ def is_in_rollout(flag_key: str, salt: str, unit_id: str, percentage: float) -> 
 
 
 def _resolve_attribute(attribute: str, ctx: dict) -> tuple[bool, Any]:
+    # Presence contract (canonical, must stay byte-for-byte identical across the
+    # config service, the JS SDK, and the Python SDK): an attribute is *present*
+    # only when its resolved value is non-null. A null/None value — whether an
+    # explicit ``user_id: null`` identity or a ``null`` trait — is treated as
+    # ABSENT, exactly like a missing key. This is deliberate: a null is never
+    # stringified into a value comparison, which is what keeps the three
+    # evaluators in lockstep (otherwise a null would compare against ``str(None)``
+    # = "None" here but ``String(null)`` = "null" in JS). Falsy non-null values
+    # (``""``, ``0``, ``false``) remain present. See fixtures/gates/parity.json.
     if attribute == "user_id":
-        if "user_id" in ctx:
-            return True, ctx.get("user_id")
-        return False, None
+        value = ctx.get("user_id")
+        return value is not None, value
     if attribute == "anonymous_id":
-        if "anonymous_id" in ctx:
-            return True, ctx.get("anonymous_id")
-        return False, None
+        value = ctx.get("anonymous_id")
+        return value is not None, value
 
     attributes = ctx.get("attributes", {})
-    if isinstance(attributes, dict) and attribute in attributes:
-        return True, attributes[attribute]
+    if isinstance(attributes, dict):
+        value = attributes.get(attribute)
+        if value is not None:
+            return True, value
     return False, None
 
 
@@ -200,6 +209,12 @@ def evaluate(flag: dict, ctx: dict) -> dict:
     """Evaluate one canonical flag config against a context."""
     result = _base_result(flag)
 
+    # The SDK evaluators gate only on ``enabled`` and never look at ``state``.
+    # That is safe — not a parity gap — because the flags table enforces
+    # ``CHECK ((state = 'active') = enabled)`` (see main.py), so a non-active flag
+    # is always ``enabled = false``. An "archived-but-enabled" flag is therefore
+    # unrepresentable, and this server-side ``state`` check is a redundant guard,
+    # not a behavior the clients must mirror. Both branches yield ``disabled``.
     if flag.get("state", "active") != "active":
         result["reason"] = "disabled"
         return result

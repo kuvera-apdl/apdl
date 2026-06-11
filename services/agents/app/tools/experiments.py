@@ -118,6 +118,7 @@ async def get_experiment_results(
     metric: str,
     project_id: str = "default",
     method: str = "frequentist",
+    flag_key: str | None = None,
 ) -> dict[str, Any]:
     """Get statistical results for a running or completed experiment.
 
@@ -126,6 +127,10 @@ async def get_experiment_results(
         metric: The conversion/metric event to evaluate.
         project_id: Project ID.
         method: Statistical method — "frequentist", "bayesian", or "sequential".
+        flag_key: Feature flag key whose canonical variant exposures back this
+            experiment. The query endpoint now requires it; defaults to
+            ``experiment_id``, matching ``create_experiment_config`` which keys
+            the underlying flag on the experiment id.
 
     Returns:
         Full experiment analysis results.
@@ -133,7 +138,12 @@ async def get_experiment_results(
     async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
         resp = await client.get(
             f"/v1/query/experiment/{experiment_id}",
-            params={"metric": metric, "method": method, "project_id": project_id},
+            params={
+                "metric": metric,
+                "method": method,
+                "project_id": project_id,
+                "flag_key": flag_key or experiment_id,
+            },
         )
         resp.raise_for_status()
         return resp.json()

@@ -369,6 +369,49 @@
         "bucket_by": "anonymous_id",
         "config_version": 2
       }
+    },
+    {
+      "name": "explicit-null identity is absent for an identity-targeted rule",
+      "flag": {
+        "key": "null_identity",
+        "enabled": true,
+        "default_variant": "control",
+        "variants": [
+          { "key": "control", "weight": 1 },
+          { "key": "treatment", "weight": 1 }
+        ],
+        "salt": "salt_123",
+        "rules": [
+          {
+            "id": "rule_uid",
+            "name": "Targets explicit user_id",
+            "conditions": [
+              { "attribute": "user_id", "operator": "equals", "value": "None" }
+            ],
+            "rollout": { "percentage": 100, "bucket_by": "anonymous_id" }
+          }
+        ],
+        "fallthrough": {
+          "rollout": { "percentage": 100, "bucket_by": "anonymous_id" }
+        },
+        "version": 1
+      },
+      "context": {
+        "user_id": null,
+        "anonymous_id": "anon_xyz",
+        "attributes": {}
+      },
+      "result": {
+        "key": "null_identity",
+        "variant": "treatment",
+        "reason": "fallthrough",
+        "rule_id": null,
+        "rollout_bucket": 15.570232205924167,
+        "variant_bucket": 74.76585753605838,
+        "rollout_percentage": 100,
+        "bucket_by": "anonymous_id",
+        "config_version": 1
+      }
     }
   ]
 }

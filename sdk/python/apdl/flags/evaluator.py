@@ -269,15 +269,19 @@ class FlagEvaluator:
 
     @staticmethod
     def _resolve_attribute(attribute: str, ctx: EvalContext) -> tuple[bool, Any]:
-        # Identity that the caller did not provide (None) is absent, not "".
+        # Presence contract — canonical, must match services/config/app/flags/
+        # evaluator.py and sdk/javascript/src/flags/evaluator.ts byte-for-byte:
+        # an attribute is *present* only when its value is non-null. A null/None
+        # value (an explicit ``user_id=None`` identity or a ``null`` trait) is
+        # ABSENT, like a missing key — it is never stringified into a value
+        # comparison, so the three evaluators stay in lockstep (a null would
+        # otherwise compare against "None" here vs "null" in JS). Falsy non-null
+        # values (``""``, ``0``, ``False``) stay present. See parity.json.
         if attribute == "user_id":
-            if ctx.user_id is not None:
-                return True, ctx.user_id
-            return False, None
+            return ctx.user_id is not None, ctx.user_id
         if attribute == "anonymous_id":
-            if ctx.anonymous_id is not None:
-                return True, ctx.anonymous_id
-            return False, None
-        if attribute in ctx.attributes:
-            return True, ctx.attributes[attribute]
+            return ctx.anonymous_id is not None, ctx.anonymous_id
+        value = ctx.attributes.get(attribute)
+        if value is not None:
+            return True, value
         return False, None

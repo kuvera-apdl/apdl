@@ -250,7 +250,7 @@ per-flag audit history — see the [config service README](services/config/READM
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
 | `POST` | `/v1/query/cohort` | Cohort analysis |
 | `POST` | `/v1/query/retention` | Retention curves |
-| `GET` | `/v1/query/experiment/:id` | Experiment results with statistical tests |
+| `GET` | `/v1/query/experiment/:id?metric=…&flag_key=…` | Experiment results with statistical tests (`flag_key` required) |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate flag guardrails |
 | `GET` | `/health`, `/ready` | Health / readiness |
 

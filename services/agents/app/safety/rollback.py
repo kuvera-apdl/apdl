@@ -95,7 +95,7 @@ class ExperimentRollbackMonitor:
 
         # Fetch current experiment results
         current = await self._fetch_current_metrics(
-            project_id, experiment_id, primary_metric_event
+            project_id, experiment_id, flag_key, primary_metric_event
         )
 
         # Check error rate
@@ -181,6 +181,7 @@ class ExperimentRollbackMonitor:
         self,
         project_id: str,
         experiment_id: str,
+        flag_key: str,
         primary_metric_event: str,
     ) -> MetricSnapshot:
         """Fetch current metric values from the query service.
@@ -198,6 +199,7 @@ class ExperimentRollbackMonitor:
                     params={
                         "metric": primary_metric_event,
                         "project_id": project_id,
+                        "flag_key": flag_key,
                     },
                 )
                 resp.raise_for_status()

@@ -1,4 +1,4 @@
--- Migration 007: decisions_v2 — unified analytical store for all "decisions".
+-- Migration 009: decisions_v2 — unified analytical store for all "decisions".
 -- Target: ClickHouse
 --
 -- A "decision" is anything produced by APDL itself rather than the user:

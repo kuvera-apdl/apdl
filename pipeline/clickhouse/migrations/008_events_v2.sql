@@ -1,6 +1,6 @@
--- Migration 006: events_v2 — canonical envelope table for behavior events.
+-- Migration 008: events_v2 — canonical envelope table for behavior events.
 -- Target: ClickHouse
--- Apply with: clickhouse-client --multiquery < 006_events_v2.sql
+-- Apply with: clickhouse-client --multiquery < 008_events_v2.sql
 --
 -- Notes:
 --   * Engine is ReplacingMergeTree keyed on (project_id, idempotency_key) so
