@@ -1,4 +1,4 @@
--- Migration 008: feeds_v2 — canonical envelope for external partner feeds.
+-- Migration 010: feeds_v2 — canonical envelope for external partner feeds.
 -- Target: ClickHouse
 --
 -- This is the landing table for anything ingested from outside APDL: real EDI

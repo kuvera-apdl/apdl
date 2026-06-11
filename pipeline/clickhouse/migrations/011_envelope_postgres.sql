@@ -1,6 +1,6 @@
--- Migration 009: Align Postgres tables to the canonical envelope, add llm_calls.
+-- Migration 011: Align Postgres tables to the canonical envelope, add llm_calls.
 -- Target: PostgreSQL
--- Apply with: psql $POSTGRES_URL < 009_envelope_postgres.sql
+-- Apply with: psql $POSTGRES_URL < 011_envelope_postgres.sql
 --
 -- Three things happen here:
 --   1. agent_audit_log gets envelope columns. It remains the source of truth
