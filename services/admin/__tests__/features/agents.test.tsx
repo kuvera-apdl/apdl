@@ -24,6 +24,23 @@ const server = setupServer(
     requests.push({ path: 'trigger', body: await request.json() })
     return HttpResponse.json({ run_id: 'run-abc-123', status: 'started' })
   }),
+  http.get('http://localhost:8083/v1/agents/runs', ({ request }) => {
+    const url = new URL(request.url)
+    requests.push({ path: 'runs-list', body: Object.fromEntries(url.searchParams) })
+    const runs = [
+      {
+        run_id: 'run-srv-1',
+        project_id: 'demo',
+        status: 'completed',
+        phase: 'done',
+        insights_count: 3,
+        experiments_count: 1,
+        started_at: '2026-06-10T11:00:00+00:00',
+        updated_at: '2026-06-10T11:05:00+00:00',
+      },
+    ].filter((run) => !url.searchParams.get('status') || run.status === url.searchParams.get('status'))
+    return HttpResponse.json({ runs, count: runs.length })
+  }),
   http.get('http://localhost:8083/v1/agents/:runId/status', ({ params }) =>
     HttpResponse.json({
       run_id: String(params.runId),
@@ -34,6 +51,37 @@ const server = setupServer(
       experiments_count: 1,
       started_at: '2026-06-10T12:00:00+00:00',
       updated_at: '2026-06-10T12:01:00+00:00',
+    }),
+  ),
+  http.get('http://localhost:8083/v1/agents/:runId/results', () =>
+    HttpResponse.json({
+      run_id: 'run-abc-123',
+      insights: [{ title: 'Checkout drop-off', severity: 'high' }],
+      experiment_designs: [
+        { hypothesis: 'Bigger CTA converts better', flag_key: 'checkout-cta', metric: 'purchase' },
+      ],
+      personalizations: [],
+      feature_proposals: [],
+    }),
+  ),
+  http.get('http://localhost:8083/v1/agents/:runId/audit', () =>
+    HttpResponse.json({
+      run_id: 'run-abc-123',
+      audit: [
+        {
+          id: 1,
+          run_id: 'run-abc-123',
+          action_type: 'experiment_design_complete',
+          config: { produced: 'experiment_designs' },
+          safety_result: {
+            risk_level: 'medium',
+            checks: [{ name: 'blast_radius', passed: true }],
+          },
+          approval_status: 'pending',
+          created_at: '2026-06-10T12:01:00+00:00',
+        },
+      ],
+      count: 1,
     }),
   ),
   http.post('http://localhost:8083/v1/agents/:runId/approve', async ({ request, params }) => {
@@ -136,7 +184,7 @@ describe('TriggerPage', () => {
 })
 
 describe('RunMonitorPage', () => {
-  test('shows the approval gate and approves', async () => {
+  test('renders the rich approval panel with the gated experiment design, then approves', async () => {
     renderWithProviders(
       <Routes>
         <Route path="/agents/runs/:runId" element={<RunMonitorPage />} />
@@ -145,6 +193,10 @@ describe('RunMonitorPage', () => {
     )
 
     expect(await screen.findByText(/experiment design awaiting approval/i)).toBeInTheDocument()
+    // Phase 7: the panel shows WHAT is being approved (gap G3). The design
+    // also appears in the Outputs card, hence getAllByText.
+    expect(await screen.findByText("What you're approving (1)")).toBeInTheDocument()
+    expect(screen.getAllByText('Bigger CTA converts better').length).toBeGreaterThanOrEqual(1)
     // Reject requires a comment.
     expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
 
@@ -158,16 +210,37 @@ describe('RunMonitorPage', () => {
     expect(await screen.findByText('approved')).toBeInTheDocument()
   })
 
-  test('renders counters with the G3 honesty note', async () => {
-    monitorStatus = 'running'
-    monitorPhase = 'behavior_analysis'
+  test('renders persisted outputs and the agent audit trail', async () => {
+    monitorStatus = 'completed'
+    monitorPhase = 'done'
     renderWithProviders(
       <Routes>
         <Route path="/agents/runs/:runId" element={<RunMonitorPage />} />
       </Routes>,
       '/agents/runs/run-abc-123',
     )
-    expect(await screen.findByText('4')).toBeInTheDocument()
-    expect(screen.getByText(/run-results endpoint/)).toBeInTheDocument()
+    expect(await screen.findByText('Outputs')).toBeInTheDocument()
+    expect(screen.getByText('Checkout drop-off')).toBeInTheDocument()
+    // Audit trail (gap G2) with safety checks rendered pass/fail.
+    expect(await screen.findByText('experiment_design_complete')).toBeInTheDocument()
+    expect(screen.getByText('blast_radius')).toBeInTheDocument()
+    expect(screen.getByText('pending')).toBeInTheDocument()
+  })
+})
+
+describe('RunsPage (server list, gap G1)', () => {
+  test('lists runs from the server with the project filter applied', async () => {
+    const { RunsPage } = await import('../../src/features/agents/RunsPage')
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents" element={<RunsPage />} />
+      </Routes>,
+      '/agents',
+    )
+    expect(await screen.findByText(/run-srv-/)).toBeInTheDocument()
+    // "completed" appears in both the status filter <option> and the pill.
+    expect(screen.getAllByText('completed').length).toBeGreaterThanOrEqual(2)
+    const listCall = requests.find((entry) => entry.path === 'runs-list')
+    expect(listCall?.body).toMatchObject({ project_id: 'demo', limit: '50' })
   })
 })

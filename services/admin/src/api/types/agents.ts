@@ -4,6 +4,10 @@ import type {
   analysisTypeSchema,
   approvalRequestSchema,
   approvalResponseSchema,
+  runAuditEntrySchema,
+  runAuditResponseSchema,
+  runResultsSchema,
+  runsListResponseSchema,
   runStatusSchema,
   triggerRequestSchema,
   triggerResponseSchema,
@@ -17,3 +21,7 @@ export type TriggerResponse = z.infer<typeof triggerResponseSchema>
 export type RunStatus = z.infer<typeof runStatusSchema>
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>
 export type ApprovalResponse = z.infer<typeof approvalResponseSchema>
+export type RunsListResponse = z.infer<typeof runsListResponseSchema>
+export type RunResults = z.infer<typeof runResultsSchema>
+export type RunAuditEntry = z.infer<typeof runAuditEntrySchema>
+export type RunAuditResponse = z.infer<typeof runAuditResponseSchema>

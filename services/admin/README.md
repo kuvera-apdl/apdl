@@ -7,7 +7,7 @@ backend of its own and persists nothing server-side; all configuration
 "workspaces".
 
 Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan.md`
-(vault). This package currently implements **Phases 0–3**:
+(vault). This package implements **all plan phases (0–7)**:
 
 - App shell: sidebar navigation, workspace switcher, SSE liveness indicator,
   dark mode.
@@ -29,12 +29,34 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   server-side verification via `POST /v1/evaluate` (internal token), 10k-user
   population simulator (also available pre-save in the editor), and a
   served-config panel showing the exact SSE payload SDKs receive.
+- Analytics (`/analytics/*`): events explorer (counts / timeseries /
+  breakdown), funnels with drop-off highlighting, retention heatmap, cohort
+  comparison — with saved views (localStorage), CSV export, and raw-JSON
+  drawers. The query-service filter vocabulary is a distinct type from flag
+  rule conditions (AD-6).
+- Experiments (`/experiments`): list/editor against the deliberately loose
+  pre-G5 schema (JSON editors, last-write-wins warning) and a Results tab
+  running frequentist / bayesian / sequential statistics with exposure-count
+  sanity checks and a guardrail glance.
+- Integration verification (`/settings/verify`): the five-step console-native
+  `dev.sh smoke` — ingest → pipeline poll (re-send at attempt 5) → flag
+  bootstrap with X-Cache observation → SSE freshness.
+- Agents (`/agents`): trigger form with the gating matrix mirrored (and
+  drift-tested) against `framework/gating.py`, server-side run history,
+  run monitor with phase stepper, **rich approvals** showing the exact
+  experiment designs / proposals being approved, per-run agent audit trail
+  with safety-check verdicts, and persisted run outputs. (The backing
+  endpoints — runs list, run results, run audit — were added to the agents
+  service as plan gaps G1–G3.)
 - Live updates: one `EventSource` on `GET /v1/stream` per workspace; SSE events
   invalidate TanStack Query caches (admin views re-fetch rather than trusting
   the client payload). Toasts announce changes made outside this console.
 - Every panel and write dialog reproduces its exact API call as **curl**.
 
-Analytics, experiments, and agent screens are later phases (plan §11).
+Remaining backend-tracked work: G4 (event-name discovery for autocomplete),
+G5 (experiment canonicalization), G6–G8 (guardrail/pipeline observability),
+G9 (auth on query/agents — required before any non-localhost deployment),
+G10 (pagination).
 
 ## Stack
 

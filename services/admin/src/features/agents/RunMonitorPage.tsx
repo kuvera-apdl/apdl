@@ -8,10 +8,10 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { approveRun, runStatus, runStatusCurl } from '@/api/agents'
+import { approveRun, runResults, runResultsCurl, runStatus, runStatusCurl } from '@/api/agents'
 import { ApiError } from '@/api/http'
 import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
-import type { RunStatus } from '@/api/types/agents'
+import type { RunResults, RunStatus } from '@/api/types/agents'
 import { CurlButton } from '@/components/shared/CurlButton'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -22,6 +22,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { ResultList } from '@/features/agents/ResultCards'
+import { RunAuditSection } from '@/features/agents/RunAuditSection'
 import { loadTrackedRuns, updateTrackedRunStatus } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { useNow } from '@/lib/hooks'
@@ -85,7 +87,30 @@ function PhaseStepper({ run, requested }: { run: RunStatus; requested: Set<strin
   )
 }
 
-function ApprovalPanel({ run, onDecided }: { run: RunStatus; onDecided: () => void }) {
+const GATED_RESULT_KEYS = {
+  experiment_design: 'experiment_designs',
+  personalization: 'personalizations',
+  feature_proposal: 'feature_proposals',
+  behavior_analysis: 'insights',
+} as const
+
+function gatedItems(run: RunStatus, results: RunResults | null): { items: unknown[]; kind: keyof typeof GATED_RESULT_KEYS } | null {
+  if (!results) return null
+  const agent = run.phase.replace(/_approval$/, '') as keyof typeof GATED_RESULT_KEYS
+  const key = GATED_RESULT_KEYS[agent]
+  if (!key) return null
+  return { items: results[key], kind: agent }
+}
+
+function ApprovalPanel({
+  run,
+  results,
+  onDecided,
+}: {
+  run: RunStatus
+  results: RunResults | null
+  onDecided: () => void
+}) {
   const { active } = useWorkspace()
   const [comment, setComment] = useState('')
   const [submitting, setSubmitting] = useState<'approve' | 'reject' | null>(null)
@@ -118,6 +143,7 @@ function ApprovalPanel({ run, onDecided }: { run: RunStatus; onDecided: () => vo
   }
 
   const agent = run.phase.replace(/_approval$/, '').replace(/_/g, ' ')
+  const gated = gatedItems(run, results)
 
   return (
     <Card className="border-amber-400 dark:border-amber-700">
@@ -127,12 +153,15 @@ function ApprovalPanel({ run, onDecided }: { run: RunStatus; onDecided: () => vo
           {agent} awaiting approval
         </CardTitle>
         <CardDescription>
-          This run is gated by its autonomy level. Until the run-results endpoint lands (plan gap
-          G3), the API exposes only counts — review the agents-service logs for the full payload
-          being approved.
+          {gated && gated.items.length > 0
+            ? 'This run is gated by its autonomy level — review exactly what would be applied below.'
+            : 'This run is gated by its autonomy level. No persisted payload is available for this phase — review the agents-service logs before deciding.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        {gated && gated.items.length > 0 ? (
+          <ResultList label="What you're approving" items={gated.items} kind={gated.kind === 'behavior_analysis' ? 'insight' : gated.kind} />
+        ) : null}
         <div className="space-y-1.5">
           <Label htmlFor="approval-comment">Comment (required when rejecting)</Label>
           <Input
@@ -179,6 +208,14 @@ export function RunMonitorPage() {
   })
 
   const run = statusQuery.data
+
+  const resultsQuery = useQuery({
+    queryKey: [active?.id ?? 'none', 'agent-run', runId, 'results'],
+    enabled: active !== null && runId !== '' && run !== undefined,
+    queryFn: ({ signal }) => runResults(serviceConnection(active!, 'agents'), runId, { signal }),
+    refetchInterval: run && !TERMINAL_RUN_STATUSES.has(run.status) ? 5000 : false,
+  })
+  const results = resultsQuery.data ?? null
 
   useEffect(() => {
     if (active && run) updateTrackedRunStatus(active.id, run.run_id, run.status)
@@ -252,7 +289,14 @@ export function RunMonitorPage() {
       </Card>
 
       {run.status === 'waiting_approval' ? (
-        <ApprovalPanel run={run} onDecided={() => void statusQuery.refetch()} />
+        <ApprovalPanel
+          run={run}
+          results={results}
+          onDecided={() => {
+            void statusQuery.refetch()
+            void resultsQuery.refetch()
+          }}
+        />
       ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -271,10 +315,39 @@ export function RunMonitorPage() {
           </CardContent>
         </Card>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Counts are all the detail the status API exposes today — full insight and proposal payloads
-        require the run-results endpoint (plan §8 G3).
-      </p>
+      {resultsQuery.error ? (
+        <p className="text-xs text-muted-foreground">
+          Full payloads unavailable — this agents service predates the run-results endpoint (plan
+          §8 G3); counts are all the status API exposes.
+        </p>
+      ) : null}
+
+      {results &&
+      (results.insights.length > 0 ||
+        results.experiment_designs.length > 0 ||
+        results.personalizations.length > 0 ||
+        results.feature_proposals.length > 0) ? (
+        <Card>
+          <CardHeader className="flex-row items-start justify-between space-y-0">
+            <div className="space-y-1.5">
+              <CardTitle>Outputs</CardTitle>
+              <CardDescription>Persisted per agent at phase completion.</CardDescription>
+            </div>
+            {active ? (
+              <CurlButton
+                spec={runResultsCurl(serviceConnection(active, 'agents'), runId)}
+                title="Run results"
+              />
+            ) : null}
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <ResultList label="Insights" items={results.insights} kind="insight" />
+            <ResultList label="Experiment designs" items={results.experiment_designs} kind="experiment_design" />
+            <ResultList label="Personalizations" items={results.personalizations} kind="personalization" />
+            <ResultList label="Feature proposals" items={results.feature_proposals} kind="feature_proposal" />
+          </CardContent>
+        </Card>
+      ) : null}
 
       {terminal ? (
         <Card>
@@ -302,6 +375,8 @@ export function RunMonitorPage() {
           </CardContent>
         </Card>
       ) : null}
+
+      <RunAuditSection runId={runId} />
     </div>
   )
 }

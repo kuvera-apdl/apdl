@@ -14,7 +14,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 
-import { runStatus } from '@/api/agents'
+import { runResults, runStatus } from '@/api/agents'
 import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
 import { useLive } from '@/core/live'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
@@ -322,6 +322,22 @@ function AgentsCard() {
   const status = statusQuery.data?.status ?? latest?.last_status ?? null
   const awaitingApproval = status === 'waiting_approval'
 
+  const resultsQuery = useQuery({
+    queryKey: [active?.id ?? 'none', 'agent-run-overview', latest?.run_id ?? 'none', 'results'],
+    enabled: active !== null && latest !== null && (statusQuery.data?.insights_count ?? 0) > 0,
+    staleTime: 60_000,
+    queryFn: ({ signal }) =>
+      runResults(serviceConnection(active!, 'agents'), latest!.run_id, { signal }),
+  })
+  const insightTitles = (resultsQuery.data?.insights ?? [])
+    .slice(0, 3)
+    .map((insight) => {
+      const record = typeof insight === 'object' && insight !== null ? (insight as Record<string, unknown>) : {}
+      const title = record.title ?? record.name ?? record.summary
+      return typeof title === 'string' ? title : null
+    })
+    .filter((title): title is string => title !== null)
+
   return (
     <Card className={awaitingApproval ? 'border-amber-400 dark:border-amber-700' : undefined}>
       <CardHeader>
@@ -350,6 +366,20 @@ function AgentsCard() {
         ) : (
           <p className="text-muted-foreground">No runs yet.</p>
         )}
+        {insightTitles.length > 0 ? (
+          <div className="space-y-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Latest insights
+            </p>
+            <ul className="space-y-1 text-sm">
+              {insightTitles.map((title) => (
+                <li key={title} className="truncate" title={title}>
+                  • {title}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <Link to="/agents/trigger" className="block text-sm font-medium underline underline-offset-4">
           Trigger a run →
         </Link>

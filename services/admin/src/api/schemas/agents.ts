@@ -75,3 +75,43 @@ export const approvalResponseSchema = z
     message: z.string(),
   })
   .strict()
+
+// ---------- Run introspection (gaps G1+G2+G3, routers/runs.py) ----------
+
+export const runsListResponseSchema = z
+  .object({
+    runs: z.array(runStatusSchema),
+    count: z.number().int(),
+  })
+  .strict()
+
+// Agent outputs are LLM-shaped and not canonicalized — arrays of unknown.
+export const runResultsSchema = z
+  .object({
+    run_id: z.string(),
+    insights: z.array(z.unknown()),
+    experiment_designs: z.array(z.unknown()),
+    personalizations: z.array(z.unknown()),
+    feature_proposals: z.array(z.unknown()),
+  })
+  .strict()
+
+export const runAuditEntrySchema = z
+  .object({
+    id: z.number().int(),
+    run_id: z.string(),
+    action_type: z.string(),
+    config: z.record(z.unknown()),
+    safety_result: z.record(z.unknown()),
+    approval_status: z.string().nullable(),
+    created_at: z.string(),
+  })
+  .strict()
+
+export const runAuditResponseSchema = z
+  .object({
+    run_id: z.string(),
+    audit: z.array(runAuditEntrySchema),
+    count: z.number().int(),
+  })
+  .strict()
