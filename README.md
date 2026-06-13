@@ -71,12 +71,12 @@ Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identi
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).
 
-### JavaScript (browser) — [`@apdl/sdk`](sdk/javascript/README.md)
+### JavaScript (browser) — [`@apdl-oss/sdk`](sdk/javascript/README.md)
 
 For full SDK usage, see [`sdk/javascript/README.md`](sdk/javascript/README.md).
 
 ```typescript
-import { APDL } from '@apdl/sdk';
+import { APDL } from '@apdl-oss/sdk';
 
 const apdl = APDL.init({
   endpoints: {
@@ -162,7 +162,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 
 ```
 apdl/
-├── sdk/javascript/          # @apdl/sdk — TypeScript client SDK
+├── sdk/javascript/          # @apdl-oss/sdk — TypeScript client SDK
 │   └── src/                 # core, capture, flags, sse, ui, privacy
 ├── sdk/python/              # apdl-sdk — server-side Python client SDK
 │   └── apdl/                # client, batching event queue, flags

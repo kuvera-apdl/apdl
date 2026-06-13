@@ -1,5 +1,5 @@
 {
-  "name": "@apdl/sdk",
+  "name": "@apdl-oss/sdk",
   "version": "0.1.0",
   "description": "Client SDK for the Autonomous Product Development Loop platform",
   "keywords": [
@@ -33,6 +33,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "setup": "npm ci",
     "clean": "rm -rf dist",

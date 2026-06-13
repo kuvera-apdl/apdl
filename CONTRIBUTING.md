@@ -32,7 +32,7 @@ make check    # lint + test every package in parallel
 
 | Path | What lives there |
 |---|---|
-| `sdk/javascript/` | `@apdl/sdk` — browser TypeScript SDK (Rollup, Vitest) |
+| `sdk/javascript/` | `@apdl-oss/sdk` — browser TypeScript SDK (Rollup, Vitest) |
 | `sdk/python/` | `apdl-sdk` — server-side Python SDK (httpx, Pydantic) |
 | `services/ingestion/` | Event ingestion API (FastAPI → Redis Streams) |
 | `services/config/` | Feature flags & experiments API (FastAPI, PostgreSQL, SSE) |
