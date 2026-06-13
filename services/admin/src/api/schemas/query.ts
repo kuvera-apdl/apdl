@@ -165,6 +165,7 @@ export const cohortRequestSchema = z
 const countRowSchema = z
   .object({
     selector: z.string(),
+    event_name: z.string(),
     event_count: z.number(),
     unique_users: z.number(),
   })
