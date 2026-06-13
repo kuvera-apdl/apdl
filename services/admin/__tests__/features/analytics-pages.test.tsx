@@ -19,7 +19,7 @@ const server = setupServer(
     requests.push({ path: 'count', body: await request.json() })
     return HttpResponse.json({
       results: [
-        { selector: '$pageview', event_count: 120, unique_users: 48 },
+        { selector: '$pageview', event_name: '$pageview', event_count: 120, unique_users: 48 },
       ],
       total_events: 120,
       total_users: 48,

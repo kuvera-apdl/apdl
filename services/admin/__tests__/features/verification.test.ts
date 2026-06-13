@@ -38,7 +38,14 @@ const server = setupServer(
     const found = countCalls >= pipelineFindsAtAttempt
     return HttpResponse.json({
       results: found
-        ? [{ selector: 'apdl_console_verification', event_count: 1, unique_users: 1 }]
+        ? [
+            {
+              selector: 'apdl_console_verification',
+              event_name: 'apdl_console_verification',
+              event_count: 1,
+              unique_users: 1,
+            },
+          ]
         : [],
       total_events: found ? 1 : 0,
       total_users: found ? 1 : 0,
