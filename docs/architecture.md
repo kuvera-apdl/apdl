@@ -14,7 +14,7 @@ Autonomous Product Development Loop.
 
 | Component | Tech | Port | Docs |
 |---|---|---|---|
-| `@apdl/sdk` (browser) | TypeScript, Rollup | — | [README](../sdk/javascript/README.md) |
+| `@apdl-oss/sdk` (browser) | TypeScript, Rollup | — | [README](../sdk/javascript/README.md) |
 | `apdl-sdk` (server) | Python 3.12, httpx | — | [README](../sdk/python/README.md) |
 | Ingestion Service | FastAPI, Redis Streams | 8080 | [README](../services/ingestion/README.md) |
 | Config Service | FastAPI, asyncpg, SSE | 8081 | [README](../services/config/README.md) |

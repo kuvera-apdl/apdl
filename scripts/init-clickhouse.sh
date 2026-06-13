@@ -60,7 +60,7 @@ docker exec "$container_id" clickhouse-client \
 for migration in "$CLICKHOUSE_MIGRATIONS_DIR"/*.sql; do
     [ -f "$migration" ] || continue
 
-    if grep -qi "NOT ClickHouse" "$migration"; then
+    if grep -qiE "NOT ClickHouse|Target:[[:space:]]*PostgreSQL|psql[[:space:]]+\\\$POSTGRES_URL" "$migration"; then
         echo "  Skipping $(basename "$migration") (not a ClickHouse migration)"
         continue
     fi

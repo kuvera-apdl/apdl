@@ -1,4 +1,4 @@
-# @apdl/sdk
+# @apdl-oss/sdk
 
 Browser TypeScript SDK for the **Autonomous Product Development Loop** platform.
 The SDK sends product analytics events to the ingestion service, evaluates
@@ -19,19 +19,19 @@ evaluated.
 ## Installation
 
 ```bash
-npm install @apdl/sdk
+npm install @apdl-oss/sdk
 ```
 
 Or drop the IIFE bundle into any page (exposes a global `APDL`):
 
 ```html
-<script src="https://unpkg.com/@apdl/sdk/dist/apdl.iife.js"></script>
+<script src="https://unpkg.com/@apdl-oss/sdk/dist/apdl.iife.js"></script>
 ```
 
 ## Initialization
 
 ```typescript
-import { APDL } from '@apdl/sdk';
+import { APDL } from '@apdl-oss/sdk';
 
 const apdl = APDL.init({
   endpoints: {

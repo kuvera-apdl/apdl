@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Releases are cut by pushing a `v*` git tag, which publishes `@apdl/sdk` to npm,
+Releases are cut by pushing a `v*` git tag, which publishes `@apdl-oss/sdk` to npm,
 `apdl-sdk` to PyPI, and service Docker images to GHCR.
 
 ## [Unreleased]
@@ -37,7 +37,7 @@ Releases are cut by pushing a `v*` git tag, which publishes `@apdl/sdk` to npm,
 Initial development release.
 
 ### Added
-- **JavaScript SDK** (`@apdl/sdk`): auto-capture (clicks, page views, forms,
+- **JavaScript SDK** (`@apdl-oss/sdk`): auto-capture (clicks, page views, forms,
   scroll depth, rage clicks, frontend errors, web vitals), manual tracking,
   local feature gate evaluation with FNV-1a bucketing, SSE flag updates,
   server-driven UI components, consent management / cookieless mode

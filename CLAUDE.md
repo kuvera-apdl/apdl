@@ -38,6 +38,7 @@ make run-config     # Config Service    → localhost:8081
 make run-query      # Query Service     → localhost:8082
 make run-agents     # Agents Service    → localhost:8083
 make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
+make run-admin      # Admin Console (Vite dev server) → localhost:5173
 ```
 
 ### Per-service test/lint
@@ -50,6 +51,7 @@ make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 | Config | `make test-config` | `make lint-config` |
 | Query | `make test-query` | `make lint-query` |
 | Agents | `make test-agents` | `make lint-agents` |
+| Admin Console | `make test-admin` | `make lint-admin` |
 
 ### Running a single test
 

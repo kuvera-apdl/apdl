@@ -12,7 +12,7 @@ export class ContextCollector {
   collect(): EventContext {
     const context: EventContext = {
       library: {
-        name: '@apdl/sdk',
+        name: '@apdl-oss/sdk',
         version: SDK_VERSION,
       },
     };
