@@ -91,7 +91,7 @@ describe('response schemas (exact SQL alias mirrors)', () => {
   test('count / timeseries / breakdown rows', () => {
     expect(
       eventCountResponseSchema.safeParse({
-        results: [{ selector: '$pageview', event_count: 10, unique_users: 4 }],
+        results: [{ selector: '$pageview', event_name: '$pageview', event_count: 10, unique_users: 4 }],
         total_events: 10,
         total_users: 4,
       }).success,
