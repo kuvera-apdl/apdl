@@ -1,5 +1,6 @@
 import { type APDLConfig, type ConsentState, resolveConfig, type ResolvedConfig } from './config';
-import { generateId } from './types';
+import { API_KEY_HEADER, SDK_IDENTIFIER, SDK_IDENTIFIER_HEADER } from './constants';
+import { generateId, type ExperimentContext } from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
 import { EventQueue } from './event-queue';
@@ -10,7 +11,6 @@ import { AutoCapture } from '../capture/auto-capture';
 import { HealthCapture } from '../capture/health';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
-import { hashBucket } from '../flags/hash';
 import { parseFlagConfigResult } from '../flags/schema';
 import type { EvalContext, FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
 import { SSEConnection } from '../sse/connection';
@@ -65,6 +65,7 @@ export class APDLClient {
   private featureFlagExposureKeys: Set<string> = new Set();
   private missingFlagWarnings: Set<string> = new Set();
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
+  private experimentContext: ExperimentContext = { attributes: {} };
 
   /** UI namespace */
   public ui: {
@@ -86,6 +87,13 @@ export class APDLClient {
     removeScrubber: (fn: ScrubFunction) => void;
   };
 
+  /** Experiments namespace */
+  public experiments: {
+    setContext: (context: ExperimentContext) => void;
+    getContext: () => ExperimentContext;
+    clearContext: () => void;
+  };
+
   /** Debug namespace */
   public debug: {
     enable: () => void;
@@ -105,7 +113,7 @@ export class APDLClient {
     this.scrubber = new Scrubber(this.config.privacyMode !== 'standard');
 
     // Core transport
-    this.transport = new Transport(this.config.apiKey, {
+    this.transport = new Transport(this.config.auth.clientKey, {
       debug: this.config.debug,
     });
     this.storage = new OfflineStorage();
@@ -146,10 +154,7 @@ export class APDLClient {
     this.flagEvaluator = new FlagEvaluator(this.flagCache);
 
     // Wire up flag change notifications to per-key listeners
-    this.flagCache.onChange(() => {
-      this.refreshActiveFlagStates();
-      this.notifyFlagListeners();
-    });
+    this.flagCache.onChange(() => this.onEvaluationContextChanged());
 
     // Health capture
     this.healthCapture = new HealthCapture(
@@ -173,10 +178,10 @@ export class APDLClient {
     this.slotManager = new SlotManager();
 
     // SSE
-    const sseUrl = `${this.config.configHost}/v1/stream`;
+    const sseUrl = `${this.config.endpoints.config}/v1/stream`;
     this.sseConnection = new SSEConnection(
       sseUrl,
-      this.config.apiKey,
+      this.config.auth.clientKey,
       this.config.debug
     );
     this.sseHandlers = new SSEHandlers(
@@ -209,6 +214,18 @@ export class APDLClient {
     this.privacy = {
       addScrubber: (fn: ScrubFunction) => this.scrubber.addScrubber(fn),
       removeScrubber: (fn: ScrubFunction) => this.scrubber.removeScrubber(fn),
+    };
+
+    this.experiments = {
+      setContext: (context: ExperimentContext) => {
+        this.experimentContext = this.normalizeExperimentContext(context);
+        this.onEvaluationContextChanged();
+      },
+      getContext: () => this.copyExperimentContext(this.experimentContext),
+      clearContext: () => {
+        this.experimentContext = { attributes: {} };
+        this.onEvaluationContextChanged();
+      },
     };
 
     this.debug = {
@@ -350,11 +367,11 @@ export class APDLClient {
 
   private async fetchInitialFlags(): Promise<void> {
     try {
-      const url = `${this.config.configHost}/v1/flags`;
+      const url = `${this.config.endpoints.config}/v1/flags`;
       const response = await fetch(url, {
         headers: {
-          'X-API-Key': this.config.apiKey,
-          'X-APDL-SDK': 'js/0.1.0',
+          [API_KEY_HEADER]: this.config.auth.clientKey,
+          [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
         },
       });
 
@@ -378,7 +395,7 @@ export class APDLClient {
 
   private async setupCookielessId(): Promise<void> {
     try {
-      const cookieless = new CookielessIdentity(this.config.apiKey);
+      const cookieless = new CookielessIdentity(this.config.auth.clientKey);
       const anonId = await cookieless.generateAnonymousId();
       this.manualCapture.setAnonymousId(anonId);
     } catch {
@@ -424,10 +441,16 @@ export class APDLClient {
   }
 
   private getEvalContext(): EvalContext {
+    const userAttributes = this.stringifyAttributes(this.manualCapture.getTraits());
+    const experimentAttributes = this.stringifyAttributes(this.experimentContext.attributes);
+
     return {
       user_id: this.manualCapture.getUserId(),
       anonymous_id: this.manualCapture.getAnonymousId(),
-      attributes: this.stringifyAttributes(this.manualCapture.getTraits()),
+      attributes: {
+        ...userAttributes,
+        ...experimentAttributes,
+      },
     };
   }
 
@@ -451,6 +474,7 @@ export class APDLClient {
     }
 
     this.featureFlagExposureKeys.add(dedupeKey);
+    const exposureContext = this.experimentExposureContext();
     this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
       flag_key: result.key,
       variant: result.variant,
@@ -464,6 +488,7 @@ export class APDLClient {
       source: result.source,
       page,
       component,
+      ...(exposureContext ? { experiment_context: exposureContext } : {}),
     });
   }
 
@@ -539,6 +564,12 @@ export class APDLClient {
     this.activeFlagStatesByPage.set(page, targetPageStates);
   }
 
+  /** Re-evaluates remembered flags and notifies listeners after anything that can change evaluation results. */
+  private onEvaluationContextChanged(): void {
+    this.refreshActiveFlagStates();
+    this.notifyFlagListeners();
+  }
+
   private refreshActiveFlagStates(): void {
     for (const [page, states] of Array.from(this.activeFlagStatesByPage.entries())) {
       for (const key of Array.from(states.keys())) {
@@ -579,13 +610,41 @@ export class APDLClient {
     };
   }
 
+  private normalizeExperimentContext(context: ExperimentContext): ExperimentContext {
+    const input = this.assertPlainObject(context, 'experiments context');
+    this.assertExactFields(input, ['attributes'], 'experiments context');
+    const attributes = this.assertPlainObject(
+      input.attributes,
+      'experiments context.attributes'
+    );
+
+    return {
+      attributes: this.cloneExperimentAttributes(attributes),
+    };
+  }
+
+  private copyExperimentContext(context: ExperimentContext): ExperimentContext {
+    return {
+      attributes: this.cloneExperimentAttributes(context.attributes),
+    };
+  }
+
+  private experimentExposureContext(): ExperimentContext | null {
+    const attributes = this.stringifyAttributes(this.experimentContext.attributes);
+    if (Object.keys(attributes).length === 0) {
+      return null;
+    }
+
+    return { attributes };
+  }
+
   private shouldPersistFlagCache(): boolean {
     return this.config.privacyMode === 'standard'
       && this.config.persistence === 'localStorage';
   }
 
   private flagStorageKey(): string {
-    return `apdl_flags_${hashBucket('sdk_flag_cache', 'v2', this.config.apiKey).toString(16)}`;
+    return `apdl_flags_${this.config.projectId}`;
   }
 
   private registerBuiltInComponents(): void {
@@ -616,5 +675,98 @@ export class APDLClient {
     }
 
     return result;
+  }
+
+  private assertPlainObject(value: unknown, path: string): Record<string, unknown> {
+    if (!this.isPlainRecord(value)) {
+      throw new Error(`APDL: ${path} is required and must be an object`);
+    }
+
+    return value;
+  }
+
+  private isPlainRecord(value: unknown): value is Record<string, unknown> {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  private assertExactFields(
+    value: Record<string, unknown>,
+    supportedFields: string[],
+    path: string
+  ): void {
+    const supported = new Set(supportedFields);
+    for (const field of Object.keys(value)) {
+      if (!supported.has(field)) {
+        throw new Error(`APDL: ${path}.${field} is not supported`);
+      }
+    }
+  }
+
+  private cloneExperimentAttributes(
+    attributes: Record<string, unknown>
+  ): Record<string, unknown> {
+    return this.cloneExperimentValue(attributes) as Record<string, unknown>;
+  }
+
+  private cloneExperimentValue(
+    value: unknown,
+    seen: WeakMap<object, unknown> = new WeakMap()
+  ): unknown {
+    if (value === null || typeof value !== 'object') {
+      return value;
+    }
+
+    const existing = seen.get(value);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    if (value instanceof Date) {
+      return new Date(value.getTime());
+    }
+
+    if (Array.isArray(value)) {
+      const cloned: unknown[] = [];
+      seen.set(value, cloned);
+      for (const item of value) {
+        cloned.push(this.cloneExperimentValue(item, seen));
+      }
+      return cloned;
+    }
+
+    if (value instanceof Map) {
+      const cloned = new Map<unknown, unknown>();
+      seen.set(value, cloned);
+      for (const [mapKey, mapValue] of value.entries()) {
+        cloned.set(
+          this.cloneExperimentValue(mapKey, seen),
+          this.cloneExperimentValue(mapValue, seen)
+        );
+      }
+      return cloned;
+    }
+
+    if (value instanceof Set) {
+      const cloned = new Set<unknown>();
+      seen.set(value, cloned);
+      for (const item of value.values()) {
+        cloned.add(this.cloneExperimentValue(item, seen));
+      }
+      return cloned;
+    }
+
+    const source = value as Record<string, unknown>;
+    const cloned = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+    seen.set(value, cloned);
+    for (const key of Object.keys(source)) {
+      cloned[key] = this.cloneExperimentValue(source[key], seen);
+    }
+
+    return cloned;
   }
 }

@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python status smoke
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -56,10 +56,13 @@ fmt:
 fmt-check:
 	@bash scripts/fmt.sh --check
 
-# ─── SDK ─────────────────────────────────────────────────────
+# ─── SDK (JavaScript) ─────────────────────────────────────────────────────
 
 build-sdk:
 	cd sdk/javascript && npm run build
+
+setup-sdk:
+	cd sdk/javascript && npm run setup
 
 test-sdk:
 	cd sdk/javascript && npm test
@@ -70,6 +73,8 @@ clean-sdk:
 lint-sdk:
 	cd sdk/javascript && npm run lint
 
+release-sdk:
+	cd sdk/javascript && npm run release:check
 # ─── SDK (Python) ────────────────────────────────────────────
 
 test-sdk-python:

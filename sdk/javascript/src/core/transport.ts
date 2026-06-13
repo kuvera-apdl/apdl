@@ -1,3 +1,10 @@
+import {
+  API_KEY_HEADER,
+  API_KEY_QUERY_PARAM,
+  SDK_IDENTIFIER,
+  SDK_IDENTIFIER_HEADER,
+} from './constants';
+
 const DEFAULT_TIMEOUT = 10000;
 const RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
 
@@ -6,11 +13,11 @@ const RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
  */
 export class Transport {
   private timeout: number;
-  private apiKey: string;
+  private clientKey: string;
   private debug: boolean;
 
-  constructor(apiKey: string, options?: { timeout?: number; debug?: boolean }) {
-    this.apiKey = apiKey;
+  constructor(clientKey: string, options?: { timeout?: number; debug?: boolean }) {
+    this.clientKey = clientKey;
     this.timeout = options?.timeout ?? DEFAULT_TIMEOUT;
     this.debug = options?.debug ?? false;
   }
@@ -31,8 +38,8 @@ export class Transport {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-API-Key': this.apiKey,
-            'X-APDL-SDK': 'js/0.1.0',
+            [API_KEY_HEADER]: this.clientKey,
+            [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
           },
           body,
           signal: controller.signal,
@@ -103,9 +110,9 @@ export class Transport {
         type: 'application/json',
       });
 
-      // Append API key as query param since we can't set headers with sendBeacon
+      // sendBeacon cannot set headers, so use the backend's query auth parameter.
       const separator = url.includes('?') ? '&' : '?';
-      const beaconUrl = `${url}${separator}api_key=${encodeURIComponent(this.apiKey)}`;
+      const beaconUrl = `${url}${separator}${API_KEY_QUERY_PARAM}=${encodeURIComponent(this.clientKey)}`;
 
       return navigator.sendBeacon(beaconUrl, blob);
     } catch {

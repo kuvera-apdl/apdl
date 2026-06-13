@@ -73,13 +73,21 @@ in the config service. Runnable samples live in [`examples/`](examples/).
 
 ### JavaScript (browser) — [`@apdl/sdk`](sdk/javascript/README.md)
 
+For full SDK usage, see [`sdk/javascript/README.md`](sdk/javascript/README.md).
+
 ```typescript
 import { APDL } from '@apdl/sdk';
 
 const apdl = APDL.init({
-  apiKey: 'proj_demo_0123456789abcdef',
-  autoCapture: true,          // clicks, page views, forms, scroll depth, rage clicks
-  privacyMode: 'standard',    // 'standard' | 'cookieless' | 'strict'
+  endpoints: {
+    ingestion: 'http://localhost:8080',
+    config: 'http://localhost:8081',
+  },
+  auth: {
+    clientKey: 'proj_apdl_0123456789abcdef',
+  },
+  autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
+  privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
 });
 
 apdl.track('purchase_completed', { product_id: 'sku-123', revenue: 49.99 });

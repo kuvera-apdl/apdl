@@ -1,3 +1,5 @@
+import { API_KEY_QUERY_PARAM } from '../core/constants';
+
 type MessageCallback = (event: { type: string; data: string; id?: string }) => void;
 
 const INITIAL_RECONNECT_DELAY = 1000;
@@ -11,7 +13,7 @@ const HEARTBEAT_GRACE = 10000; // Extra time before considering heartbeat missed
  */
 export class SSEConnection {
   private url: string;
-  private apiKey: string;
+  private clientKey: string;
   private eventSource: EventSource | null = null;
   private messageCallback: MessageCallback | null = null;
   private lastEventId: string | undefined;
@@ -22,9 +24,9 @@ export class SSEConnection {
   private intentionalClose = false;
   private debug: boolean;
 
-  constructor(url: string, apiKey: string, debug = false) {
+  constructor(url: string, clientKey: string, debug = false) {
     this.url = url;
-    this.apiKey = apiKey;
+    this.clientKey = clientKey;
     this.debug = debug;
   }
 
@@ -68,9 +70,9 @@ export class SSEConnection {
 
     this.cleanup();
 
-    // Build URL with API key and last event ID
+    // Build URL with client key and last event ID
     const connectUrl = new URL(this.url);
-    connectUrl.searchParams.set('api_key', this.apiKey);
+    connectUrl.searchParams.set(API_KEY_QUERY_PARAM, this.clientKey);
     if (this.lastEventId) {
       connectUrl.searchParams.set('last_event_id', this.lastEventId);
     }

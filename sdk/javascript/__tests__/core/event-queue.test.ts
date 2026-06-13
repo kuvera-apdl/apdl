@@ -4,14 +4,19 @@ import { Transport } from '../../src/core/transport';
 import { OfflineStorage } from '../../src/core/storage';
 import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
-import type { ResolvedConfig } from '../../src/core/config';
+import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
 import type { TrackEvent } from '../../src/core/types';
+import { CLIENT_KEY, CONFIG_ENDPOINT, INGESTION_ENDPOINT } from '../helpers';
 
 function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
-  return {
-    apiKey: 'test-key',
-    host: 'https://ingest.test.dev',
-    configHost: 'https://config.test.dev',
+  const base = resolveConfig({
+    endpoints: {
+      ingestion: INGESTION_ENDPOINT,
+      config: CONFIG_ENDPOINT,
+    },
+    auth: {
+      clientKey: CLIENT_KEY,
+    },
     autoCapture: {
       pageViews: false,
       clicks: false,
@@ -27,7 +32,27 @@ function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
     persistence: 'memory',
     maxQueueSize: 100,
     debug: false,
+  });
+
+  return {
+    ...base,
     ...overrides,
+    endpoints: {
+      ...base.endpoints,
+      ...(overrides?.endpoints ?? {}),
+    },
+    auth: {
+      ...base.auth,
+      ...(overrides?.auth ?? {}),
+    },
+    autoCapture: {
+      ...base.autoCapture,
+      ...(overrides?.autoCapture ?? {}),
+    },
+    consent: {
+      ...base.consent,
+      ...(overrides?.consent ?? {}),
+    },
   };
 }
 
@@ -55,7 +80,7 @@ describe('EventQueue', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     config = createConfig();
-    transport = new Transport('test-key');
+    transport = new Transport(CLIENT_KEY);
     storage = new OfflineStorage();
     scrubber = new Scrubber(false); // No built-in scrubbers for testing
     consentManager = new ConsentManager(
@@ -141,7 +166,7 @@ describe('EventQueue', () => {
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const call = sendSpy.mock.calls[0];
-      expect(call[0]).toBe('https://ingest.test.dev/v1/events');
+      expect(call[0]).toBe(`${INGESTION_ENDPOINT}/v1/events`);
       const payload = call[1] as { events: Array<Record<string, unknown>> };
       expect(payload.events).toHaveLength(2);
       expect(payload.events[0]).toMatchObject({

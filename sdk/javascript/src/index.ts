@@ -4,12 +4,14 @@ import type { APDLConfig } from './core/config';
 // Re-export all public types
 export type {
   APDLConfig,
+  APDLEndpointsConfig,
+  APDLAuthConfig,
   AutoCaptureConfig,
   ConsentState,
   ResolvedConfig,
 } from './core/config';
 
-export type { TrackEvent, EventContext } from './core/types';
+export type { TrackEvent, EventContext, ExperimentContext } from './core/types';
 
 export type {
   FlagConfig,

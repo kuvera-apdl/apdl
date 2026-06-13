@@ -36,6 +36,7 @@ export class EventQueue {
   private visibilityHandler: (() => void) | null = null;
   private unloadHandler: (() => void) | null = null;
   private started = false;
+  private ingestionUrl: string;
 
   constructor(
     config: ResolvedConfig,
@@ -49,6 +50,7 @@ export class EventQueue {
     this.storage = storage;
     this.scrubber = scrubber;
     this.consentManager = consentManager;
+    this.ingestionUrl = `${config.endpoints.ingestion}/v1/events`;
   }
 
   /**
@@ -104,12 +106,11 @@ export class EventQueue {
     const batch = this.queue.splice(0, this.config.batchSize);
 
     try {
-      const url = `${this.config.host}/v1/events`;
       const payload = {
         events: batch.map((event) => this.toIngestionEvent(event)),
       };
 
-      const success = await this.transport.send(url, payload);
+      const success = await this.transport.send(this.ingestionUrl, payload);
 
       if (!success) {
         // Persist failed batch to offline storage
@@ -140,12 +141,11 @@ export class EventQueue {
     if (this.queue.length === 0) return;
 
     const batch = this.queue.splice(0);
-    const url = `${this.config.host}/v1/events`;
     const payload = {
       events: batch.map((event) => this.toIngestionEvent(event)),
     };
 
-    const accepted = this.transport.sendBeacon(url, payload);
+    const accepted = this.transport.sendBeacon(this.ingestionUrl, payload);
 
     if (!accepted) {
       // sendBeacon failed; try to persist to offline storage synchronously.
