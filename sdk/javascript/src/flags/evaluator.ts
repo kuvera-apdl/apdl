@@ -1,10 +1,11 @@
 import type {
   EvalContext,
-  GateCondition,
-  GateConfig,
-  GateEvaluationResult,
-  GateRule,
+  FlagCondition,
+  FlagConfig,
+  FlagEvaluationResult,
+  FlagRule,
   RolloutConfig,
+  VariantConfig,
 } from './types';
 import { FlagCache } from './cache';
 import { percentageBucket } from './hash';
@@ -15,13 +16,13 @@ type ResolvedAttribute =
 
 interface RolloutResult {
   passed: boolean;
-  bucket: number | null;
+  rolloutBucket: number | null;
   percentage: number;
   bucketBy: string;
 }
 
 /**
- * Canonical local feature gate evaluator matching the config service contract.
+ * Canonical local feature flag evaluator matching the config service contract.
  */
 export class FlagEvaluator {
   private cache: FlagCache;
@@ -30,34 +31,36 @@ export class FlagEvaluator {
     this.cache = cache;
   }
 
-  evaluate(key: string, context: EvalContext): GateEvaluationResult {
+  evaluate(key: string, context: EvalContext): FlagEvaluationResult {
     const flag = this.cache.get(key);
 
     if (!flag) {
       if (this.cache.isInvalid(key)) {
         return {
           key,
-          value: false,
+          variant: null,
           reason: 'invalid_config',
-          rule_id: '',
-          bucket: null,
+          rule_id: null,
+          rollout_bucket: null,
+          variant_bucket: null,
           rollout_percentage: null,
-          bucket_by: '',
-          config_version: 0,
-          source: this.cache.getInvalidSource(key),
+          bucket_by: null,
+          config_version: null,
+          source: null,
         };
       }
 
       return {
         key,
-        value: false,
+        variant: null,
         reason: 'not_found',
-        rule_id: '',
-        bucket: null,
+        rule_id: null,
+        rollout_bucket: null,
+        variant_bucket: null,
         rollout_percentage: null,
-        bucket_by: '',
-        config_version: 0,
-        source: 'none',
+        bucket_by: null,
+        config_version: null,
+        source: null,
       };
     }
 
@@ -76,76 +79,104 @@ export class FlagEvaluator {
       }
 
       const rollout = this.applyRollout(flag, rule.rollout, context);
-      if (rollout.bucket === null) {
+      if (rollout.rolloutBucket === null) {
         return {
           ...result,
           reason: 'error',
           rule_id: rule.id,
-          bucket: null,
+          rollout_bucket: null,
+          variant_bucket: null,
           rollout_percentage: rollout.percentage,
           bucket_by: rollout.bucketBy,
         };
       }
 
+      if (!rollout.passed) {
+        return {
+          ...result,
+          reason: 'rule_rollout',
+          rule_id: rule.id,
+          rollout_bucket: rollout.rolloutBucket,
+          rollout_percentage: rollout.percentage,
+          bucket_by: rollout.bucketBy,
+        };
+      }
+
+      const assignment = this.assignWeightedVariant(flag, context, rollout.bucketBy);
       return {
         ...result,
-        value: rollout.passed ? true : flag.default_value,
-        reason: rollout.passed ? 'rule_match' : 'rule_rollout',
+        variant: assignment.variant,
+        reason: 'rule_match',
         rule_id: rule.id,
-        bucket: rollout.bucket,
+        rollout_bucket: rollout.rolloutBucket,
+        variant_bucket: assignment.variantBucket,
         rollout_percentage: rollout.percentage,
         bucket_by: rollout.bucketBy,
       };
     }
 
     const rollout = this.applyRollout(flag, flag.fallthrough.rollout, context);
-    if (rollout.bucket === null) {
+    if (rollout.rolloutBucket === null) {
       return {
         ...result,
         reason: 'error',
-        bucket: null,
+        rollout_bucket: null,
+        variant_bucket: null,
         rollout_percentage: rollout.percentage,
         bucket_by: rollout.bucketBy,
       };
     }
 
+    if (!rollout.passed) {
+      return {
+        ...result,
+        reason: 'fallthrough_rollout',
+        rollout_bucket: rollout.rolloutBucket,
+        rollout_percentage: rollout.percentage,
+        bucket_by: rollout.bucketBy,
+      };
+    }
+
+    const assignment = this.assignWeightedVariant(flag, context, rollout.bucketBy);
     return {
       ...result,
-      value: rollout.passed ? flag.fallthrough.value : flag.default_value,
-      reason: rollout.passed ? 'fallthrough' : 'fallthrough_rollout',
-      bucket: rollout.bucket,
+      variant: assignment.variant,
+      reason: 'fallthrough',
+      rollout_bucket: rollout.rolloutBucket,
+      variant_bucket: assignment.variantBucket,
       rollout_percentage: rollout.percentage,
       bucket_by: rollout.bucketBy,
     };
   }
 
-  private baseResult(flag: GateConfig): GateEvaluationResult {
+  private baseResult(flag: FlagConfig): FlagEvaluationResult {
     return {
       key: flag.key,
-      value: flag.default_value,
+      variant: flag.default_variant,
       reason: 'error',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
+      bucket_by: null,
       config_version: flag.version,
       source: this.cache.getSource(flag.key),
     };
   }
 
-  private matchesRule(rule: GateRule, context: EvalContext): boolean {
+  private matchesRule(rule: FlagRule, context: EvalContext): boolean {
     return rule.conditions.every((condition) => this.matchesCondition(condition, context));
   }
 
-  private matchesCondition(condition: GateCondition, context: EvalContext): boolean {
+  private matchesCondition(condition: FlagCondition, context: EvalContext): boolean {
     const { attribute, operator } = condition;
     const actual = this.resolveAttribute(attribute, context);
 
     if (operator === 'exists') {
-      return actual.exists && Boolean(actual.value);
+      return actual.exists && actual.value !== null && actual.value !== undefined;
     }
     if (operator === 'not_exists') {
-      return !actual.exists || !actual.value;
+      return !actual.exists || actual.value === null || actual.value === undefined;
     }
     if (!actual.exists || !Object.prototype.hasOwnProperty.call(condition, 'value')) {
       return false;
@@ -206,7 +237,7 @@ export class FlagEvaluator {
   }
 
   private applyRollout(
-    flag: GateConfig,
+    flag: FlagConfig,
     rollout: RolloutConfig,
     context: EvalContext
   ): RolloutResult {
@@ -214,18 +245,39 @@ export class FlagEvaluator {
     if (!unitId) {
       return {
         passed: false,
-        bucket: null,
+        rolloutBucket: null,
         percentage: rollout.percentage,
         bucketBy: rollout.bucket_by,
       };
     }
 
-    const bucket = percentageBucket(flag.key, flag.salt, unitId);
+    const bucket = percentageBucket(flag.key, `${flag.salt}:rollout`, unitId);
     return {
       passed: bucket < rollout.percentage,
-      bucket,
+      rolloutBucket: bucket,
       percentage: rollout.percentage,
       bucketBy: rollout.bucket_by,
+    };
+  }
+
+  private assignWeightedVariant(
+    flag: FlagConfig,
+    context: EvalContext,
+    bucketBy: string
+  ): { variant: string; variantBucket: number | null } {
+    const unitId = this.unitId(context, bucketBy);
+    if (!unitId) {
+      return {
+        variant: flag.default_variant,
+        variantBucket: null,
+      };
+    }
+
+    const variantBucket = percentageBucket(flag.key, `${flag.salt}:variant`, unitId);
+    const assigned = assignWeightedVariant(flag.variants, variantBucket) ?? flag.default_variant;
+    return {
+      variant: assigned,
+      variantBucket,
     };
   }
 
@@ -238,19 +290,58 @@ export class FlagEvaluator {
   }
 
   private resolveAttribute(attribute: string, context: EvalContext): ResolvedAttribute {
+    // Presence contract — canonical, must match services/config/app/flags/
+    // evaluator.py and sdk/python/apdl/flags/evaluator.py byte-for-byte: an
+    // attribute is *present* only when its value is non-null. A null/undefined
+    // value (an explicit `user_id: null` identity or a `null` trait) is ABSENT,
+    // like a missing key — it is never stringified into a value comparison, so
+    // the three evaluators stay in lockstep (a null would otherwise compare
+    // against `String(null)` = "null" here vs `str(None)` = "None" in Python).
+    // Falsy non-null values (`''`, `0`, `false`) stay present. See parity.json.
     if (attribute === 'user_id') {
-      return { exists: true, value: context.user_id ?? '' };
+      return context.user_id != null
+        ? { exists: true, value: context.user_id }
+        : { exists: false, value: null };
     }
 
     if (attribute === 'anonymous_id') {
-      return { exists: true, value: context.anonymous_id ?? '' };
+      return context.anonymous_id != null
+        ? { exists: true, value: context.anonymous_id }
+        : { exists: false, value: null };
     }
 
     const attributes = context.attributes ?? {};
-    if (Object.prototype.hasOwnProperty.call(attributes, attribute)) {
-      return { exists: true, value: attributes[attribute] };
+    const value = attributes[attribute];
+    return value != null
+      ? { exists: true, value }
+      : { exists: false, value: null };
+  }
+}
+
+export function assignWeightedVariant(
+  variants: VariantConfig[],
+  variantBucket: number
+): string | null {
+  const totalWeight = variants.reduce((total, variant) => total + variant.weight, 0);
+  if (totalWeight <= 0) {
+    return null;
+  }
+
+  const target = (variantBucket / 100) * totalWeight;
+  let cumulative = 0;
+  let lastPositiveVariant: string | null = null;
+
+  for (const variant of variants) {
+    if (variant.weight <= 0) {
+      continue;
     }
 
-    return { exists: false, value: null };
+    lastPositiveVariant = variant.key;
+    cumulative += variant.weight;
+    if (target < cumulative) {
+      return variant.key;
+    }
   }
+
+  return lastPositiveVariant;
 }

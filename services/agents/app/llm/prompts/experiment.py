@@ -30,7 +30,21 @@ When designing an experiment, return a JSON object:
   "minimum_detectable_effect": 0.05,
   "flag_config": {
     "key": "...",
-    "variants": [...]
+    "name": "...",
+    "default_variant": "control",
+    "variants": [
+      {"key": "control", "weight": 1},
+      {"key": "treatment", "weight": 1}
+    ],
+    "rules": [],
+    "fallthrough": {
+      "rollout": {
+        "percentage": 100,
+        "bucket_by": "user_id"
+      }
+    },
+    "evaluation_mode": "client",
+    "auto_disable": true
   }
 }
 ```

@@ -1,3 +1,5 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -5,6 +7,78 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.routers import admin
+
+
+@pytest.mark.asyncio
+async def test_flag_update_broadcast_uses_canonical_client_shape():
+    broadcaster = AsyncMock()
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(broadcaster=broadcaster))
+    )
+    flag = {**make_flag(), "evaluation_mode": "both"}
+
+    await admin._broadcast_flag_change(
+        request,
+        "apdl",
+        "flag_updated",
+        flag,
+        "checkout",
+    )
+
+    broadcaster.broadcast.assert_awaited_once()
+    project_id, event_name, data = broadcaster.broadcast.await_args.args
+    payload = json.loads(data)
+    assert project_id == "apdl"
+    assert event_name == "flag_update"
+    assert payload == {
+        "action": "flag_updated",
+        "flag": admin.serialize_client_flag(flag),
+    }
+    assert set(payload["flag"]) == {
+        "key",
+        "enabled",
+        "default_variant",
+        "variants",
+        "salt",
+        "rules",
+        "fallthrough",
+        "version",
+    }
+
+
+@pytest.mark.asyncio
+async def test_admin_create_and_update_reject_legacy_boolean_fields():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_response = await client.post(
+            "/v1/admin/flags",
+            params={"project_id": "apdl"},
+            json={
+                "key": "checkout",
+                "name": "Checkout",
+                "default_value": False,
+                "default_variant": "control",
+                "variants": [
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
+                "fallthrough": {
+                    "value": True,
+                    "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+                },
+            },
+        )
+        update_response = await client.put(
+            "/v1/admin/flags/checkout",
+            params={"project_id": "apdl"},
+            json={
+                "version": 4,
+                "default_value": False,
+            },
+        )
+
+    assert create_response.status_code == 422
+    assert update_response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -117,13 +191,66 @@ async def test_disable_flag_allows_admin_source_without_auto_disable(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_update_flag_rejects_variants_without_existing_default(monkeypatch):
+    existing = make_flag()
+    update_flag = AsyncMock()
+
+    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
+    monkeypatch.setattr(admin.pg_store, "update_flag", update_flag)
+    app.state.pg_pool = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/v1/admin/flags/checkout",
+            params={"project_id": "apdl"},
+            json={
+                "version": 4,
+                "variants": [{"key": "treatment", "weight": 1}],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+    update_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_flag_rejects_default_variant_without_matching_existing_variant(monkeypatch):
+    existing = make_flag()
+    update_flag = AsyncMock()
+
+    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
+    monkeypatch.setattr(admin.pg_store, "update_flag", update_flag)
+    app.state.pg_pool = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            "/v1/admin/flags/checkout",
+            params={"project_id": "apdl"},
+            json={
+                "version": 4,
+                "default_variant": "missing",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+    update_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stale_flags_reports_review_and_cleanup_candidates(monkeypatch):
     reviewed = make_flag()
     cleanup_candidate = {
         **make_flag(),
         "key": "checkout-v2",
+        "variants": [
+            {"key": "control", "weight": 0},
+            {"key": "treatment", "weight": 1},
+        ],
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
     }
@@ -161,8 +288,11 @@ async def test_stale_flags_reports_review_and_cleanup_candidates(monkeypatch):
 async def test_cleanup_flag_archives_full_rollout_and_writes_audit(monkeypatch):
     existing = {
         **make_flag(),
+        "variants": [
+            {"key": "control", "weight": 0},
+            {"key": "treatment", "weight": 1},
+        ],
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
     }
@@ -275,10 +405,13 @@ def make_flag() -> dict:
         "review_by": "2099-07-01",
         "description": "Controls the checkout redesign.",
         "enabled": True,
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": [],
         "fallthrough": {
-            "value": False,
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FlagCache } from '../../src/flags/cache';
-import type { GateConfig } from '../../src/flags/types';
+import type { FlagConfig } from '../../src/flags/types';
 
 describe('FlagCache', () => {
   beforeEach(() => {
@@ -13,7 +13,7 @@ describe('FlagCache', () => {
       storageKey: 'apdl_test_flags',
     });
 
-    first.set([makeGate()], 'initial_fetch');
+    first.set([makeFlag()], 'initial_fetch');
 
     const restored = new FlagCache({
       persist: true,
@@ -33,7 +33,7 @@ describe('FlagCache', () => {
       storageKey: 'apdl_test_flags',
     });
 
-    first.set([makeGate()], 'initial_fetch');
+    first.set([makeFlag()], 'initial_fetch');
 
     const restored = new FlagCache({
       persist: true,
@@ -45,7 +45,7 @@ describe('FlagCache', () => {
 
   it('tracks invalid keyed configs without clearing unrelated flags', () => {
     const cache = new FlagCache();
-    cache.set([makeGate()], 'initial_fetch');
+    cache.set([makeFlag()], 'initial_fetch');
 
     cache.markInvalid(['broken'], 'sse');
 
@@ -55,15 +55,18 @@ describe('FlagCache', () => {
   });
 });
 
-function makeGate(): GateConfig {
+function makeFlag(): FlagConfig {
   return {
     key: 'checkout',
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

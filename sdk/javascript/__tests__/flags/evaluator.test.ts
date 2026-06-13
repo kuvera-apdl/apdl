@@ -3,13 +3,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { FlagEvaluator } from '../../src/flags/evaluator';
 import { FlagCache } from '../../src/flags/cache';
-import type { EvalContext, GateConfig, GateEvaluationResult } from '../../src/flags/types';
+import type { EvalContext, FlagConfig, FlagEvaluationResult } from '../../src/flags/types';
 
 interface EvaluationFixture {
   name: string;
-  flag: GateConfig;
+  flag: FlagConfig;
   context: EvalContext;
-  result: Omit<GateEvaluationResult, 'source'>;
+  result: Omit<FlagEvaluationResult, 'source'>;
 }
 
 interface ParityFixture {
@@ -29,41 +29,43 @@ describe('FlagEvaluator', () => {
     evaluator = new FlagEvaluator(cache);
   });
 
-  it('returns not_found for unknown gates', () => {
+  it('returns not_found for unknown flags', () => {
     expect(evaluator.evaluate('missing', {
       user_id: 'user_123',
       anonymous_id: '',
       attributes: {},
     })).toEqual({
       key: 'missing',
-      value: false,
+      variant: null,
       reason: 'not_found',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
-      config_version: 0,
-      source: 'none',
+      bucket_by: null,
+      config_version: null,
+      source: null,
     });
   });
 
-  it('returns invalid_config for malformed keyed gate configs', () => {
-    cache.markInvalid(['broken-gate'], 'initial_fetch');
+  it('returns invalid_config for malformed keyed flag configs', () => {
+    cache.markInvalid(['broken-flag'], 'initial_fetch');
 
-    expect(evaluator.evaluate('broken-gate', {
+    expect(evaluator.evaluate('broken-flag', {
       user_id: 'user_123',
       anonymous_id: '',
       attributes: {},
     })).toEqual({
-      key: 'broken-gate',
-      value: false,
+      key: 'broken-flag',
+      variant: null,
       reason: 'invalid_config',
-      rule_id: '',
-      bucket: null,
+      rule_id: null,
+      rollout_bucket: null,
+      variant_bucket: null,
       rollout_percentage: null,
-      bucket_by: '',
-      config_version: 0,
-      source: 'initial_fetch',
+      bucket_by: null,
+      config_version: null,
+      source: null,
     });
   });
 
@@ -92,9 +94,10 @@ describe('FlagEvaluator', () => {
 
     for (const [index, condition] of conditions.entries()) {
       const key = `operator_${index}`;
-      cache.set([makeGate(key, {
+      cache.set([makeFlag(key, {
         rules: [{
           id: `rule_${index}`,
+          name: '',
           conditions: [condition],
           rollout: { percentage: 100, bucket_by: 'user_id' },
         }],
@@ -109,32 +112,58 @@ describe('FlagEvaluator', () => {
           age: '30',
           email: 'alice@company.com',
         },
-      }).value).toBe(true);
+      })).toMatchObject({ reason: 'rule_match' });
     }
   });
 
+  it('uses presence and non-null value for exists operators', () => {
+    cache.set([makeFlag('presence_flag', {
+      rules: [{
+        id: 'rule_presence',
+        name: '',
+        conditions: [
+          { attribute: 'empty_text', operator: 'exists' },
+          { attribute: 'is_beta', operator: 'exists' },
+          { attribute: 'cart_items', operator: 'exists' },
+          { attribute: 'null_trait', operator: 'not_exists' },
+          { attribute: 'missing_trait', operator: 'not_exists' },
+        ],
+        rollout: { percentage: 100, bucket_by: 'anonymous_id' },
+      }],
+    })]);
+
+    expect(evaluator.evaluate('presence_flag', {
+      anonymous_id: 'anon_123',
+      attributes: {
+        empty_text: '',
+        is_beta: false,
+        cart_items: 0,
+        null_trait: null,
+      },
+    })).toMatchObject({ reason: 'rule_match' });
+  });
+
   it('uses anonymous_id only when bucket_by explicitly selects it', () => {
-    cache.set([makeGate('anonymous_gate', {
+    cache.set([makeFlag('anonymous_flag', {
       fallthrough: {
-        value: true,
         rollout: { percentage: 100, bucket_by: 'anonymous_id' },
       },
     })]);
 
-    expect(evaluator.evaluate('anonymous_gate', {
+    expect(evaluator.evaluate('anonymous_flag', {
       anonymous_id: 'anon_123',
       attributes: {},
     })).toMatchObject({
-      value: true,
+      variant: expect.any(String),
       reason: 'fallthrough',
       bucket_by: 'anonymous_id',
     });
   });
 
   it('returns source details from the cache', () => {
-    cache.set([makeGate('source_gate')], 'sse');
+    cache.set([makeFlag('source_flag')], 'sse');
 
-    expect(evaluator.evaluate('source_gate', {
+    expect(evaluator.evaluate('source_flag', {
       user_id: 'user_123',
       anonymous_id: '',
       attributes: {},
@@ -142,15 +171,18 @@ describe('FlagEvaluator', () => {
   });
 });
 
-function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig {
+function makeFlag(key: string, overrides: Partial<FlagConfig> = {}): FlagConfig {
   return {
     key,
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,
@@ -158,15 +190,22 @@ function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig 
   };
 }
 
-function expectResult(actual: GateEvaluationResult, expected: GateEvaluationResult): void {
+function expectResult(actual: FlagEvaluationResult, expected: FlagEvaluationResult): void {
   expect(actual).toMatchObject({
     ...expected,
-    bucket: actual.bucket,
+    rollout_bucket: actual.rollout_bucket,
+    variant_bucket: actual.variant_bucket,
   });
 
-  if (expected.bucket === null) {
-    expect(actual.bucket).toBeNull();
+  if (expected.rollout_bucket === null) {
+    expect(actual.rollout_bucket).toBeNull();
   } else {
-    expect(actual.bucket).toBeCloseTo(expected.bucket, 10);
+    expect(actual.rollout_bucket).toBeCloseTo(expected.rollout_bucket, 10);
+  }
+
+  if (expected.variant_bucket === null) {
+    expect(actual.variant_bucket).toBeNull();
+  } else {
+    expect(actual.variant_bucket).toBeCloseTo(expected.variant_bucket, 10);
   }
 }

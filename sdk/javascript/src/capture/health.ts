@@ -7,7 +7,7 @@ export const FRONTEND_ERROR_EVENT = '$frontend_error';
 export const WEB_VITAL_EVENT = '$web_vital';
 
 type ActiveFlagSnapshot = {
-  active_flags: Record<string, boolean>;
+  active_flags: Record<string, string>;
   active_flag_versions: Record<string, number>;
 };
 
@@ -17,7 +17,7 @@ const MAX_MESSAGE_LENGTH = 1024;
 const MAX_STACK_LENGTH = 4096;
 
 /**
- * Captures browser health signals and attaches the currently evaluated gate
+ * Captures browser health signals and attaches the currently evaluated flag
  * state so guardrails can attribute frontend failures to active flags.
  */
 export class HealthCapture {

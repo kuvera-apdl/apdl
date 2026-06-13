@@ -120,10 +120,11 @@ async def test_feature_flag_exposure_payload_is_published(client):
             "timestamp": "2026-05-26T02:26:53.455Z",
             "properties": {
                 "flag_key": "checkout-gate",
-                "value": True,
+                "variant": "treatment",
                 "reason": "fallthrough",
-                "rule_id": "",
-                "bucket": 7.31,
+                "rule_id": None,
+                "rollout_bucket": 7.31,
+                "variant_bucket": 74.2,
                 "rollout_percentage": 100,
                 "bucket_by": "user_id",
                 "config_version": 3,
@@ -160,10 +161,11 @@ async def test_feature_flag_exposure_rejects_camel_case_identity(client):
             "timestamp": "2026-05-26T02:26:53.455Z",
             "properties": {
                 "flag_key": "checkout-gate",
-                "value": True,
+                "variant": "treatment",
                 "reason": "fallthrough",
-                "rule_id": "",
-                "bucket": 7.31,
+                "rule_id": None,
+                "rollout_bucket": 7.31,
+                "variant_bucket": 74.2,
                 "rollout_percentage": 100,
                 "bucket_by": "user_id",
                 "config_version": 3,
@@ -181,6 +183,43 @@ async def test_feature_flag_exposure_rejects_camel_case_identity(client):
     fields = {error["field"] for error in body["errors"]}
     assert "events[0].anonymousId" in fields
     assert "events[0].user_id" in fields
+    app.state.redis.xadd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_feature_flag_exposure_rejects_boolean_value_payload(client):
+    payload = {
+        "events": [{
+            "event": "$feature_flag_exposure",
+            "type": "track",
+            "anonymous_id": "anon-sdk-1",
+            "session_id": "sess-sdk-1",
+            "message_id": "msg-sdk-1",
+            "timestamp": "2026-05-26T02:26:53.455Z",
+            "properties": {
+                "flag_key": "checkout-gate",
+                "value": True,
+                "reason": "fallthrough",
+                "rule_id": None,
+                "rollout_bucket": 7.31,
+                "variant_bucket": 74.2,
+                "rollout_percentage": 100,
+                "bucket_by": "user_id",
+                "config_version": 3,
+                "source": "initial_fetch",
+                "page": "/checkout",
+                "component": "CheckoutPage",
+            },
+        }],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 400
+    body = resp.json()
+    fields = {error["field"] for error in body["errors"]}
+    assert "events[0].properties.variant" in fields
+    assert "events[0].properties.value" in fields
     app.state.redis.xadd.assert_not_awaited()
 
 

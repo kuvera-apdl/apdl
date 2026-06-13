@@ -9,6 +9,22 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 
 PROJECT_ID = "apiasport"
+VARIANT_CONTEXT = {
+    "default_variant": "control",
+    "variants": [
+        {"key": "control", "weight": 1},
+        {"key": "treatment", "weight": 1},
+    ],
+}
+
+
+def _guardrail_request(flag_key: str, guardrail: dict) -> dict:
+    return {
+        "project_id": PROJECT_ID,
+        "flag_key": flag_key,
+        **VARIANT_CONTEXT,
+        "guardrail": guardrail,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -96,110 +112,129 @@ async def test_event_count(client):
 @pytest.mark.asyncio
 async def test_guardrail_frontend_error_count_trips_on_single_failure(client):
     app.state.ch_client.execute = AsyncMock(return_value=[{
-        "exposed_sessions": 1,
-        "baseline_sessions": 0,
-        "exposed_failure_sessions": 1,
-        "baseline_failure_sessions": 0,
-        "exposed_failures": 1,
-        "baseline_failures": 0,
+        "variant": "treatment",
+        "default_variant": "control",
+        "variant_sessions": 1,
+        "default_sessions": 0,
+        "variant_failure_sessions": 1,
+        "default_failure_sessions": 0,
+        "variant_failures": 1,
+        "default_failures": 0,
     }])
 
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
-            "metric": "frontend_error_count",
-            "threshold": "at_least_one",
-            "scope": "page:/checkout",
-            "minimum_exposures": 0,
-            "window_minutes": 10,
-        },
-    })
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_count",
+                "threshold": "at_least_one",
+                "scope": "page:/checkout",
+                "minimum_exposures": 0,
+                "window_minutes": 10,
+            },
+        ),
+    )
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["tripped"] is True
-    assert body["evidence"]["exposed_failures"] == 1
+    assert body["evidence"]["variant"] == "treatment"
+    assert body["evidence"]["default_variant"] == "control"
+    assert body["evidence"]["variant_failures"] == 1
 
 
 @pytest.mark.asyncio
 async def test_guardrail_frontend_error_rate_uses_baseline(client):
     app.state.ch_client.execute = AsyncMock(return_value=[{
-        "exposed_sessions": 100,
-        "baseline_sessions": 100,
-        "exposed_failure_sessions": 8,
-        "baseline_failure_sessions": 2,
-        "exposed_failures": 8,
-        "baseline_failures": 2,
+        "variant": "treatment",
+        "default_variant": "control",
+        "variant_sessions": 100,
+        "default_sessions": 100,
+        "variant_failure_sessions": 8,
+        "default_failure_sessions": 2,
+        "variant_failures": 8,
+        "default_failures": 2,
     }])
 
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
-            "metric": "frontend_error_rate",
-            "threshold": "2x_baseline",
-            "scope": "",
-            "minimum_exposures": 100,
-            "window_minutes": 10,
-        },
-    })
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_rate",
+                "threshold": "2x_baseline",
+                "scope": "",
+                "minimum_exposures": 100,
+                "window_minutes": 10,
+            },
+        ),
+    )
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["tripped"] is True
-    assert body["evidence"]["exposed_error_rate"] == 0.08
-    assert body["evidence"]["baseline_error_rate"] == 0.02
+    assert body["evidence"]["variant"] == "treatment"
+    assert body["evidence"]["variant_error_rate"] == 0.08
+    assert body["evidence"]["default_error_rate"] == 0.02
 
 
 @pytest.mark.asyncio
 async def test_guardrail_frontend_error_rate_trips_with_zero_baseline(client):
     app.state.ch_client.execute = AsyncMock(return_value=[{
-        "exposed_sessions": 100,
-        "baseline_sessions": 100,
-        "exposed_failure_sessions": 1,
-        "baseline_failure_sessions": 0,
-        "exposed_failures": 1,
-        "baseline_failures": 0,
+        "variant": "treatment",
+        "default_variant": "control",
+        "variant_sessions": 100,
+        "default_sessions": 100,
+        "variant_failure_sessions": 1,
+        "default_failure_sessions": 0,
+        "variant_failures": 1,
+        "default_failures": 0,
     }])
 
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
-            "metric": "frontend_error_rate",
-            "threshold": "2x_baseline",
-            "minimum_exposures": 100,
-        },
-    })
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_rate",
+                "threshold": "2x_baseline",
+                "minimum_exposures": 100,
+            },
+        ),
+    )
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["tripped"] is True
-    assert body["evidence"]["exposed_error_rate"] == 0.01
-    assert body["evidence"]["baseline_error_rate"] == 0.0
+    assert body["evidence"]["variant_error_rate"] == 0.01
+    assert body["evidence"]["default_error_rate"] == 0.0
 
 
 @pytest.mark.asyncio
 async def test_guardrail_frontend_error_rate_zero_baseline_no_exposed_failures(client):
     app.state.ch_client.execute = AsyncMock(return_value=[{
-        "exposed_sessions": 100,
-        "baseline_sessions": 100,
-        "exposed_failure_sessions": 0,
-        "baseline_failure_sessions": 0,
-        "exposed_failures": 0,
-        "baseline_failures": 0,
+        "variant": "treatment",
+        "default_variant": "control",
+        "variant_sessions": 100,
+        "default_sessions": 100,
+        "variant_failure_sessions": 0,
+        "default_failure_sessions": 0,
+        "variant_failures": 0,
+        "default_failures": 0,
     }])
 
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
-            "metric": "frontend_error_rate",
-            "threshold": "2x_baseline",
-            "minimum_exposures": 100,
-        },
-    })
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_rate",
+                "threshold": "2x_baseline",
+                "minimum_exposures": 100,
+            },
+        ),
+    )
 
     assert resp.status_code == 200
     assert resp.json()["tripped"] is False
@@ -207,15 +242,33 @@ async def test_guardrail_frontend_error_rate_zero_baseline_no_exposed_failures(c
 
 @pytest.mark.asyncio
 async def test_guardrail_rejects_noncanonical_fields(client):
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_count",
+                "threshold": "at_least_one",
+                "minimumExposures": 10,
+            },
+        ),
+    )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_guardrail_rejects_legacy_default_value_context(client):
+    payload = _guardrail_request(
+        "checkout-gate",
+        {
             "metric": "frontend_error_count",
             "threshold": "at_least_one",
-            "minimumExposures": 10,
         },
-    })
+    )
+    payload["default_value"] = False
+
+    resp = await client.post("/v1/query/guardrails/evaluate", json=payload)
 
     assert resp.status_code == 422
 
@@ -224,14 +277,16 @@ async def test_guardrail_rejects_noncanonical_fields(client):
 async def test_guardrail_query_requires_active_flag_snapshot(client):
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
-    resp = await client.post("/v1/query/guardrails/evaluate", json={
-        "project_id": PROJECT_ID,
-        "flag_key": "checkout-gate",
-        "guardrail": {
-            "metric": "frontend_error_count",
-            "threshold": "at_least_one",
-        },
-    })
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_count",
+                "threshold": "at_least_one",
+            },
+        ),
+    )
 
     assert resp.status_code == 200
     query = app.state.ch_client.execute.await_args.args[0]
@@ -241,7 +296,9 @@ async def test_guardrail_query_requires_active_flag_snapshot(client):
     assert "count(f.session_id)" not in query
     assert "min(first_exposure) AS first_exposure" not in query
     assert "JSONHas(f.active_flags, %(flag_key)s)" in query
-    assert "JSONExtractBool(f.active_flags, %(flag_key)s)" in query
+    assert "JSONExtractString(f.active_flags, %(flag_key)s) = e.variant" in query
+    assert "JSONExtractBool(f.active_flags, %(flag_key)s)" not in query
+    assert " value" not in query
 
 
 @pytest.mark.asyncio
@@ -616,6 +673,7 @@ async def test_experiment_results_frequentist(client):
         "/v1/query/experiment/exp_123",
         params={
             "metric": "purchase",
+            "flag_key": "checkout-experiment",
             "method": "frequentist",
             "project_id": PROJECT_ID,
         },
@@ -624,10 +682,19 @@ async def test_experiment_results_frequentist(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["experiment_id"] == "exp_123"
+    assert body["flag_key"] == "checkout-experiment"
     assert body["metric"] == "purchase"
     assert body["method"] == "frequentist"
     assert len(body["variants"]) == 2
     assert body["is_significant"] is True
+    metric_call = app.state.ch_client.execute.await_args_list[0]
+    exposure_call = app.state.ch_client.execute.await_args_list[1]
+    assert "FROM feature_flag_exposures" in metric_call.args[0]
+    assert "FROM feature_flag_exposures" in exposure_call.args[0]
+    assert "$experiment_exposure" not in metric_call.args[0]
+    assert metric_call.args[1]["flag_key"] == "checkout-experiment"
+    assert exposure_call.args[1]["flag_key"] == "checkout-experiment"
+    assert "experiment_id" not in metric_call.args[1]
 
 
 @pytest.mark.asyncio
@@ -637,7 +704,11 @@ async def test_experiment_no_data_returns_404(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_missing",
-        params={"metric": "purchase", "project_id": PROJECT_ID},
+        params={
+            "metric": "purchase",
+            "flag_key": "checkout-experiment",
+            "project_id": PROJECT_ID,
+        },
     )
 
     assert resp.status_code == 404
@@ -655,7 +726,22 @@ async def test_experiment_single_variant_returns_400(client):
 
     resp = await client.get(
         "/v1/query/experiment/exp_single",
-        params={"metric": "purchase", "project_id": PROJECT_ID},
+        params={
+            "metric": "purchase",
+            "flag_key": "checkout-experiment",
+            "project_id": PROJECT_ID,
+        },
     )
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_experiment_requires_flag_key(client):
+    """Experiment analysis requires canonical flag metadata."""
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"metric": "purchase", "project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 422

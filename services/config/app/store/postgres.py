@@ -8,8 +8,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VARIANTS = [
+    {"key": "control", "weight": 1},
+    {"key": "treatment", "weight": 1},
+]
+DEFAULT_FALLTHROUGH = {
+    "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+}
+FLAG_COLUMNS = """
+    key, project_id, name, state, owners, review_by, enabled,
+    description, default_variant, variants, rules, fallthrough, salt,
+    evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+    disabled_at, version, created_at, updated_at, archived_at
+"""
 
-def _json_value(value, fallback):
+
+def _json_field(value, fallback):
     if value is None:
         return fallback
     if isinstance(value, str):
@@ -27,17 +41,18 @@ def _row_to_flag(row) -> dict:
         "project_id": row["project_id"],
         "name": row["name"],
         "state": row["state"],
-        "owners": _json_value(row["owners"], []),
+        "owners": _json_field(row["owners"], []),
         "review_by": str(row["review_by"]) if row["review_by"] else None,
         "enabled": row["enabled"],
         "description": row["description"],
-        "default_value": row["default_value"],
-        "rules": _json_value(row["rules"], []),
-        "fallthrough": _json_value(row["fallthrough"], {}),
+        "default_variant": row["default_variant"],
+        "variants": _json_field(row["variants"], []),
+        "rules": _json_field(row["rules"], []),
+        "fallthrough": _json_field(row["fallthrough"], {}),
         "salt": row["salt"],
         "evaluation_mode": row["evaluation_mode"],
         "auto_disable": row["auto_disable"],
-        "guardrails": _json_value(row["guardrails"], []),
+        "guardrails": _json_field(row["guardrails"], []),
         "disabled_reason": row["disabled_reason"],
         "disabled_by": row["disabled_by"],
         "disabled_at": str(row["disabled_at"]) if row["disabled_at"] else None,
@@ -82,7 +97,7 @@ async def get_flags(
     if client_visible_only:
         filters.append("evaluation_mode IN ('client', 'both')")
 
-    sql = f"SELECT * FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
+    sql = f"SELECT {FLAG_COLUMNS} FROM flags WHERE {' AND '.join(filters)} ORDER BY key"
     rows = await pool.fetch(sql, project_id)
     return [_row_to_flag(r) for r in rows]
 
@@ -92,7 +107,10 @@ async def get_flag(
 ) -> dict | None:
     """Fetch a single flag by project_id and key."""
     archived_filter = "" if include_archived else " AND archived_at IS NULL"
-    sql = f"SELECT * FROM flags WHERE project_id = $1 AND key = $2{archived_filter}"
+    sql = (
+        f"SELECT {FLAG_COLUMNS} FROM flags "
+        f"WHERE project_id = $1 AND key = $2{archived_filter}"
+    )
     row = await pool.fetchrow(sql, project_id, key)
     if row is None:
         return None
@@ -104,14 +122,18 @@ async def create_flag(pool, flag: dict) -> dict | None:
     sql = """
         INSERT INTO flags (
             key, project_id, name, state, owners, review_by, enabled,
-            description, default_value, rules, fallthrough, salt,
+            description, default_variant, variants, rules, fallthrough, salt,
             evaluation_mode, auto_disable, guardrails
         )
         VALUES (
             $1, $2, $3, $4, $5::jsonb, $6, $7,
-            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15::jsonb
+            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb
         )
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(
@@ -124,9 +146,13 @@ async def create_flag(pool, flag: dict) -> dict | None:
             flag.get("review_by"),
             flag.get("enabled", False),
             flag.get("description", ""),
-            flag.get("default_value", False),
+            flag.get("default_variant", "control"),
+            json.dumps(flag.get("variants", DEFAULT_VARIANTS), separators=(",", ":")),
             json.dumps(flag.get("rules", []), separators=(",", ":")),
-            json.dumps(flag.get("fallthrough", {}), separators=(",", ":")),
+            json.dumps(
+                flag.get("fallthrough", DEFAULT_FALLTHROUGH),
+                separators=(",", ":"),
+            ),
             flag["salt"],
             flag.get("evaluation_mode", "client"),
             flag.get("auto_disable", True),
@@ -148,19 +174,24 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             review_by = $7,
             enabled = $8,
             description = $9,
-            default_value = $10,
-            rules = $11::jsonb,
-            fallthrough = $12::jsonb,
-            evaluation_mode = $13,
-            auto_disable = $14,
-            guardrails = $15::jsonb,
+            default_variant = $10,
+            variants = $11::jsonb,
+            rules = $12::jsonb,
+            fallthrough = $13::jsonb,
+            evaluation_mode = $14,
+            auto_disable = $15,
+            guardrails = $16::jsonb,
             version = version + 1,
             updated_at = NOW()
         WHERE project_id = $1
           AND key = $2
           AND version = $3
           AND archived_at IS NULL
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(
@@ -174,7 +205,8 @@ async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
             flag.get("review_by"),
             flag["enabled"],
             flag["description"],
-            flag["default_value"],
+            flag["default_variant"],
+            json.dumps(flag["variants"], separators=(",", ":")),
             json.dumps(flag["rules"], separators=(",", ":")),
             json.dumps(flag["fallthrough"], separators=(",", ":")),
             flag["evaluation_mode"],
@@ -205,7 +237,11 @@ async def archive_flag(
             updated_at = NOW()
         WHERE project_id = $1 AND key = $2 AND archived_at IS NULL
     """ + version_filter + """
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         args = (project_id, key) if expected_version is None else (project_id, key, expected_version)
@@ -238,7 +274,11 @@ async def disable_flag(
           AND key = $2
           AND enabled = true
           AND archived_at IS NULL
-        RETURNING *
+        RETURNING
+            key, project_id, name, state, owners, review_by, enabled,
+            description, default_variant, variants, rules, fallthrough, salt,
+            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
+            disabled_at, version, created_at, updated_at, archived_at
     """
     try:
         row = await pool.fetchrow(sql, project_id, key, reason, source)
@@ -309,9 +349,9 @@ async def get_flag_audit_entries(
             "actor": row["actor"],
             "previous_version": row["previous_version"],
             "new_version": row["new_version"],
-            "before": _json_value(row["before"], None),
-            "after": _json_value(row["after"], None),
-            "evidence": _json_value(row["evidence"], {}),
+            "before": _json_field(row["before"], None),
+            "after": _json_field(row["after"], None),
+            "evidence": _json_field(row["evidence"], {}),
             "reason": row["reason"],
             "created_at": str(row["created_at"]),
         }

@@ -22,9 +22,10 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
         List of active experiment configurations.
     """
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get("/v1/experiments", params={"project_id": project_id})
+        resp = await client.get("/v1/admin/experiments", params={"project_id": project_id})
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return data.get("experiments", []) if isinstance(data, dict) else data
 
 
 async def create_experiment_config(
@@ -60,23 +61,23 @@ async def create_experiment_config(
         The created experiment configuration.
     """
     payload: dict[str, Any] = {
-        "project_id": project_id,
-        "experiment_id": experiment_id,
-        "hypothesis": hypothesis,
+        "key": experiment_id,
+        "status": "active",
+        "description": hypothesis,
         "variants": variants,
-        "primary_metric": primary_metric,
-        "flag_key": flag_key or experiment_id,
-        "estimated_duration_days": estimated_duration_days,
+        "traffic_percentage": 100.0,
     }
-    if secondary_metrics:
-        payload["secondary_metrics"] = secondary_metrics
-    if guardrail_metrics:
-        payload["guardrail_metrics"] = guardrail_metrics
-    if targeting:
-        payload["targeting"] = targeting
+    if isinstance(targeting, dict):
+        payload["targeting_rules"] = targeting.get("conditions", [])
+    elif isinstance(targeting, list):
+        payload["targeting_rules"] = targeting
 
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post("/v1/admin/experiments", json=payload)
+        resp = await client.post(
+            "/v1/admin/experiments",
+            json=payload,
+            params={"project_id": project_id},
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -117,6 +118,7 @@ async def get_experiment_results(
     metric: str,
     project_id: str = "default",
     method: str = "frequentist",
+    flag_key: str | None = None,
 ) -> dict[str, Any]:
     """Get statistical results for a running or completed experiment.
 
@@ -125,6 +127,10 @@ async def get_experiment_results(
         metric: The conversion/metric event to evaluate.
         project_id: Project ID.
         method: Statistical method — "frequentist", "bayesian", or "sequential".
+        flag_key: Feature flag key whose canonical variant exposures back this
+            experiment. The query endpoint now requires it; defaults to
+            ``experiment_id``, matching ``create_experiment_config`` which keys
+            the underlying flag on the experiment id.
 
     Returns:
         Full experiment analysis results.
@@ -132,7 +138,12 @@ async def get_experiment_results(
     async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
         resp = await client.get(
             f"/v1/query/experiment/{experiment_id}",
-            params={"metric": metric, "method": method, "project_id": project_id},
+            params={
+                "metric": metric,
+                "method": method,
+                "project_id": project_id,
+                "flag_key": flag_key or experiment_id,
+            },
         )
         resp.raise_for_status()
         return resp.json()
@@ -172,4 +183,3 @@ class _InlineAnalyzer:
         num = (z_alpha * math.sqrt(2 * p_bar * (1 - p_bar))
                + z_beta * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
         return math.ceil(num / (mde ** 2)) if mde != 0 else 0
-

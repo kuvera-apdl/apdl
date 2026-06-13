@@ -55,18 +55,22 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
         )
 
     assert response.status_code == 200
+    response_json = response.json()
     assert response.json() == {
         "key": "checkout",
-        "value": True,
+        "variant": response_json["variant"],
         "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": response.json()["bucket"],
+        "rule_id": None,
+        "rollout_bucket": response_json["rollout_bucket"],
+        "variant_bucket": response_json["variant_bucket"],
         "rollout_percentage": 100.0,
         "bucket_by": "user_id",
         "config_version": 4,
         "source": "server",
     }
-    assert response.json()["bucket"] is not None
+    assert response_json["variant"] in {"control", "treatment"}
+    assert response_json["rollout_bucket"] is not None
+    assert response_json["variant_bucket"] is not None
     redis.xadd.assert_awaited_once()
     args, kwargs = redis.xadd.await_args
     stream_key, fields = args
@@ -81,10 +85,11 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     assert published["session_id"].startswith("server:")
     assert published["properties"] == {
         "flag_key": "checkout",
-        "value": True,
+        "variant": response_json["variant"],
         "reason": "fallthrough",
-        "rule_id": "",
-        "bucket": response.json()["bucket"],
+        "rule_id": None,
+        "rollout_bucket": response_json["rollout_bucket"],
+        "variant_bucket": response_json["variant_bucket"],
         "rollout_percentage": 100.0,
         "bucket_by": "user_id",
         "config_version": 4,
@@ -92,6 +97,47 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
         "page": "/checkout",
         "component": "CheckoutPage",
     }
+
+
+@pytest.mark.asyncio
+async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypatch):
+    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
+    monkeypatch.setattr(
+        evaluate.pg_store,
+        "get_flag",
+        AsyncMock(return_value=make_flag({"evaluation_mode": "server"})),
+    )
+    redis = AsyncMock()
+    redis.xadd = AsyncMock(return_value=b"1234567890-0")
+    app.state.pg_pool = object()
+    app.state.redis = redis
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/evaluate",
+            headers={"X-APDL-Internal-Token": "secret"},
+            json={
+                "project_id": "apdl",
+                "key": "checkout",
+                "context": {"anonymous_id": "anon_123", "attributes": {}},
+            },
+        )
+
+    assert response.status_code == 200
+    redis.xadd.assert_awaited_once()
+
+    args, _ = redis.xadd.await_args
+    _, fields = args
+    published = json.loads(fields["event_json"])
+    assert published["anonymous_id"] == "anon_123"
+    assert published["message_id"].startswith("srv_")
+    assert published["session_id"] == f"server:{published['message_id']}"
+    assert published["properties"]["source"] == "server"
+    assert published["properties"]["page"] == ""
+    assert published["properties"]["component"] == ""
+    assert "value" not in published["properties"]
+    assert "bucket" not in published["properties"]
 
 
 @pytest.mark.asyncio
@@ -134,10 +180,13 @@ def make_flag(overrides: dict | None = None) -> dict:
         "review_by": "2099-07-01",
         "description": "Controls checkout.",
         "enabled": True,
-        "default_value": False,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
         "rules": [],
         "fallthrough": {
-            "value": True,
             "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",

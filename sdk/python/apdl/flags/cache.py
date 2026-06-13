@@ -58,17 +58,17 @@ class FlagCache:
         with self._lock:
             return list(self._flags.values())
 
-    def get_source(self, key: str) -> GateConfigSource:
+    def get_source(self, key: str) -> GateConfigSource | None:
         with self._lock:
-            return self._sources.get(key, "none")
+            return self._sources.get(key)
 
     def is_invalid(self, key: str) -> bool:
         with self._lock:
             return key in self._invalid_sources
 
-    def get_invalid_source(self, key: str) -> GateConfigSource:
+    def get_invalid_source(self, key: str) -> GateConfigSource | None:
         with self._lock:
-            return self._invalid_sources.get(key, "none")
+            return self._invalid_sources.get(key)
 
     def get_version(self) -> int:
         with self._lock:

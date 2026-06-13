@@ -13,19 +13,17 @@ export type { TrackEvent, EventContext } from './core/types';
 
 export type {
   FlagConfig,
-  TargetingRule,
-  Condition,
-  FlagResult,
   EvalContext,
-  GateConfig,
-  GateRule,
-  GateCondition,
+  VariantConfig,
+  FlagRule,
+  FlagCondition,
+  ConditionOperator,
   RolloutConfig,
   FallthroughConfig,
-  GateEvaluationResult,
-  GateEvaluationReason,
-  GateConfigSource,
-  GateEvaluationOptions,
+  FlagEvaluationResult,
+  FlagEvaluationReason,
+  FlagConfigSource,
+  FlagEvaluationOptions,
 } from './flags/types';
 
 export type {

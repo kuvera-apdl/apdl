@@ -1,5 +1,5 @@
 import { parseFlagConfigs } from './schema';
-import type { FlagConfig, GateConfigSource } from './types';
+import type { FlagConfig, FlagConfigSource } from './types';
 
 type FlagChangeCallback = (flags: FlagConfig[]) => void;
 
@@ -9,15 +9,15 @@ interface FlagCacheOptions {
 }
 
 const DEFAULT_STORAGE_KEY = 'apdl_flags';
-const STORAGE_SCHEMA_VERSION = 1;
+const STORAGE_SCHEMA_VERSION = 2;
 
 /**
  * In-memory flag configuration store with change notification.
  */
 export class FlagCache {
   private flags: Map<string, FlagConfig> = new Map();
-  private sources: Map<string, GateConfigSource> = new Map();
-  private invalidSources: Map<string, GateConfigSource> = new Map();
+  private sources: Map<string, FlagConfigSource> = new Map();
+  private invalidSources: Map<string, FlagConfigSource> = new Map();
   private version = 0;
   private listeners: Set<FlagChangeCallback> = new Set();
   private persistEnabled: boolean;
@@ -38,7 +38,7 @@ export class FlagCache {
    */
   set(
     flags: FlagConfig[],
-    source: GateConfigSource = 'memory',
+    source: FlagConfigSource = 'memory',
     invalidKeys: string[] = []
   ): void {
     this.flags.clear();
@@ -66,7 +66,7 @@ export class FlagCache {
   /**
    * Marks keyed records as malformed while preserving unrelated cached flags.
    */
-  markInvalid(keys: string[], source: GateConfigSource = 'memory'): void {
+  markInvalid(keys: string[], source: FlagConfigSource = 'memory'): void {
     for (const key of keys) {
       this.flags.delete(key);
       this.sources.delete(key);
@@ -80,8 +80,8 @@ export class FlagCache {
   /**
    * Returns where a flag configuration most recently came from.
    */
-  getSource(key: string): GateConfigSource | 'none' {
-    return this.sources.get(key) ?? 'none';
+  getSource(key: string): FlagConfigSource | null {
+    return this.sources.get(key) ?? null;
   }
 
   /**
@@ -94,8 +94,8 @@ export class FlagCache {
   /**
    * Returns where a malformed flag configuration most recently came from.
    */
-  getInvalidSource(key: string): GateConfigSource | 'none' {
-    return this.invalidSources.get(key) ?? 'none';
+  getInvalidSource(key: string): FlagConfigSource | null {
+    return this.invalidSources.get(key) ?? null;
   }
 
   /**
@@ -144,6 +144,7 @@ export class FlagCache {
         this.storageKey,
         JSON.stringify({
           schema_version: STORAGE_SCHEMA_VERSION,
+          project_id: 'local_storage',
           flags: this.getAll(),
         })
       );

@@ -67,7 +67,7 @@ make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
 ## Using the SDKs
 
 API keys follow `proj_{project_id}_{secret}` (secret: 16+ alphanumeric chars).
-Both SDKs evaluate feature gates **locally** with a byte-for-byte identical
+Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identical
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).
 
@@ -85,8 +85,10 @@ const apdl = APDL.init({
 apdl.track('purchase_completed', { product_id: 'sku-123', revenue: 49.99 });
 apdl.identify('user-42', { email: 'user@example.com', plan: 'pro' });
 
-if (apdl.checkGate('new-checkout-flow')) {
-  // Show the gated experience.
+const checkoutVariant = apdl.getVariant('new-checkout-flow');
+
+if (checkoutVariant === 'treatment') {
+  // Show the treatment experience.
 }
 ```
 
@@ -102,11 +104,11 @@ with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
     client.identify("u_123", {"plan": "pro"})
 
-    if client.check_gate("new-checkout", user_id="u_123"):
-        ...  # gated experience
+    if client.get_variant("new-checkout", user_id="u_123") == "treatment":
+        ...  # treatment experience
 ```
 
-→ [Full Python SDK docs](sdk/python/README.md): batching, gate-result
+→ [Full Python SDK docs](sdk/python/README.md): batching, variant-result
 explanations, configuration.
 
 ## Architecture
@@ -240,7 +242,7 @@ per-flag audit history — see the [config service README](services/config/READM
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
 | `POST` | `/v1/query/cohort` | Cohort analysis |
 | `POST` | `/v1/query/retention` | Retention curves |
-| `GET` | `/v1/query/experiment/:id` | Experiment results with statistical tests |
+| `GET` | `/v1/query/experiment/:id?metric=…&flag_key=…` | Experiment results with statistical tests (`flag_key` required) |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate flag guardrails |
 | `GET` | `/health`, `/ready` | Health / readiness |
 

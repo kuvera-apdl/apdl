@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FlagCache } from '../../src/flags/cache';
 import { SSEHandlers } from '../../src/sse/handlers';
-import type { GateConfig } from '../../src/flags/types';
+import type { FlagConfig } from '../../src/flags/types';
 
 describe('SSEHandlers', () => {
   it('loads canonical flags from config events', () => {
@@ -11,11 +11,10 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
         project_id: 'apdl',
-        flags: [makeGate('booking-flow', {
+        flags: [makeFlag('booking-flow', {
           fallthrough: {
-            value: true,
             rollout: { percentage: 50, bucket_by: 'user_id' },
           },
         })],
@@ -26,7 +25,6 @@ describe('SSEHandlers', () => {
       key: 'booking-flow',
       enabled: true,
       fallthrough: {
-        value: true,
         rollout: { percentage: 50, bucket_by: 'user_id' },
       },
     });
@@ -40,8 +38,9 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
-        flags: [makeGate('existing')],
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('existing')],
       }),
     });
 
@@ -49,9 +48,8 @@ describe('SSEHandlers', () => {
       type: 'flag_update',
       data: JSON.stringify({
         action: 'flag_created',
-        flag: makeGate('created', {
+        flag: makeFlag('created', {
           fallthrough: {
-            value: true,
             rollout: { percentage: 20, bucket_by: 'user_id' },
           },
         }),
@@ -74,8 +72,9 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
-        flags: [makeGate('delete-me')],
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('delete-me')],
       }),
     });
 
@@ -97,6 +96,8 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [{
           key: 'legacy',
           enabled: true,
@@ -119,15 +120,17 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
-        flags: [makeGate('existing')],
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('existing')],
       }),
     });
 
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
+        schema_version: 2,
+        project_id: 'apdl',
         flags: [{
           key: 'legacy',
           enabled: true,
@@ -153,8 +156,9 @@ describe('SSEHandlers', () => {
     handlers.handle({
       type: 'config',
       data: JSON.stringify({
-        schema_version: 1,
-        flags: [makeGate('toggle-me')],
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('toggle-me')],
       }),
     });
 
@@ -171,15 +175,18 @@ describe('SSEHandlers', () => {
   });
 });
 
-function makeGate(key: string, overrides: Partial<GateConfig> = {}): GateConfig {
+function makeFlag(key: string, overrides: Partial<FlagConfig> = {}): FlagConfig {
   return {
     key,
     enabled: true,
-    default_value: false,
+    default_variant: 'control',
+    variants: [
+      { key: 'control', weight: 1 },
+      { key: 'treatment', weight: 1 },
+    ],
     salt: 'salt_123',
     rules: [],
     fallthrough: {
-      value: true,
       rollout: { percentage: 100, bucket_by: 'user_id' },
     },
     version: 1,

@@ -10,7 +10,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.clickhouse.client import ClickHouseClient
-from app.models.schemas import GuardrailConfig
+from app.models.schemas import GuardrailConfig, GuardrailVariantContext
 from app.routers.guardrails import evaluate_guardrail
 
 logger = logging.getLogger(__name__)
@@ -73,9 +73,13 @@ async def evaluate_project(
         for raw_guardrail in flag.get("guardrails", []):
             try:
                 guardrail = GuardrailConfig.model_validate(raw_guardrail)
+                variant_context = GuardrailVariantContext.model_validate({
+                    "default_variant": flag.get("default_variant"),
+                    "variants": flag.get("variants"),
+                })
             except ValidationError as exc:
                 logger.warning(
-                    "Skipping invalid guardrail for flag %s: %s",
+                    "Skipping invalid guardrail context for flag %s: %s",
                     flag.get("key", ""),
                     exc,
                 )
@@ -85,6 +89,8 @@ async def evaluate_project(
                 ch_client,
                 project_id=project_id,
                 flag_key=flag["key"],
+                default_variant=variant_context.default_variant,
+                variants=variant_context.variants,
                 guardrail=guardrail,
             )
             if not result.tripped:

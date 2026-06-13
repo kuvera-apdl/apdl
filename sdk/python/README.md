@@ -1,14 +1,14 @@
 # apdl-sdk (Python)
 
 Server-side Python client for the **Autonomous Product Development Loop** platform.
-Capture analytics events and evaluate feature gates locally — with the same
-FNV-1a bucketing as the JavaScript SDK and the config service, so a user buckets
-identically no matter where a gate is evaluated.
+Capture analytics events and evaluate variant feature flags locally — with the
+same FNV-1a bucketing as the JavaScript SDK and the config service, so a user
+buckets identically no matter where a flag is evaluated.
 
 - 🧵 Non-blocking event capture via a background batching/flush thread
-- 🚩 Local feature gate evaluation (no network round-trip on the hot path)
+- 🚩 Local variant flag evaluation (no network round-trip on the hot path)
 - 🔁 Background flag-config refresh from the config service
-- 🔬 Fully-explained gate results (`reason`, `bucket`, `rule_id`, …) and automatic exposure logging
+- 🔬 Fully-explained results (`reason`, `variant`, `rollout_bucket`, `variant_bucket`, `rule_id`, …) and automatic exposure logging
 - ✅ Pydantic v2 models throughout; ships with `py.typed`
 
 Requires Python 3.12+. Runtime dependencies: `httpx`, `pydantic`.
@@ -34,8 +34,8 @@ client.identify("u_123", {"plan": "pro"})
 client.group("org_42", {"name": "Acme"}, user_id="u_123")
 client.page("/checkout", user_id="u_123")
 
-# Evaluate a feature gate locally
-if client.check_gate("new-checkout", user_id="u_123"):
+# Evaluate a variant feature flag locally
+if client.get_variant("new-checkout", user_id="u_123") == "treatment":
     ...
 
 client.shutdown()  # flushes pending events and stops background threads
@@ -62,7 +62,7 @@ client = APDL.init(APDLConfig(
     batch_size=20,                         # 1..100
     flush_interval=3.0,                    # seconds between background flushes
     max_queue_size=1000,                   # oldest events dropped past this
-    enable_flags=True,                     # fetch + poll gate configs
+    enable_flags=True,                     # fetch + poll flag configs
     flag_poll_interval=30.0,               # seconds between flag refreshes
     log_exposures=True,                    # emit $feature_flag_exposure events
     request_timeout=10.0,
@@ -70,29 +70,37 @@ client = APDL.init(APDLConfig(
 ))
 ```
 
-## Feature gates
+## Variant feature flags
 
-`check_gate` returns a `bool`; `check_gate_details` returns a fully-explained
-`GateEvaluationResult`:
+Every flag is a set of weighted variants (a binary flag is `control`/`treatment`).
+`get_variant` returns the assigned variant key — or `None` when the flag is
+missing or its config is invalid; `get_variant_details` returns a
+fully-explained `GateEvaluationResult`:
 
 ```python
-result = client.check_gate_details("new-checkout", user_id="u_123", attributes={"plan": "pro"})
-print(result.value, result.reason, result.rule_id, result.bucket)
-# True  rule_match  r_pro_users  None
+variant = client.get_variant("new-checkout", user_id="u_123")
+if variant == "treatment":
+    ...
+
+result = client.get_variant_details("new-checkout", user_id="u_123", attributes={"plan": "pro"})
+print(result.variant, result.reason, result.rule_id, result.variant_bucket)
+# treatment  rule_match  r_pro_users  73.4
 ```
 
 `reason` is one of `not_found`, `invalid_config`, `disabled`, `error`,
-`rule_match`, `rule_rollout`, `fallthrough`, `fallthrough_rollout`.
+`rule_match`, `rule_rollout`, `fallthrough`, `fallthrough_rollout`. Detail
+fields that do not apply are `None` (never `""`/`0`).
 
-Calling `check_gate`/`check_gate_details` automatically emits a deduplicated
+Calling `get_variant`/`get_variant_details` automatically emits a deduplicated
 `$feature_flag_exposure` event (disable per call with `log_exposure=False`, or
-globally with `log_exposures=False`).
+globally with `log_exposures=False`). Pass `page=`/`component=` to annotate the
+exposure.
 
 React to config changes (e.g. to bust a local cache). The callback takes no
 value, because the evaluated result depends on per-request context:
 
 ```python
-unsubscribe = client.on_flag_change("new-checkout", lambda: my_cache.clear())
+unsubscribe = client.on_variant_change("new-checkout", lambda: my_cache.clear())
 ...
 unsubscribe()
 ```

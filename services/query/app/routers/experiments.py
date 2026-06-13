@@ -32,6 +32,11 @@ async def experiment_results(
     experiment_id: str,
     request: Request,
     metric: str = Query(..., description="The conversion/metric event name to evaluate"),
+    flag_key: str = Query(
+        ...,
+        min_length=1,
+        description="Feature flag key that produced canonical variant exposures",
+    ),
     method: AnalysisMethod = Query(
         AnalysisMethod.frequentist,
         description="Statistical method: frequentist, bayesian, or sequential",
@@ -43,15 +48,22 @@ async def experiment_results(
 ) -> ExperimentResult:
     """Retrieve and statistically analyse experiment results.
 
-    Fetches exposure assignments and per-user metric values from ClickHouse,
-    then runs the selected statistical test (frequentist / bayesian / sequential).
+    Fetches feature-flag variant assignments and per-user metric values from
+    ClickHouse, then runs the selected statistical test.
+
+    Contract note: ``flag_key`` is **required** — exposures are stored and joined
+    by flag key (``feature_flag_exposures.flag_key``), so it identifies the data
+    to analyse. ``experiment_id`` is a path label only and no longer filters the
+    query; callers must supply the flag key that produced the exposures (by
+    convention this equals the experiment id — see the agents service's
+    ``create_experiment_config``). Omitting ``flag_key`` returns ``422``.
     """
     client = _get_client(request)
     pid = project_id if project_id is not None else DEFAULT_PROJECT_ID
 
     params: dict[str, Any] = {
         "project_id": pid,
-        "experiment_id": experiment_id,
+        "flag_key": flag_key,
         "metric": metric,
     }
 
@@ -61,7 +73,10 @@ async def experiment_results(
     if not metric_rows:
         raise HTTPException(
             status_code=404,
-            detail=f"No data found for experiment '{experiment_id}' with metric '{metric}'.",
+            detail=(
+                f"No data found for experiment '{experiment_id}' "
+                f"and flag '{flag_key}' with metric '{metric}'."
+            ),
         )
 
     # Also fetch exposures to include users with zero conversions
@@ -137,6 +152,7 @@ async def experiment_results(
 
     return ExperimentResult(
         experiment_id=experiment_id,
+        flag_key=flag_key,
         metric=metric,
         method=method.value,
         variants=variant_results,

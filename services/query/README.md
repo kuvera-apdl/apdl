@@ -25,7 +25,7 @@ against ClickHouse over FastAPI (port **8082**).
 | `POST` | `/v1/query/funnel` | N-step funnel (2–20 steps, 1–90 day window) |
 | `POST` | `/v1/query/cohort` | Compare a metric across values of a user property |
 | `POST` | `/v1/query/retention` | Day/week retention from a cohort selector to a return selector |
-| `GET`  | `/v1/query/experiment/{id}?metric=...&method=...` | Statistical experiment analysis |
+| `GET`  | `/v1/query/experiment/{id}?metric=...&flag_key=...&method=...` | Statistical experiment analysis (`flag_key` required) |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate a feature-flag guardrail on demand |
 | `GET`  | `/health` / `/ready` | Liveness / ClickHouse readiness probes |
 
@@ -69,7 +69,9 @@ curl -s http://localhost:8082/v1/query/events/count \
 
 `GET /v1/query/experiment/{id}` joins `$experiment_exposure` assignments with
 post-exposure metric events (zero-filling exposed non-converters) and runs one
-of three implemented methods:
+of three implemented methods. `flag_key` is a **required** query parameter —
+exposures are keyed by flag, so it selects the data; `{id}` is a label only and
+does not filter (by convention the flag key equals the experiment id):
 
 - **`frequentist`** — Welch's t-test with Cohen's d effect size and a CI for
   the difference in means

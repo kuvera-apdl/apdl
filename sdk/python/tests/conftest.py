@@ -12,14 +12,21 @@ from apdl.flags.models import (
     GateConfig,
     GateRule,
     RolloutConfig,
+    VariantConfig,
 )
 
 
-def make_gate(
-    key: str = "gate",
+def binary_variants() -> list[VariantConfig]:
+    """A fresh control/treatment variant pair."""
+    return [VariantConfig(key="control", weight=1), VariantConfig(key="treatment", weight=1)]
+
+
+def make_flag(
+    key: str = "flag",
     *,
     enabled: bool = True,
-    default_value: bool = False,
+    default_variant: str = "control",
+    variants: list[VariantConfig] | None = None,
     salt: str = "s",
     rules: list[GateRule] | None = None,
     fallthrough: FallthroughConfig | None = None,
@@ -28,12 +35,12 @@ def make_gate(
     return GateConfig(
         key=key,
         enabled=enabled,
-        default_value=default_value,
+        default_variant=default_variant,
+        variants=variants if variants is not None else binary_variants(),
         salt=salt,
         rules=rules or [],
-        fallthrough=fallthrough or FallthroughConfig(
-            value=True, rollout=RolloutConfig(percentage=100.0, bucket_by="user_id")
-        ),
+        fallthrough=fallthrough
+        or FallthroughConfig(rollout=RolloutConfig(percentage=100.0, bucket_by="user_id")),
         version=version,
     )
 

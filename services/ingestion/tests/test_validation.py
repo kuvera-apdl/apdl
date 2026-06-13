@@ -204,6 +204,60 @@ class TestSingleEventValidation:
         assert result["valid"] is False
         assert any(error["field"] == "properties.reason" for error in result["errors"])
 
+    def test_feature_flag_exposure_rejects_boolean_value_property(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["value"] = True
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.value" for error in result["errors"])
+
+    def test_feature_flag_exposure_rejects_legacy_bucket_property(self):
+        event = feature_flag_exposure_event()
+        properties = event["properties"]
+        properties.pop("rollout_bucket")
+        properties["bucket"] = 7.31
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "properties.rollout_bucket" in fields
+        assert "properties.bucket" in fields
+
+    def test_feature_flag_exposure_requires_canonical_metadata(self):
+        event = feature_flag_exposure_event()
+        event["properties"].pop("source")
+        event["properties"].pop("page")
+        event["properties"].pop("component")
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        fields = {error["field"] for error in result["errors"]}
+        assert "properties.source" in fields
+        assert "properties.page" in fields
+        assert "properties.component" in fields
+
+    def test_feature_flag_exposure_allows_empty_page_and_component(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["page"] = ""
+        event["properties"]["component"] = ""
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is True
+
+    def test_feature_flag_exposure_requires_non_empty_variant(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["variant"] = ""
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.variant" for error in result["errors"])
+
     def test_feature_flag_exposure_requires_track_type(self):
         event = feature_flag_exposure_event()
         event["type"] = "page"
@@ -437,10 +491,11 @@ def feature_flag_exposure_event():
         "timestamp": "2026-05-26T02:26:53.455Z",
         "properties": {
             "flag_key": "checkout-gate",
-            "value": True,
+            "variant": "treatment",
             "reason": "fallthrough",
-            "rule_id": "",
-            "bucket": 7.31,
+            "rule_id": None,
+            "rollout_bucket": 7.31,
+            "variant_bucket": 74.2,
             "rollout_percentage": 100,
             "bucket_by": "user_id",
             "config_version": 3,
@@ -470,7 +525,7 @@ def frontend_error_event():
             "line": 12,
             "column": 4,
             "stack": "Error: Checkout exploded",
-            "active_flags": {"checkout-gate": True},
+            "active_flags": {"checkout-gate": "treatment"},
             "active_flag_versions": {"checkout-gate": 3},
         },
     }
@@ -493,7 +548,7 @@ def web_vital_event():
             "id": "vital_1",
             "navigation_type": "navigate",
             "page": "/checkout",
-            "active_flags": {"checkout-gate": True},
+            "active_flags": {"checkout-gate": "treatment"},
             "active_flag_versions": {"checkout-gate": 3},
         },
     }

@@ -155,21 +155,32 @@ class ExperimentDesignAgent(BaseAgent):
     async def _deploy(self, ctx: AgentContext, experiment: dict) -> bool:
         try:
             flag_config = experiment.get("flag_config", {})
-            variants = experiment.get("variants", [])
-            flag_key = flag_config.get("key", experiment.get("experiment_id", "unknown"))
+            flag_variants = flag_config.get("variants", [])
+            experiment_variants = experiment.get("variants") or flag_variants
+            experiment_id = experiment.get("experiment_id", "")
+            flag_key = flag_config.get("key", experiment_id)
+            description = experiment.get("description") or experiment.get("hypothesis", "")
 
             await create_flag(
                 project_id=ctx.project_id,
                 key=flag_key,
-                description=experiment.get("hypothesis", ""),
-                variants=[{"key": v["key"], "weight": v.get("weight", 50)} for v in variants],
-                enabled=True,
+                name=flag_config.get("name") or experiment_id or flag_key,
+                description=description,
+                state=flag_config.get("state"),
+                enabled=flag_config.get("enabled", True),
+                default_variant=flag_config.get("default_variant", "control"),
+                variants=flag_variants,
+                rules=flag_config.get("rules", []),
+                fallthrough=flag_config.get("fallthrough"),
+                evaluation_mode=flag_config.get("evaluation_mode", "client"),
+                auto_disable=flag_config.get("auto_disable", True),
+                guardrails=flag_config.get("guardrails", []),
             )
             await create_experiment_config(
                 project_id=ctx.project_id,
-                experiment_id=experiment.get("experiment_id", flag_key),
+                experiment_id=experiment_id or flag_key,
                 hypothesis=experiment.get("hypothesis", ""),
-                variants=variants,
+                variants=experiment_variants,
                 primary_metric=experiment.get("primary_metric", {}),
                 secondary_metrics=experiment.get("secondary_metrics"),
                 guardrail_metrics=experiment.get("guardrail_metrics"),
