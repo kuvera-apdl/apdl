@@ -34,10 +34,7 @@ Or drop the IIFE bundle into any page (exposes a global `APDL`):
 import { APDL } from '@apdl-oss/sdk';
 
 const apdl = APDL.init({
-  endpoints: {
-    ingestion: 'https://ingestion.example.com',
-    config: 'https://config.example.com',
-  },
+  endpoint: 'https://api.example.com',
   auth: {
     clientKey: 'proj_apdl_0123456789abcdef',
   },
@@ -54,8 +51,7 @@ The SDK uses one strict initialization contract:
 
 | Field | Required | Description |
 |---|---:|---|
-| `endpoints.ingestion` | Yes | Base URL for event ingestion. The SDK posts batches to `/v1/events`. |
-| `endpoints.config` | Yes | Base URL for feature flags, SSE updates, and UI configuration. The SDK reads `/v1/flags` and `/v1/stream`. |
+| `endpoint` | Yes | Base URL of the APDL gateway. The SDK posts events to `/v1/events` and reads flags + SSE from `/v1/flags` and `/v1/stream` on this one origin. |
 | `auth.clientKey` | Yes | Browser-safe APDL client key used for service authentication and project identification. |
 
 `auth.clientKey` must use the canonical APDL client key format:
@@ -65,9 +61,9 @@ proj_{project_id}_{secret}
 ```
 
 The secret must be 16+ alphanumeric characters. The SDK derives the project ID
-from the client key internally. Do not pass `projectId`, `apiKey`, `host`, or
-`configHost`; those fields are not part of the public config contract and the
-SDK rejects them.
+from the client key internally. Do not pass `projectId`, `apiKey`, `host`,
+`configHost`, or the old `endpoints` object; those fields are not part of the
+public config contract and the SDK rejects them.
 
 Optional fields include:
 
@@ -85,14 +81,11 @@ Optional fields include:
 ## Local Development Endpoints
 
 When running the local APDL services, initialize the SDK with the local
-ingestion and config ports:
+gateway URL (`make dev-all` starts the gateway on port 8000):
 
 ```typescript
 const apdl = APDL.init({
-  endpoints: {
-    ingestion: 'http://localhost:8080',
-    config: 'http://localhost:8081',
-  },
+  endpoint: 'http://localhost:8000',
   auth: {
     clientKey: 'proj_apdl_0123456789abcdef',
   },
@@ -121,7 +114,7 @@ apdl.page('Pricing', {
 });
 ```
 
-Events are batched and sent to `endpoints.ingestion` at `/v1/events`.
+Events are batched and sent to the gateway `endpoint` at `/v1/events`.
 
 ## User Identification
 
@@ -162,7 +155,7 @@ console.log(result.variant, result.reason);
 ```
 
 Flag evaluation automatically emits a deduplicated `$feature_flag_exposure`
-event. The SDK fetches initial flag configuration from `endpoints.config` at
+event. The SDK fetches initial flag configuration from the gateway `endpoint` at
 `/v1/flags` and listens for real-time updates on `/v1/stream`.
 
 React to real-time variant changes pushed over SSE:

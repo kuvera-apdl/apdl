@@ -1,5 +1,5 @@
 export interface APDLConfig {
-  endpoints: APDLEndpointsConfig;
+  endpoint: string;
   auth: APDLAuthConfig;
   autoCapture?: boolean | AutoCaptureConfig;
   batchSize?: number;
@@ -9,11 +9,6 @@ export interface APDLConfig {
   persistence?: 'localStorage' | 'cookie' | 'memory';
   maxQueueSize?: number;
   debug?: boolean;
-}
-
-export interface APDLEndpointsConfig {
-  ingestion: string;
-  config: string;
 }
 
 export interface APDLAuthConfig {
@@ -39,7 +34,7 @@ export interface ConsentState {
 
 export interface ResolvedConfig {
   projectId: string;
-  endpoints: APDLEndpointsConfig;
+  endpoint: string;
   auth: APDLAuthConfig;
   autoCapture: AutoCaptureConfig;
   batchSize: number;
@@ -58,7 +53,7 @@ const DEFAULT_MAX_QUEUE_SIZE = 1000;
 const CLIENT_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$/;
 
 const SUPPORTED_CONFIG_FIELDS = new Set([
-  'endpoints',
+  'endpoint',
   'auth',
   'autoCapture',
   'batchSize',
@@ -89,8 +84,9 @@ const SUPPORTED_CONSENT_FIELDS: Array<keyof ConsentState> = [
 
 const REMOVED_CONFIG_FIELDS: Record<string, string> = {
   apiKey: 'auth.clientKey',
-  host: 'endpoints.ingestion',
-  configHost: 'endpoints.config',
+  host: 'endpoint',
+  configHost: 'endpoint',
+  endpoints: 'endpoint',
   projectId: 'auth.clientKey',
 };
 
@@ -114,15 +110,12 @@ const DEFAULT_CONSENT: ConsentState = {
 export function resolveConfig(config: APDLConfig): ResolvedConfig {
   rejectUnsupportedTopLevelFields(assertObject(config, 'config'));
 
-  const endpoints = assertObject(config.endpoints, 'endpoints');
-  assertSupportedNestedFields(endpoints, ['ingestion', 'config'], 'endpoints');
-  const ingestionEndpoint = requireNonEmptyString(
-    endpoints.ingestion,
-    'endpoints.ingestion'
-  );
-  const configEndpoint = requireNonEmptyString(
-    endpoints.config,
-    'endpoints.config'
+  // Single front-door URL: a gateway routes /v1/events to the ingestion service
+  // and /v1/flags + /v1/stream to the config service behind one origin. Trailing
+  // slashes are stripped so `${endpoint}/v1/...` never double-slashes.
+  const endpoint = requireNonEmptyString(config.endpoint, 'endpoint').replace(
+    /\/+$/,
+    ''
   );
 
   const auth = assertObject(config.auth, 'auth');
@@ -148,10 +141,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
 
   return {
     projectId,
-    endpoints: {
-      ingestion: ingestionEndpoint,
-      config: configEndpoint,
-    },
+    endpoint,
     auth: {
       clientKey,
     },

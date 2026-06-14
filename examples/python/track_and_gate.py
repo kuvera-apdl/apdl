@@ -15,8 +15,7 @@ API_KEY = "proj_demo_0123456789abcdef"
 
 config = APDLConfig(
     api_key=API_KEY,
-    host="http://localhost:8080",
-    config_host="http://localhost:8081",
+    endpoint="http://localhost:8000",
     flush_interval=1.0,
     debug=True,
 )
