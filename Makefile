@@ -175,7 +175,7 @@ dev:
 dev-all:
 	docker compose -f infra/docker/docker-compose.yml up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.yml
-	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents clickhouse-writer
+	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents clickhouse-writer admin
 
 dev-down:
 	docker compose -f infra/docker/docker-compose.yml down
