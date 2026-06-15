@@ -26,17 +26,17 @@ with APDL.init(config) as client:
     client.page("/checkout", user_id="u_123")
     client.track("order_completed", {"total": 42.0, "items": 3}, user_id="u_123")
 
-    # --- Evaluate a gate locally (no network round-trip) ----------------
-    result = client.check_gate_details("new-checkout", user_id="u_123")
+    # --- Evaluate a flag locally (no network round-trip) ----------------
+    result = client.get_variant_details("new-checkout", user_id="u_123")
     print(
-        f"\nnew-checkout for u_123: value={result.value} "
-        f"reason={result.reason} bucket={result.bucket}"
+        f"\nnew-checkout for u_123: variant={result.variant} "
+        f"reason={result.reason} rollout_bucket={result.rollout_bucket}"
     )
 
-    # The 50% rollout is deterministic: the same user always buckets the
+    # Variant assignment is deterministic: the same user always buckets the
     # same way, in this SDK, the JS SDK, and the config service.
-    enabled = [u for u in (f"u_{i}" for i in range(20)) if client.check_gate("new-checkout", user_id=u)]
-    print(f"users in rollout: {len(enabled)}/20 -> {enabled}")
+    assignments = {u: client.get_variant("new-checkout", user_id=u) for u in (f"u_{i}" for i in range(20))}
+    print(f"variant assignment for 20 users: {assignments}")
 
 # Exiting the context manager flushes pending events and stops background
 # threads; events are now in Redis Streams on their way to ClickHouse.

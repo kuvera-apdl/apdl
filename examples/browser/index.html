@@ -56,15 +56,15 @@
 
     // Feature gate, evaluated locally once flags load
     const renderGate = () => {
-      const result = apdl.checkGateDetails('new-checkout');
+      const result = apdl.getVariantDetails('new-checkout');
       document.getElementById('gate-status').textContent =
-        `${result.value} (reason: ${result.reason})`;
+        `${result.variant} (reason: ${result.reason})`;
     };
     setTimeout(renderGate, 500); // give the initial flag fetch a moment
 
     // Live updates over SSE — toggle the flag via the admin API and watch
-    apdl.onFlagChange('new-checkout', (value) => {
-      log(`flag update over SSE: new-checkout -> ${value}`);
+    apdl.onVariantChange('new-checkout', (variant) => {
+      log(`flag update over SSE: new-checkout -> ${variant}`);
       renderGate();
     });
   </script>
