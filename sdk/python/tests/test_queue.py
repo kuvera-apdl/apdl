@@ -9,7 +9,7 @@ from apdl.queue import EventQueue
 
 
 def config(**kwargs) -> APDLConfig:
-    base = dict(api_key="proj_t_x", batch_size=2, max_queue_size=3, enable_flags=False)
+    base = dict(api_key="proj_t_0123456789abcdef", batch_size=2, max_queue_size=3, enable_flags=False)
     base.update(kwargs)
     return APDLConfig(**base)
 
