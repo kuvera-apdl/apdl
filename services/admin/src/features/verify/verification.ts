@@ -8,7 +8,6 @@ import { countEvents } from '@/api/query'
 import { flagCollectionSchema } from '@/api/schemas/flags'
 import type { StreamStatus } from '@/api/sse'
 import { serviceBaseUrl, serviceConnection, type Workspace } from '@/core/workspace'
-import { lastDays } from '@/features/analytics/selectorModel'
 
 export const VERIFICATION_EVENT_NAME = 'apdl_console_verification'
 
@@ -147,9 +146,16 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   // Step 3 — poll the query service until the pipeline lands the event.
   update('pipeline', { status: 'running', detail: 'Polling /v1/query/events/count…' })
   const queryConn = serviceConnection(workspace, 'query')
+  // verification_id is globally unique, so the date range is only a coarse
+  // pre-filter — bracket it wide in UTC so no timezone/clock skew between the
+  // browser and the event store can hide a just-ingested event. (The count
+  // endpoint requires both dates.)
+  const utcDate = (offsetDays: number) =>
+    new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10)
   const pollBody = {
     project_id: projectId,
-    ...lastDays(2),
+    start_date: utcDate(-2),
+    end_date: utcDate(1),
     selectors: [
       {
         event_name: VERIFICATION_EVENT_NAME,
