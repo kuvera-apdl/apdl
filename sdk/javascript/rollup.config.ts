@@ -1,7 +1,19 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'rollup';
 import typescript from '@rollup/plugin-typescript';
 import resolve from '@rollup/plugin-node-resolve';
 import terser from '@rollup/plugin-terser';
+import replace from '@rollup/plugin-replace';
+
+// Inject the version from package.json so it is the single source of truth.
+const pkg = JSON.parse(readFileSync('./package.json', 'utf8'));
+
+const injectVersion = replace({
+  preventAssignment: true,
+  values: {
+    __APDL_SDK_VERSION__: JSON.stringify(pkg.version),
+  },
+});
 
 // React is a peer dependency, and the core SDK is consumed via its own entry —
 // never bundle either into the adapter.
@@ -43,6 +55,7 @@ export default defineConfig([
         declaration: true,
         declarationDir: 'dist',
       }),
+      injectVersion,
     ],
   },
   {
@@ -68,6 +81,7 @@ export default defineConfig([
         declaration: true,
         declarationDir: 'dist',
       }),
+      injectVersion,
     ],
   },
 ]);
