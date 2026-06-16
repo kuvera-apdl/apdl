@@ -28,6 +28,11 @@
       "import": "./dist/apdl.esm.js",
       "require": "./dist/apdl.cjs.js",
       "types": "./dist/index.d.ts"
+    },
+    "./react": {
+      "import": "./dist/react.esm.js",
+      "require": "./dist/react.cjs.js",
+      "types": "./dist/react/index.d.ts"
     }
   },
   "files": [
@@ -52,18 +57,35 @@
   "dependencies": {
     "web-vitals": "^5.3.0"
   },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "rollup": "^4.12.0",
-    "@rollup/plugin-typescript": "^11.1.6",
     "@rollup/plugin-node-resolve": "^15.2.3",
     "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@testing-library/react": "16.3.2",
     "@types/node": "^20.19.42",
-    "tslib": "^2.6.0",
-    "vitest": "^1.3.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitest/coverage-v8": "^1.3.0",
     "jsdom": "^24.0.0",
-    "@vitest/coverage-v8": "^1.3.0"
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "rollup": "^4.12.0",
+    "tslib": "^2.6.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.3.0"
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/apdl.esm.js",
+    "./dist/apdl.cjs.js",
+    "./dist/apdl.iife.js"
+  ],
   "license": "MIT"
 }
