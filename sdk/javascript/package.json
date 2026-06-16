@@ -1,6 +1,6 @@
 {
   "name": "@apdl-oss/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client SDK for the Autonomous Product Development Loop platform",
   "keywords": [
     "analytics",
@@ -11,12 +11,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JahaanRawat/apdl.git",
+    "url": "git+https://github.com/kuvera-apdl/apdl.git",
     "directory": "sdk/javascript"
   },
-  "homepage": "https://github.com/JahaanRawat/apdl/tree/main/sdk/javascript#readme",
+  "homepage": "https://github.com/kuvera-apdl/apdl/tree/main/sdk/javascript#readme",
   "bugs": {
-    "url": "https://github.com/JahaanRawat/apdl/issues"
+    "url": "https://github.com/kuvera-apdl/apdl/issues"
   },
   "type": "module",
   "main": "dist/apdl.cjs.js",
