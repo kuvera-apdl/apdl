@@ -1,4 +1,10 @@
-import { type APDLConfig, type ConsentState, resolveConfig, type ResolvedConfig } from './config';
+import type { APDLApi } from './api';
+import {
+  type ConsentState,
+  type PartialAPDLConfig,
+  resolveConfig,
+  type ResolvedConfig,
+} from './config';
 import { API_KEY_HEADER, SDK_IDENTIFIER, SDK_IDENTIFIER_HEADER } from './constants';
 import { generateId, type ExperimentContext } from './types';
 import { Transport } from './transport';
@@ -42,7 +48,7 @@ interface ActiveFlagState {
  * Orchestrates all SDK subsystems: event tracking, feature flags,
  * SSE real-time updates, UI components, and privacy controls.
  */
-export class APDLClient {
+export class APDLClient implements APDLApi {
   private config: ResolvedConfig;
   private transport: Transport;
   private storage: OfflineStorage;
@@ -102,8 +108,8 @@ export class APDLClient {
     flush: () => Promise<void>;
   };
 
-  constructor(config: APDLConfig) {
-    this.config = resolveConfig(config);
+  constructor(config: PartialAPDLConfig) {
+    this.config = resolveConfig(config, { strict: true });
 
     // Privacy subsystems
     this.consentManager = new ConsentManager(

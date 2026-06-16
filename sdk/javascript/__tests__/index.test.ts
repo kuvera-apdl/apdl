@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APDL, APDLClient, type APDLConfig, type ExperimentContext } from '../src';
+import {
+  APDL,
+  APDLClient,
+  type APDLApi,
+  type APDLConfig,
+  type ExperimentContext,
+} from '../src';
 import {
   CLIENT_KEY,
   ENDPOINT,
@@ -11,7 +17,7 @@ import {
 const fetchMock = vi.fn();
 
 describe('public SDK entrypoint', () => {
-  const clients: APDLClient[] = [];
+  const clients: APDLApi[] = [];
 
   beforeEach(() => {
     vi.useFakeTimers();
