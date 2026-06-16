@@ -178,7 +178,7 @@ export class APDLClient {
     this.slotManager = new SlotManager();
 
     // SSE
-    const sseUrl = `${this.config.endpoints.config}/v1/stream`;
+    const sseUrl = `${this.config.endpoint}/v1/stream`;
     this.sseConnection = new SSEConnection(
       sseUrl,
       this.config.auth.clientKey,
@@ -367,7 +367,7 @@ export class APDLClient {
 
   private async fetchInitialFlags(): Promise<void> {
     try {
-      const url = `${this.config.endpoints.config}/v1/flags`;
+      const url = `${this.config.endpoint}/v1/flags`;
       const response = await fetch(url, {
         headers: {
           [API_KEY_HEADER]: this.config.auth.clientKey,

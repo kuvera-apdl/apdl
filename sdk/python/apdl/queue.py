@@ -24,7 +24,7 @@ class EventQueue:
     def __init__(self, config: APDLConfig, transport: Transport) -> None:
         self._config = config
         self._transport = transport
-        self._url = f"{config.host}/v1/events"
+        self._url = f"{config.endpoint}/v1/events"
 
         self._queue: deque[dict[str, Any]] = deque()
         self._lock = threading.Lock()

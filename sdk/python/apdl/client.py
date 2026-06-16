@@ -211,7 +211,7 @@ class APDLClient:
 
         Returns ``True`` if the cache was updated.
         """
-        url = f"{self._config.config_host}/v1/flags"
+        url = f"{self._config.endpoint}/v1/flags"
         data = self._transport.get_json(url)
         if data is None:
             return False

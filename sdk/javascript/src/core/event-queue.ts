@@ -50,7 +50,7 @@ export class EventQueue {
     this.storage = storage;
     this.scrubber = scrubber;
     this.consentManager = consentManager;
-    this.ingestionUrl = `${config.endpoints.ingestion}/v1/events`;
+    this.ingestionUrl = `${config.endpoint}/v1/events`;
   }
 
   /**

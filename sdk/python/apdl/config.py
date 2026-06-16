@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-DEFAULT_HOST = "https://ingest.apdl.dev"
-DEFAULT_CONFIG_HOST = "https://config.apdl.dev"
+DEFAULT_ENDPOINT = "https://api.apdl.dev"
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 DEFAULT_FLUSH_INTERVAL = 3.0
@@ -20,13 +19,16 @@ class APDLConfig(BaseModel):
     Mirrors the JS SDK's ``APDLConfig``/``resolveConfig`` where it makes sense
     for a server-side client. Browser-only concepts (persistence, consent,
     auto-capture, UI) are intentionally omitted.
+
+    A single ``endpoint`` origin serves both event ingestion (``/v1/events``)
+    and flag config (``/v1/flags``); a gateway routes each path to the right
+    service behind that origin.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     api_key: str
-    host: str = DEFAULT_HOST
-    config_host: str = DEFAULT_CONFIG_HOST
+    endpoint: str = DEFAULT_ENDPOINT
 
     # Event batching
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -49,7 +51,7 @@ class APDLConfig(BaseModel):
             raise ValueError("apiKey is required and must be a non-empty string")
         return v
 
-    @field_validator("host", "config_host")
+    @field_validator("endpoint")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
