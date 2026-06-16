@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APDL, APDLClient, type APDLConfig, type ExperimentContext } from '../src';
+import {
+  APDL,
+  APDLClient,
+  type APDLApi,
+  type APDLConfig,
+  type ExperimentContext,
+} from '../src';
+import { SDK_IDENTIFIER } from '../src/core/constants';
 import {
   CLIENT_KEY,
   ENDPOINT,
@@ -11,7 +18,7 @@ import {
 const fetchMock = vi.fn();
 
 describe('public SDK entrypoint', () => {
-  const clients: APDLClient[] = [];
+  const clients: APDLApi[] = [];
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -70,7 +77,7 @@ describe('public SDK entrypoint', () => {
     expect(fetchMock).toHaveBeenCalledWith(`${ENDPOINT}/v1/flags`, {
       headers: {
         'X-API-Key': CLIENT_KEY,
-        'X-APDL-SDK': 'js/0.1.0',
+        'X-APDL-SDK': SDK_IDENTIFIER,
       },
     });
 
@@ -91,7 +98,7 @@ describe('public SDK entrypoint', () => {
     expect(init.headers).toMatchObject({
       'Content-Type': 'application/json',
       'X-API-Key': CLIENT_KEY,
-      'X-APDL-SDK': 'js/0.1.0',
+      'X-APDL-SDK': SDK_IDENTIFIER,
     });
   });
 
