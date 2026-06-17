@@ -1,0 +1,78 @@
+"""APDL Codegen Service — FastAPI application entry point.
+
+The codegen service is the platform's "hands": it connects to customer
+repositories, produces changesets (branch + commits + pull request), and —
+under policy — merges them. It is the only component that holds the GitHub App
+credentials and runs untrusted code in a sandbox, isolated from the rest of the
+platform. Orchestration, autonomy gating, and approvals stay in the agents
+service, which calls this one over the internal API.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+import asyncpg
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import postgres_url
+from app.db import ALL_DDL
+from app.routers import changesets, connections
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Manage startup/shutdown of shared resources."""
+    pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
+    application.state.pg_pool = pool
+
+    async with pool.acquire() as conn:
+        for ddl in ALL_DDL:
+            await conn.execute(ddl)
+
+    logger.info("Codegen service started: PostgreSQL pool and schema initialized")
+    yield
+
+    await pool.close()
+    logger.info("Codegen service shut down: PostgreSQL pool closed")
+
+
+app = FastAPI(
+    title="APDL Codegen Service",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(connections.router)
+app.include_router(changesets.router)
+
+
+@app.get("/health")
+async def health_check():
+    """Liveness probe."""
+    return {"status": "ok", "service": "apdl-codegen"}
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness probe — verifies PostgreSQL connectivity."""
+    try:
+        pool: asyncpg.Pool = app.state.pg_pool
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return {"status": "ready"}
+    except Exception as exc:
+        logger.error("Readiness check failed: %s", exc)
+        return {"status": "not_ready", "error": str(exc)}
