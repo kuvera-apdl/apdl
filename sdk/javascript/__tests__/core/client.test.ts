@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
+import { SDK_IDENTIFIER } from '../../src/core/constants';
 import {
   CLIENT_KEY,
   ENDPOINT,
@@ -54,7 +55,7 @@ describe('APDLClient', () => {
       expect(url).toBe(`${ENDPOINT}/v1/flags`);
       expect(init.headers).toMatchObject({
         'X-API-Key': CLIENT_KEY,
-        'X-APDL-SDK': 'js/0.1.0',
+        'X-APDL-SDK': SDK_IDENTIFIER,
       });
     });
 

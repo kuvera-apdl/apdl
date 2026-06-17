@@ -83,4 +83,6 @@ export function generateId(): string {
   });
 }
 
-export const SDK_VERSION = '0.1.0';
+// Re-exported from constants so the SDK version has a single source of truth
+// (package.json), injected at build/test time. See core/constants.ts.
+export { SDK_VERSION } from './constants';

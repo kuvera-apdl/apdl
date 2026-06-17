@@ -1,6 +1,6 @@
 {
   "name": "@apdl-oss/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client SDK for the Autonomous Product Development Loop platform",
   "keywords": [
     "analytics",
@@ -11,12 +11,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JahaanRawat/apdl.git",
+    "url": "git+https://github.com/kuvera-apdl/apdl.git",
     "directory": "sdk/javascript"
   },
-  "homepage": "https://github.com/JahaanRawat/apdl/tree/main/sdk/javascript#readme",
+  "homepage": "https://github.com/kuvera-apdl/apdl/tree/main/sdk/javascript#readme",
   "bugs": {
-    "url": "https://github.com/JahaanRawat/apdl/issues"
+    "url": "https://github.com/kuvera-apdl/apdl/issues"
   },
   "type": "module",
   "main": "dist/apdl.cjs.js",
@@ -28,6 +28,11 @@
       "import": "./dist/apdl.esm.js",
       "require": "./dist/apdl.cjs.js",
       "types": "./dist/index.d.ts"
+    },
+    "./react": {
+      "import": "./dist/react.esm.js",
+      "require": "./dist/react.cjs.js",
+      "types": "./dist/react/index.d.ts"
     }
   },
   "files": [
@@ -52,18 +57,36 @@
   "dependencies": {
     "web-vitals": "^5.3.0"
   },
-  "devDependencies": {
-    "typescript": "^5.4.0",
-    "rollup": "^4.12.0",
-    "@rollup/plugin-typescript": "^11.1.6",
-    "@rollup/plugin-node-resolve": "^15.2.3",
-    "@rollup/plugin-terser": "^0.4.4",
-    "@types/node": "^20.19.42",
-    "tslib": "^2.6.0",
-    "vitest": "^1.3.0",
-    "jsdom": "^24.0.0",
-    "@vitest/coverage-v8": "^1.3.0"
+  "peerDependencies": {
+    "react": ">=18"
   },
-  "sideEffects": false,
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-replace": "6.0.2",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "^20.19.42",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitest/coverage-v8": "^1.3.0",
+    "jsdom": "^24.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "rollup": "^4.12.0",
+    "tslib": "^2.6.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.3.0"
+  },
+  "sideEffects": [
+    "./dist/apdl.esm.js",
+    "./dist/apdl.cjs.js",
+    "./dist/apdl.iife.js"
+  ],
   "license": "MIT"
 }
