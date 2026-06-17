@@ -20,9 +20,10 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   buildCreate,
+  buildUpdate,
+  emptyExperimentValues,
   entryToFormValues,
   ExperimentForm,
-  parseJsonArray,
   type ExperimentFormValues,
 } from '@/features/experiments/ExperimentForm'
 import {
@@ -53,22 +54,6 @@ export function ExperimentDetailPage() {
   if (entry && values === null) {
     setValues(entryToFormValues(entry))
     setLoadedUpdatedAt(entry.updated_at)
-  }
-
-  const buildUpdate = (formValues: ExperimentFormValues): ExperimentUpdate => {
-    const created = buildCreate(formValues)
-    const update: ExperimentUpdate = {
-      status: created.status,
-      description: created.description,
-      traffic_percentage: created.traffic_percentage,
-      start_date: created.start_date,
-      end_date: created.end_date,
-      variants: created.variants,
-    }
-    // Empty editor = "leave unchanged" (the API cannot return the current value).
-    const rules = parseJsonArray(formValues.targetingRulesJson)
-    if (rules.value !== null) update.targeting_rules = rules.value
-    return update
   }
 
   const submitUpdate = async (body: ExperimentUpdate) => {
@@ -162,7 +147,7 @@ export function ExperimentDetailPage() {
           <TabsTrigger value="setup">Setup</TabsTrigger>
         </TabsList>
         <TabsContent value="results">
-          <ExperimentResultsTab experimentKey={entry.key} />
+          <ExperimentResultsTab experimentKey={entry.key} defaultFlagKey={entry.flag_key} />
         </TabsContent>
         <TabsContent value="setup">
           {values ? (
@@ -170,6 +155,7 @@ export function ExperimentDetailPage() {
               values={values}
               onChange={setValues}
               isCreate={false}
+              currentStatus={entry.status}
               onSubmit={() => void save()}
               submitting={updateMutation.isPending}
             />
@@ -244,23 +230,7 @@ export function ExperimentDetailPage() {
 export function ExperimentCreatePage() {
   const navigate = useNavigate()
   const createMutation = useCreateExperimentMutation()
-  const [values, setValues] = useState<ExperimentFormValues>(() => ({
-    key: '',
-    status: 'draft',
-    description: '',
-    traffic_percentage: 100,
-    start_date: '',
-    end_date: '',
-    variantsJson: JSON.stringify(
-      [
-        { key: 'control', weight: 1 },
-        { key: 'treatment', weight: 1 },
-      ],
-      null,
-      2,
-    ),
-    targetingRulesJson: '[]',
-  }))
+  const [values, setValues] = useState<ExperimentFormValues>(emptyExperimentValues)
   const [keyError, setKeyError] = useState<string | null>(null)
 
   const submit = async () => {
@@ -280,7 +250,7 @@ export function ExperimentCreatePage() {
       <PageHeader
         backTo={{ to: '/experiments', label: 'Experiments' }}
         title="Create experiment"
-        description="The record is intentionally loose pre-canonicalization — link a flag on the Results tab to measure it."
+        description="Creating an experiment also creates its backing flag — start it as running to begin bucketing users immediately."
       />
       <ExperimentForm
         values={values}
