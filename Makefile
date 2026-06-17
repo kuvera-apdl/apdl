@@ -32,6 +32,8 @@ deps:
 	cd services/query && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Agents service"
 	cd services/agents && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up Codegen service"
+	cd services/codegen && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
 	@echo "==> Setting up ETL framework"
@@ -41,9 +43,9 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-etl test-admin
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-etl test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -147,6 +149,17 @@ lint-agents:
 run-agents:
 	cd services/agents && .venv/bin/uvicorn app.main:app --reload --port 8083
 
+# ─── Codegen Service (Python) ────────────────────────────────
+
+test-codegen:
+	cd services/codegen && .venv/bin/python -m pytest -v
+
+lint-codegen:
+	cd services/codegen && .venv/bin/ruff check app/
+
+run-codegen:
+	cd services/codegen && .venv/bin/uvicorn app.main:app --reload --port 8084
+
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:
@@ -191,4 +204,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl test-etl lint-admin test-admin
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl test-etl lint-admin test-admin
