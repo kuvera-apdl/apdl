@@ -243,10 +243,14 @@ CREATE_EXPERIMENTS_TABLE = """
 CREATE TABLE IF NOT EXISTS experiments (
     key TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
+    status TEXT NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('draft', 'running', 'completed', 'stopped')),
     description TEXT NOT NULL DEFAULT '',
+    flag_key TEXT NOT NULL DEFAULT '',
+    default_variant TEXT NOT NULL DEFAULT 'control',
     variants_json TEXT NOT NULL DEFAULT '[]',
     targeting_rules_json TEXT NOT NULL DEFAULT '[]',
+    primary_metric_json TEXT NOT NULL DEFAULT '{}',
     traffic_percentage DOUBLE PRECISION NOT NULL DEFAULT 100.0,
     start_date TEXT NOT NULL DEFAULT '',
     end_date TEXT NOT NULL DEFAULT '',
@@ -254,6 +258,25 @@ CREATE TABLE IF NOT EXISTS experiments (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (project_id, key)
 );
+"""
+
+MIGRATE_EXPERIMENTS_TABLE = """
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS flag_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS default_variant TEXT NOT NULL DEFAULT 'control';
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS primary_metric_json TEXT NOT NULL DEFAULT '{}';
+
+-- The flag-key link becomes a stored column: default it to the experiment key.
+UPDATE experiments SET flag_key = key WHERE flag_key = '';
+
+-- Normalize legacy status values onto the canonical lifecycle literal before
+-- enforcing the constraint (the agent previously wrote 'active').
+UPDATE experiments SET status = 'running' WHERE status = 'active';
+UPDATE experiments SET status = 'draft'
+    WHERE status NOT IN ('draft', 'running', 'completed', 'stopped');
+
+ALTER TABLE experiments DROP CONSTRAINT IF EXISTS experiments_status_check;
+ALTER TABLE experiments ADD CONSTRAINT experiments_status_check
+    CHECK (status IN ('draft', 'running', 'completed', 'stopped'));
 """
 
 CREATE_FLAGS_INDEX = (
@@ -299,6 +322,7 @@ async def lifespan(application: FastAPI):
         await conn.execute(CREATE_FLAG_AUDIT_TABLE)
         await conn.execute(MIGRATE_FLAG_AUDIT_TABLE)
         await conn.execute(CREATE_EXPERIMENTS_TABLE)
+        await conn.execute(MIGRATE_EXPERIMENTS_TABLE)
         await conn.execute(CREATE_FLAGS_INDEX)
         await conn.execute(CREATE_FLAGS_LIFECYCLE_INDEX)
         await conn.execute(CREATE_FLAG_AUDIT_INDEX)
