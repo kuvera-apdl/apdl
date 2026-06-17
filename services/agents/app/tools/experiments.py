@@ -28,6 +28,31 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
         return data.get("experiments", []) if isinstance(data, dict) else data
 
 
+def _targeting_to_rules(targeting: dict[str, Any] | list | None) -> list[dict[str, Any]]:
+    """Canonicalize loose targeting conditions into the flag's GateRule shape.
+
+    The experiment-design output expresses targeting as a list of conditions;
+    the Config experiment schema now requires canonical ``GateRule`` objects
+    (each with an ``id`` and a ``rollout``). Matching users are fully included
+    in the experiment; variant split is by weight.
+    """
+    if isinstance(targeting, dict):
+        conditions = targeting.get("conditions", [])
+    elif isinstance(targeting, list):
+        conditions = targeting
+    else:
+        conditions = []
+    if not conditions:
+        return []
+    return [
+        {
+            "id": "targeting",
+            "conditions": conditions,
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        }
+    ]
+
+
 async def create_experiment_config(
     project_id: str,
     experiment_id: str,
@@ -40,37 +65,44 @@ async def create_experiment_config(
     estimated_duration_days: int = 14,
     flag_key: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new experiment configuration and its associated feature flag.
+    """Create a running experiment via the Config service.
 
-    This sets up both the experiment metadata and the underlying flag
-    that controls variant assignment.
+    The Config service owns experiment→flag initialization, so this single call
+    also creates the canonical backing flag (keyed by ``flag_key``) that controls
+    variant assignment — the agent no longer creates the flag separately.
 
     Args:
         project_id: Project scope.
         experiment_id: Unique experiment identifier (e.g. "exp_checkout_v2").
-        hypothesis: The hypothesis being tested.
-        variants: Variant definitions with "key", "weight", and "description".
+        hypothesis: The hypothesis being tested (stored as the description).
+        variants: Variant definitions with "key", "weight", and optional "description".
         primary_metric: Dict with "event", "type", and "direction".
         secondary_metrics: Optional additional metrics to track.
         guardrail_metrics: Metrics that should not degrade.
         targeting: User targeting conditions.
         estimated_duration_days: Expected experiment runtime.
-        flag_key: Feature flag key to use (defaults to experiment_id).
+        flag_key: Backing flag key to use (defaults to experiment_id).
 
     Returns:
         The created experiment configuration.
     """
     payload: dict[str, Any] = {
         "key": experiment_id,
-        "status": "active",
+        "flag_key": flag_key or experiment_id,
+        "status": "running",
         "description": hypothesis,
         "variants": variants,
         "traffic_percentage": 100.0,
     }
-    if isinstance(targeting, dict):
-        payload["targeting_rules"] = targeting.get("conditions", [])
-    elif isinstance(targeting, list):
-        payload["targeting_rules"] = targeting
+    if isinstance(primary_metric, dict) and primary_metric.get("event"):
+        payload["primary_metric"] = {
+            "event": primary_metric["event"],
+            "type": primary_metric.get("type", "conversion"),
+            "direction": primary_metric.get("direction", "increase"),
+        }
+    targeting_rules = _targeting_to_rules(targeting)
+    if targeting_rules:
+        payload["targeting_rules"] = targeting_rules
 
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
         resp = await client.post(

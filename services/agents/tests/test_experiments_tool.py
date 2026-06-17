@@ -49,14 +49,20 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
     assert captured["params"] == {"project_id": "apdl"}
     assert captured["json"] == {
         "key": "exp_checkout",
-        "status": "active",
+        "flag_key": "exp_checkout",
+        "status": "running",
         "description": "Checkout changes should improve conversion.",
         "variants": [
             {"key": "control", "weight": 1, "description": "Current checkout"},
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         "traffic_percentage": 100.0,
+        "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
         "targeting_rules": [
-            {"attribute": "plan", "operator": "equals", "value": "pro"},
+            {
+                "id": "targeting",
+                "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
+                "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+            },
         ],
     }
