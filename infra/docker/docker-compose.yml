@@ -120,6 +120,25 @@ services:
       redis:
         condition: service_healthy
 
+  # Codegen — autonomous code-implementation "hands". Holds the GitHub App
+  # credentials and (in later phases) runs sandboxed clone/build/test jobs. The
+  # agents service calls it over the internal API to open and merge PRs.
+  codegen:
+    build:
+      context: ../../services/codegen
+      dockerfile: Dockerfile
+    ports:
+      - "8084:8084"
+    environment:
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   clickhouse-writer:
     build:
       context: ../../pipeline/redis
