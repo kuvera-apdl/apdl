@@ -29,6 +29,8 @@ ActionType = Literal[
     "propose_feature",
     "modify_flag_rollout",
     "send_insight",
+    "open_pull_request",
+    "merge_pull_request",
 ]
 
 ApprovalStatus = Literal["auto", "pending", "approved", "rejected", "executed", "rolled_back"]
