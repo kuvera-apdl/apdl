@@ -13,8 +13,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # misconfigured key fails fast at init() instead of as 401s on the first flush.
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
 
-DEFAULT_HOST = "https://ingest.apdl.dev"
-DEFAULT_CONFIG_HOST = "https://config.apdl.dev"
+DEFAULT_ENDPOINT = "https://api.apdl.dev"
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 DEFAULT_FLUSH_INTERVAL = 3.0
@@ -29,13 +28,16 @@ class APDLConfig(BaseModel):
     Mirrors the JS SDK's ``APDLConfig``/``resolveConfig`` where it makes sense
     for a server-side client. Browser-only concepts (persistence, consent,
     auto-capture, UI) are intentionally omitted.
+
+    A single ``endpoint`` origin serves both event ingestion (``/v1/events``)
+    and flag config (``/v1/flags``); a gateway routes each path to the right
+    service behind that origin.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     api_key: str
-    host: str = DEFAULT_HOST
-    config_host: str = DEFAULT_CONFIG_HOST
+    endpoint: str = DEFAULT_ENDPOINT
 
     # Event batching
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -70,7 +72,7 @@ class APDLConfig(BaseModel):
         assert match is not None  # guaranteed by _validate_api_key
         return match.group(1)
 
-    @field_validator("host", "config_host")
+    @field_validator("endpoint")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")

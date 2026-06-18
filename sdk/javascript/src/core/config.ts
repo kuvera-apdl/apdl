@@ -1,5 +1,7 @@
+import { clientKeyFromEnv, endpointFromEnv } from './env';
+
 export interface APDLConfig {
-  endpoints: APDLEndpointsConfig;
+  endpoint: string;
   auth: APDLAuthConfig;
   autoCapture?: boolean | AutoCaptureConfig;
   batchSize?: number;
@@ -11,9 +13,22 @@ export interface APDLConfig {
   debug?: boolean;
 }
 
-export interface APDLEndpointsConfig {
-  ingestion: string;
-  config: string;
+/**
+ * A loosened config accepted by `init()`: every field is optional because
+ * `endpoint` and `auth.clientKey` can be supplied via env conventions, and
+ * missing credentials are tolerated in fail-soft (non-strict) mode.
+ */
+export type PartialAPDLConfig = Partial<Omit<APDLConfig, 'auth'>> & {
+  auth?: Partial<APDLAuthConfig>;
+};
+
+export interface ResolveConfigOptions {
+  /**
+   * When `true` (the default), missing `endpoint` / `auth.clientKey` throw.
+   * When `false`, they resolve to `null` so callers can fall back to a no-op
+   * client instead of crashing. Malformed values still throw in both modes.
+   */
+  strict?: boolean;
 }
 
 export interface APDLAuthConfig {
@@ -39,7 +54,7 @@ export interface ConsentState {
 
 export interface ResolvedConfig {
   projectId: string;
-  endpoints: APDLEndpointsConfig;
+  endpoint: string;
   auth: APDLAuthConfig;
   autoCapture: AutoCaptureConfig;
   batchSize: number;
@@ -58,7 +73,7 @@ const DEFAULT_MAX_QUEUE_SIZE = 1000;
 const CLIENT_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$/;
 
 const SUPPORTED_CONFIG_FIELDS = new Set([
-  'endpoints',
+  'endpoint',
   'auth',
   'autoCapture',
   'batchSize',
@@ -89,8 +104,9 @@ const SUPPORTED_CONSENT_FIELDS: Array<keyof ConsentState> = [
 
 const REMOVED_CONFIG_FIELDS: Record<string, string> = {
   apiKey: 'auth.clientKey',
-  host: 'endpoints.ingestion',
-  configHost: 'endpoints.config',
+  host: 'endpoint',
+  configHost: 'endpoint',
+  endpoints: 'endpoint',
   projectId: 'auth.clientKey',
 };
 
@@ -111,23 +127,52 @@ const DEFAULT_CONSENT: ConsentState = {
   experiments: true,
 };
 
-export function resolveConfig(config: APDLConfig): ResolvedConfig {
+export function resolveConfig(config: APDLConfig): ResolvedConfig;
+export function resolveConfig(
+  config: PartialAPDLConfig,
+  options: { strict: true }
+): ResolvedConfig;
+export function resolveConfig(
+  config: PartialAPDLConfig,
+  options: { strict?: false }
+): ResolvedConfig | null;
+export function resolveConfig(
+  config: PartialAPDLConfig,
+  options?: ResolveConfigOptions
+): ResolvedConfig | null {
+  const strict = options?.strict !== false;
   rejectUnsupportedTopLevelFields(assertObject(config, 'config'));
 
-  const endpoints = assertObject(config.endpoints, 'endpoints');
-  assertSupportedNestedFields(endpoints, ['ingestion', 'config'], 'endpoints');
-  const ingestionEndpoint = requireNonEmptyString(
-    endpoints.ingestion,
-    'endpoints.ingestion'
-  );
-  const configEndpoint = requireNonEmptyString(
-    endpoints.config,
-    'endpoints.config'
-  );
+  // Credentials may come from the config object or from env conventions.
+  // Unsupported nested `auth` fields are still rejected eagerly below.
+  const endpointValue = coalesceNonEmpty(config.endpoint, endpointFromEnv());
+  let clientKeyValue: string | undefined;
+  if (config.auth !== undefined) {
+    const authInput = assertObject(config.auth, 'auth');
+    assertSupportedNestedFields(authInput, ['clientKey'], 'auth');
+    clientKeyValue = coalesceNonEmpty(authInput.clientKey, clientKeyFromEnv());
+  } else {
+    clientKeyValue = clientKeyFromEnv();
+  }
 
-  const auth = assertObject(config.auth, 'auth');
-  assertSupportedNestedFields(auth, ['clientKey'], 'auth');
-  const clientKey = requireNonEmptyString(auth.clientKey, 'auth.clientKey');
+  if (endpointValue === undefined || clientKeyValue === undefined) {
+    if (!strict) {
+      return null;
+    }
+    // Strict mode: re-run the original validators to throw the exact,
+    // field-specific error messages consumers rely on.
+    requireNonEmptyString(config.endpoint, 'endpoint');
+    const auth = assertObject(config.auth, 'auth');
+    requireNonEmptyString(auth.clientKey, 'auth.clientKey');
+    throw new Error('APDL: endpoint and auth.clientKey are required');
+  }
+
+  // Single front-door URL: a gateway routes /v1/events to the ingestion service
+  // and /v1/flags + /v1/stream to the config service behind one origin. Trailing
+  // slashes are stripped so `${endpoint}/v1/...` never double-slashes.
+  const endpoint = endpointValue.replace(/\/+$/, '');
+
+  const clientKey = clientKeyValue;
   const keyMatch = CLIENT_KEY_PATTERN.exec(clientKey);
   if (!keyMatch) {
     throw new Error(
@@ -148,10 +193,7 @@ export function resolveConfig(config: APDLConfig): ResolvedConfig {
 
   return {
     projectId,
-    endpoints: {
-      ingestion: ingestionEndpoint,
-      config: configEndpoint,
-    },
+    endpoint,
     auth: {
       clientKey,
     },
@@ -250,6 +292,16 @@ function assertSupportedNestedFields(
       throw new Error(`APDL: ${path}.${field} is not supported`);
     }
   }
+}
+
+/** Returns the first non-empty string among the given values, else undefined. */
+function coalesceNonEmpty(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function requireNonEmptyString(value: unknown, path: string): string {

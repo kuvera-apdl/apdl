@@ -150,6 +150,19 @@ services:
     ports:
       - "5173:80"
 
+  # Gateway — single SDK front door. Routes /v1/events to ingestion and
+  # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
+  # URL (http://<host>:8000) instead of separate ingestion + config URLs.
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - ingestion
+      - config
+
 volumes:
   redis-data:
   clickhouse-data:

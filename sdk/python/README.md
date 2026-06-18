@@ -60,8 +60,7 @@ from apdl import APDL, APDLConfig
 
 client = APDL.init(APDLConfig(
     api_key="proj_demo_0123456789abcdef",
-    host="https://ingest.apdl.dev",       # event ingestion endpoint
-    config_host="https://config.apdl.dev",# flag config endpoint
+    endpoint="https://api.apdl.dev",       # gateway origin for events + flags
     batch_size=20,                         # 1..100
     flush_interval=3.0,                    # seconds between background flushes
     max_queue_size=1000,                   # oldest events dropped past this
