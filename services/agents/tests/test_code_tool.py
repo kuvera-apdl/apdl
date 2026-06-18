@@ -59,6 +59,21 @@ async def test_abandon_changeset_hits_endpoint(monkeypatch):
     assert result["status"] == "abandoned"
 
 
+@pytest.mark.asyncio
+async def test_revert_changeset_hits_endpoint(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_post(path: str, payload: dict[str, Any] | None = None):
+        captured["path"] = path
+        return {"changeset_id": "cs_revert", "status": "queued"}
+
+    monkeypatch.setattr(code, "_post", fake_post)
+
+    result = await code.revert_changeset("cs_9")
+    assert captured["path"] == "/v1/changesets/cs_9/revert"
+    assert result["changeset_id"] == "cs_revert"
+
+
 def test_headers_carry_internal_token(monkeypatch):
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "s3cret")
     assert code._headers() == {"X-APDL-Internal-Token": "s3cret"}
