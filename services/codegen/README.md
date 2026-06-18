@@ -13,10 +13,13 @@ full design and phase plan.
 
 ## Status
 
-Phase 0–1 (foundation): service skeleton, the changeset lifecycle state machine,
-the repo connection registry, and GitHub App installation-token auth. The
-sandboxed job runner (clone → edit → test → push → PR), CI/merge gating, and the
-agents-service integration land in later phases.
+Phases 0–6 implemented. The service connects repos (GitHub App), produces
+changesets via Claude Managed Agents (self-hosted sandbox worker), runs
+deterministic pre-push safety gates, opens draft PRs, ingests CI status (webhook
++ poll), and merges on green CI under the autonomy gate. The live Managed Agents
+editor and self-hosted worker are **integration-untested** against the beta API —
+they need an Anthropic environment key and a registered GitHub App. Remaining:
+merged-change revert-PR rollback and the console changeset view.
 
 ## API
 
@@ -31,6 +34,8 @@ All `/v1` endpoints require the `X-APDL-Internal-Token` header when
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
 | GET | `/v1/changesets/{id}` | Fetch one changeset |
 | POST | `/v1/changesets/{id}/abandon` | Abandon an un-merged changeset |
+| POST | `/v1/changesets/{id}/merge` | Merge the PR (green CI required; APDL-gated) |
+| POST | `/webhooks/github` | HMAC-verified CI ingestion (`check_run`/`pull_request`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
 ## Changeset lifecycle
@@ -53,12 +58,41 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=            # PEM inline, or…
 GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the PEM file
 GITHUB_API_URL=https://api.github.com
+GITHUB_WEBHOOK_SECRET=             # HMAC secret for /webhooks/github
+ANTHROPIC_ENVIRONMENT_KEY=         # self-hosted Managed Agents worker (Phase 3)
+CODEGEN_ENVIRONMENT_ID=            # the CMA self-hosted environment id
+CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
+CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
 
 ## Develop
 
 ```bash
-make run-codegen     # uvicorn on :8084 (hot reload)
-make test-codegen    # pytest
-make lint-codegen    # ruff
+make run-codegen         # uvicorn on :8084 (hot reload)
+make run-codegen-worker  # self-hosted Managed Agents sandbox worker
+make test-codegen        # pytest
+make lint-codegen        # ruff
 ```
+
+## Going live (end-to-end)
+
+The autonomous loop runs once these external pieces are set up:
+
+1. **Register a GitHub App** (org-level) with minimal permissions — `contents:
+   write`, `pull_requests: write`, `checks: read`, `metadata: read`. Set
+   `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`. Customers install it on their
+   repos; record each installation via `POST /v1/connections`.
+2. **Create a self-hosted Managed Agents environment** and set
+   `ANTHROPIC_ENVIRONMENT_KEY` + `CODEGEN_ENVIRONMENT_ID`; run the sandbox worker
+   with `make run-codegen-worker` (container: `Dockerfile.worker`).
+3. **Add a repo webhook** → `POST /webhooks/github`, secret
+   `GITHUB_WEBHOOK_SECRET`, events `check_run` + `pull_request`.
+4. **Enable branch protection** on the default branch (require PR + green checks)
+   as the server-side merge backstop.
+
+Flow: an approved feature proposal enqueues a `code_implementation` run (agents
+service) → `POST /v1/changesets` → the job mints a repo token, runs the Managed
+Agents editor (implement until tests pass) in the self-hosted sandbox, runs
+pre-push gates, pushes a branch, and opens a **draft PR** → the repo's CI runs →
+the webhook advances the changeset to `ci_passed` and promotes the PR to
+ready-for-review → merge is gated on green CI + autonomy level.
