@@ -37,6 +37,7 @@ make run-ingestion  # Ingestion Service → localhost:8080
 make run-config     # Config Service    → localhost:8081
 make run-query      # Query Service     → localhost:8082
 make run-agents     # Agents Service    → localhost:8083
+make run-codegen    # Codegen Service   → localhost:8084
 make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 make run-admin      # Admin Console (Vite dev server) → localhost:5173
 ```
@@ -51,6 +52,7 @@ make run-admin      # Admin Console (Vite dev server) → localhost:5173
 | Config | `make test-config` | `make lint-config` |
 | Query | `make test-query` | `make lint-query` |
 | Agents | `make test-agents` | `make lint-agents` |
+| Codegen | `make test-codegen` | `make lint-codegen` |
 | Admin Console | `make test-admin` | `make lint-admin` |
 
 ### Running a single test
@@ -67,11 +69,12 @@ cd services/ingestion && .venv/bin/python -m pytest tests/test_events.py -v
 cd services/config && .venv/bin/python -m pytest tests/test_evaluator.py -v
 cd services/query && .venv/bin/python -m pytest tests/test_funnels.py -v
 cd services/agents && .venv/bin/python -m pytest tests/test_supervisor.py::test_specific -v
+cd services/codegen && .venv/bin/python -m pytest tests/test_job_runner.py -v
 ```
 
 ## Architecture Overview
 
-The system is a monorepo with four Python services, a data pipeline, and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
+The system is a monorepo with five Python services, a data pipeline, and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
 
 ```
 SDK (TypeScript) ──POST /v1/events──→ Ingestion (Python/FastAPI :8080) ──→ Redis Streams
@@ -83,6 +86,9 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                                       ↓
                                               Agents Service (Python/FastAPI :8083)
                                               ↕ PostgreSQL (pgvector) for memory
+                                                      ↓
+                                              Codegen Service (Python/FastAPI :8084)
+                                              → GitHub App → customer repos (autonomous PRs)
 ```
 
 ### Data Flow
@@ -93,6 +99,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 4. **Flag evaluation:** SDKs evaluate flags locally using FNV-1a bucketing (no server round-trip for evaluation). The JS SDK, the Python SDK, and the Config Service share a byte-for-byte identical hash so a user buckets identically everywhere
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
 6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
+7. **Autonomous code:** Codegen Service turns approved feature proposals into tested-green pull requests on connected customer repos via Claude Managed Agents (self-hosted sandbox); merge is gated on green CI + autonomy level, audited like every other action
 
 ### Tech Stack by Service
 
@@ -102,6 +109,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis (hiredis), sse-starlette, Pydantic — uv, pytest, ruff
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
+- **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), anthropic (Managed Agents) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
 
 ### Key Ports
@@ -112,6 +120,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 | Config | 8081 |
 | Query | 8082 |
 | Agents | 8083 |
+| Codegen | 8084 |
 | Redis | 6379 |
 | ClickHouse HTTP / Native | 8123 / 9000 |
 | PostgreSQL | 5432 |
@@ -123,7 +132,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
-- **CI runs on push/PR to main:** JS SDK tests + build, Python SDK lint + tests (ruff + pytest), Python linting (ruff) for all four services
+- **CI runs on push/PR to main:** JS SDK tests + build, Python SDK lint + tests (ruff + pytest), Python linting (ruff) for all five services
 - **Releases:** git tags matching `v*` trigger npm publish + Docker image builds to GHCR
 
 ## Environment Variables

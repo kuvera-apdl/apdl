@@ -76,6 +76,7 @@ area:
 | `services/config/` | `cd services/config && .venv/bin/ruff check app/` |
 | `services/query/` | `cd services/query && .venv/bin/ruff check app/` |
 | `services/agents/` | `cd services/agents && .venv/bin/ruff check app/` |
+| `services/codegen/` | `cd services/codegen && .venv/bin/ruff check app/` |
 | `sdk/javascript/` | `cd sdk/javascript && npx tsc --noEmit` |
 | `sdk/python/` | `cd sdk/python && .venv/bin/ruff check apdl/ tests/` |
 
