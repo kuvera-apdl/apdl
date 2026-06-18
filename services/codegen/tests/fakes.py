@@ -63,6 +63,7 @@ class FakeConn:
                 "branch": None,
                 "pr_url": None,
                 "pr_number": None,
+                "pr_node_id": None,
                 "ci_status": None,
                 "task": args[5],
                 "diff_stat": "{}",
@@ -73,18 +74,31 @@ class FakeConn:
             self.store["changesets"][args[0]] = row
             return row
         if "SELECT * FROM codegen_changesets" in query:
+            if "WHERE branch" in query:
+                matches = [
+                    r
+                    for r in self.store["changesets"].values()
+                    if r.get("branch") == args[0]
+                    and r["status"] in ("pr_open", "ci_running", "ci_failed", "ci_passed")
+                ]
+                return matches[-1] if matches else None
             return self.store["changesets"].get(args[0])
         if "UPDATE codegen_changesets" in query:
             row = self.store["changesets"].get(args[0])
             if row is None:
                 return None
             if "pr_url" in query:
-                # mark_pr_open: (id, status, branch, pr_url, pr_number, diff_stat)
+                # mark_pr_open: (id, status, branch, pr_url, pr_number, node_id, diff_stat)
                 row["status"] = args[1]
                 row["branch"] = args[2]
                 row["pr_url"] = args[3]
                 row["pr_number"] = args[4]
-                row["diff_stat"] = args[5]
+                row["pr_node_id"] = args[5]
+                row["diff_stat"] = args[6]
+            elif "ci_status" in query:
+                # set_ci_status: (id, status, ci_status)
+                row["status"] = args[1]
+                row["ci_status"] = args[2]
             else:
                 # transition_changeset: (id, status, error)
                 row["status"] = args[1]
@@ -133,6 +147,37 @@ class FakePool:
             "repo": repo,
             "default_base_branch": "main",
             "policy": "{}",
+            "created_at": _T0,
+            "updated_at": _T0,
+        }
+
+    def add_changeset(
+        self,
+        changeset_id: str,
+        project_id: str = "demo",
+        *,
+        status: str = "queued",
+        ci_status: str | None = None,
+        pr_number: int | None = None,
+        pr_node_id: str | None = None,
+        branch: str | None = None,
+        base_branch: str = "main",
+    ) -> None:
+        """Seed a changeset row in an arbitrary lifecycle state (for endpoint tests)."""
+        self.store["changesets"][changeset_id] = {
+            "changeset_id": changeset_id,
+            "project_id": project_id,
+            "run_id": None,
+            "status": status,
+            "base_branch": base_branch,
+            "branch": branch,
+            "pr_url": f"https://github.com/acme/widgets/pull/{pr_number}" if pr_number else None,
+            "pr_number": pr_number,
+            "pr_node_id": pr_node_id,
+            "ci_status": ci_status,
+            "task": '{"title": "t", "spec": "spec spec spec"}',
+            "diff_stat": "{}",
+            "error": None,
             "created_at": _T0,
             "updated_at": _T0,
         }

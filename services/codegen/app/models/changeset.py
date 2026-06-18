@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -136,8 +136,17 @@ class Changeset(BaseModel):
     branch: str | None = None
     pr_url: str | None = None
     pr_number: int | None = None
+    pr_node_id: str | None = None
     ci_status: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class MergeRequest(BaseModel):
+    """Request body for ``POST /v1/changesets/{id}/merge``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    merge_method: Literal["squash", "merge", "rebase"] = "squash"

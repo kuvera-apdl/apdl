@@ -21,8 +21,9 @@ from app.config import postgres_url
 from app.db import ALL_DDL
 from app.editor.managed_agents import ManagedAgentsEditor
 from app.github.app_auth import mint_installation_token
-from app.github.pulls import open_pull_request
-from app.routers import changesets, connections
+from app.github.checks import get_ci_status
+from app.github.pulls import mark_ready_for_review, open_pull_request
+from app.routers import changesets, connections, webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,12 @@ async def lifespan(application: FastAPI):
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
+    # Dependencies for CI-status sync (driven by the GitHub webhook).
+    application.state.ci_deps = {
+        "get_status": get_ci_status,
+        "mint_token": _mint_token,
+        "mark_ready": mark_ready_for_review,
+    }
 
     logger.info("Codegen service started: PostgreSQL pool and schema initialized")
     yield
@@ -73,6 +80,7 @@ app.add_middleware(
 
 app.include_router(connections.router)
 app.include_router(changesets.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health")

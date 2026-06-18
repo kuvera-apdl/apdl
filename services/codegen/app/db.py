@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     branch        TEXT,
     pr_url        TEXT,
     pr_number     INTEGER,
+    pr_node_id    TEXT,
     ci_status     TEXT,
     task          JSONB NOT NULL DEFAULT '{}',
     diff_stat     JSONB NOT NULL DEFAULT '{}',

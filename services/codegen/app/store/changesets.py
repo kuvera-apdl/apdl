@@ -32,6 +32,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         branch=row["branch"],
         pr_url=row["pr_url"],
         pr_number=row["pr_number"],
+        pr_node_id=row["pr_node_id"],
         ci_status=row["ci_status"],
         diff_stat=_loads(row["diff_stat"]),
         error=row["error"],
@@ -73,6 +74,22 @@ async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | No
         row = await conn.fetchrow(
             "SELECT * FROM codegen_changesets WHERE changeset_id = $1",
             changeset_id,
+        )
+    return _row_to_changeset(row) if row else None
+
+
+async def get_changeset_by_branch(pool: asyncpg.Pool, branch: str) -> Changeset | None:
+    """Find the active changeset for a branch (used to route GitHub webhooks)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM codegen_changesets
+            WHERE branch = $1
+              AND status IN ('pr_open', 'ci_running', 'ci_failed', 'ci_passed')
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            branch,
         )
     return _row_to_changeset(row) if row else None
 
@@ -138,6 +155,7 @@ async def mark_pr_open(
     pr_url: str,
     pr_number: int,
     diff_stat: dict[str, Any],
+    node_id: str = "",
 ) -> Changeset | None:
     """Transition ``pushing → pr_open`` and persist the branch + PR identifiers.
 
@@ -157,7 +175,7 @@ async def mark_pr_open(
                 """
                 UPDATE codegen_changesets
                 SET status = $2, branch = $3, pr_url = $4, pr_number = $5,
-                    diff_stat = $6::jsonb, updated_at = now()
+                    pr_node_id = $6, diff_stat = $7::jsonb, updated_at = now()
                 WHERE changeset_id = $1
                 RETURNING *
                 """,
@@ -166,6 +184,42 @@ async def mark_pr_open(
                 branch,
                 pr_url,
                 pr_number,
+                node_id,
                 json.dumps(diff_stat),
+            )
+    return _row_to_changeset(row)
+
+
+async def set_ci_status(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    target: ChangesetStatus,
+    ci_status: str,
+) -> Changeset | None:
+    """Transition to ``target`` and persist the external ``ci_status`` string.
+
+    Used to move ``pr_open → ci_running → ci_passed | ci_failed`` as the repo's
+    own CI reports in (via webhook or poll).
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchval(
+                "SELECT status FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if current is None:
+                return None
+            assert_transition(ChangesetStatus(current), target)
+            row = await conn.fetchrow(
+                """
+                UPDATE codegen_changesets
+                SET status = $2, ci_status = $3, updated_at = now()
+                WHERE changeset_id = $1
+                RETURNING *
+                """,
+                changeset_id,
+                target.value,
+                ci_status,
             )
     return _row_to_changeset(row)
