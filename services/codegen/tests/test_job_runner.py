@@ -137,3 +137,44 @@ async def test_job_is_a_noop_for_unknown_changeset():
     await run_changeset_job(
         FakePool(), "cs_missing", editor=FakeEditor(), mint_token=_mint, open_pr=open_pr
     )
+
+
+@pytest.mark.asyncio
+async def test_job_blocks_on_pre_push_gate_violation():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_secret01")
+
+    editor = FakeEditor(
+        EditResult(success=True, diff_stat={"files": 1}, diff_text="AKIAIOSFODNN7EXAMPLE")
+    )
+    opened: list = []
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.append(kwargs)
+        return PullRequest(url="x", number=1)
+
+    await run_changeset_job(pool, "cs_secret01", editor=editor, mint_token=_mint, open_pr=open_pr)
+
+    final = await store.get_changeset(pool, "cs_secret01")
+    assert final.status == ChangesetStatus.tests_failed
+    assert "gate" in (final.error or "").lower()
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_job_abandoned_when_automation_disabled(monkeypatch):
+    monkeypatch.setenv("CODEGEN_KILL_SWITCH", "true")
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_killed01")
+
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool, "cs_killed01", editor=FakeEditor(), mint_token=_mint, open_pr=open_pr
+    )
+
+    final = await store.get_changeset(pool, "cs_killed01")
+    assert final.status == ChangesetStatus.abandoned

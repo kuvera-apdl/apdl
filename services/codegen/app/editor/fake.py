@@ -20,6 +20,10 @@ class FakeEditor:
         # Default a successful result's branch to the requested one.
         if result.success and result.branch is None:
             return EditResult(
-                success=True, branch=request.branch, diff_stat=result.diff_stat
+                success=True,
+                branch=request.branch,
+                diff_stat=result.diff_stat,
+                changed_paths=result.changed_paths,
+                diff_text=result.diff_text,
             )
         return result
