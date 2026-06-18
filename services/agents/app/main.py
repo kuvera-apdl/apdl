@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.memory.pgvector_store import PgVectorStore
 from app.routers import approvals, runs, status, triggers
+from app.store.proposals import FEATURE_PROPOSALS_DDL
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ async def lifespan(application: FastAPI):
                 PRIMARY KEY (run_id, agent_name)
             );
         """)
+        await conn.execute(FEATURE_PROPOSALS_DDL)
 
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store

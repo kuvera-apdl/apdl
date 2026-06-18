@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from app.graphs import (  # noqa: F401  (imported for registration side-effects)
     behavior_analysis,
+    code_implementation,
     experiment_design,
     feature_proposal,
     personalization,
