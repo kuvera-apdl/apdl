@@ -1,0 +1,139 @@
+"""Tests for the changeset job runner (fake editor + fake pool, no network)."""
+
+import pytest
+
+from app.editor.base import EditRequest, EditResult
+from app.editor.fake import FakeEditor
+from app.github.pulls import PullRequest
+from app.jobs.runner import run_changeset_job
+from app.models.changeset import ChangesetStatus
+from app.store import changesets as store
+from tests.fakes import FakePool
+
+_TASK = {
+    "title": "Add dark mode",
+    "spec": "Implement a dark-mode toggle.",
+    "context": {},
+    "constraints": ["keeps existing tests green"],
+}
+
+
+async def _mint(installation_id: int) -> str:
+    return "ghs_tok"
+
+
+async def _seed(pool: FakePool, changeset_id: str, project_id: str = "demo", base="main"):
+    await store.create_changeset(
+        pool,
+        changeset_id=changeset_id,
+        project_id=project_id,
+        run_id="run-1",
+        base_branch=base,
+        task=_TASK,
+    )
+
+
+@pytest.mark.asyncio
+async def test_job_opens_draft_pr_on_success():
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=1)
+    await _seed(pool, "cs_abc12345")
+
+    editor = FakeEditor(EditResult(success=True, diff_stat={"files": 3}))
+    calls: dict = {}
+
+    async def open_pr(**kwargs) -> PullRequest:
+        calls.update(kwargs)
+        return PullRequest(url="https://github.com/acme/widgets/pull/9", number=9)
+
+    await run_changeset_job(pool, "cs_abc12345", editor=editor, mint_token=_mint, open_pr=open_pr)
+
+    final = await store.get_changeset(pool, "cs_abc12345")
+    assert final.status == ChangesetStatus.pr_open
+    assert final.pr_url.endswith("/pull/9")
+    assert final.pr_number == 9
+    assert final.branch.startswith("apdl/add-dark-mode-")
+    assert final.diff_stat == {"files": 3}
+    # The editor saw the resolved repo/branch + the minted token.
+    assert isinstance(editor.last_request, EditRequest)
+    assert editor.last_request.repo == "acme/widgets"
+    assert editor.last_request.base_branch == "main"
+    assert editor.last_request.token == "ghs_tok"
+    # The PR was opened as a draft, on the right repo/base, with the token.
+    assert calls["draft"] is True
+    assert calls["repo"] == "acme/widgets"
+    assert calls["base"] == "main"
+    assert calls["token"] == "ghs_tok"
+
+
+@pytest.mark.asyncio
+async def test_job_marks_tests_failed_without_opening_pr():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_fail0001")
+
+    editor = FakeEditor(EditResult(success=False, error="tests red"))
+    opened: list = []
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.append(kwargs)
+        return PullRequest(url="x", number=1)
+
+    await run_changeset_job(pool, "cs_fail0001", editor=editor, mint_token=_mint, open_pr=open_pr)
+
+    final = await store.get_changeset(pool, "cs_fail0001")
+    assert final.status == ChangesetStatus.tests_failed
+    assert final.error == "tests red"
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_job_errors_when_connection_missing():
+    pool = FakePool()  # no connection seeded for "ghost"
+    await store.create_changeset(
+        pool, changeset_id="cs_ghost001", project_id="ghost",
+        run_id=None, base_branch=None, task=_TASK,
+    )
+
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool, "cs_ghost001", editor=FakeEditor(), mint_token=_mint, open_pr=open_pr
+    )
+
+    final = await store.get_changeset(pool, "cs_ghost001")
+    assert final.status == ChangesetStatus.error
+
+
+@pytest.mark.asyncio
+async def test_job_errors_on_unexpected_editor_fault():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_boom0001")
+
+    class _BoomEditor:
+        async def implement(self, request: EditRequest) -> EditResult:
+            raise RuntimeError("kaboom")
+
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool, "cs_boom0001", editor=_BoomEditor(), mint_token=_mint, open_pr=open_pr
+    )
+
+    final = await store.get_changeset(pool, "cs_boom0001")
+    assert final.status == ChangesetStatus.error
+    assert "kaboom" in (final.error or "")
+
+
+@pytest.mark.asyncio
+async def test_job_is_a_noop_for_unknown_changeset():
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    # Should not raise.
+    await run_changeset_job(
+        FakePool(), "cs_missing", editor=FakeEditor(), mint_token=_mint, open_pr=open_pr
+    )

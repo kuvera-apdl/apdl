@@ -130,6 +130,7 @@ class Changeset(BaseModel):
     changeset_id: str
     project_id: str
     run_id: str | None = None
+    task: TaskSpec
     status: ChangesetStatus
     base_branch: str | None = None
     branch: str | None = None

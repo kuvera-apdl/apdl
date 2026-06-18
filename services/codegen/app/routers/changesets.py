@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from app.auth import require_internal_token
+from app.jobs.runner import run_changeset_job
 from app.models.changeset import Changeset, ChangesetCreate, ChangesetStatus, InvalidTransition
 from app.store import changesets as store
 from app.store import connections as connections_store
@@ -28,15 +30,24 @@ router = APIRouter(
 )
 
 
-def _enqueue_job(changeset_id: str) -> None:
-    """Seam for the sandboxed code job (Phase 2+). Currently a no-op."""
-    logger.info(
-        "Changeset %s queued; sandbox job runner not yet wired (Phase 2).", changeset_id
-    )
+def _maybe_enqueue(app: Any, background_tasks: BackgroundTasks, changeset_id: str) -> None:
+    """Schedule the changeset job when the runner deps are configured.
+
+    Lifespan wires ``app.state.job_deps`` (editor + token minter + PR opener). In
+    tests the lifespan does not run, so the deps are absent and the changeset
+    simply parks in ``queued`` — the job is exercised directly in unit tests.
+    """
+    deps = getattr(app.state, "job_deps", None)
+    if deps is None:
+        logger.info("Changeset %s queued; job runner not configured.", changeset_id)
+        return
+    background_tasks.add_task(run_changeset_job, app.state.pg_pool, changeset_id, **deps)
 
 
 @router.post("", response_model=Changeset, status_code=202)
-async def create_changeset(body: ChangesetCreate, request: Request) -> Changeset:
+async def create_changeset(
+    body: ChangesetCreate, request: Request, background_tasks: BackgroundTasks
+) -> Changeset:
     """Enqueue a changeset for a connected project."""
     pool: asyncpg.Pool = request.app.state.pg_pool
 
@@ -57,7 +68,7 @@ async def create_changeset(body: ChangesetCreate, request: Request) -> Changeset
         base_branch=base_branch,
         task=body.task.model_dump(),
     )
-    _enqueue_job(changeset_id)
+    _maybe_enqueue(request.app, background_tasks, changeset_id)
     return changeset
 
 
