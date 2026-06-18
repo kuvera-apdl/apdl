@@ -2,14 +2,19 @@
 // not errors, so panels can render them.
 import { normalizeBaseUrl } from './http'
 
+// The analytics services that the health grid + integration verification cover.
+// Distinct from the full ServiceName set (which also includes codegen — a
+// separate concern not in the event→flag→query data path).
+export type HealthServiceName = 'ingestion' | 'config' | 'query' | 'agents'
+
 export interface ServiceDescriptor {
-  service: ServiceHealthTarget['service']
+  service: HealthServiceName
   label: string
   hasReady: boolean
 }
 
 export interface ServiceHealthTarget {
-  service: 'ingestion' | 'config' | 'query' | 'agents'
+  service: HealthServiceName
   baseUrl: string
   apiKey?: string
 }
