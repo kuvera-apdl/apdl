@@ -12,7 +12,7 @@ from typing import Any
 
 import asyncpg
 
-from app.models.changeset import Changeset, ChangesetStatus, assert_transition
+from app.models.changeset import Changeset, ChangesetStatus, TaskSpec, assert_transition
 
 
 def _loads(value: Any) -> dict[str, Any]:
@@ -26,6 +26,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         changeset_id=row["changeset_id"],
         project_id=row["project_id"],
         run_id=row["run_id"],
+        task=TaskSpec(**_loads(row["task"])),
         status=ChangesetStatus(row["status"]),
         base_branch=row["base_branch"],
         branch=row["branch"],
@@ -125,5 +126,46 @@ async def transition_changeset(
                 changeset_id,
                 target.value,
                 error,
+            )
+    return _row_to_changeset(row)
+
+
+async def mark_pr_open(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    branch: str,
+    pr_url: str,
+    pr_number: int,
+    diff_stat: dict[str, Any],
+) -> Changeset | None:
+    """Transition ``pushing → pr_open`` and persist the branch + PR identifiers.
+
+    Enforces the lifecycle state machine inside a row-locked transaction, like
+    :func:`transition_changeset`.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchval(
+                "SELECT status FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if current is None:
+                return None
+            assert_transition(ChangesetStatus(current), ChangesetStatus.pr_open)
+            row = await conn.fetchrow(
+                """
+                UPDATE codegen_changesets
+                SET status = $2, branch = $3, pr_url = $4, pr_number = $5,
+                    diff_stat = $6::jsonb, updated_at = now()
+                WHERE changeset_id = $1
+                RETURNING *
+                """,
+                changeset_id,
+                ChangesetStatus.pr_open.value,
+                branch,
+                pr_url,
+                pr_number,
+                json.dumps(diff_stat),
             )
     return _row_to_changeset(row)

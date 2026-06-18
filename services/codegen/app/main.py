@@ -19,9 +19,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import postgres_url
 from app.db import ALL_DDL
+from app.editor.managed_agents import ManagedAgentsEditor
+from app.github.app_auth import mint_installation_token
+from app.github.pulls import open_pull_request
 from app.routers import changesets, connections
 
 logger = logging.getLogger(__name__)
+
+
+async def _mint_token(installation_id: int) -> str:
+    """Mint a short-lived installation token (string) for the changeset job."""
+    token = await mint_installation_token(installation_id)
+    return token.token
 
 
 @asynccontextmanager
@@ -33,6 +42,13 @@ async def lifespan(application: FastAPI):
     async with pool.acquire() as conn:
         for ddl in ALL_DDL:
             await conn.execute(ddl)
+
+    # Dependencies for the changeset job runner (editing engine + PR opener).
+    application.state.job_deps = {
+        "editor": ManagedAgentsEditor(),
+        "mint_token": _mint_token,
+        "open_pr": open_pull_request,
+    }
 
     logger.info("Codegen service started: PostgreSQL pool and schema initialized")
     yield

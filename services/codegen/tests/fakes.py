@@ -78,9 +78,18 @@ class FakeConn:
             row = self.store["changesets"].get(args[0])
             if row is None:
                 return None
-            row["status"] = args[1]
-            if args[2] is not None:
-                row["error"] = args[2]
+            if "pr_url" in query:
+                # mark_pr_open: (id, status, branch, pr_url, pr_number, diff_stat)
+                row["status"] = args[1]
+                row["branch"] = args[2]
+                row["pr_url"] = args[3]
+                row["pr_number"] = args[4]
+                row["diff_stat"] = args[5]
+            else:
+                # transition_changeset: (id, status, error)
+                row["status"] = args[1]
+                if args[2] is not None:
+                    row["error"] = args[2]
             row["updated_at"] = _T0
             return row
         raise AssertionError(f"Unexpected fetchrow: {query}")
