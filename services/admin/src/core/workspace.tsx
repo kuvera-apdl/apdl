@@ -15,6 +15,7 @@ export const workspaceSchema = z.object({
   configUrl: z.string().url(),
   queryUrl: z.string().url(),
   agentsUrl: z.string().url(),
+  codegenUrl: z.string().url().optional(),
   apiKey: z.string().regex(API_KEY_PATTERN, 'API key must match proj_{project_id}_{secret}'),
   actor: z.string().min(1).max(64),
   internalToken: z.string(),
@@ -22,7 +23,7 @@ export const workspaceSchema = z.object({
 
 export type Workspace = z.infer<typeof workspaceSchema>
 
-export type ServiceName = 'ingestion' | 'config' | 'query' | 'agents'
+export type ServiceName = 'ingestion' | 'config' | 'query' | 'agents' | 'codegen'
 
 const WORKSPACES_KEY = 'apdl-admin:workspaces'
 const ACTIVE_KEY = 'apdl-admin:active-workspace'
@@ -34,6 +35,7 @@ export const WORKSPACE_URL_DEFAULTS: Record<`${ServiceName}Url`, string> = {
   configUrl: env.VITE_CONFIG_URL ?? 'http://localhost:8081',
   queryUrl: env.VITE_QUERY_URL ?? 'http://localhost:8082',
   agentsUrl: env.VITE_AGENTS_URL ?? 'http://localhost:8083',
+  codegenUrl: env.VITE_CODEGEN_URL ?? 'http://localhost:8084',
 }
 
 export function projectIdFromKey(apiKey: string): string | null {
@@ -51,6 +53,8 @@ export function serviceBaseUrl(workspace: Workspace, service: ServiceName): stri
       return workspace.queryUrl
     case 'agents':
       return workspace.agentsUrl
+    case 'codegen':
+      return workspace.codegenUrl ?? WORKSPACE_URL_DEFAULTS.codegenUrl
   }
 }
 
