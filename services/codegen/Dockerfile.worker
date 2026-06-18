@@ -1,0 +1,25 @@
+# Self-hosted Managed Agents environment worker — the untrusted-code sandbox.
+#
+# Tool execution (the customer's build/test + AI-authored edits) runs HERE,
+# isolated inside APDL's VPC. Harden at deploy time:
+#   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
+#   * drop ALL capabilities, no privilege escalation, seccomp default
+#   * egress allowlist: github.com + package registries only; block the APDL
+#     internal CIDR and the cloud metadata IP (169.254.169.254)
+#   * CPU / memory / pids / wall-clock caps
+# The installation token is held by the orchestrator, never exposed to the
+# agent's tool process (strip it from the in-container git config).
+FROM python:3.12-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY pyproject.toml .
+RUN pip install --no-cache-dir .
+COPY app/ app/
+RUN useradd --create-home --uid 1000 worker \
+    && mkdir -p /workspace \
+    && chown -R worker /app /workspace
+USER worker
+ENV CODEGEN_WORKDIR=/workspace
+CMD ["python", "-m", "app.worker"]
