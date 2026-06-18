@@ -27,7 +27,7 @@ class TriggerRequest(BaseModel):
     trigger_type: TriggerType
     analysis_types: list[str] = Field(
         default_factory=lambda: ["behavior_analysis"],
-        description="Agent graphs to run: behavior_analysis, experiment_design, personalization, feature_proposal",
+        description="Agent graphs to run: behavior_analysis, experiment_design, personalization, feature_proposal, code_implementation",
     )
     time_range_days: int = Field(default=7, ge=1, le=90)
     autonomy_level: int = Field(
