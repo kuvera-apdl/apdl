@@ -28,7 +28,7 @@ CANONICAL_EXPOSURE_KEYS = {
 
 
 def make_client(transport: RecordingTransport, **cfg) -> APDLClient:
-    base = dict(api_key="proj_test_secret", enable_flags=False)
+    base = dict(api_key="proj_test_0123456789abcdef", enable_flags=False)
     base.update(cfg)
     return APDLClient(APDLConfig(**base), transport=transport)
 
@@ -256,3 +256,63 @@ def test_context_manager_shuts_down():
     with make_client(transport) as client:
         client.track("e", user_id="u1")
     assert transport.closed is True
+
+
+# ── API key validation ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        "",
+        "   ",
+        "secret_only",
+        "proj_demo_short",  # secret < 16 chars
+        "proj__0123456789abcdef",  # empty project id
+        "proj_demo_with-dashes-0123456789",  # non-alphanumeric secret
+    ],
+)
+def test_rejects_malformed_api_key(bad_key):
+    with pytest.raises(ValueError):
+        APDLConfig(api_key=bad_key)
+
+
+def test_exposes_project_id_from_api_key():
+    transport = RecordingTransport()
+    client = APDLClient(
+        APDLConfig(api_key="proj_acme42_0123456789abcdef", enable_flags=False),
+        transport=transport,
+    )
+    assert client.project_id == "acme42"
+    client.shutdown()
+
+
+# ── Bulk evaluation ───────────────────────────────────────────
+
+
+def test_get_all_variants_evaluates_every_cached_flag():
+    client = make_client(RecordingTransport())
+    client.set_flags([make_flag("a"), make_flag("b")])
+    variants = client.get_all_variants(user_id="u1")
+    assert set(variants) == {"a", "b"}
+    assert all(v in {"control", "treatment"} for v in variants.values())
+    client.shutdown()
+
+
+def test_get_all_variants_never_logs_exposures():
+    transport = RecordingTransport()
+    client = make_client(transport, log_exposures=True)
+    client.set_flags([make_flag("a"), make_flag("b")])
+    client.get_all_variants(user_id="u1")
+    client.flush()
+    client.shutdown()
+    assert transport.all_events() == []
+
+
+def test_get_all_variant_details_is_sorted_and_explained():
+    client = make_client(RecordingTransport())
+    client.set_flags([make_flag("zeta"), make_flag("alpha")])
+    details = client.get_all_variant_details(user_id="u1")
+    assert [d.key for d in details] == ["alpha", "zeta"]
+    assert all(d.reason == "fallthrough" for d in details)
+    client.shutdown()

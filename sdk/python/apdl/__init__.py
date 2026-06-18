@@ -4,7 +4,7 @@ Quick start::
 
     from apdl import APDL
 
-    client = APDL.init(api_key="proj_demo_secret")
+    client = APDL.init(api_key="proj_demo_0123456789abcdef")
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
 
     if client.get_variant("new-checkout", user_id="u_123") == "treatment":
@@ -14,7 +14,7 @@ Quick start::
 
 Or as a context manager::
 
-    with APDL.init(api_key="proj_demo_secret") as client:
+    with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
         client.identify("u_123", {"plan": "pro"})
 """
 
