@@ -28,4 +28,5 @@ export const queryKeys = {
   staleFlags: (wsId: string, olderThanDays: number) => [wsId, 'flags-stale', olderThanDays] as const,
   serviceHealth: (wsId: string, service: string) => [wsId, 'health', service] as const,
   experiments: (wsId: string) => [wsId, 'experiments'] as const,
+  changesets: (wsId: string) => [wsId, 'changesets'] as const,
 }

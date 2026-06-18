@@ -65,3 +65,15 @@ export function abandonChangeset(
     headers: authHeaders(internalToken),
   })
 }
+
+export function revertChangeset(
+  conn: ServiceConnection,
+  internalToken: string,
+  changesetId: string,
+): Promise<Changeset> {
+  return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/revert`, {
+    method: 'POST',
+    schema: changesetSchema,
+    headers: authHeaders(internalToken),
+  })
+}
