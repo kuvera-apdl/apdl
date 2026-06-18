@@ -79,3 +79,8 @@ async def merge_changeset(changeset_id: str, merge_method: str = "squash") -> di
 async def abandon_changeset(changeset_id: str) -> dict[str, Any]:
     """Abandon a changeset (close PR / drop branch) — rollback for un-merged work."""
     return await _post(f"/v1/changesets/{changeset_id}/abandon")
+
+
+async def revert_changeset(changeset_id: str) -> dict[str, Any]:
+    """Roll back a merged changeset by opening a revert PR (a new changeset)."""
+    return await _post(f"/v1/changesets/{changeset_id}/revert")

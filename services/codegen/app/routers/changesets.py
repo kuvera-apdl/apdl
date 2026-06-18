@@ -150,3 +150,53 @@ async def merge_changeset(
         raise HTTPException(status_code=502, detail="GitHub declined the merge.")
 
     return await store.transition_changeset(pool, changeset_id, ChangesetStatus.merged)
+
+
+@router.post("/{changeset_id}/revert", response_model=Changeset, status_code=202)
+async def revert_changeset(
+    changeset_id: str, request: Request, background_tasks: BackgroundTasks
+) -> Changeset:
+    """Roll back a MERGED changeset by opening a revert PR.
+
+    Reuses the changeset pipeline: a new changeset is enqueued whose task is to
+    revert the original PR. (Un-merged changes roll back via /abandon instead.)
+    """
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    original = await store.get_changeset(pool, changeset_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    if original.status != ChangesetStatus.merged:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Only merged changesets can be reverted "
+                f"(this one is '{original.status.value}'); use /abandon for un-merged work."
+            ),
+        )
+
+    new_id = f"cs_{uuid.uuid4().hex[:24]}"
+    base = original.base_branch or "main"
+    pr_ref = f"#{original.pr_number}" if original.pr_number else f"branch `{original.branch}`"
+    revert_task = {
+        "title": f"Revert: {original.task.title}",
+        "spec": (
+            f"Revert pull request {pr_ref} (branch `{original.branch}`), which was "
+            f"merged into `{base}`. Produce a clean revert of all its changes and "
+            "keep the test suite green."
+        ),
+        "context": {
+            "reverts_changeset": changeset_id,
+            "reverts_pr_number": original.pr_number,
+        },
+        "constraints": ["All existing tests must pass."],
+    }
+    new_changeset = await store.create_changeset(
+        pool,
+        changeset_id=new_id,
+        project_id=original.project_id,
+        run_id=original.run_id,
+        base_branch=base,
+        task=revert_task,
+    )
+    _maybe_enqueue(request.app, background_tasks, new_id)
+    return new_changeset
