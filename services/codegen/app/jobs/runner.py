@@ -136,6 +136,7 @@ async def run_changeset_job(
             pr_url=pr.url,
             pr_number=pr.number,
             diff_stat=result.diff_stat,
+            node_id=pr.node_id,
         )
         logger.info("Changeset %s opened draft PR %s", changeset_id, pr.url)
     except Exception as exc:

@@ -16,8 +16,16 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from app.auth import require_internal_token
+from app.github.app_auth import mint_installation_token
+from app.github.pulls import merge_pull_request
 from app.jobs.runner import run_changeset_job
-from app.models.changeset import Changeset, ChangesetCreate, ChangesetStatus, InvalidTransition
+from app.models.changeset import (
+    Changeset,
+    ChangesetCreate,
+    ChangesetStatus,
+    InvalidTransition,
+    MergeRequest,
+)
 from app.store import changesets as store
 from app.store import connections as connections_store
 
@@ -106,3 +114,39 @@ async def abandon_changeset(changeset_id: str, request: Request) -> Changeset:
     if changeset is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
     return changeset
+
+
+@router.post("/{changeset_id}/merge", response_model=Changeset)
+async def merge_changeset(
+    changeset_id: str, body: MergeRequest, request: Request
+) -> Changeset:
+    """Merge a changeset's PR. Green CI is mandatory; APDL gates the decision."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    changeset = await store.get_changeset(pool, changeset_id)
+    if changeset is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    if changeset.status not in (ChangesetStatus.ci_passed, ChangesetStatus.waiting_approval):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Changeset is '{changeset.status.value}', not mergeable.",
+        )
+    if changeset.ci_status != "passed":
+        raise HTTPException(status_code=409, detail="Merge requires green CI.")
+    if changeset.pr_number is None:
+        raise HTTPException(status_code=409, detail="Changeset has no open pull request.")
+
+    connection = await connections_store.get_connection(pool, changeset.project_id)
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Repository connection is missing.")
+
+    token = (await mint_installation_token(connection.installation_id)).token
+    merge = await merge_pull_request(
+        repo=connection.repo,
+        number=changeset.pr_number,
+        token=token,
+        merge_method=body.merge_method,
+    )
+    if not merge.merged:
+        raise HTTPException(status_code=502, detail="GitHub declined the merge.")
+
+    return await store.transition_changeset(pool, changeset_id, ChangesetStatus.merged)

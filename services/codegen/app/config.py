@@ -44,3 +44,8 @@ def github_app_private_key() -> str:
 def github_api_url() -> str:
     """Base URL for the GitHub REST API (override for GitHub Enterprise)."""
     return os.getenv("GITHUB_API_URL", "https://api.github.com")
+
+
+def github_webhook_secret() -> str:
+    """HMAC secret for verifying inbound GitHub webhooks. Empty = permissive dev."""
+    return os.getenv("GITHUB_WEBHOOK_SECRET", "")
