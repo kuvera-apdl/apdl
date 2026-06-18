@@ -32,6 +32,8 @@ class EditResult:
     success: bool
     branch: str | None = None
     diff_stat: dict[str, Any] = field(default_factory=dict)
+    changed_paths: list[str] = field(default_factory=list)
+    diff_text: str = ""
     error: str | None = None
     logs_uri: str | None = None
 

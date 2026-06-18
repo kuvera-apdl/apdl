@@ -18,6 +18,8 @@ import asyncpg
 
 from app.editor.base import Editor, EditRequest
 from app.models.changeset import ChangesetStatus, TaskSpec
+from app.safety.gates import evaluate_pre_push
+from app.safety.killswitch import automation_enabled
 from app.store import changesets as store
 from app.store import connections as connections_store
 
@@ -59,6 +61,15 @@ async def run_changeset_job(
         logger.warning("Changeset job for unknown id %s", changeset_id)
         return
 
+    if not automation_enabled(changeset.project_id):
+        await store.transition_changeset(
+            pool,
+            changeset_id,
+            ChangesetStatus.abandoned,
+            error="Code automation is disabled for this project (kill switch).",
+        )
+        return
+
     try:
         connection = await connections_store.get_connection(pool, changeset.project_id)
         if connection is None:
@@ -91,6 +102,21 @@ async def run_changeset_job(
             await store.transition_changeset(
                 pool, changeset_id, ChangesetStatus.tests_failed,
                 error=result.error or "The edit attempt did not pass tests.",
+            )
+            return
+
+        gate = evaluate_pre_push(
+            diff_stat=result.diff_stat,
+            changed_paths=result.changed_paths,
+            diff_text=result.diff_text,
+            policy=connection.policy.get("gates") if isinstance(connection.policy, dict) else None,
+        )
+        if not gate.passed:
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.tests_failed,
+                error="Pre-push gate failed: " + "; ".join(gate.violations),
             )
             return
 
