@@ -146,8 +146,9 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
    feature proposals. Actions pass through safety validation with audit logging
    and rollback support.
 7. **Autonomous code:** The Codegen Service turns approved feature proposals into
-   tested-green pull requests on connected customer repos via Claude Managed
-   Agents (self-hosted sandbox); merge is gated on green CI plus autonomy level.
+   tested-green pull requests on connected customer repos via a sandboxed,
+   model-agnostic OSS coding agent (Aider); merge is gated on green CI plus
+   autonomy level.
 
 ### Tech Stack by Service
 
@@ -163,7 +164,7 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic,
   google-genai, asyncpg, pgvector, uv, pytest-asyncio, ruff.
 - **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt
-  (GitHub App), anthropic (Managed Agents), uv, pytest-asyncio, ruff.
+  (GitHub App), Aider (model-agnostic editor via LiteLLM), uv, pytest-asyncio, ruff.
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client,
   clickhouse-driver.
 

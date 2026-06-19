@@ -13,13 +13,16 @@ full design and phase plan.
 
 ## Status
 
-Phases 0–6 implemented. The service connects repos (GitHub App), produces
-changesets via Claude Managed Agents (self-hosted sandbox worker), runs
-deterministic pre-push safety gates, opens draft PRs, ingests CI status (webhook
-+ poll), and merges on green CI under the autonomy gate. The live Managed Agents
-editor and self-hosted worker are **integration-untested** against the beta API —
-they need an Anthropic environment key and a registered GitHub App. Remaining:
-merged-change revert-PR rollback and the console changeset view.
+Phases 0–7 implemented, with the editing engine **reworked from Claude Managed
+Agents to a model-agnostic OSS coding agent ([Aider](https://github.com/Aider-AI/aider))**.
+The service connects repos (GitHub App), produces changesets by running Aider in
+a sandboxed clone, runs deterministic pre-push safety gates, opens draft PRs,
+ingests CI status (webhook + poll), merges on green CI under the autonomy gate,
+and reverts merged changes. The editor model is a config choice — `CODEGEN_MODEL`
+takes any LiteLLM model id (Claude by default, GPT, Gemini, local, …). The real
+agent path is **integration-untested** here: it needs `aider` on `PATH`, a model
+provider key, and a connected repo. The tested core (job runner, safety gates,
+PR/CI/merge, agents queue) runs through a fake editor.
 
 ## API
 
@@ -59,20 +62,28 @@ GITHUB_APP_PRIVATE_KEY=            # PEM inline, or…
 GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the PEM file
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # HMAC secret for /webhooks/github
-ANTHROPIC_ENVIRONMENT_KEY=         # self-hosted Managed Agents worker (Phase 3)
-CODEGEN_ENVIRONMENT_ID=            # the CMA self-hosted environment id
+CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
+ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
+                                   #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
+
+Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
+(throwaway-clone base), and the `CODEGEN_TIMEOUT` / `CODEGEN_TEST_TIMEOUT` /
+`CODEGEN_GIT_TIMEOUT` second caps. A repo's test command comes from the connection
+`policy.test_cmd`; if unset, the editor auto-detects it (pytest / npm / make / …).
 
 ## Develop
 
 ```bash
 make run-codegen         # uvicorn on :8084 (hot reload)
-make run-codegen-worker  # self-hosted Managed Agents sandbox worker
 make test-codegen        # pytest
 make lint-codegen        # ruff
 ```
+
+To exercise the real editor locally, install the agent extra so `aider` is on
+`PATH`: `cd services/codegen && uv pip install -e ".[agent]"`.
 
 ## Going live (end-to-end)
 
@@ -82,17 +93,20 @@ The autonomous loop runs once these external pieces are set up:
    write`, `pull_requests: write`, `checks: read`, `metadata: read`. Set
    `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`. Customers install it on their
    repos; record each installation via `POST /v1/connections`.
-2. **Create a self-hosted Managed Agents environment** and set
-   `ANTHROPIC_ENVIRONMENT_KEY` + `CODEGEN_ENVIRONMENT_ID`; run the sandbox worker
-   with `make run-codegen-worker` (container: `Dockerfile.worker`).
+2. **Provision the coding agent.** Make `aider` available where the editor runs
+   — `uv pip install -e ".[agent]"` on the codegen host for v1, or build the
+   hardened sandbox image (`Dockerfile.worker`) to run one changeset per
+   container. Set `CODEGEN_MODEL` and the matching provider key (e.g.
+   `ANTHROPIC_API_KEY`). Optionally set each repo's test command via the
+   connection `policy.test_cmd` (otherwise it is auto-detected).
 3. **Add a repo webhook** → `POST /webhooks/github`, secret
    `GITHUB_WEBHOOK_SECRET`, events `check_run` + `pull_request`.
 4. **Enable branch protection** on the default branch (require PR + green checks)
    as the server-side merge backstop.
 
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
-service) → `POST /v1/changesets` → the job mints a repo token, runs the Managed
-Agents editor (implement until tests pass) in the self-hosted sandbox, runs
-pre-push gates, pushes a branch, and opens a **draft PR** → the repo's CI runs →
+service) → `POST /v1/changesets` → the job mints a repo token, runs the Aider
+editor (implement until tests pass) in a sandboxed clone, runs pre-push gates,
+pushes a branch, and opens a **draft PR** → the repo's CI runs →
 the webhook advances the changeset to `ci_passed` and promotes the PR to
 ready-for-review → merge is gated on green CI + autonomy level.
