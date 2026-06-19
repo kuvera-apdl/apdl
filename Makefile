@@ -160,9 +160,6 @@ lint-codegen:
 run-codegen:
 	cd services/codegen && .venv/bin/uvicorn app.main:app --reload --port 8084
 
-run-codegen-worker:
-	cd services/codegen && .venv/bin/python -m app.worker
-
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:

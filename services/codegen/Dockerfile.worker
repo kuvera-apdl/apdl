@@ -1,25 +1,30 @@
-# Self-hosted Managed Agents environment worker — the untrusted-code sandbox.
+# APDL codegen agent sandbox — the untrusted-code boundary.
 #
-# Tool execution (the customer's build/test + AI-authored edits) runs HERE,
-# isolated inside APDL's VPC. Harden at deploy time:
+# Runs the OSS coding agent (Aider) plus the customer's build/test, isolated
+# inside APDL's VPC. v1 executes the agent as a subprocess on the codegen host;
+# this image is the hardened substrate to graduate to — run ONE changeset per
+# container. Harden at deploy time:
 #   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
 #   * drop ALL capabilities, no privilege escalation, seccomp default
 #   * egress allowlist: github.com + package registries only; block the APDL
 #     internal CIDR and the cloud metadata IP (169.254.169.254)
 #   * CPU / memory / pids / wall-clock caps
-# The installation token is held by the orchestrator, never exposed to the
-# agent's tool process (strip it from the in-container git config).
+# The GitHub installation token is held by the orchestrator and passed to git via
+# a one-shot http.extraHeader — never written to this container's git config, and
+# never handed to the agent process. Give the agent only its model provider key.
 FROM python:3.12-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
-COPY app/ app/
-RUN useradd --create-home --uid 1000 worker \
+# The model-agnostic coding agent. It reaches any model through LiteLLM, chosen
+# at run time via CODEGEN_MODEL (default a Claude model); supply the matching
+# provider key (ANTHROPIC_API_KEY / OPENAI_API_KEY / …) to the agent only.
+RUN pip install --no-cache-dir aider-chat
+RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \
-    && chown -R worker /app /workspace
-USER worker
-ENV CODEGEN_WORKDIR=/workspace
-CMD ["python", "-m", "app.worker"]
+    && chown -R agent /workspace
+USER agent
+WORKDIR /workspace
+ENV CODEGEN_WORKDIR=/workspace \
+    AIDER_ANALYTICS=false \
+    AIDER_CHECK_UPDATE=false
