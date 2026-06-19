@@ -2,7 +2,7 @@
 
 Phase 2 path: ``queued → cloning → editing → testing → (tests_failed | pushing →
 pr_open)``. The edit itself is delegated to an :class:`~app.editor.base.Editor`
-(Managed Agents in production, a fake in tests); the PR is opened by codegen via
+(Aider in production, a fake in tests); the PR is opened by codegen via
 the GitHub App so merge gating stays in APDL. The job never raises — any
 unexpected fault lands the changeset in ``error``.
 """
@@ -94,6 +94,11 @@ async def run_changeset_job(
                 title=changeset.task.title,
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
+                test_cmd=(
+                    connection.policy.get("test_cmd")
+                    if isinstance(connection.policy, dict)
+                    else None
+                ),
             )
         )
 

@@ -1,9 +1,9 @@
 """The editing-engine seam.
 
 ``Editor`` is the interface codegen uses to turn a task spec into a pushed
-branch. Production uses a Claude Managed Agents-backed implementation; tests use
-a fake. Keeping the engine behind a Protocol makes it a config choice, not a
-rewrite (plan decision D3).
+branch. Production uses an Aider-backed implementation (model-agnostic via
+LiteLLM); tests use a fake. Keeping the engine behind a Protocol makes the engine
+— and the model — a config choice, not a rewrite (plan decision D3).
 """
 
 from __future__ import annotations
@@ -23,6 +23,9 @@ class EditRequest:
     title: str
     spec: str
     constraints: list[str] = field(default_factory=list)
+    #: Repo test command for the agent's test loop + the post-edit verify.
+    #: ``None`` lets the engine auto-detect from the repo (e.g. pytest/npm test).
+    test_cmd: str | None = None
 
 
 @dataclass
