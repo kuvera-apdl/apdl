@@ -99,7 +99,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 4. **Flag evaluation:** SDKs evaluate flags locally using FNV-1a bucketing (no server round-trip for evaluation). The JS SDK, the Python SDK, and the Config Service share a byte-for-byte identical hash so a user buckets identically everywhere
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
 6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
-7. **Autonomous code:** Codegen Service turns approved feature proposals into tested-green pull requests on connected customer repos via Claude Managed Agents (self-hosted sandbox); merge is gated on green CI + autonomy level, audited like every other action
+7. **Autonomous code:** Codegen Service turns approved feature proposals into tested-green pull requests on connected customer repos via a sandboxed, model-agnostic OSS coding agent (Aider); merge is gated on green CI + autonomy level, audited like every other action
 
 ### Tech Stack by Service
 
@@ -109,7 +109,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis (hiredis), sse-starlette, Pydantic — uv, pytest, ruff
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
-- **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), anthropic (Managed Agents) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
+- **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), Aider (model-agnostic editor via LiteLLM) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
 
 ### Key Ports
