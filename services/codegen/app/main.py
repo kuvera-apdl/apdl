@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import postgres_url
 from app.db import ALL_DDL
-from app.editor.managed_agents import ManagedAgentsEditor
+from app.editor.aider_editor import AiderEditor
 from app.github.app_auth import mint_installation_token
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
@@ -46,7 +46,7 @@ async def lifespan(application: FastAPI):
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
     application.state.job_deps = {
-        "editor": ManagedAgentsEditor(),
+        "editor": AiderEditor(),
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
