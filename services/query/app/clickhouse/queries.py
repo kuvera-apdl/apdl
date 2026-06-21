@@ -195,16 +195,21 @@ WITH
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+    ),
+    cohort_sizes AS (
+        SELECT cohort_date, count(DISTINCT user_id) AS cohort_size
+        FROM cohort
+        GROUP BY cohort_date
     )
 SELECT
     c.cohort_date,
-    count(DISTINCT c.user_id) AS cohort_size,
+    cs.cohort_size,
     dateDiff('day', c.cohort_date, a.activity_date) AS period_offset,
     count(DISTINCT a.user_id) AS active_users
 FROM cohort c
+INNER JOIN cohort_sizes cs ON cs.cohort_date = c.cohort_date
 LEFT JOIN activity a ON c.user_id = a.user_id
-    AND a.activity_date >= c.cohort_date
-GROUP BY c.cohort_date, period_offset
+GROUP BY c.cohort_date, cs.cohort_size, period_offset
 ORDER BY c.cohort_date, period_offset
 """
 
@@ -230,16 +235,21 @@ WITH
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+    ),
+    cohort_sizes AS (
+        SELECT cohort_week, count(DISTINCT user_id) AS cohort_size
+        FROM cohort
+        GROUP BY cohort_week
     )
 SELECT
     c.cohort_week,
-    count(DISTINCT c.user_id) AS cohort_size,
+    cs.cohort_size,
     dateDiff('week', c.cohort_week, a.activity_week) AS period_offset,
     count(DISTINCT a.user_id) AS active_users
 FROM cohort c
+INNER JOIN cohort_sizes cs ON cs.cohort_week = c.cohort_week
 LEFT JOIN activity a ON c.user_id = a.user_id
-    AND a.activity_week >= c.cohort_week
-GROUP BY c.cohort_week, period_offset
+GROUP BY c.cohort_week, cs.cohort_size, period_offset
 ORDER BY c.cohort_week, period_offset
 """
 
@@ -264,6 +274,26 @@ WHERE project_id = %(project_id)s
   AND JSONHas(properties, %(cohort_property)s)
 GROUP BY cohort_value, day
 ORDER BY cohort_value, day
+"""
+
+
+# ---------------------------------------------------------------------------
+# Event discovery
+# ---------------------------------------------------------------------------
+
+def build_event_catalog_query(params: dict[str, Any]) -> str:
+    """List distinct event names with volume, most frequent first."""
+    return """
+SELECT
+    event_name,
+    count() AS event_count,
+    uniq(user_id) AS unique_users
+FROM events
+WHERE project_id = %(project_id)s
+  AND event_date BETWEEN %(start_date)s AND %(end_date)s
+GROUP BY event_name
+ORDER BY event_count DESC
+LIMIT %(limit)s
 """
 
 
