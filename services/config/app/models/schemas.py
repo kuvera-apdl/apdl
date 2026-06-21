@@ -36,6 +36,7 @@ GuardrailThreshold = Literal["2x_baseline", "at_least_one"]
 EvaluationMode = Literal["client", "server", "both"]
 FlagState = Literal["draft", "active", "disabled", "archived"]
 WritableFlagState = Literal["draft", "active", "disabled"]
+ExperimentStatus = Literal["draft", "running", "completed", "stopped"]
 GateEvaluationReason = Literal[
     "not_found",
     "invalid_config",
@@ -135,6 +136,20 @@ def validate_variant_weights(variants: list[VariantConfig]) -> None:
         raise ValueError("variant weights must contain at least one positive weight")
 
 
+def derive_default_variant(variant_keys: list[str], explicit: str | None = None) -> str:
+    """Resolve the default variant: an explicit choice (validated), else
+    ``"control"`` when present, else the first variant key."""
+    if explicit is not None:
+        if explicit not in variant_keys:
+            raise ValueError("default_variant must match a variant key")
+        return explicit
+    if "control" in variant_keys:
+        return "control"
+    if variant_keys:
+        return variant_keys[0]
+    raise ValueError("variants must contain at least one variant")
+
+
 def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
     """Validate the canonical variant fields for a complete flag config."""
     default_variant = flag.get("default_variant")
@@ -196,12 +211,17 @@ class ClientFlagConfig(VariantFlagMixin):
 
 
 class ExperimentConfig(BaseModel):
+    """Mirror of a stored ``experiments`` row (canonical columns)."""
+
     key: str
     project_id: str = ""
-    status: str = "draft"
+    status: ExperimentStatus = "draft"
     description: str = ""
+    flag_key: str = ""
+    default_variant: str = "control"
     variants_json: str = "[]"
     targeting_rules_json: str = "[]"
+    primary_metric_json: str = "{}"
     traffic_percentage: float = 100.0
     start_date: str = ""
     end_date: str = ""
@@ -328,22 +348,80 @@ def validate_state_enabled(state: str, enabled: bool) -> None:
         raise ValueError(f"state '{state}' requires enabled={expected_enabled}")
 
 
-class ExperimentCreate(BaseModel):
+class ExperimentVariant(StrictModel):
+    """A variant as authored on an experiment.
+
+    Carries optional display fields (``description``) that the backing flag's
+    strict ``VariantConfig`` does not; projected down to ``{key, weight}`` when
+    the flag is derived.
+    """
+
     key: str = Field(..., min_length=1)
-    status: str = "draft"
+    weight: int = Field(..., ge=0, strict=True)
+    description: str = ""
+
+
+class ExperimentMetric(StrictModel):
+    """Primary/secondary metric descriptor.
+
+    ``type`` and ``direction`` are advisory for analysis and display; only
+    ``event`` drives the Query service's exposure→event join.
+    """
+
+    event: str = Field(..., min_length=1)
+    type: str = "conversion"
+    direction: str = "increase"
+
+
+def default_experiment_variants() -> list[ExperimentVariant]:
+    return [
+        ExperimentVariant(key="control", weight=1),
+        ExperimentVariant(key="treatment", weight=1),
+    ]
+
+
+def _projected_variants(variants: list[ExperimentVariant]) -> list[VariantConfig]:
+    return [VariantConfig(key=v.key, weight=v.weight) for v in variants]
+
+
+class ExperimentCreate(StrictModel):
+    key: str = Field(..., min_length=1)
+    flag_key: str | None = Field(default=None, min_length=1)
+    status: ExperimentStatus = "draft"
     description: str = ""
     traffic_percentage: float = Field(default=100.0, ge=0.0, le=100.0)
     start_date: str = ""
     end_date: str = ""
-    variants: list[Any] = Field(default_factory=list)
-    targeting_rules: list[Any] = Field(default_factory=list)
+    variants: list[ExperimentVariant] = Field(default_factory=default_experiment_variants)
+    default_variant: str | None = Field(default=None, min_length=1)
+    primary_metric: ExperimentMetric | None = None
+    targeting_rules: list[GateRule] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_experiment(self):
+        projected = _projected_variants(self.variants)
+        validate_variant_weights(projected)
+        if self.default_variant is not None:
+            validate_variants(projected, self.default_variant)
+        return self
 
 
-class ExperimentUpdate(BaseModel):
-    status: str | None = None
+class ExperimentUpdate(StrictModel):
+    status: ExperimentStatus | None = None
     description: str | None = None
     traffic_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
     start_date: str | None = None
     end_date: str | None = None
-    variants: list[Any] | None = None
-    targeting_rules: list[Any] | None = None
+    variants: list[ExperimentVariant] | None = None
+    default_variant: str | None = Field(default=None, min_length=1)
+    primary_metric: ExperimentMetric | None = None
+    targeting_rules: list[GateRule] | None = None
+
+    @model_validator(mode="after")
+    def validate_experiment(self):
+        if self.variants is not None:
+            projected = _projected_variants(self.variants)
+            validate_variant_weights(projected)
+            if self.default_variant is not None:
+                validate_variants(projected, self.default_variant)
+        return self

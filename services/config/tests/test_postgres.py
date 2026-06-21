@@ -156,6 +156,128 @@ def test_migration_rewrites_and_drops_legacy_boolean_flag_shape():
     assert "flags_fallthrough_rollout_only_check" in migrate_sql
 
 
+@pytest.mark.asyncio
+async def test_get_experiments_uses_explicit_projection():
+    pool = RecordingPool()
+
+    await postgres.get_experiments(pool, "apdl")
+
+    assert "SELECT *" not in pool.sql
+    assert "flag_key" in pool.sql
+    assert "default_variant" in pool.sql
+    assert "primary_metric_json" in pool.sql
+    assert pool.args == ("apdl",)
+
+
+@pytest.mark.asyncio
+async def test_get_experiment_uses_explicit_projection():
+    pool = RecordingFetchRowPool(row=None)
+
+    await postgres.get_experiment(pool, "apdl", "checkout")
+
+    assert "SELECT *" not in pool.sql
+    assert "flag_key" in pool.sql
+    assert pool.args == ("apdl", "checkout")
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_writes_canonical_columns():
+    pool = RecordingExecutePool()
+
+    ok = await postgres.create_experiment(pool, {
+        "key": "checkout",
+        "project_id": "apdl",
+        "status": "running",
+        "description": "d",
+        "flag_key": "checkout",
+        "default_variant": "control",
+        "variants_json": '[{"key":"control","weight":1}]',
+        "targeting_rules_json": "[]",
+        "primary_metric_json": '{"event":"purchase"}',
+        "traffic_percentage": 100.0,
+        "start_date": "",
+        "end_date": "",
+    })
+
+    assert ok is True
+    assert "flag_key" in pool.sql
+    assert "primary_metric_json" in pool.sql
+    assert "checkout" in pool.args
+    assert '{"event":"purchase"}' in pool.args
+
+
+@pytest.mark.asyncio
+async def test_update_experiment_writes_canonical_columns_and_not_flag_key():
+    pool = RecordingExecutePool(result="UPDATE 1")
+
+    ok = await postgres.update_experiment(pool, {
+        "key": "checkout",
+        "project_id": "apdl",
+        "status": "stopped",
+        "description": "d",
+        "default_variant": "treatment",
+        "variants_json": "[]",
+        "targeting_rules_json": "[]",
+        "primary_metric_json": "{}",
+        "traffic_percentage": 50.0,
+        "start_date": "",
+        "end_date": "",
+    })
+
+    assert ok is True
+    assert "default_variant" in pool.sql
+    assert "primary_metric_json" in pool.sql
+    # flag_key is an immutable link — never rewritten on update.
+    assert "flag_key" not in pool.sql
+
+
+def test_row_to_experiment_includes_canonical_columns():
+    row = {
+        "key": "checkout",
+        "project_id": "apdl",
+        "status": "running",
+        "description": "d",
+        "flag_key": "checkout",
+        "default_variant": "control",
+        "variants_json": "[]",
+        "targeting_rules_json": "[]",
+        "primary_metric_json": "{}",
+        "traffic_percentage": 100.0,
+        "start_date": "",
+        "end_date": "",
+        "created_at": "2026-06-01T00:00:00+00:00",
+        "updated_at": "2026-06-01T00:00:00+00:00",
+    }
+
+    exp = postgres._row_to_experiment(row)
+
+    assert exp["flag_key"] == "checkout"
+    assert exp["default_variant"] == "control"
+    assert exp["primary_metric_json"] == "{}"
+    assert exp["traffic_percentage"] == 100.0
+
+
+def test_create_experiments_table_defines_canonical_columns():
+    create_sql = main.CREATE_EXPERIMENTS_TABLE
+
+    assert "flag_key TEXT NOT NULL DEFAULT ''" in create_sql
+    assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
+    assert "primary_metric_json TEXT NOT NULL DEFAULT '{}'" in create_sql
+    assert "status IN ('draft', 'running', 'completed', 'stopped')" in create_sql
+
+
+def test_migrate_experiments_table_adds_columns_and_normalizes_status():
+    migrate_sql = main.MIGRATE_EXPERIMENTS_TABLE
+
+    assert "ADD COLUMN IF NOT EXISTS flag_key" in migrate_sql
+    assert "ADD COLUMN IF NOT EXISTS default_variant" in migrate_sql
+    assert "ADD COLUMN IF NOT EXISTS primary_metric_json" in migrate_sql
+    # Legacy status values are rewritten before the constraint is enforced.
+    assert "SET status = 'running' WHERE status = 'active'" in migrate_sql
+    assert "experiments_status_check" in migrate_sql
+    assert "SET flag_key = key WHERE flag_key = ''" in migrate_sql
+
+
 class RecordingPool:
     sql: str = ""
     args: tuple = ()
@@ -164,6 +286,18 @@ class RecordingPool:
         self.sql = sql
         self.args = args
         return []
+
+
+class RecordingExecutePool:
+    def __init__(self, result: str = "INSERT 0 1"):
+        self.result = result
+        self.sql = ""
+        self.args = ()
+
+    async def execute(self, sql: str, *args):
+        self.sql = sql
+        self.args = args
+        return self.result
 
 
 class RecordingFetchRowPool:

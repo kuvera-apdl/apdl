@@ -28,7 +28,6 @@ from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
 from app.safety.validator import ActionType, AgentAction, SafetyValidator
 from app.tools.experiments import create_experiment_config, get_active_experiments
-from app.tools.flags import create_flag
 
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
@@ -153,34 +152,23 @@ class ExperimentDesignAgent(BaseAgent):
         return result
 
     async def _deploy(self, ctx: AgentContext, experiment: dict) -> bool:
+        # Config owns experiment→flag initialization: creating the experiment
+        # config also creates its canonical backing flag. The agent no longer
+        # creates the flag itself, which removes the old drift between the flag
+        # built from ``flag_config.variants`` and the experiment created from
+        # ``experiment.variants``.
         try:
             flag_config = experiment.get("flag_config", {})
-            flag_variants = flag_config.get("variants", [])
-            experiment_variants = experiment.get("variants") or flag_variants
             experiment_id = experiment.get("experiment_id", "")
-            flag_key = flag_config.get("key", experiment_id)
+            flag_key = flag_config.get("key") or experiment_id
+            variants = experiment.get("variants") or flag_config.get("variants", [])
             description = experiment.get("description") or experiment.get("hypothesis", "")
 
-            await create_flag(
-                project_id=ctx.project_id,
-                key=flag_key,
-                name=flag_config.get("name") or experiment_id or flag_key,
-                description=description,
-                state=flag_config.get("state"),
-                enabled=flag_config.get("enabled", True),
-                default_variant=flag_config.get("default_variant", "control"),
-                variants=flag_variants,
-                rules=flag_config.get("rules", []),
-                fallthrough=flag_config.get("fallthrough"),
-                evaluation_mode=flag_config.get("evaluation_mode", "client"),
-                auto_disable=flag_config.get("auto_disable", True),
-                guardrails=flag_config.get("guardrails", []),
-            )
             await create_experiment_config(
                 project_id=ctx.project_id,
                 experiment_id=experiment_id or flag_key,
-                hypothesis=experiment.get("hypothesis", ""),
-                variants=experiment_variants,
+                hypothesis=description,
+                variants=variants,
                 primary_metric=experiment.get("primary_metric", {}),
                 secondary_metrics=experiment.get("secondary_metrics"),
                 guardrail_metrics=experiment.get("guardrail_metrics"),
@@ -188,7 +176,7 @@ class ExperimentDesignAgent(BaseAgent):
                 estimated_duration_days=experiment.get("estimated_duration_days", 14),
                 flag_key=flag_key,
             )
-            logger.info("Experiment %s deployed successfully", experiment.get("experiment_id"))
+            logger.info("Experiment %s deployed successfully", experiment_id)
             return True
         except Exception as exc:
             logger.error("Failed to deploy experiment: %s", exc)

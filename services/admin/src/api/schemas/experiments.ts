@@ -1,18 +1,38 @@
-// Experiment mirrors. The experiment record is deliberately loose,
-// pre-canonicalization (plan §1.5 / D4): status is a free-form string and
-// variants/targeting_rules are unvalidated JSON arrays — the console mirrors
-// that looseness rather than inventing schema. Canonicalization is gap G5.
+// Experiment mirrors of services/config/app/models/schemas.py (Strict Schema
+// Rule). Canonicalized in gap G5: the experiment owns a backing flag, so the
+// record reuses the flag's variant/rule contracts rather than loose JSON.
 import { z } from 'zod'
 
-// GET /v1/admin/experiments rows (routers/admin.py list_experiments):
-// `variants` is present only when variants_json was a non-empty array.
+import { gateRuleSchema, variantConfigSchema } from './flags'
+
+export const experimentStatusSchema = z.enum(['draft', 'running', 'completed', 'stopped'])
+
+// Variants carry an optional display description on top of the canonical
+// {key, weight} that the backing flag projects down to.
+export const experimentVariantSchema = variantConfigSchema
+  .extend({ description: z.string().optional() })
+  .strict()
+
+export const experimentMetricSchema = z
+  .object({
+    event: z.string().min(1),
+    type: z.string(),
+    direction: z.string(),
+  })
+  .strict()
+
+// GET /v1/admin/experiments rows (routers/admin.py list_experiments).
 export const experimentEntrySchema = z
   .object({
     key: z.string(),
-    status: z.string(),
+    flag_key: z.string(),
+    status: experimentStatusSchema,
     description: z.string(),
+    default_variant: z.string(),
     traffic_percentage: z.number(),
-    variants: z.array(z.unknown()).optional(),
+    variants: z.array(experimentVariantSchema),
+    targeting_rules: z.array(gateRuleSchema),
+    primary_metric: experimentMetricSchema.nullable(),
     start_date: z.string(),
     end_date: z.string(),
     created_at: z.string(),
@@ -30,36 +50,41 @@ export const experimentsListResponseSchema = z
 export const experimentCreateSchema = z
   .object({
     key: z.string().min(1),
-    status: z.string(),
+    flag_key: z.string().min(1).optional(),
+    status: experimentStatusSchema,
     description: z.string(),
     traffic_percentage: z.number().min(0).max(100),
     start_date: z.string(),
     end_date: z.string(),
-    variants: z.array(z.unknown()),
-    targeting_rules: z.array(z.unknown()),
+    variants: z.array(experimentVariantSchema),
+    default_variant: z.string().min(1).optional(),
+    primary_metric: experimentMetricSchema.optional(),
+    targeting_rules: z.array(gateRuleSchema),
   })
   .strict()
 
 export const experimentUpdateSchema = z
   .object({
-    status: z.string().optional(),
+    status: experimentStatusSchema.optional(),
     description: z.string().optional(),
     traffic_percentage: z.number().min(0).max(100).optional(),
     start_date: z.string().optional(),
     end_date: z.string().optional(),
-    variants: z.array(z.unknown()).optional(),
-    targeting_rules: z.array(z.unknown()).optional(),
+    variants: z.array(experimentVariantSchema).optional(),
+    default_variant: z.string().min(1).optional(),
+    primary_metric: experimentMetricSchema.optional(),
+    targeting_rules: z.array(gateRuleSchema).optional(),
   })
   .strict()
 
 export const experimentCreateResponseSchema = z
-  .object({ created: z.boolean(), key: z.string() })
+  .object({ created: z.boolean(), key: z.string(), flag_key: z.string() })
   .strict()
 export const experimentUpdateResponseSchema = z
-  .object({ updated: z.boolean(), key: z.string() })
+  .object({ updated: z.boolean(), key: z.string(), flag_key: z.string() })
   .strict()
 export const experimentDeleteResponseSchema = z
-  .object({ deleted: z.boolean(), key: z.string() })
+  .object({ deleted: z.boolean(), key: z.string(), flag_key: z.string() })
   .strict()
 
 // GET /v1/query/experiment/{id} (query service ExperimentResult).

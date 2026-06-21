@@ -21,6 +21,11 @@ FLAG_COLUMNS = """
     evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
     disabled_at, version, created_at, updated_at, archived_at
 """
+EXPERIMENT_COLUMNS = """
+    key, project_id, status, description, flag_key, default_variant,
+    variants_json, targeting_rules_json, primary_metric_json,
+    traffic_percentage, start_date, end_date, created_at, updated_at
+"""
 
 
 def _json_field(value, fallback):
@@ -70,8 +75,11 @@ def _row_to_experiment(row) -> dict:
         "project_id": row["project_id"],
         "status": row["status"],
         "description": row["description"],
+        "flag_key": row["flag_key"],
+        "default_variant": row["default_variant"],
         "variants_json": row["variants_json"],
         "targeting_rules_json": row["targeting_rules_json"],
+        "primary_metric_json": row["primary_metric_json"],
         "traffic_percentage": float(row["traffic_percentage"]),
         "start_date": row["start_date"],
         "end_date": row["end_date"],
@@ -364,14 +372,14 @@ async def get_flag_audit_entries(
 
 async def get_experiments(pool, project_id: str) -> list[dict]:
     """Fetch all experiments for a project, ordered by key."""
-    sql = "SELECT * FROM experiments WHERE project_id = $1 ORDER BY key"
+    sql = f"SELECT {EXPERIMENT_COLUMNS} FROM experiments WHERE project_id = $1 ORDER BY key"
     rows = await pool.fetch(sql, project_id)
     return [_row_to_experiment(r) for r in rows]
 
 
 async def get_experiment(pool, project_id: str, key: str) -> dict | None:
     """Fetch a single experiment by project_id and key."""
-    sql = "SELECT * FROM experiments WHERE project_id = $1 AND key = $2"
+    sql = f"SELECT {EXPERIMENT_COLUMNS} FROM experiments WHERE project_id = $1 AND key = $2"
     row = await pool.fetchrow(sql, project_id, key)
     if row is None:
         return None
@@ -381,9 +389,12 @@ async def get_experiment(pool, project_id: str, key: str) -> dict | None:
 async def create_experiment(pool, exp: dict) -> bool:
     """Insert a new experiment. Returns True on success."""
     sql = """
-        INSERT INTO experiments (key, project_id, status, description, variants_json,
-                                  targeting_rules_json, traffic_percentage, start_date, end_date)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO experiments (
+            key, project_id, status, description, flag_key, default_variant,
+            variants_json, targeting_rules_json, primary_metric_json,
+            traffic_percentage, start_date, end_date
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     """
     try:
         await pool.execute(
@@ -392,8 +403,11 @@ async def create_experiment(pool, exp: dict) -> bool:
             exp["project_id"],
             exp.get("status", "draft"),
             exp.get("description", ""),
+            exp.get("flag_key", ""),
+            exp.get("default_variant", "control"),
             exp.get("variants_json", "[]"),
             exp.get("targeting_rules_json", "[]"),
+            exp.get("primary_metric_json", "{}"),
             exp.get("traffic_percentage", 100.0),
             exp.get("start_date", ""),
             exp.get("end_date", ""),
@@ -410,11 +424,13 @@ async def update_experiment(pool, exp: dict) -> bool:
         UPDATE experiments SET
             status = $3,
             description = $4,
-            variants_json = $5,
-            targeting_rules_json = $6,
-            traffic_percentage = $7,
-            start_date = $8,
-            end_date = $9,
+            default_variant = $5,
+            variants_json = $6,
+            targeting_rules_json = $7,
+            primary_metric_json = $8,
+            traffic_percentage = $9,
+            start_date = $10,
+            end_date = $11,
             updated_at = NOW()
         WHERE project_id = $1 AND key = $2
     """
@@ -425,8 +441,10 @@ async def update_experiment(pool, exp: dict) -> bool:
             exp["key"],
             exp.get("status", "draft"),
             exp.get("description", ""),
+            exp.get("default_variant", "control"),
             exp.get("variants_json", "[]"),
             exp.get("targeting_rules_json", "[]"),
+            exp.get("primary_metric_json", "{}"),
             exp.get("traffic_percentage", 100.0),
             exp.get("start_date", ""),
             exp.get("end_date", ""),

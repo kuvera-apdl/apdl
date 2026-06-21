@@ -1,7 +1,7 @@
 // Experiment results (plan §5.4.3): an experiment is measured through a
-// flag's exposures — flag_key + metric are chosen at query time (the loose
-// schema has no first-class link until gap G5). Stats queries are heavy:
-// manual run + explicit refresh, never faster than 60s.
+// flag's exposures. The flag link is now a first-class field (gap G5), so the
+// flag picker defaults to the experiment's flag_key; metric is still chosen at
+// query time. Stats queries are heavy: manual run + explicit refresh.
 import { Play, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -39,14 +39,18 @@ function storageKey(wsId: string, experimentKey: string): string {
   return `apdl-admin:exp-results:${wsId}:${experimentKey}`
 }
 
-function loadInputs(wsId: string, experimentKey: string): ResultInputs {
+function loadInputs(wsId: string, experimentKey: string, defaultFlagKey: string): ResultInputs {
   try {
     const raw = localStorage.getItem(storageKey(wsId, experimentKey))
-    if (raw) return JSON.parse(raw) as ResultInputs
+    if (raw) {
+      const stored = JSON.parse(raw) as ResultInputs
+      // Prefer a previously chosen flag, but fall back to the experiment's link.
+      return { ...stored, flagKey: stored.flagKey || defaultFlagKey }
+    }
   } catch {
     // fall through to defaults
   }
-  return { flagKey: '', metric: '', method: 'sequential' }
+  return { flagKey: defaultFlagKey, metric: '', method: 'sequential' }
 }
 
 function ConfidenceIntervalBar({ interval }: { interval: [number, number] }) {
@@ -108,11 +112,19 @@ function MethodBlock({ result }: { result: ExperimentResult }) {
   )
 }
 
-export function ExperimentResultsTab({ experimentKey }: { experimentKey: string }) {
+export function ExperimentResultsTab({
+  experimentKey,
+  defaultFlagKey = '',
+}: {
+  experimentKey: string
+  defaultFlagKey?: string
+}) {
   const { active, projectId } = useWorkspace()
   const wsId = active?.id ?? 'none'
   const flagsQuery = useFlagsQuery()
-  const [inputs, setInputs] = useState<ResultInputs>(() => loadInputs(wsId, experimentKey))
+  const [inputs, setInputs] = useState<ResultInputs>(() =>
+    loadInputs(wsId, experimentKey, defaultFlagKey),
+  )
   const [params, setParams] = useState<
     (ResultInputs & { projectId: string }) | null
   >(null)

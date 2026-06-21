@@ -18,23 +18,21 @@ def make_ctx() -> AgentContext:
 
 
 @pytest.mark.asyncio
-async def test_deploy_creates_canonical_variant_flag(monkeypatch):
+async def test_deploy_uses_single_config_owned_creation_path(monkeypatch):
     captured = {}
-
-    async def fake_create_flag(**kwargs):
-        captured["flag"] = kwargs
-        return {"created": True, "flag": kwargs}
 
     async def fake_create_experiment_config(**kwargs):
         captured["experiment"] = kwargs
-        return {"created": True, "key": kwargs["experiment_id"]}
+        return {"created": True, "key": kwargs["experiment_id"], "flag_key": kwargs.get("flag_key")}
 
-    monkeypatch.setattr(experiment_design, "create_flag", fake_create_flag)
     monkeypatch.setattr(
         experiment_design,
         "create_experiment_config",
         fake_create_experiment_config,
     )
+
+    # Config now owns flag init — the agent must not import or call create_flag.
+    assert not hasattr(experiment_design, "create_flag")
 
     experiment = {
         "experiment_id": "exp_checkout",
@@ -53,28 +51,14 @@ async def test_deploy_creates_canonical_variant_flag(monkeypatch):
                 {"key": "control", "weight": 1},
                 {"key": "treatment", "weight": 1},
             ],
-            "rules": [],
-            "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
-            "evaluation_mode": "client",
-            "auto_disable": True,
         },
     }
 
     deployed = await ExperimentDesignAgent()._deploy(make_ctx(), experiment)
 
     assert deployed is True
-    assert captured["flag"]["project_id"] == "apdl"
-    assert captured["flag"]["key"] == "exp_checkout"
-    assert captured["flag"]["name"] == "Checkout experiment"
-    assert captured["flag"]["default_variant"] == "control"
-    assert captured["flag"]["variants"] == [
-        {"key": "control", "weight": 1},
-        {"key": "treatment", "weight": 1},
-    ]
-    assert captured["flag"]["rules"] == []
-    assert captured["flag"]["fallthrough"] == {
-        "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
-    }
-    assert "default_value" not in captured["flag"]
+    # Exactly one creation path, carrying the canonical link + variants.
+    assert captured["experiment"]["experiment_id"] == "exp_checkout"
     assert captured["experiment"]["flag_key"] == "exp_checkout"
     assert captured["experiment"]["variants"] == experiment["variants"]
+    assert captured["experiment"]["primary_metric"] == experiment["primary_metric"]

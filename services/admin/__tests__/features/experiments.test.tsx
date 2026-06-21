@@ -14,7 +14,9 @@ import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import {
   buildCreate,
-  parseJsonArray,
+  emptyExperimentValues,
+  parseTargetingRules,
+  validateExperimentForm,
   type ExperimentFormValues,
 } from '../../src/features/experiments/ExperimentForm'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
@@ -22,10 +24,17 @@ import { seedWorkspace } from '../helpers/fixtures'
 
 const EXPERIMENT = {
   key: 'checkout-test',
+  flag_key: 'checkout-test',
   status: 'running',
   description: 'CTA experiment',
+  default_variant: 'control',
   traffic_percentage: 100,
-  variants: [{ key: 'control', weight: 1 }],
+  variants: [
+    { key: 'control', weight: 1 },
+    { key: 'treatment', weight: 1 },
+  ],
+  targeting_rules: [],
+  primary_metric: null,
   start_date: '2026-06-01',
   end_date: '',
   created_at: '2026-06-01T00:00:00+00:00',
@@ -48,10 +57,11 @@ beforeEach(() => {
 })
 
 describe('experiment schemas', () => {
-  test('list entries parse with and without the optional variants key', () => {
+  test('list entries parse into the canonical record', () => {
     expect(experimentEntrySchema.safeParse(EXPERIMENT).success).toBe(true)
-    const { variants: _variants, ...withoutVariants } = EXPERIMENT
-    expect(experimentEntrySchema.safeParse(withoutVariants).success).toBe(true)
+    // The record is canonical now — the flag link is required, not optional.
+    const { flag_key: _flagKey, ...withoutFlagKey } = EXPERIMENT
+    expect(experimentEntrySchema.safeParse(withoutFlagKey).success).toBe(false)
   })
 
   test('experiment results parse the CI tuple and nullable stats', () => {
@@ -87,34 +97,73 @@ describe('experiment schemas', () => {
 })
 
 describe('experiment form model', () => {
-  test('parseJsonArray distinguishes empty (= unchanged) from invalid', () => {
-    expect(parseJsonArray('')).toEqual({ value: null, error: null })
-    expect(parseJsonArray('[1, 2]')).toEqual({ value: [1, 2], error: null })
-    expect(parseJsonArray('{"a": 1}').error).toBe('Must be a JSON array')
-    expect(parseJsonArray('{nope').error).toBe('Invalid JSON')
+  test('parseTargetingRules validates against the canonical GateRule schema', () => {
+    expect(parseTargetingRules('')).toEqual({ value: [], error: null })
+    const rule = {
+      id: 'r1',
+      name: '',
+      conditions: [],
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    }
+    expect(parseTargetingRules(JSON.stringify([rule]))).toEqual({ value: [rule], error: null })
+    expect(parseTargetingRules('{"a": 1}').error).toBe('Must be a JSON array of rules')
+    expect(parseTargetingRules('[{"id":"r1"}]').error).toBe(
+      'Each rule needs id, name, conditions, and a rollout',
+    )
+    expect(parseTargetingRules('{nope').error).toBe('Invalid JSON')
   })
 
-  test('buildCreate trims and defaults the loose fields', () => {
+  test('buildCreate projects the structured form to the canonical payload', () => {
     const values: ExperimentFormValues = {
       key: ' exp-1 ',
-      status: '',
+      flagKey: '',
+      status: 'running',
       description: 'd',
       traffic_percentage: 50,
       start_date: '2026-06-01',
       end_date: '',
-      variantsJson: '[{"key":"control","weight":1}]',
+      variants: [
+        { key: 'control', weight: 1, description: 'Current' },
+        { key: 'treatment', weight: 2, description: '' },
+      ],
+      default_variant: 'control',
+      metricEvent: 'purchase',
+      metricType: 'conversion',
+      metricDirection: 'increase',
       targetingRulesJson: '',
     }
     expect(buildCreate(values)).toEqual({
       key: 'exp-1',
-      status: 'draft',
+      flag_key: 'exp-1',
+      status: 'running',
       description: 'd',
       traffic_percentage: 50,
       start_date: '2026-06-01',
       end_date: '',
-      variants: [{ key: 'control', weight: 1 }],
+      variants: [
+        { key: 'control', weight: 1, description: 'Current' },
+        { key: 'treatment', weight: 2 },
+      ],
+      default_variant: 'control',
+      primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
       targeting_rules: [],
     })
+  })
+
+  test('validateExperimentForm catches duplicate keys and an out-of-set default', () => {
+    expect(validateExperimentForm(emptyExperimentValues())).toEqual({})
+
+    const duplicate = {
+      ...emptyExperimentValues(),
+      variants: [
+        { key: 'a', weight: 1, description: '' },
+        { key: 'a', weight: 1, description: '' },
+      ],
+    }
+    expect(validateExperimentForm(duplicate).variants).toBe('Variant keys must be unique')
+
+    const badDefault = { ...emptyExperimentValues(), default_variant: 'nope' }
+    expect(validateExperimentForm(badDefault).default_variant).toBeTruthy()
   })
 })
 
