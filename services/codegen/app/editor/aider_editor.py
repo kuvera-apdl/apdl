@@ -220,7 +220,9 @@ class AiderEditor:
             rc, names = await self._git(repo_dir, ["diff", "--name-only", f"{base}..HEAD"])
             changed_paths = [p for p in names.splitlines() if p.strip()]
             if rc != 0 or not changed_paths:
-                return fail("The agent produced no changes.")
+                # Surface aider's own output so a no-op edit (e.g. an unreachable
+                # or misnamed model) is diagnosable from the changeset error.
+                return fail(f"The agent produced no changes. aider: {out.strip()[-_ERR_TAIL:]}")
             _, numstat = await self._git(repo_dir, ["diff", "--numstat", f"{base}..HEAD"])
             _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
 
