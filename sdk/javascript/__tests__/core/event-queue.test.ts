@@ -6,14 +6,11 @@ import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
 import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
 import type { TrackEvent } from '../../src/core/types';
-import { CLIENT_KEY, CONFIG_ENDPOINT, INGESTION_ENDPOINT } from '../helpers';
+import { CLIENT_KEY, ENDPOINT } from '../helpers';
 
 function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   const base = resolveConfig({
-    endpoints: {
-      ingestion: INGESTION_ENDPOINT,
-      config: CONFIG_ENDPOINT,
-    },
+    endpoint: ENDPOINT,
     auth: {
       clientKey: CLIENT_KEY,
     },
@@ -37,10 +34,7 @@ function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   return {
     ...base,
     ...overrides,
-    endpoints: {
-      ...base.endpoints,
-      ...(overrides?.endpoints ?? {}),
-    },
+    endpoint: overrides?.endpoint ?? base.endpoint,
     auth: {
       ...base.auth,
       ...(overrides?.auth ?? {}),
@@ -166,7 +160,7 @@ describe('EventQueue', () => {
 
       expect(sendSpy).toHaveBeenCalledTimes(1);
       const call = sendSpy.mock.calls[0];
-      expect(call[0]).toBe(`${INGESTION_ENDPOINT}/v1/events`);
+      expect(call[0]).toBe(`${ENDPOINT}/v1/events`);
       const payload = call[1] as { events: Array<Record<string, unknown>> };
       expect(payload.events).toHaveLength(2);
       expect(payload.events[0]).toMatchObject({

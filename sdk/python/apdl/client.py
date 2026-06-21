@@ -81,6 +81,11 @@ class APDLClient:
             self.refresh_flags()
             self._start_flag_poller()
 
+    @property
+    def project_id(self) -> str:
+        """The project id parsed from the configured ``api_key``."""
+        return self._config.project_id
+
     # ── Event tracking ────────────────────────────────────────────
 
     def track(
@@ -206,12 +211,53 @@ class APDLClient:
 
         return unsubscribe
 
+    def get_all_variants(
+        self,
+        *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> dict[str, str | None]:
+        """Evaluates every cached flag for one identity and returns ``{key: variant}``.
+
+        Useful for bootstrapping a downstream client in a single call. Flags that
+        are not in the local cache (missing/invalid) are simply absent from the
+        result rather than mapped to ``None``. Exposures are **never** logged here:
+        returning a bulk snapshot is not the same as exposing a user to each flag.
+        """
+        return {
+            result.key: result.variant
+            for result in self.get_all_variant_details(
+                user_id=user_id, anonymous_id=anonymous_id, attributes=attributes
+            )
+        }
+
+    def get_all_variant_details(
+        self,
+        *,
+        user_id: str | None = None,
+        anonymous_id: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> list[GateEvaluationResult]:
+        """Fully-explained evaluation of every cached flag for one identity.
+
+        Like :meth:`get_all_variants` but preserving each ``GateEvaluationResult``.
+        Results are ordered by flag key for stable output. Never logs exposures.
+        """
+        context = EvalContext(
+            user_id=user_id,
+            anonymous_id=anonymous_id,
+            attributes=attributes or {},
+        )
+        flags = sorted(self._flag_cache.get_all(), key=lambda flag: flag.key)
+        return [self._evaluator.evaluate(flag.key, context) for flag in flags]
+
     def refresh_flags(self) -> bool:
         """Fetches the latest flag configs from the config service.
 
         Returns ``True`` if the cache was updated.
         """
-        url = f"{self._config.config_host}/v1/flags"
+        url = f"{self._config.endpoint}/v1/flags"
         data = self._transport.get_json(url)
         if data is None:
             return False

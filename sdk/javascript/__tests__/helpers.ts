@@ -1,23 +1,17 @@
 import type { APDLConfig } from '../src/core/config';
 
 export const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
-export const INGESTION_ENDPOINT = 'https://ingest.test.dev';
-export const CONFIG_ENDPOINT = 'https://config.test.dev';
+export const ENDPOINT = 'https://api.test.dev';
 
-export type TestConfigOverrides = Partial<Omit<APDLConfig, 'endpoints' | 'auth'>> & {
-  endpoints?: Partial<APDLConfig['endpoints']>;
+export type TestConfigOverrides = Partial<Omit<APDLConfig, 'auth'>> & {
   auth?: Partial<APDLConfig['auth']>;
 };
 
 export function createTestConfig(overrides: TestConfigOverrides = {}): APDLConfig {
-  const { endpoints, auth, ...rest } = overrides;
+  const { auth, ...rest } = overrides;
 
   return {
-    endpoints: {
-      ingestion: INGESTION_ENDPOINT,
-      config: CONFIG_ENDPOINT,
-      ...endpoints,
-    },
+    endpoint: ENDPOINT,
     auth: {
       clientKey: CLIENT_KEY,
       ...auth,

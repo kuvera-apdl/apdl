@@ -9,7 +9,7 @@ from apdl.queue import EventQueue
 
 
 def config(**kwargs) -> APDLConfig:
-    base = dict(api_key="proj_t_x", batch_size=2, max_queue_size=3, enable_flags=False)
+    base = dict(api_key="proj_t_0123456789abcdef", batch_size=2, max_queue_size=3, enable_flags=False)
     base.update(kwargs)
     return APDLConfig(**base)
 
@@ -49,6 +49,6 @@ def test_max_queue_size_drops_oldest():
     assert "e3" in names
 
 
-def test_url_built_from_host():
-    queue = EventQueue(config(host="https://x.example/"), RecordingTransport())
+def test_url_built_from_endpoint():
+    queue = EventQueue(config(endpoint="https://x.example/"), RecordingTransport())
     assert queue._url == "https://x.example/v1/events"

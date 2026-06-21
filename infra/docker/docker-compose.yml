@@ -158,6 +158,36 @@ services:
       clickhouse:
         condition: service_healthy
 
+  # Admin console — static SPA served by nginx. The browser calls config/query/
+  # agents directly, so the baked VITE_* URLs must be browser-reachable (NOT
+  # Docker service names). Defaults suit an SSH tunnel (localhost:<port>);
+  # override via ADMIN_*_URL for public-IP access, or change them in-app under
+  # Workspace Settings. No depends_on: it serves files, it doesn't call services.
+  admin:
+    build:
+      context: ../../services/admin
+      dockerfile: Dockerfile
+      args:
+        VITE_INGESTION_URL: ${ADMIN_INGESTION_URL:-http://localhost:8080}
+        VITE_CONFIG_URL: ${ADMIN_CONFIG_URL:-http://localhost:8081}
+        VITE_QUERY_URL: ${ADMIN_QUERY_URL:-http://localhost:8082}
+        VITE_AGENTS_URL: ${ADMIN_AGENTS_URL:-http://localhost:8083}
+    ports:
+      - "5173:80"
+
+  # Gateway — single SDK front door. Routes /v1/events to ingestion and
+  # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
+  # URL (http://<host>:8000) instead of separate ingestion + config URLs.
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "8000:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - ingestion
+      - config
+
 volumes:
   redis-data:
   clickhouse-data:

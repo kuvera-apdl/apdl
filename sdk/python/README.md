@@ -27,6 +27,9 @@ cd sdk/python && uv pip install -e ".[dev]"
 from apdl import APDL
 
 client = APDL.init(api_key="proj_<project>_<secret>")  # secret: 16+ alphanumeric chars
+# The key format is validated at init (same regex as the ingestion/config
+# services); a malformed key raises immediately instead of 401-ing on first send.
+# client.project_id  -> "<project>" (parsed from the key)
 
 # Track events (identity is explicit per call — servers handle many users)
 client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -57,8 +60,7 @@ from apdl import APDL, APDLConfig
 
 client = APDL.init(APDLConfig(
     api_key="proj_demo_0123456789abcdef",
-    host="https://ingest.apdl.dev",       # event ingestion endpoint
-    config_host="https://config.apdl.dev",# flag config endpoint
+    endpoint="https://api.apdl.dev",       # gateway origin for events + flags
     batch_size=20,                         # 1..100
     flush_interval=3.0,                    # seconds between background flushes
     max_queue_size=1000,                   # oldest events dropped past this
@@ -95,6 +97,22 @@ Calling `get_variant`/`get_variant_details` automatically emits a deduplicated
 `$feature_flag_exposure` event (disable per call with `log_exposure=False`, or
 globally with `log_exposures=False`). Pass `page=`/`component=` to annotate the
 exposure.
+
+### Bulk evaluation
+
+To bootstrap a downstream client (or render a server-side page) you often want
+every flag at once for a single identity. `get_all_variants` evaluates all
+cached flags in one call and returns `{key: variant}`; `get_all_variant_details`
+returns the fully-explained `GateEvaluationResult` for each, ordered by key:
+
+```python
+variants = client.get_all_variants(user_id="u_123", attributes={"plan": "pro"})
+# {"new-checkout": "treatment", "dark-mode": "control"}
+```
+
+Flags missing from the local cache are simply absent from the result. Bulk
+evaluation **never** logs exposures — returning a snapshot is not the same as
+exposing a user to each flag; call `get_variant` where a true exposure occurs.
 
 React to config changes (e.g. to bust a local cache). The callback takes no
 value, because the evaluated result depends on per-request context:

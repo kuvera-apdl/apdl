@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
+import { SDK_IDENTIFIER } from '../../src/core/constants';
 import {
   CLIENT_KEY,
-  CONFIG_ENDPOINT,
-  INGESTION_ENDPOINT,
+  ENDPOINT,
   MockEventSource,
   createTestConfig,
   emptyFlagsResponse,
@@ -42,10 +42,7 @@ describe('APDLClient', () => {
 
       expect(resolved).toMatchObject({
         projectId: 'apdl',
-        endpoints: {
-          ingestion: INGESTION_ENDPOINT,
-          config: CONFIG_ENDPOINT,
-        },
+        endpoint: ENDPOINT,
         auth: {
           clientKey: CLIENT_KEY,
         },
@@ -55,10 +52,10 @@ describe('APDLClient', () => {
     it('should fetch initial flags from the config endpoint with client key auth', () => {
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 
-      expect(url).toBe(`${CONFIG_ENDPOINT}/v1/flags`);
+      expect(url).toBe(`${ENDPOINT}/v1/flags`);
       expect(init.headers).toMatchObject({
         'X-API-Key': CLIENT_KEY,
-        'X-APDL-SDK': 'js/0.1.0',
+        'X-APDL-SDK': SDK_IDENTIFIER,
       });
     });
 
@@ -67,21 +64,15 @@ describe('APDLClient', () => {
       expect(source).toBeDefined();
 
       const url = new URL(source!.url);
-      expect(`${url.origin}${url.pathname}`).toBe(`${CONFIG_ENDPOINT}/v1/stream`);
+      expect(`${url.origin}${url.pathname}`).toBe(`${ENDPOINT}/v1/stream`);
       expect(url.searchParams.get('api_key')).toBe(CLIENT_KEY);
       expect(url.searchParams.has('project_id')).toBe(false);
     });
 
-    it('should throw on missing ingestion endpoint', () => {
+    it('should throw on missing endpoint', () => {
       expect(() => resolveConfig(createTestConfig({
-        endpoints: { ingestion: '' },
-      }))).toThrow('endpoints.ingestion is required');
-    });
-
-    it('should throw on missing config endpoint', () => {
-      expect(() => resolveConfig(createTestConfig({
-        endpoints: { config: '' },
-      }))).toThrow('endpoints.config is required');
+        endpoint: '',
+      }))).toThrow('endpoint is required');
     });
 
     it('should throw on missing client key', () => {
@@ -98,8 +89,8 @@ describe('APDLClient', () => {
 
     it.each([
       ['apiKey', CLIENT_KEY],
-      ['host', INGESTION_ENDPOINT],
-      ['configHost', CONFIG_ENDPOINT],
+      ['host', ENDPOINT],
+      ['configHost', ENDPOINT],
       ['projectId', 'apdl'],
     ])('should reject removed top-level config field %s', (field, value) => {
       const config = {
@@ -114,22 +105,24 @@ describe('APDLClient', () => {
     it('should reject unsupported top-level config fields', () => {
       const config = {
         ...createTestConfig(),
-        apiBaseUrl: INGESTION_ENDPOINT,
+        apiBaseUrl: ENDPOINT,
       };
 
       expect(() => resolveConfig(config as unknown as APDLConfig))
         .toThrow('config.apiBaseUrl is not supported');
     });
 
-    it('should reject unsupported endpoint and auth fields', () => {
-      const endpointConfig = {
+    it('should reject the removed endpoints object', () => {
+      const config = {
         ...createTestConfig(),
-        endpoints: {
-          ingestion: INGESTION_ENDPOINT,
-          config: CONFIG_ENDPOINT,
-          flags: CONFIG_ENDPOINT,
-        },
+        endpoints: { ingestion: ENDPOINT, config: ENDPOINT },
       };
+
+      expect(() => resolveConfig(config as unknown as APDLConfig))
+        .toThrow('config.endpoints is no longer supported');
+    });
+
+    it('should reject unsupported auth fields', () => {
       const authConfig = {
         ...createTestConfig(),
         auth: {
@@ -138,8 +131,6 @@ describe('APDLClient', () => {
         },
       };
 
-      expect(() => resolveConfig(endpointConfig as unknown as APDLConfig))
-        .toThrow('endpoints.flags is not supported');
       expect(() => resolveConfig(authConfig as unknown as APDLConfig))
         .toThrow('auth.projectId is not supported');
     });
@@ -776,7 +767,7 @@ describe('APDLClient', () => {
       await flaggedClient.debug.flush();
 
       const eventPost = fetchMock.mock.calls.find(([url]) => {
-        return url === `${INGESTION_ENDPOINT}/v1/events`;
+        return url === `${ENDPOINT}/v1/events`;
       });
       expect(eventPost).toBeDefined();
 

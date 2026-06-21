@@ -39,9 +39,8 @@
     const log = (msg) => { logEl.textContent += msg + '\n'; };
 
     const apdl = APDL.init({
-      apiKey: 'proj_demo_0123456789abcdef',
-      host: 'http://localhost:8080',
-      configHost: 'http://localhost:8081',
+      endpoint: 'http://localhost:8000',
+      auth: { clientKey: 'proj_demo_0123456789abcdef' },
       autoCapture: true,
       debug: true,
     });
@@ -57,15 +56,15 @@
 
     // Feature gate, evaluated locally once flags load
     const renderGate = () => {
-      const result = apdl.checkGateDetails('new-checkout');
+      const result = apdl.getVariantDetails('new-checkout');
       document.getElementById('gate-status').textContent =
-        `${result.value} (reason: ${result.reason})`;
+        `${result.variant} (reason: ${result.reason})`;
     };
     setTimeout(renderGate, 500); // give the initial flag fetch a moment
 
     // Live updates over SSE — toggle the flag via the admin API and watch
-    apdl.onFlagChange('new-checkout', (value) => {
-      log(`flag update over SSE: new-checkout -> ${value}`);
+    apdl.onVariantChange('new-checkout', (variant) => {
+      log(`flag update over SSE: new-checkout -> ${variant}`);
       renderGate();
     });
   </script>

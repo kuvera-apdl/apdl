@@ -1,15 +1,16 @@
 import { APDLClient } from './core/client';
-import type { APDLConfig } from './core/config';
 
 // Re-export all public types
 export type {
   APDLConfig,
-  APDLEndpointsConfig,
+  PartialAPDLConfig,
   APDLAuthConfig,
   AutoCaptureConfig,
   ConsentState,
   ResolvedConfig,
 } from './core/config';
+
+export type { APDLApi } from './core/api';
 
 export type { TrackEvent, EventContext, ExperimentContext } from './core/types';
 
@@ -41,21 +42,16 @@ export type { ScrubFunction } from './privacy/scrubber';
 // Re-export the client class
 export { APDLClient };
 
+// Re-export the no-op client for advanced/testing usage
+export { NoopClient } from './core/noop-client';
+
 // Re-export hash utilities for advanced usage
 export { hashBucket, isInRollout, percentageBucket } from './flags/hash';
 
-/**
- * Initializes the APDL SDK and returns a client instance.
- *
- * Exported at the top level so the IIFE bundle's global supports
- * `APDL.init(...)` directly, matching the documented module usage.
- */
-export function init(config: APDLConfig): APDLClient {
-  return new APDLClient(config);
-}
+// Entry points: `init()` / `APDL.init()` for explicit setup, and the lazy
+// `apdl` module-scope singleton for zero-config, SSR-safe usage.
+import { apdl, APDL, init, maybeAutoStart } from './core/init';
+export { apdl, APDL, init };
 
-/**
- * APDL namespace — the primary entry point for the SDK.
- * Use APDL.init(config) to create a client instance.
- */
-export const APDL = { init };
+// Auto-start auto-capture on the first browser tick when env config is present.
+maybeAutoStart();

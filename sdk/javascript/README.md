@@ -14,6 +14,8 @@ evaluated.
 - 🔁 Real-time flag updates over SSE, with a persisted local flag cache
 - 🧩 Server-driven UI components (banner, modal, toast, …) plus custom registrations
 - 🔒 Privacy controls: consent management, PII scrubbing, cookieless mode
+- ⚛️ First-party React/Next adapter (`@apdl-oss/sdk/react`) — a provider + hook, no wrapper boilerplate
+- 🧯 Zero-config setup: env conventions, SSR-safe init, idempotent singleton, fail-soft validation
 - 📦 Ships ESM, CJS, and an IIFE browser bundle, with full TypeScript types
 
 ## Installation
@@ -34,10 +36,7 @@ Or drop the IIFE bundle into any page (exposes a global `APDL`):
 import { APDL } from '@apdl-oss/sdk';
 
 const apdl = APDL.init({
-  endpoints: {
-    ingestion: 'https://ingestion.example.com',
-    config: 'https://config.example.com',
-  },
+  endpoint: 'https://api.example.com',
   auth: {
     clientKey: 'proj_apdl_0123456789abcdef',
   },
@@ -46,17 +45,87 @@ const apdl = APDL.init({
 });
 ```
 
-`APDL.init(config)` is the primary public entrypoint and returns an `APDLClient`.
+`APDL.init(config)` (also exported as the bare `init(config)`) is the primary
+public entrypoint. It is:
 
-## Required Config Fields
+- **SSR-safe** — on the server (no `window`) it returns an inert no-op client
+  and opens no sockets, timers, or fetches, so it is safe to call at module
+  scope in frameworks like Next.js.
+- **An idempotent singleton** — repeated calls with the same `clientKey` return
+  the same client, so it is immune to React StrictMode double-invoke and HMR
+  re-runs (no duplicate listeners, SSE connections, or flush loops). The
+  instance is evicted on `shutdown()`, so a later `init()` starts fresh.
+- **Fail-soft** — when `endpoint`/`clientKey` are absent it warns once and
+  returns a no-op client instead of throwing, so an unset env var does not crash
+  every route. Malformed values (bad key format, removed fields) still throw.
 
-The SDK uses one strict initialization contract:
+### Zero-config setup (env conventions)
+
+If `endpoint` / `auth.clientKey` are omitted, they are read from environment
+variables, so `init()` can be called with no arguments:
+
+| Field | Browser (bundler-inlined) | Server |
+|---|---|---|
+| endpoint | `NEXT_PUBLIC_APDL_URL` | `APDL_URL` |
+| clientKey | `NEXT_PUBLIC_APDL_CLIENT_KEY` | `APDL_CLIENT_KEY` |
+
+For module-scope use without any `useEffect`, import the lazy `apdl` singleton.
+It no-ops on the server and auto-starts on the first browser tick, reading config
+from the env conventions above:
+
+```typescript
+import { apdl } from '@apdl-oss/sdk'; // no 'use client', no useEffect
+
+apdl.track('cta_clicked', { id: 'hero' });
+const variant = apdl.getVariant('new-checkout-flow');
+```
+
+## React & Next.js
+
+Install the package and drop the provider in once — it owns the `'use client'`
+boundary, the singleton lifecycle, and SSR safety internally:
+
+```tsx
+// app/layout.tsx — the entire integration
+import { APDLProvider } from '@apdl-oss/sdk/react';
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return <APDLProvider autoCapture>{children}</APDLProvider>;
+}
+```
+
+With `NEXT_PUBLIC_APDL_URL` / `NEXT_PUBLIC_APDL_CLIENT_KEY` set, the example above
+is a complete setup. You can also pass props explicitly
+(`<APDLProvider endpoint={...} clientKey={...} autoCapture>`).
+
+Read the client anywhere with the `useAPDL` hook — no instance threading:
+
+```tsx
+import { useAPDL } from '@apdl-oss/sdk/react';
+
+function HeroCTA() {
+  const apdl = useAPDL();
+  const variant = apdl.getVariant('new-checkout-flow');
+  return <button onClick={() => apdl.track('cta_clicked', { id: 'hero' })}>Buy</button>;
+}
+```
+
+`react` (>= 18) is an optional peer dependency, required only when importing
+`@apdl-oss/sdk/react`. Outside a provider, `useAPDL()` returns an inert no-op
+client, so calls never throw.
+
+## Config Fields
+
+The SDK uses one initialization contract:
 
 | Field | Required | Description |
 |---|---:|---|
-| `endpoints.ingestion` | Yes | Base URL for event ingestion. The SDK posts batches to `/v1/events`. |
-| `endpoints.config` | Yes | Base URL for feature flags, SSE updates, and UI configuration. The SDK reads `/v1/flags` and `/v1/stream`. |
-| `auth.clientKey` | Yes | Browser-safe APDL client key used for service authentication and project identification. |
+| `endpoint` | Yes¹ | Base URL of the APDL gateway. The SDK posts events to `/v1/events` and reads flags + SSE from `/v1/flags` and `/v1/stream` on this one origin. |
+| `auth.clientKey` | Yes¹ | Browser-safe APDL client key used for service authentication and project identification. |
+
+¹ Resolved from the env conventions above when omitted. If still absent, `init()`
+returns a no-op client (fail-soft); `new APDLClient(config)` and
+`resolveConfig(config, { strict: true })` throw.
 
 `auth.clientKey` must use the canonical APDL client key format:
 
@@ -65,9 +134,9 @@ proj_{project_id}_{secret}
 ```
 
 The secret must be 16+ alphanumeric characters. The SDK derives the project ID
-from the client key internally. Do not pass `projectId`, `apiKey`, `host`, or
-`configHost`; those fields are not part of the public config contract and the
-SDK rejects them.
+from the client key internally. Do not pass `projectId`, `apiKey`, `host`,
+`configHost`, or the old `endpoints` object; those fields are not part of the
+public config contract and the SDK rejects them.
 
 Optional fields include:
 
@@ -85,14 +154,11 @@ Optional fields include:
 ## Local Development Endpoints
 
 When running the local APDL services, initialize the SDK with the local
-ingestion and config ports:
+gateway URL (`make dev-all` starts the gateway on port 8000):
 
 ```typescript
 const apdl = APDL.init({
-  endpoints: {
-    ingestion: 'http://localhost:8080',
-    config: 'http://localhost:8081',
-  },
+  endpoint: 'http://localhost:8000',
   auth: {
     clientKey: 'proj_apdl_0123456789abcdef',
   },
@@ -121,7 +187,7 @@ apdl.page('Pricing', {
 });
 ```
 
-Events are batched and sent to `endpoints.ingestion` at `/v1/events`.
+Events are batched and sent to the gateway `endpoint` at `/v1/events`.
 
 ## User Identification
 
@@ -162,7 +228,7 @@ console.log(result.variant, result.reason);
 ```
 
 Flag evaluation automatically emits a deduplicated `$feature_flag_exposure`
-event. The SDK fetches initial flag configuration from `endpoints.config` at
+event. The SDK fetches initial flag configuration from the gateway `endpoint` at
 `/v1/flags` and listens for real-time updates on `/v1/stream`.
 
 React to real-time variant changes pushed over SSE:

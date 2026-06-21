@@ -116,6 +116,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 
 | Service | Port |
 |---------|------|
+| Gateway (SDK front door) | 8000 |
 | Ingestion | 8080 |
 | Config | 8081 |
 | Query | 8082 |

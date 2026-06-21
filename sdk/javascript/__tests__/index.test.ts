@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APDL, APDLClient, type APDLConfig, type ExperimentContext } from '../src';
+import {
+  APDL,
+  APDLClient,
+  type APDLApi,
+  type APDLConfig,
+  type ExperimentContext,
+} from '../src';
+import { SDK_IDENTIFIER } from '../src/core/constants';
 import {
   CLIENT_KEY,
-  CONFIG_ENDPOINT,
-  INGESTION_ENDPOINT,
+  ENDPOINT,
   MockEventSource,
   createTestConfig,
   emptyFlagsResponse,
@@ -12,7 +18,7 @@ import {
 const fetchMock = vi.fn();
 
 describe('public SDK entrypoint', () => {
-  const clients: APDLClient[] = [];
+  const clients: APDLApi[] = [];
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -68,31 +74,31 @@ describe('public SDK entrypoint', () => {
     }));
     clients.push(client);
 
-    expect(fetchMock).toHaveBeenCalledWith(`${CONFIG_ENDPOINT}/v1/flags`, {
+    expect(fetchMock).toHaveBeenCalledWith(`${ENDPOINT}/v1/flags`, {
       headers: {
         'X-API-Key': CLIENT_KEY,
-        'X-APDL-SDK': 'js/0.1.0',
+        'X-APDL-SDK': SDK_IDENTIFIER,
       },
     });
 
     const source = MockEventSource.instances.at(-1);
     expect(source).toBeDefined();
     const sseUrl = new URL(source!.url);
-    expect(`${sseUrl.origin}${sseUrl.pathname}`).toBe(`${CONFIG_ENDPOINT}/v1/stream`);
+    expect(`${sseUrl.origin}${sseUrl.pathname}`).toBe(`${ENDPOINT}/v1/stream`);
     expect(sseUrl.searchParams.get('api_key')).toBe(CLIENT_KEY);
 
     client.track('public_api_event');
     await client.debug.flush();
 
     const eventPost = fetchMock.mock.calls.find(([url]) => {
-      return url === `${INGESTION_ENDPOINT}/v1/events`;
+      return url === `${ENDPOINT}/v1/events`;
     });
     expect(eventPost).toBeDefined();
     const [, init] = eventPost as [string, RequestInit];
     expect(init.headers).toMatchObject({
       'Content-Type': 'application/json',
       'X-API-Key': CLIENT_KEY,
-      'X-APDL-SDK': 'js/0.1.0',
+      'X-APDL-SDK': SDK_IDENTIFIER,
     });
   });
 

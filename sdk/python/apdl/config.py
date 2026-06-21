@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, field_validator
 
-DEFAULT_HOST = "https://ingest.apdl.dev"
-DEFAULT_CONFIG_HOST = "https://config.apdl.dev"
+# Canonical API-key format, byte-for-byte identical to the pattern enforced by
+# the ingestion service (services/ingestion/app/middleware/auth.py), the config
+# service (services/config/app/utils.py), and the JS SDK: proj_{project_id}_{secret}
+# where the secret is at least 16 alphanumeric characters. Validating here means a
+# misconfigured key fails fast at init() instead of as 401s on the first flush.
+_KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
+
+DEFAULT_ENDPOINT = "https://api.apdl.dev"
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 DEFAULT_FLUSH_INTERVAL = 3.0
@@ -20,13 +28,16 @@ class APDLConfig(BaseModel):
     Mirrors the JS SDK's ``APDLConfig``/``resolveConfig`` where it makes sense
     for a server-side client. Browser-only concepts (persistence, consent,
     auto-capture, UI) are intentionally omitted.
+
+    A single ``endpoint`` origin serves both event ingestion (``/v1/events``)
+    and flag config (``/v1/flags``); a gateway routes each path to the right
+    service behind that origin.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     api_key: str
-    host: str = DEFAULT_HOST
-    config_host: str = DEFAULT_CONFIG_HOST
+    endpoint: str = DEFAULT_ENDPOINT
 
     # Event batching
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -46,10 +57,22 @@ class APDLConfig(BaseModel):
     @classmethod
     def _validate_api_key(cls, v: str) -> str:
         if not isinstance(v, str) or not v.strip():
-            raise ValueError("apiKey is required and must be a non-empty string")
+            raise ValueError("APDL: api_key is required and must be a non-empty string")
+        if not _KEY_PATTERN.match(v):
+            raise ValueError(
+                "APDL: api_key must match format proj_{project_id}_{secret} "
+                "(secret: 16+ alphanumeric characters)"
+            )
         return v
 
-    @field_validator("host", "config_host")
+    @property
+    def project_id(self) -> str:
+        """The project id embedded in ``api_key`` (the validated middle segment)."""
+        match = _KEY_PATTERN.match(self.api_key)
+        assert match is not None  # guaranteed by _validate_api_key
+        return match.group(1)
+
+    @field_validator("endpoint")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
