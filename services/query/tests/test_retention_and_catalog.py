@@ -8,7 +8,11 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from app.clickhouse.queries import build_event_catalog_query, build_retention_query
+from app.clickhouse.queries import (
+    build_event_catalog_query,
+    build_event_count_query,
+    build_retention_query,
+)
 from app.main import app
 from app.models.schemas import EventSelector
 
@@ -41,6 +45,16 @@ def test_event_catalog_query_shape():
     assert "GROUP BY event_name" in sql
     assert "ORDER BY event_count DESC" in sql
     assert "LIMIT %(limit)s" in sql
+
+
+def test_event_count_qualifies_event_name_to_avoid_alias_shadow():
+    # The literal label is aliased AS event_name; if the filter referenced the
+    # bare column, ClickHouse would bind it to that alias and every selector
+    # would match all events (returning the grand total). The filter must
+    # target the real column, events.event_name.
+    sql = build_event_count_query([_sel("page"), _sel("$click")], {})
+    assert sql.count("events.event_name =") == 2
+    assert "AS event_name" in sql
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,13 @@ def build_event_count_query(selectors: list[EventSelector], params: dict[str, An
         prefix = f"count_{index}"
         label_param = f"{prefix}_label"
         params[label_param] = selector_label(selector)
-        condition = build_selector_condition(selector, params, prefix)
+        # The literal event name is also aliased ``AS event_name`` below; qualify
+        # the filter column so ClickHouse binds it to the events table column and
+        # not that alias (otherwise the filter is always true and every selector
+        # matches all events).
+        condition = build_selector_condition(
+            selector, params, prefix, event_name_column="events.event_name"
+        )
         subqueries.append(
             f"""
 SELECT
