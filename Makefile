@@ -6,6 +6,12 @@ all: build
 
 CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
+# Full-stack Compose command. `-f infra/docker/docker-compose.yml` makes Compose
+# use that folder as its project dir (and its default `.env` lookup), so the
+# repo-root `.env` is otherwise ignored — load it explicitly when it exists.
+COMPOSE_FILE ?= infra/docker/docker-compose.yml
+COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_FILE)
+
 setup:
 	@bash scripts/setup.sh
 
@@ -189,12 +195,12 @@ dev:
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
 dev-all:
-	docker compose -f infra/docker/docker-compose.yml up -d --build redis clickhouse postgres
-	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.yml
-	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents codegen clickhouse-writer admin gateway
+	$(COMPOSE) up -d --build redis clickhouse postgres
+	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
+	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin gateway
 
 dev-down:
-	docker compose -f infra/docker/docker-compose.yml down
+	$(COMPOSE) down
 	docker compose -f infra/docker/docker-compose.deps.yml down
 
 # Container status + service health endpoints.

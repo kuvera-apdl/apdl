@@ -20,6 +20,15 @@ DEPS_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.deps.yml"
 FULL_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.yml"
 SMOKE_API_KEY="${APDL_SMOKE_API_KEY:-proj_demo_0123456789abcdef}"
 
+# Full-stack Compose wrapper. With `-f` pointing into infra/docker/, Compose's
+# project dir (and its default .env lookup) is that folder, so the repo-root
+# .env is otherwise ignored — load it explicitly when it exists.
+dc_full() {
+    local args=(-f "$FULL_COMPOSE")
+    [ -f "$ROOT_DIR/.env" ] && args=(--env-file "$ROOT_DIR/.env" "${args[@]}")
+    docker compose "${args[@]}" "$@"
+}
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info() { echo -e "${BLUE}==>${NC} $*"; }
 ok()   { echo -e "${GREEN}  ✓${NC} $*"; }
@@ -136,7 +145,7 @@ cmd_up() {
     # If the full stack is already running, reuse its compose file so we
     # don't recreate Redis/ClickHouse underneath the application services.
     local compose="$DEPS_COMPOSE"
-    if [ -n "$(docker compose -f "$FULL_COMPOSE" ps -q ingestion 2>/dev/null)" ]; then
+    if [ -n "$(dc_full ps -q ingestion 2>/dev/null)" ]; then
         compose="$FULL_COMPOSE"
         info "Full stack detected — starting infrastructure via the full compose file"
     else
@@ -150,18 +159,18 @@ cmd_up() {
 
 cmd_up_full() {
     info "Starting full stack in Docker (detached)"
-    docker compose -f "$FULL_COMPOSE" up -d --build redis clickhouse postgres
+    dc_full up -d --build redis clickhouse postgres
     wait_healthy "$FULL_COMPOSE" 3
     CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
-    docker compose -f "$FULL_COMPOSE" up -d --build ingestion config query agents codegen clickhouse-writer
+    dc_full up -d --build ingestion config query agents codegen clickhouse-writer
     ok "Application services starting"
     sleep 3
     cmd_status
 }
 
 cmd_down() {
-    docker compose -f "$FULL_COMPOSE" down
+    dc_full down
     docker compose -f "$DEPS_COMPOSE" down
     ok "All containers stopped"
 }
@@ -172,13 +181,13 @@ cmd_reset() {
         read -r -p "Type 'yes' to continue: " answer
         [ "$answer" = "yes" ] || die "Aborted"
     fi
-    docker compose -f "$FULL_COMPOSE" down -v
+    dc_full down -v
     docker compose -f "$DEPS_COMPOSE" down -v
     ok "Containers stopped and volumes removed"
 }
 
 cmd_logs() {
-    docker compose -f "$FULL_COMPOSE" logs -f --tail=100 "$@"
+    dc_full logs -f --tail=100 "$@"
 }
 
 # ── status & smoke ───────────────────────────────────────────────────
@@ -201,7 +210,7 @@ check_health() {
 
 cmd_status() {
     info "Containers"
-    docker compose -f "$FULL_COMPOSE" ps 2>/dev/null || true
+    dc_full ps 2>/dev/null || true
     docker compose -f "$DEPS_COMPOSE" ps 2>/dev/null || true
     echo ""
     info "Service health"
