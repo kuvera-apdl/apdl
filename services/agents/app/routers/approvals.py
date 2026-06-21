@@ -147,12 +147,12 @@ async def _kick_code_implementation(
                 """
                 INSERT INTO agent_runs
                     (run_id, project_id, trigger_type, autonomy_level, status, phase, config)
-                VALUES ($1, $2, 'manual', $3, 'started', 'initializing', $4)
+                VALUES ($1, $2, 'manual', $3, 'started', 'initializing', $4::jsonb)
                 """,
                 new_run_id,
                 project_id,
                 autonomy_level,
-                {"analysis_types": ["code_implementation"], "kicked_by": run_id},
+                json.dumps({"analysis_types": ["code_implementation"], "kicked_by": run_id}),
             )
 
         background_tasks.add_task(

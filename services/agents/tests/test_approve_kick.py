@@ -104,6 +104,14 @@ async def test_approval_enqueues_and_kicks_implementation(monkeypatch):
     assert kicked[0]["project_id"] == "demo"
     assert kicked[0]["autonomy_level"] == 3
 
+    # The kicked run's config must be a JSON *string* for the jsonb column;
+    # a raw dict makes asyncpg raise "expected str, got dict".
+    _, run_insert_args = next(
+        (q, a) for q, a in app.state.pg_pool.conn.executed if "INSERT INTO agent_runs" in q
+    )
+    assert isinstance(run_insert_args[-1], str)
+    assert json.loads(run_insert_args[-1])["analysis_types"] == ["code_implementation"]
+
 
 @pytest.mark.asyncio
 async def test_approval_without_proposals_does_not_kick(monkeypatch):
