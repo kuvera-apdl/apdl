@@ -7,6 +7,7 @@ environment without re-importing the module.
 
 from __future__ import annotations
 
+import base64
 import os
 
 
@@ -30,11 +31,33 @@ def github_app_id() -> str:
 
 
 def github_app_private_key() -> str:
-    """The GitHub App's PEM private key, provided inline or via a file path."""
+    r"""The GitHub App's PEM private key.
+
+    Resolved so it works cleanly from a single-line ``.env`` (Docker) or a file
+    (host), checked in this order:
+
+    1. ``GITHUB_APP_PRIVATE_KEY`` — inline PEM. A one-line value whose newlines
+       are backslash-escaped (``\n``) is restored to real newlines, so the key
+       survives a ``.env`` file / compose interpolation.
+    2. ``GITHUB_APP_PRIVATE_KEY_BASE64`` — base64 of the ``.pem``; the simplest
+       single-line form to carry through ``.env`` (``base64 -w0 key.pem``).
+    3. ``GITHUB_APP_PRIVATE_KEY_PATH`` — path to the ``.pem`` (``~`` expanded).
+    """
     inline = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
-    if inline:
-        return inline
-    path = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", "")
+    if inline.strip():
+        # A one-line .env value often carries escaped newlines; restore them.
+        if "\\n" in inline and "\n" not in inline:
+            inline = inline.replace("\\n", "\n")
+        return inline.strip()
+
+    encoded = os.getenv("GITHUB_APP_PRIVATE_KEY_BASE64", "").strip()
+    if encoded:
+        try:
+            return base64.b64decode(encoded).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return ""
+
+    path = os.path.expanduser(os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", ""))
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as handle:
             return handle.read()

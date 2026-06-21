@@ -133,7 +133,11 @@ services:
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      # Provide the private key one of three ways (see .env.example). Base64 is
+      # the simplest to carry through .env in Docker (no multi-line / no mount).
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
+      GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.

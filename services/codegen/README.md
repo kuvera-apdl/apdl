@@ -58,8 +58,9 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
 APDL_INTERNAL_TOKEN=apdl-dev-internal-token
 GITHUB_APP_ID=
-GITHUB_APP_PRIVATE_KEY=            # PEM inline, or…
-GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the PEM file
+GITHUB_APP_PRIVATE_KEY=            # PEM inline (escaped \n accepted), or…
+GITHUB_APP_PRIVATE_KEY_BASE64=     # …base64 of the .pem (easiest in Docker), or…
+GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the .pem file (~ expanded)
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # HMAC secret for /webhooks/github
 CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
