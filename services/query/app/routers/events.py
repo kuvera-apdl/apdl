@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import (
     build_event_breakdown_query,
+    build_event_catalog_query,
     build_event_count_query,
     build_event_timeseries_query,
 )
@@ -17,6 +18,8 @@ from app.clickhouse.selectors import selector_label
 from app.models.schemas import (
     BreakdownRequest,
     BreakdownResponse,
+    EventCatalogRequest,
+    EventCatalogResponse,
     EventCountRequest,
     EventCountResponse,
     TimeseriesRequest,
@@ -104,3 +107,22 @@ async def event_breakdown(body: BreakdownRequest, request: Request) -> Breakdown
         property=body.property,
         results=rows,
     )
+
+
+@router.post("/names", response_model=EventCatalogResponse)
+async def event_names(body: EventCatalogRequest, request: Request) -> EventCatalogResponse:
+    """List the event names present for a project, most frequent first.
+
+    Powers agent event discovery so analysis plans target events that exist.
+    """
+    client = _get_client(request)
+
+    params: dict[str, Any] = {
+        "project_id": body.project_id,
+        "start_date": body.start_date.isoformat(),
+        "end_date": body.end_date.isoformat(),
+        "limit": body.limit,
+    }
+    query = build_event_catalog_query(params)
+    rows = await client.execute(query, params)
+    return EventCatalogResponse(events=rows)

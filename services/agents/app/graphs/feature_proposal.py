@@ -46,8 +46,10 @@ class FeatureProposalAgent(BaseAgent):
             active = []
 
         async def _fetch_result(exp: dict) -> dict[str, Any] | None:
+            if not isinstance(exp, dict):
+                return None
             exp_id = exp.get("experiment_id", "")
-            metric = exp.get("primary_metric", {}).get("event", "")
+            metric = (exp.get("primary_metric") or {}).get("event", "")
             if not exp_id or not metric:
                 return None
             try:

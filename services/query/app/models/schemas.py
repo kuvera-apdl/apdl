@@ -226,6 +226,17 @@ class EventCountResponse(BaseModel):
     total_users: int
 
 
+class EventCatalogRequest(DateRangeRequest):
+    """Discover which event names exist for a project in a date range."""
+
+    project_id: ProjectId
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class EventCatalogResponse(BaseModel):
+    events: list[dict[str, Any]]
+
+
 class TimeseriesRequest(DateRangeRequest):
     model_config = ConfigDict(
         extra="forbid",

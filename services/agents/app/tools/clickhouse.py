@@ -68,6 +68,31 @@ async def query_events(
     })
 
 
+async def discover_events(
+    project_id: str,
+    start_date: str,
+    end_date: str,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """List the event names present for a project, most frequent first.
+
+    Lets the behaviour agent plan queries against events that actually exist
+    instead of guessing names.
+
+    Args:
+        project_id: The project to inspect.
+        start_date: Start date (YYYY-MM-DD).
+        end_date: End date (YYYY-MM-DD).
+        limit: Max distinct event names to return.
+    """
+    return await _post("/v1/query/events/names", {
+        "project_id": project_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "limit": limit,
+    })
+
+
 async def query_timeseries(
     project_id: str,
     selector: EventSelectorPayload,

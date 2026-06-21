@@ -7,11 +7,22 @@ from typing import Any
 
 
 def parse_llm_json(response: str, fallback: Any = None) -> Any:
-    """Parse JSON from an LLM response, stripping markdown code fences if present."""
-    try:
-        return json.loads(response)
-    except json.JSONDecodeError:
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-            return json.loads(json_str)
+    """Parse JSON from an LLM response, tolerating markdown code fences.
+
+    Never raises: if no candidate parses cleanly, ``fallback`` is returned.
+    """
+    if not isinstance(response, str):
         return fallback
+
+    candidates = [response]
+    if "```json" in response:
+        candidates.append(response.split("```json", 1)[1].split("```", 1)[0])
+    elif "```" in response:
+        candidates.append(response.split("```", 1)[1].split("```", 1)[0])
+
+    for candidate in candidates:
+        try:
+            return json.loads(candidate.strip())
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return fallback

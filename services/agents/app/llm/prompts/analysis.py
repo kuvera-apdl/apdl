@@ -45,16 +45,27 @@ Project ID: {project_id}
 Time range: last {time_range_days} days
 Available analysis types: event counts, timeseries, funnels, retention, cohort comparison
 
+Events actually observed in this project (use these EXACT names — do not invent events):
+{event_catalog}
+
+An EventSelector is an object: {{"event_name": "<one of the events above>", "filters": []}}.
+
 Return a JSON object with:
-- "queries": list of query specifications to run, each with "type" (event_count|timeseries|funnel|retention|cohort), \
-  and relevant EventSelector parameters. Use "selectors" for event_count, "selector" for timeseries, \
-  "steps" as a list of selectors for funnel, "cohort_selector" and "return_selector" for retention, \
-  and "metric_selector" for cohort. Do not use legacy top-level event fields such as "event_name", \
-  "event_names", "cohort_event", "return_event", or "metric_event".
+- "queries": list of query specifications to run, each with "type" (event_count|timeseries|funnel|retention|cohort) \
+  and relevant EventSelector parameters:
+    - event_count: "selectors" (a list of EventSelector)
+    - timeseries: "selector" (one EventSelector)
+    - funnel: "steps" (a list of EventSelector)
+    - retention: "cohort_selector" and "return_selector" (each one EventSelector)
+    - cohort: "metric_selector" (one EventSelector) and "cohort_property" (a JSON event-property \
+      name to segment users by, e.g. "plan" or "country")
+  Do not use legacy top-level event fields such as "event_name", "event_names", "cohort_event", \
+  "return_event", or "metric_event".
 - "rationale": brief explanation of why each query is useful
 - "focus_areas": key areas to investigate based on previous context
 
-Keep the plan focused — no more than 8 queries."""
+Only plan queries for events that appear in the list above. If no events are available, return an \
+empty "queries" list. Keep the plan focused — no more than 8 queries."""
 
 
 SYNTHESIS_PROMPT = """You are synthesizing the results of multiple analytics queries into actionable insights.
