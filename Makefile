@@ -183,12 +183,12 @@ dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
-	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-pipeline"
+	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
 dev-all:
 	docker compose -f infra/docker/docker-compose.yml up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.yml
-	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents clickhouse-writer
+	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents codegen clickhouse-writer
 
 dev-down:
 	docker compose -f infra/docker/docker-compose.yml down

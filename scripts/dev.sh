@@ -125,7 +125,7 @@ cmd_setup() {
     echo "  scripts/dev.sh smoke       End-to-end smoke test"
     echo "  scripts/dev.sh check       Lint + test every package in parallel"
     echo ""
-    echo "  make run-ingestion / run-config / run-query / run-agents / run-pipeline"
+    echo "  make run-ingestion / run-config / run-query / run-agents / run-codegen / run-pipeline"
     echo "                             Run one service locally with hot-reload"
     echo ""
 }
@@ -154,7 +154,7 @@ cmd_up_full() {
     wait_healthy "$FULL_COMPOSE" 3
     CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
-    docker compose -f "$FULL_COMPOSE" up -d --build ingestion config query agents clickhouse-writer
+    docker compose -f "$FULL_COMPOSE" up -d --build ingestion config query agents codegen clickhouse-writer
     ok "Application services starting"
     sleep 3
     cmd_status
