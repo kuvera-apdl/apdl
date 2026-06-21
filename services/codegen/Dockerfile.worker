@@ -1,30 +1,39 @@
-# APDL codegen agent sandbox — the untrusted-code boundary.
+# APDL codegen agent sandbox — the untrusted-code boundary (decision D4 / Option B).
 #
-# Runs the OSS coding agent (Aider) plus the customer's build/test, isolated
-# inside APDL's VPC. v1 executes the agent as a subprocess on the codegen host;
-# this image is the hardened substrate to graduate to — run ONE changeset per
-# container. Harden at deploy time:
+# One ephemeral container per changeset: it clones the repo, runs the OSS coding
+# agent (Aider) + the customer's build/test, and pushes the branch — all isolated
+# from the codegen API container (which holds the GitHub App key, the Postgres
+# DSN, and the internal token). The orchestrator
+# (app.editor.container_editor.ContainerAiderEditor) launches it with `docker run`;
+# the ENTRYPOINT (run_changeset.py) reuses the SAME AiderEditor as the in-process
+# path, so the edit logic lives in exactly one place.
+#
+# Harden at deploy time (beyond the docker-run caps the orchestrator already sets
+# — --cap-drop ALL, no-new-privileges, pids/memory/cpu limits, non-root):
 #   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
-#   * drop ALL capabilities, no privilege escalation, seccomp default
 #   * egress allowlist: github.com + package registries only; block the APDL
 #     internal CIDR and the cloud metadata IP (169.254.169.254)
-#   * CPU / memory / pids / wall-clock caps
-# The GitHub installation token is held by the orchestrator and passed to git via
-# a one-shot http.extraHeader — never written to this container's git config, and
-# never handed to the agent process. Give the agent only its model provider key.
+# The install token arrives as GH_TOKEN; the runner drops it from the environment
+# before aider/tests run, so only the model provider key is ever exposed to the
+# untrusted code.
 FROM python:3.12-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
-# The model-agnostic coding agent. It reaches any model through LiteLLM, chosen
-# at run time via CODEGEN_MODEL (default a Claude model); supply the matching
-# provider key (ANTHROPIC_API_KEY / OPENAI_API_KEY / …) to the agent only.
+# The model-agnostic coding agent (any model via LiteLLM, chosen at run time via
+# CODEGEN_MODEL).
 RUN pip install --no-cache-dir aider-chat
+# The shared, stdlib-only edit logic + the in-sandbox runner (the ENTRYPOINT).
+COPY app/__init__.py /app/app/__init__.py
+COPY app/editor/ /app/app/editor/
+COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \
-    && chown -R agent /workspace
+    && chown -R agent /app /workspace
 USER agent
-WORKDIR /workspace
-ENV CODEGEN_WORKDIR=/workspace \
+WORKDIR /app
+ENV PYTHONPATH=/app \
+    CODEGEN_WORKDIR=/workspace \
     AIDER_ANALYTICS=false \
     AIDER_CHECK_UPDATE=false
+ENTRYPOINT ["python", "/app/run_changeset.py"]

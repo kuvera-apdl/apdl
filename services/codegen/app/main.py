@@ -11,6 +11,7 @@ service, which calls this one over the internal API.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -20,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import postgres_url
 from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
+from app.editor.base import Editor
+from app.editor.container_editor import ContainerAiderEditor
 from app.github.app_auth import mint_installation_token
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
@@ -34,6 +37,19 @@ async def _mint_token(installation_id: int) -> str:
     return token.token
 
 
+def _make_editor() -> Editor:
+    """Pick the editor execution model from ``CODEGEN_SANDBOX``.
+
+    ``docker`` runs each changeset in an isolated, ephemeral sandbox container
+    (Option B); anything else uses the in-process subprocess editor (default).
+    """
+    if os.getenv("CODEGEN_SANDBOX", "").strip().lower() == "docker":
+        logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
+        return ContainerAiderEditor()
+    logger.info("Codegen editor: in-process subprocess execution")
+    return AiderEditor()
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
@@ -46,7 +62,7 @@ async def lifespan(application: FastAPI):
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
     application.state.job_deps = {
-        "editor": AiderEditor(),
+        "editor": _make_editor(),
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }

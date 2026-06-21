@@ -141,6 +141,15 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Editor execution model: unset = in-process subprocess (default); "docker"
+      # = isolated sandbox container per changeset (Option B). Needs the sandbox
+      # image (`make build-codegen-sandbox`) + the Docker socket mounted below.
+      CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-}
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
+    # Uncomment to let codegen launch the sandbox container (Docker-out-of-Docker).
+    # SECURITY: the socket grants host-root-equivalent access — dev convenience.
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

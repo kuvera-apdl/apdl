@@ -160,6 +160,9 @@ lint-codegen:
 run-codegen:
 	cd services/codegen && .venv/bin/uvicorn app.main:app --reload --port 8084
 
+build-codegen-sandbox:
+	docker build -f services/codegen/Dockerfile.worker -t apdl-codegen-sandbox:latest services/codegen
+
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:

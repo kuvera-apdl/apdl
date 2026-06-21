@@ -85,6 +85,35 @@ make lint-codegen        # ruff
 To exercise the real editor locally, install the agent extra so `aider` is on
 `PATH`: `cd services/codegen && uv pip install -e ".[agent]"`.
 
+## Editor execution model
+
+The editor sits behind the `Editor` interface; *how/where* it runs is config:
+
+- **In-process (default)** — `AiderEditor` runs `git`/`aider`/tests as
+  subprocesses in the codegen process, in a throwaway workdir. Simplest, but it
+  **executes untrusted repo code in the codegen container** — use it only for
+  trusted repos / local dev.
+- **Sandboxed container (`CODEGEN_SANDBOX=docker`)** — `ContainerAiderEditor`
+  runs each changeset in an ephemeral container from `Dockerfile.worker`
+  (`--rm`, `--cap-drop ALL`, `no-new-privileges`, pid/memory/cpu caps, non-root),
+  reusing the same `AiderEditor` inside it. Untrusted code never touches the API
+  container's secrets; the sandbox only gets the short-lived install token (which
+  the runner drops from the env before aider/tests run) and the model key.
+
+Enable the sandbox:
+
+```bash
+make build-codegen-sandbox        # build apdl-codegen-sandbox:latest
+export CODEGEN_SANDBOX=docker
+# If codegen itself runs in a container, mount /var/run/docker.sock (see compose)
+# so it can launch the sandbox (Docker-out-of-Docker); on a Docker host it just works.
+```
+
+Remaining deploy-time hardening: an egress allowlist (GitHub + registries only;
+block the internal CIDR + `169.254.169.254`) via `CODEGEN_SANDBOX_NETWORK`, and a
+read-only rootfs. Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
+`CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`.
+
 ## Going live (end-to-end)
 
 The autonomous loop runs once these external pieces are set up:
