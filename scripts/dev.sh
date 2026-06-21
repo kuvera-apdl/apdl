@@ -20,14 +20,16 @@ DEPS_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.deps.yml"
 FULL_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.yml"
 SMOKE_API_KEY="${APDL_SMOKE_API_KEY:-proj_demo_0123456789abcdef}"
 
-# Full-stack Compose wrapper. With `-f` pointing into infra/docker/, Compose's
-# project dir (and its default .env lookup) is that folder, so the repo-root
-# .env is otherwise ignored — load it explicitly when it exists.
-dc_full() {
-    local args=(-f "$FULL_COMPOSE")
+# Compose wrappers that load the repo-root .env. With `-f` pointing into
+# infra/docker/, Compose's project dir (and its default .env lookup) is that
+# folder, so the repo-root .env is otherwise ignored — pass it explicitly.
+dc() {
+    local file="$1"; shift
+    local args=(-f "$file")
     [ -f "$ROOT_DIR/.env" ] && args=(--env-file "$ROOT_DIR/.env" "${args[@]}")
     docker compose "${args[@]}" "$@"
 }
+dc_full() { dc "$FULL_COMPOSE" "$@"; }
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info() { echo -e "${BLUE}==>${NC} $*"; }
@@ -46,7 +48,7 @@ wait_healthy() {
     local compose="$1" want="$2" healthy=0
     echo -n "  Waiting for containers to be healthy"
     for _ in $(seq 1 60); do
-        healthy=$(docker compose -f "$compose" ps --format json 2>/dev/null | grep -c '"healthy"' || true)
+        healthy=$(dc "$compose" ps --format json 2>/dev/null | grep -c '"healthy"' || true)
         if [ "$healthy" -ge "$want" ] 2>/dev/null; then
             echo ""
             ok "$healthy containers healthy"
@@ -151,7 +153,7 @@ cmd_up() {
     else
         info "Starting infrastructure (Redis, ClickHouse, PostgreSQL)"
     fi
-    docker compose -f "$compose" up -d redis clickhouse postgres
+    dc "$compose" up -d redis clickhouse postgres
     wait_healthy "$compose" 3
     CLICKHOUSE_COMPOSE_FILE="$compose" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"

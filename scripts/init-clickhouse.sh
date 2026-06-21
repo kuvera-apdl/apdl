@@ -8,6 +8,11 @@ if [[ "$COMPOSE_FILE" != /* ]]; then
     COMPOSE_FILE="$ROOT_DIR/$COMPOSE_FILE"
 fi
 
+# Load the repo-root .env so ${...} interpolation in the (full) compose file
+# resolves; the file is parsed even though this script only targets ClickHouse.
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+[ -f "$ROOT_DIR/.env" ] && COMPOSE_ARGS=(--env-file "$ROOT_DIR/.env" "${COMPOSE_ARGS[@]}")
+
 CLICKHOUSE_SERVICE="${CLICKHOUSE_SERVICE:-clickhouse}"
 CLICKHOUSE_USER="${CLICKHOUSE_USER:-apdl}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-apdl_dev}"
@@ -27,9 +32,9 @@ if [ ! -d "$CLICKHOUSE_MIGRATIONS_DIR" ]; then
 fi
 
 echo "==> Initializing ClickHouse"
-docker compose -f "$COMPOSE_FILE" up -d "$CLICKHOUSE_SERVICE" >/dev/null
+docker compose "${COMPOSE_ARGS[@]}" up -d "$CLICKHOUSE_SERVICE" >/dev/null
 
-container_id="$(docker compose -f "$COMPOSE_FILE" ps -q "$CLICKHOUSE_SERVICE")"
+container_id="$(docker compose "${COMPOSE_ARGS[@]}" ps -q "$CLICKHOUSE_SERVICE")"
 if [ -z "$container_id" ]; then
     echo "ClickHouse container is not running for compose file: $COMPOSE_FILE" >&2
     exit 1
