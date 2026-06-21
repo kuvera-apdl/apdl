@@ -130,6 +130,16 @@ def _build_message(spec: str, constraints: list[str]) -> str:
     return message
 
 
+def _model_settings_yaml(model: str) -> str:
+    """Aider model-settings that disable ``temperature``.
+
+    Newer models (e.g. ``claude-opus-4-8``) reject the ``temperature`` parameter,
+    but aider sends it by default — which silently fails the request and produces
+    a no-op edit. Disabling it is safe (the model uses its own default).
+    """
+    return f'- name: "{model}"\n  use_temperature: false\n'
+
+
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
@@ -193,8 +203,12 @@ class AiderEditor:
             test_cmd = request.test_cmd or _detect_test_cmd(repo_dir)
 
             # 3. Run Aider headless. It edits + commits locally; it does NOT push.
-            argv = [self._aider_bin, "--model", self._model, "--yes-always",
-                    "--no-stream", "--no-pretty"]
+            #    The settings file lives outside repo_dir so it never enters the diff.
+            settings_file = work / "aider.model.settings.yml"
+            settings_file.write_text(_model_settings_yaml(self._model), encoding="utf-8")
+            argv = [self._aider_bin, "--model", self._model,
+                    "--model-settings-file", str(settings_file),
+                    "--yes-always", "--no-stream", "--no-pretty"]
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
             argv += ["--message", _build_message(request.spec, request.constraints)]

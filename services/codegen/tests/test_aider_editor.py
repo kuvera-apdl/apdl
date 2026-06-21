@@ -15,6 +15,7 @@ from app.editor.aider_editor import (
     _basic_auth_header,
     _build_message,
     _detect_test_cmd,
+    _model_settings_yaml,
     _parse_numstat,
 )
 from app.editor.base import EditRequest
@@ -61,6 +62,12 @@ def test_build_message_appends_constraints():
 
 def test_build_message_without_constraints():
     assert _build_message("Just this.", []) == "Just this."
+
+
+def test_model_settings_yaml_disables_temperature():
+    out = _model_settings_yaml("claude-opus-4-8")
+    assert '- name: "claude-opus-4-8"' in out
+    assert "use_temperature: false" in out
 
 
 def test_basic_auth_header_encodes_x_access_token():
