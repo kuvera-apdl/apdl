@@ -150,9 +150,14 @@ services:
       # image (`make build-codegen-sandbox`) + the Docker socket mounted below.
       CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-}
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
-    # Uncomment to let codegen launch the sandbox container (Docker-out-of-Docker).
-    # SECURITY: the socket grants host-root-equivalent access — dev convenience.
+    # Optional bind mounts — uncomment `volumes:` and the line(s) you need:
+    #  * Private key via GITHUB_APP_PRIVATE_KEY_PATH: mounts your .pem read-only
+    #    at the SAME path inside the container, so set that path in .env (use an
+    #    ABSOLUTE path — `~` is not expanded for a mount). base64 avoids this.
+    #  * Docker socket: lets codegen launch the sandbox container (Option B,
+    #    CODEGEN_SANDBOX=docker). SECURITY: grants host-root-equivalent access.
     # volumes:
+    #   - ${GITHUB_APP_PRIVATE_KEY_PATH}:${GITHUB_APP_PRIVATE_KEY_PATH}:ro
     #   - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
