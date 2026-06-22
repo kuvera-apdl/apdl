@@ -65,8 +65,8 @@ export function EventsExplorerPage() {
     : 'counts'
 
   const [range, setRange] = useState<DateRange>(lastDays(7))
-  const [countSelectors, setCountSelectors] = useState<SelectorFormValues[]>([emptySelector('$pageview')])
-  const [tsSelector, setTsSelector] = useState<SelectorFormValues>(emptySelector('$pageview'))
+  const [countSelectors, setCountSelectors] = useState<SelectorFormValues[]>([emptySelector('page')])
+  const [tsSelector, setTsSelector] = useState<SelectorFormValues>(emptySelector('page'))
   const [interval, setIntervalValue] = useState<TimeInterval>('1 DAY')
   const [bdSelector, setBdSelector] = useState<SelectorFormValues>(emptySelector('$click'))
   const [property, setProperty] = useState('')

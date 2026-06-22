@@ -102,7 +102,7 @@ export function FunnelsPage() {
   const { active, projectId } = useWorkspace()
   const [range, setRange] = useState<DateRange>(lastDays(7))
   const [steps, setSteps] = useState<SelectorFormValues[]>([
-    emptySelector('$pageview'),
+    emptySelector('page'),
     emptySelector('$click'),
   ])
   const [windowDays, setWindowDays] = useState(7)
