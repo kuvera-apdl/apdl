@@ -36,7 +36,7 @@ async def lifespan(application: FastAPI):
                 project_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 metadata JSONB DEFAULT '{}',
-                embedding vector(1536),
+                embedding vector(384),
                 created_at TIMESTAMPTZ DEFAULT now()
             );
         """)
