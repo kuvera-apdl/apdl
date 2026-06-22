@@ -201,7 +201,7 @@ function ThroughputCard() {
     ? {
         project_id: projectId,
         ...lastDays(2),
-        selector: { event_name: '$pageview', filters: [] },
+        selector: { event_name: 'page', filters: [] },
         interval: '1 HOUR' as const,
       }
     : null
@@ -224,8 +224,8 @@ function ThroughputCard() {
         <CardTitle>Event throughput</CardTitle>
         <CardDescription>
           {totalToday !== null
-            ? `${totalToday.toLocaleString()} events today across known event names · hourly $pageview below`
-            : 'Hourly $pageview volume (the API has no match-all selector yet — gap G4).'}
+            ? `${totalToday.toLocaleString()} events today across known event names · hourly page below`
+            : 'Hourly page volume (the API has no match-all selector yet — gap G4).'}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -236,8 +236,8 @@ function ThroughputCard() {
         ) : buckets.length === 0 ? (
           totalToday !== null && totalToday > 0 ? (
             <EmptyState
-              title="No $pageview events in the last 2 days"
-              description="Other event types are coming in, but there are no $pageview events to chart yet."
+              title="No page events in the last 2 days"
+              description="Other event types are coming in, but there are no page events to chart yet."
             >
               <Link to="/analytics/events" className="text-sm font-medium underline underline-offset-4">
                 Explore events →

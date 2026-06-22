@@ -19,7 +19,7 @@ const server = setupServer(
     requests.push({ path: 'count', body: await request.json() })
     return HttpResponse.json({
       results: [
-        { selector: '$pageview', event_name: '$pageview', event_count: 120, unique_users: 48 },
+        { selector: 'page', event_name: 'page', event_count: 120, unique_users: 48 },
       ],
       total_events: 120,
       total_users: 48,
@@ -31,8 +31,8 @@ const server = setupServer(
       steps: [
         {
           step: 1,
-          event_name: '$pageview',
-          selector: '$pageview',
+          event_name: 'page',
+          selector: 'page',
           count: 100,
           conversion_rate: 100,
           overall_rate: 100,
@@ -83,7 +83,7 @@ describe('EventsExplorerPage', () => {
     expect(screen.getByText(/48 users/)).toBeInTheDocument()
     expect(requests[0]?.body).toMatchObject({
       project_id: 'demo',
-      selectors: [{ event_name: '$pageview', filters: [] }],
+      selectors: [{ event_name: 'page', filters: [] }],
     })
   })
 

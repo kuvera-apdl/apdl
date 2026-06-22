@@ -31,7 +31,7 @@ export const NUMERIC_FILTER_OPERATORS: ReadonlySet<EventFilterOperator> = new Se
 ])
 
 export const COMMON_EVENTS = [
-  '$pageview',
+  'page',
   '$click',
   '$feature_flag_exposure',
   '$frontend_error',

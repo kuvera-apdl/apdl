@@ -59,7 +59,7 @@ export function SelectorBuilder({ value, onChange, eventLabel = 'Event name' }: 
       <Input
         value={value.event_name}
         onChange={(event) => onChange({ ...value, event_name: event.target.value })}
-        placeholder="$pageview — exact event name"
+        placeholder="page — exact event name"
         list="apdl-common-events"
         className="font-mono text-xs"
         aria-label={eventLabel}

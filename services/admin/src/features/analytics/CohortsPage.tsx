@@ -44,7 +44,7 @@ export function CohortsPage() {
   const { active, projectId } = useWorkspace()
   const [range, setRange] = useState<DateRange>(lastDays(30))
   const [cohortProperty, setCohortProperty] = useState('plan')
-  const [metricSelector, setMetricSelector] = useState<SelectorFormValues>(emptySelector('$pageview'))
+  const [metricSelector, setMetricSelector] = useState<SelectorFormValues>(emptySelector('page'))
   const [body, setBody] = useState<CohortRequest | null>(null)
   const cohortQuery = useAnalyticsQuery('cohorts', body, runCohort)
   const conn = active ? serviceConnection(active, 'query') : null

@@ -113,8 +113,8 @@ function averageCurve(result: RetentionResponse): { label: string; value: number
 export function RetentionPage() {
   const { active, projectId } = useWorkspace()
   const [range, setRange] = useState<DateRange>(lastDays(30))
-  const [cohortSelector, setCohortSelector] = useState<SelectorFormValues>(emptySelector('$pageview'))
-  const [returnSelector, setReturnSelector] = useState<SelectorFormValues>(emptySelector('$pageview'))
+  const [cohortSelector, setCohortSelector] = useState<SelectorFormValues>(emptySelector('page'))
+  const [returnSelector, setReturnSelector] = useState<SelectorFormValues>(emptySelector('page'))
   const [period, setPeriod] = useState<'day' | 'week'>('day')
   const [body, setBody] = useState<RetentionRequest | null>(null)
   const retentionQuery = useAnalyticsQuery('retention', body, runRetention)
