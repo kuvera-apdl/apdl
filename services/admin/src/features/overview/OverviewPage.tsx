@@ -233,12 +233,23 @@ function ThroughputCard() {
           <Skeleton className="h-48 w-full" />
         ) : tsQuery.error ? (
           <ErrorState error={tsQuery.error} onRetry={() => void tsQuery.refetch()} />
-        ) : buckets.length === 0 && (totalToday === null || totalToday === 0) ? (
-          <EmptyState title="No events in the last 24h" description="Is the SDK wired up?">
-            <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
-              Verify your integration →
-            </Link>
-          </EmptyState>
+        ) : buckets.length === 0 ? (
+          totalToday !== null && totalToday > 0 ? (
+            <EmptyState
+              title="No $pageview events in the last 2 days"
+              description="Other event types are coming in, but there are no $pageview events to chart yet."
+            >
+              <Link to="/analytics/events" className="text-sm font-medium underline underline-offset-4">
+                Explore events →
+              </Link>
+            </EmptyState>
+          ) : (
+            <EmptyState title="No events in the last 24h" description="Is the SDK wired up?">
+              <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
+                Verify your integration →
+              </Link>
+            </EmptyState>
+          )
         ) : (
           <TimeseriesChart buckets={buckets} mode="bar" />
         )}
