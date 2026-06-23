@@ -147,7 +147,13 @@ async def merge_changeset(
         merge_method=body.merge_method,
     )
     if not merge.merged:
-        raise HTTPException(status_code=502, detail="GitHub declined the merge.")
+        # Not-mergeable (conflict / unmet checks / head moved) is a client-state
+        # 409, not a 502 — merge_pull_request already maps GitHub's 405/409/422
+        # refusals to this clean result instead of letting them surface as a 500.
+        raise HTTPException(
+            status_code=409,
+            detail=merge.reason or "GitHub declined the merge (the PR is not mergeable).",
+        )
 
     return await store.transition_changeset(pool, changeset_id, ChangesetStatus.merged)
 

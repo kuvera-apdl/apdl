@@ -16,9 +16,8 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import postgres_url
+from app.config import codegen_agent_timeout, postgres_url
 from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
@@ -27,6 +26,7 @@ from app.github.app_auth import mint_installation_token
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
 from app.routers import changesets, connections, webhooks
+from app.store import changesets as changeset_store
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,21 @@ async def lifespan(application: FastAPI):
         for ddl in ALL_DDL:
             await conn.execute(ddl)
 
+    # Recover orphans: in-process background jobs can't survive a restart, so any
+    # changeset left in a transient (pre-PR) state from before this boot is dead.
+    # Sweep it to error rather than let it hang in a non-terminal status forever.
+    # The deadline (2× the per-job budget) keeps a concurrent replica's in-flight
+    # work safe on the shared database.
+    swept = await changeset_store.fail_stale_changesets(
+        pool,
+        older_than_seconds=2 * codegen_agent_timeout(),
+        error="Orphaned by a codegen restart while mid-pipeline; no PR was produced.",
+    )
+    if swept:
+        logger.warning(
+            "Swept %d orphaned changeset(s) to error: %s", len(swept), ", ".join(swept)
+        )
+
     # Dependencies for the changeset job runner (editing engine + PR opener).
     application.state.job_deps = {
         "editor": _make_editor(),
@@ -86,13 +101,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware: codegen is an internal-only service (the admin console
+# reaches it server-side, never from a browser), so there is no cross-origin
+# request to permit — and "*" origins with credentials is invalid anyway.
 
 app.include_router(connections.router)
 app.include_router(changesets.router)

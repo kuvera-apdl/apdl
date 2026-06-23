@@ -61,11 +61,14 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
         raise HTTPException(status_code=400, detail="Malformed webhook body.") from None
 
     branch = _branch_of(event, payload)
-    if not branch:
+    repo = payload.get("repository", {}).get("full_name", "")
+    if not branch or not repo:
         return {"status": "ignored"}
 
     pool = request.app.state.pg_pool
-    changeset = await get_changeset_by_branch(pool, branch)
+    # Scope by repo as well as branch so two connected repos sharing a branch
+    # name can't mis-route each other's CI events.
+    changeset = await get_changeset_by_branch(pool, branch, repo)
     if changeset is None:
         return {"status": "no_changeset"}
 

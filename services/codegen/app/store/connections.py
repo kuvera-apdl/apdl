@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import asyncpg
 
 from app.models.connection import Connection, ConnectionCreate
-
-
-def _loads(value: Any) -> dict[str, Any]:
-    """Coerce a JSONB column (str from asyncpg, dict from fakes) to a dict."""
-    if isinstance(value, str):
-        return json.loads(value)
-    return value or {}
+from app.store.jsonb import loads_jsonb
 
 
 def _row_to_connection(row: asyncpg.Record) -> Connection:
@@ -23,7 +16,7 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         installation_id=row["installation_id"],
         repo=row["repo"],
         default_base_branch=row["default_base_branch"],
-        policy=_loads(row["policy"]),
+        policy=loads_jsonb(row["policy"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

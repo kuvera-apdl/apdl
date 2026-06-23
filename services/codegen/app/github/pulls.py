@@ -12,8 +12,13 @@ from dataclasses import dataclass
 import httpx
 
 from app.config import github_api_url
+from app.github.client import gh_client, gh_headers
 
-_TIMEOUT = 30.0
+#: GitHub status codes on the merge endpoint that mean "this PR can't be merged
+#: right now" rather than a server fault: 405 not mergeable, 409 head moved / SHA
+#: mismatch, 422 required checks unmet. These are surfaced as a clean not-merged
+#: result so the caller can return a 409, not an unhandled 500.
+_NOT_MERGEABLE = frozenset({405, 409, 422})
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class PullRequest:
 class MergeResult:
     merged: bool
     sha: str = ""
+    reason: str = ""  # why GitHub declined, when ``merged`` is False
 
 
 async def open_pull_request(
@@ -42,22 +48,12 @@ async def open_pull_request(
 ) -> PullRequest:
     """Open a pull request on ``repo`` (``owner/name``) and return its URL + number."""
     url = f"{github_api_url()}/repos/{repo}/pulls"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
     payload = {"title": title, "head": head, "base": base, "body": body, "draft": draft}
 
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=_TIMEOUT)
-    try:
-        resp = await client.post(url, headers=headers, json=payload)
+    async with gh_client(client) as c:
+        resp = await c.post(url, headers=gh_headers(token), json=payload)
         resp.raise_for_status()
         data = resp.json()
-    finally:
-        if owns_client:
-            await client.aclose()
 
     return PullRequest(
         url=data["html_url"], number=data["number"], node_id=data.get("node_id", "")
@@ -73,23 +69,39 @@ async def merge_pull_request(
     client: httpx.AsyncClient | None = None,
 ) -> MergeResult:
     """Merge a pull request (``owner/name``, PR number). GitHub enforces branch
-    protection / required checks server-side as a backstop."""
+    protection / required checks server-side as a backstop.
+
+    A GitHub *refusal* to merge (405 not mergeable / 409 head moved / 422 checks
+    unmet) is returned as ``MergeResult(merged=False, reason=...)`` rather than
+    raised, so the caller maps it to a clean 409. Other transport/5xx errors
+    still propagate.
+    """
     url = f"{github_api_url()}/repos/{repo}/pulls/{number}/merge"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=_TIMEOUT)
-    try:
-        resp = await client.put(url, headers=headers, json={"merge_method": merge_method})
-        resp.raise_for_status()
+    async with gh_client(client) as c:
+        resp = await c.put(
+            url, headers=gh_headers(token), json={"merge_method": merge_method}
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _NOT_MERGEABLE:
+                return MergeResult(merged=False, reason=_merge_refusal_reason(exc.response))
+            raise
         data = resp.json()
-    finally:
-        if owns_client:
-            await client.aclose()
-    return MergeResult(merged=bool(data.get("merged")), sha=data.get("sha", ""))
+    merged = bool(data.get("merged"))
+    return MergeResult(
+        merged=merged,
+        sha=data.get("sha", ""),
+        reason="" if merged else (data.get("message") or "GitHub declined the merge."),
+    )
+
+
+def _merge_refusal_reason(response: httpx.Response) -> str:
+    """Pull GitHub's human message off a not-mergeable response (best effort)."""
+    try:
+        return response.json().get("message") or "GitHub declined the merge."
+    except ValueError:
+        return "GitHub declined the merge."
 
 
 async def mark_ready_for_review(
@@ -102,20 +114,10 @@ async def mark_ready_for_review(
         "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
         "{pullRequest{id isDraft}}}"
     )
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=_TIMEOUT)
-    try:
-        resp = await client.post(
+    async with gh_client(client) as c:
+        resp = await c.post(
             f"{github_api_url()}/graphql",
-            headers=headers,
+            headers=gh_headers(token),
             json={"query": query, "variables": {"id": node_id}},
         )
         resp.raise_for_status()
-    finally:
-        if owns_client:
-            await client.aclose()

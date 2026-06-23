@@ -16,6 +16,7 @@ import httpx
 import jwt
 
 from app.config import github_api_url, github_app_id, github_app_private_key
+from app.github.client import gh_client, gh_headers
 
 #: GitHub rejects App JWTs whose ``exp`` is more than 10 minutes out. Use a
 #: conservative 9-minute window and backdate ``iat`` by 60s for clock skew.
@@ -77,21 +78,10 @@ async def mint_installation_token(
     app_jwt = build_app_jwt(resolved_app_id, resolved_key)
 
     url = f"{github_api_url()}/app/installations/{installation_id}/access_tokens"
-    headers = {
-        "Authorization": f"Bearer {app_jwt}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=15.0)
-    try:
-        resp = await client.post(url, headers=headers)
+    async with gh_client(client, timeout=15.0) as c:
+        resp = await c.post(url, headers=gh_headers(app_jwt))
         resp.raise_for_status()
         data = resp.json()
-    finally:
-        if owns_client:
-            await client.aclose()
 
     expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
     return InstallationToken(token=data["token"], expires_at=expires_at)

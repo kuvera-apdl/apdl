@@ -79,7 +79,9 @@ async def test_merge_refused_in_non_mergeable_state(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_merge_502_when_github_declines(monkeypatch):
+async def test_merge_409_when_github_declines(monkeypatch):
+    # GitHub refusing the merge (not mergeable / conflict / unmet checks) is a
+    # client-state 409, not a 502 — and never an unhandled 500.
     _patch_merge(monkeypatch, merged=False)
     pool = FakePool()
     pool.add_connection("demo")
@@ -88,4 +90,4 @@ async def test_merge_502_when_github_declines(monkeypatch):
     )
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_m4/merge", json={})
-    assert resp.status_code == 502
+    assert resp.status_code == 409

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import base64
 import os
+import tempfile
+
+_DEFAULT_MODEL = "claude-opus-4-8"
 
 
 def postgres_url() -> str:
@@ -72,3 +75,43 @@ def github_api_url() -> str:
 def github_webhook_secret() -> str:
     """HMAC secret for verifying inbound GitHub webhooks. Empty = permissive dev."""
     return os.getenv("GITHUB_WEBHOOK_SECRET", "")
+
+
+# --- Codegen editor configuration -----------------------------------------
+# The in-process editor's knobs, read through getters (house style) rather than
+# scattered ``os.getenv`` calls in ``AiderEditor.__init__``.
+
+
+def codegen_model() -> str:
+    """LiteLLM model id the editor drives (any provider key present in env)."""
+    return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
+
+
+def codegen_aider_bin() -> str:
+    """Path/name of the aider executable."""
+    return os.getenv("CODEGEN_AIDER_BIN", "aider")
+
+
+def codegen_workdir() -> str:
+    """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
+    return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()
+
+
+def codegen_keep_workdir() -> bool:
+    """Keep the workdir after a run (for debugging) instead of deleting it."""
+    return os.getenv("CODEGEN_KEEP_WORKDIR") == "true"
+
+
+def codegen_git_timeout() -> int:
+    """Per-``git``-invocation timeout, seconds."""
+    return int(os.getenv("CODEGEN_GIT_TIMEOUT", "300"))
+
+
+def codegen_agent_timeout() -> int:
+    """Editing-agent (aider) timeout, seconds — also the per-job pipeline budget."""
+    return int(os.getenv("CODEGEN_TIMEOUT", "1800"))
+
+
+def codegen_test_timeout() -> int:
+    """Repo test-command timeout, seconds."""
+    return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))

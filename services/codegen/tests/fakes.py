@@ -73,15 +73,20 @@ class FakeConn:
             }
             self.store["changesets"][args[0]] = row
             return row
+        if "JOIN codegen_connections" in query:
+            # get_changeset_by_branch: route by (branch, repo), repo joined
+            # through the project's connection.
+            branch, repo = args[0], args[1]
+            matches = [
+                r
+                for r in self.store["changesets"].values()
+                if r.get("branch") == branch
+                and r["status"] in ("pr_open", "ci_running", "ci_failed", "ci_passed")
+                and (self.store["connections"].get(r["project_id"]) or {}).get("repo") == repo
+            ]
+            matches.sort(key=lambda r: r["created_at"], reverse=True)
+            return matches[0] if matches else None
         if "SELECT * FROM codegen_changesets" in query:
-            if "WHERE branch" in query:
-                matches = [
-                    r
-                    for r in self.store["changesets"].values()
-                    if r.get("branch") == args[0]
-                    and r["status"] in ("pr_open", "ci_running", "ci_failed", "ci_passed")
-                ]
-                return matches[-1] if matches else None
             return self.store["changesets"].get(args[0])
         if "UPDATE codegen_changesets" in query:
             row = self.store["changesets"].get(args[0])
@@ -109,6 +114,20 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
     async def fetch(self, query: str, *args: Any):
+        if "UPDATE codegen_changesets" in query and "status = ANY" in query:
+            # fail_stale_changesets sweep. The fake has no clock, so it applies
+            # the status filter only (the time deadline is enforced by real SQL),
+            # flipping matching transient rows to error and returning their ids.
+            transient = set(args[1])
+            swept = []
+            for row in self.store["changesets"].values():
+                if row["status"] in transient:
+                    row["status"] = "error"
+                    if row.get("error") is None:
+                        row["error"] = args[0]
+                    row["updated_at"] = _T0
+                    swept.append({"changeset_id": row["changeset_id"]})
+            return swept
         if "FROM codegen_changesets" in query and "WHERE project_id" in query:
             rows = [
                 r for r in self.store["changesets"].values() if r["project_id"] == args[0]

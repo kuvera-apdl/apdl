@@ -49,11 +49,17 @@ async def test_rejects_invalid_signature(monkeypatch):
 async def test_routes_check_run_to_ci_sync(monkeypatch):
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)  # permissive dev
     pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
     pool.add_changeset("cs_w1", "demo", status="pr_open", branch="apdl/x", pr_number=5)
     app.state.pg_pool = pool
     synced = _patch_sync(monkeypatch)
 
-    body = json.dumps({"check_run": {"check_suite": {"head_branch": "apdl/x"}}}).encode()
+    body = json.dumps(
+        {
+            "check_run": {"check_suite": {"head_branch": "apdl/x"}},
+            "repository": {"full_name": "acme/widgets"},
+        }
+    ).encode()
     async with _client() as client:
         resp = await client.post(
             "/webhooks/github", content=body, headers={"X-GitHub-Event": "check_run"}
@@ -65,14 +71,47 @@ async def test_routes_check_run_to_ci_sync(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_does_not_route_across_repos(monkeypatch):
+    """A branch name shared by another repo must not mis-route its CI events."""
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset("cs_w3", "demo", status="pr_open", branch="apdl/x", pr_number=5)
+    app.state.pg_pool = pool
+    synced = _patch_sync(monkeypatch)
+
+    # Same branch name, different repo → no match, no sync scheduled.
+    body = json.dumps(
+        {
+            "check_run": {"check_suite": {"head_branch": "apdl/x"}},
+            "repository": {"full_name": "someone-else/widgets"},
+        }
+    ).encode()
+    async with _client() as client:
+        resp = await client.post(
+            "/webhooks/github", content=body, headers={"X-GitHub-Event": "check_run"}
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no_changeset"
+    assert synced == []
+
+
+@pytest.mark.asyncio
 async def test_accepts_valid_signature_and_routes_pull_request(monkeypatch):
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "s3cret")
     pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
     pool.add_changeset("cs_w2", "demo", status="pr_open", branch="apdl/y", pr_number=5)
     app.state.pg_pool = pool
     synced = _patch_sync(monkeypatch)
 
-    body = json.dumps({"pull_request": {"head": {"ref": "apdl/y"}}}).encode()
+    body = json.dumps(
+        {
+            "pull_request": {"head": {"ref": "apdl/y"}},
+            "repository": {"full_name": "acme/widgets"},
+        }
+    ).encode()
     async with _client() as client:
         resp = await client.post(
             "/webhooks/github",
@@ -90,7 +129,12 @@ async def test_unknown_branch_is_ignored(monkeypatch):
     app.state.pg_pool = FakePool()
     synced = _patch_sync(monkeypatch)
 
-    body = json.dumps({"check_run": {"check_suite": {"head_branch": "nope"}}}).encode()
+    body = json.dumps(
+        {
+            "check_run": {"check_suite": {"head_branch": "nope"}},
+            "repository": {"full_name": "acme/widgets"},
+        }
+    ).encode()
     async with _client() as client:
         resp = await client.post(
             "/webhooks/github", content=body, headers={"X-GitHub-Event": "check_run"}

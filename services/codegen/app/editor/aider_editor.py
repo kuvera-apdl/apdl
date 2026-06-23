@@ -15,10 +15,14 @@ documented next step. This real path is INTEGRATION-UNTESTED here (it needs
 through ``FakeEditor``.
 
 Token custody (entirely ours now — there is no Anthropic git proxy): the GitHub
-installation token is used only by the orchestrator for clone/push, passed to git
-through a one-shot ``http.extraHeader`` so it is never written to ``.git/config``
-or handed to the agent/test subprocesses. The agent runs with a minimal env —
-PATH/HOME plus LLM provider keys only — never the GitHub token or APDL secrets.
+installation token is used only by the orchestrator for clone/push, injected into
+git as a one-shot ``http.extraHeader`` via ``GIT_CONFIG_*`` environment variables.
+Going through the env (not ``-c`` on the command line) keeps the header — and the
+reversible base64 token inside it — off git's argv, so it can't leak through
+``ps`` / ``/proc/<pid>/cmdline``; it is likewise never written to ``.git/config``.
+It is never handed to the agent/test subprocesses either: the agent runs with a
+minimal env — PATH/HOME plus LLM provider keys only — never the GitHub token or
+APDL secrets.
 """
 
 from __future__ import annotations
@@ -31,11 +35,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from app import config
 from app.editor.base import EditRequest, EditResult
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "claude-opus-4-8"
 _DIFF_TEXT_CAP = 1_000_000  # cap the diff text fed to the secret scan (chars)
 _ERR_TAIL = 800  # how much subprocess output to surface on failure
 
@@ -156,14 +160,12 @@ class AiderEditor:
         aider_bin: str | None = None,
         workdir_base: str | None = None,
     ) -> None:
-        self._model = model or os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
-        self._aider_bin = aider_bin or os.getenv("CODEGEN_AIDER_BIN", "aider")
-        self._workdir_base = (
-            workdir_base or os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()
-        )
-        self._git_timeout = int(os.getenv("CODEGEN_GIT_TIMEOUT", "300"))
-        self._agent_timeout = int(os.getenv("CODEGEN_TIMEOUT", "1800"))
-        self._test_timeout = int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
+        self._model = model or config.codegen_model()
+        self._aider_bin = aider_bin or config.codegen_aider_bin()
+        self._workdir_base = workdir_base or config.codegen_workdir()
+        self._git_timeout = config.codegen_git_timeout()
+        self._agent_timeout = config.codegen_agent_timeout()
+        self._test_timeout = config.codegen_test_timeout()
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
@@ -173,7 +175,7 @@ class AiderEditor:
             return EditResult(success=False, branch=request.branch, error=str(exc))
 
     async def _run(self, request: EditRequest) -> EditResult:
-        keep = os.getenv("CODEGEN_KEEP_WORKDIR") == "true"
+        keep = config.codegen_keep_workdir()
         work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
         repo_dir = work / "repo"
         header = _basic_auth_header(request.token)
@@ -187,8 +189,9 @@ class AiderEditor:
             #    NOT persisted to .git/config), then cut the work branch.
             rc, out = await self._git(
                 None,
-                ["-c", f"http.extraHeader={header}", "clone", "--depth", "1",
+                ["clone", "--depth", "1",
                  "--branch", request.base_branch, clone_url, str(repo_dir)],
+                auth_header=header,
             )
             if rc != 0:
                 return fail(f"clone failed: {out.strip()[-_ERR_TAIL:]}")
@@ -243,8 +246,8 @@ class AiderEditor:
             # 6. Push the branch from the orchestrator (token via one-shot header).
             rc, out = await self._git(
                 repo_dir,
-                ["-c", f"http.extraHeader={header}", "push", "origin",
-                 f"{request.branch}:{request.branch}"],
+                ["push", "origin", f"{request.branch}:{request.branch}"],
+                auth_header=header,
             )
             if rc != 0:
                 return fail(f"push failed: {out.strip()[-_ERR_TAIL:]}")
@@ -260,14 +263,25 @@ class AiderEditor:
             if not keep:
                 shutil.rmtree(work, ignore_errors=True)
 
-    async def _git(self, cwd: Path | None, args: list[str]) -> tuple[int, str]:
+    async def _git(
+        self, cwd: Path | None, args: list[str], *, auth_header: str | None = None
+    ) -> tuple[int, str]:
+        env = _git_env()
+        if auth_header is not None:
+            # Inject the one-shot ``http.extraHeader`` via GIT_CONFIG_* env vars
+            # instead of ``-c`` on the command line, so the (reversible base64)
+            # token never lands on git's argv where ps / /proc would expose it.
+            env = {
+                **env,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": auth_header,
+            }
         argv = ["git"]
         if cwd is not None:
             argv += ["-C", str(cwd)]
         argv += args
-        return await self._exec(
-            argv, cwd=None, env=_git_env(), timeout=self._git_timeout
-        )
+        return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
 
     async def _run_tests(self, repo_dir: Path, test_cmd: str) -> tuple[bool, str]:
         proc = await asyncio.create_subprocess_shell(

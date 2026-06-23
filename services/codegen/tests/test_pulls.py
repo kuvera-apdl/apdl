@@ -66,6 +66,38 @@ async def test_merge_pull_request_puts_merge():
 
 
 @pytest.mark.asyncio
+async def test_merge_not_mergeable_returns_clean_result_not_raise():
+    """A GitHub 405 (not mergeable) is a not-merged result, not an exception."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(405, json={"message": "Pull Request is not mergeable"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await merge_pull_request(
+            repo="acme/widgets", number=5, token="ghs_tok", client=client
+        )
+
+    assert result.merged is False
+    assert result.reason == "Pull Request is not mergeable"
+
+
+@pytest.mark.asyncio
+async def test_merge_server_error_still_raises():
+    """A genuine upstream 5xx must still propagate (not be masked as not-merged)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"message": "boom"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await merge_pull_request(
+                repo="acme/widgets", number=5, token="ghs_tok", client=client
+            )
+
+
+@pytest.mark.asyncio
 async def test_mark_ready_for_review_posts_graphql_mutation():
     captured: dict = {}
 
