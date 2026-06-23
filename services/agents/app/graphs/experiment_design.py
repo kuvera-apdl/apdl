@@ -83,6 +83,39 @@ def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
         flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
 
 
+async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
+    """Create a running experiment (and its canonical backing flag) from a design.
+
+    Config owns experiment→flag initialization, so this single call also creates
+    the backing flag keyed by ``flag_key``. Shared by the agent (autonomy-permitting
+    deploy) and the approval endpoint (human-approved deploy).
+    """
+    try:
+        flag_config = experiment.get("flag_config", {})
+        experiment_id = experiment.get("experiment_id", "")
+        flag_key = flag_config.get("key") or experiment_id
+        variants = experiment.get("variants") or flag_config.get("variants", [])
+        description = experiment.get("description") or experiment.get("hypothesis", "")
+
+        await create_experiment_config(
+            project_id=project_id,
+            experiment_id=experiment_id or flag_key,
+            hypothesis=description,
+            variants=variants,
+            primary_metric=experiment.get("primary_metric", {}),
+            secondary_metrics=experiment.get("secondary_metrics"),
+            guardrail_metrics=experiment.get("guardrail_metrics"),
+            targeting=experiment.get("targeting"),
+            estimated_duration_days=experiment.get("estimated_duration_days", 14),
+            flag_key=flag_key,
+        )
+        logger.info("Experiment %s deployed successfully", experiment_id)
+        return True
+    except Exception as exc:
+        logger.error("Failed to deploy experiment: %s", exc)
+        return False
+
+
 @register_agent
 class ExperimentDesignAgent(BaseAgent):
     """Designs, validates, and (autonomy permitting) deploys experiments."""
@@ -208,32 +241,6 @@ class ExperimentDesignAgent(BaseAgent):
         return result
 
     async def _deploy(self, ctx: AgentContext, experiment: dict) -> bool:
-        # Config owns experiment→flag initialization: creating the experiment
-        # config also creates its canonical backing flag. The agent no longer
-        # creates the flag itself, which removes the old drift between the flag
-        # built from ``flag_config.variants`` and the experiment created from
-        # ``experiment.variants``.
-        try:
-            flag_config = experiment.get("flag_config", {})
-            experiment_id = experiment.get("experiment_id", "")
-            flag_key = flag_config.get("key") or experiment_id
-            variants = experiment.get("variants") or flag_config.get("variants", [])
-            description = experiment.get("description") or experiment.get("hypothesis", "")
-
-            await create_experiment_config(
-                project_id=ctx.project_id,
-                experiment_id=experiment_id or flag_key,
-                hypothesis=description,
-                variants=variants,
-                primary_metric=experiment.get("primary_metric", {}),
-                secondary_metrics=experiment.get("secondary_metrics"),
-                guardrail_metrics=experiment.get("guardrail_metrics"),
-                targeting=experiment.get("targeting"),
-                estimated_duration_days=experiment.get("estimated_duration_days", 14),
-                flag_key=flag_key,
-            )
-            logger.info("Experiment %s deployed successfully", experiment_id)
-            return True
-        except Exception as exc:
-            logger.error("Failed to deploy experiment: %s", exc)
-            return False
+        # Config owns experiment→flag initialization. Delegates to the shared
+        # deploy_experiment so the agent and the approval endpoint use one path.
+        return await deploy_experiment(ctx.project_id, experiment)

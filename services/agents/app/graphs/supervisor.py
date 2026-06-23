@@ -79,6 +79,28 @@ async def _persist_results(
         logger.exception("[%s] Failed to persist %s results", run_id, agent_name)
 
 
+async def _load_prior_results(
+    pool: asyncpg.Pool, run_id: str, state: dict[str, Any]
+) -> set[str]:
+    """Reload a run's persisted agent outputs into ``state`` for a resume.
+
+    Returns the set of agent names that already completed, so the supervisor can
+    skip them and continue with the not-yet-run agents after an approval.
+    """
+    completed: set[str] = set()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT agent_name, produces, output FROM agent_run_results WHERE run_id = $1",
+            run_id,
+        )
+    for row in rows:
+        completed.add(row["agent_name"])
+        output = row["output"]
+        data = json.loads(output) if isinstance(output, str) else output
+        state[row["produces"]] = data if data is not None else []
+    return completed
+
+
 async def run_supervisor(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
@@ -87,6 +109,7 @@ async def run_supervisor(
     analysis_types: list[str],
     time_range_days: int,
     autonomy_level: int,
+    resume: bool = False,
 ) -> None:
     """Execute the supervisor orchestration as a background task.
 
@@ -112,11 +135,19 @@ async def run_supervisor(
         "errors": [],
     }
 
-    await audit.log(run_id, "supervisor_start", {
-        "analysis_types": analysis_types,
-        "autonomy_level": autonomy_level,
-        "time_range_days": time_range_days,
-    })
+    completed: set[str] = set()
+    if resume:
+        completed = await _load_prior_results(pool, run_id, state)
+        await audit.log(run_id, "supervisor_resume", {
+            "analysis_types": analysis_types,
+            "completed": sorted(completed),
+        })
+    else:
+        await audit.log(run_id, "supervisor_start", {
+            "analysis_types": analysis_types,
+            "autonomy_level": autonomy_level,
+            "time_range_days": time_range_days,
+        })
 
     # Resolve requested agents, warn on unknown names, order by pipeline order.
     agents = []
@@ -137,6 +168,9 @@ async def run_supervisor(
 
     try:
         for agent in agents:
+            if agent.name in completed:
+                logger.info("[%s] Skipping %s — already completed (resume)", run_id, agent.name)
+                continue
             if not agent.requirements_met(state):
                 logger.info(
                     "[%s] Skipping %s — unmet requirements %s",
@@ -172,6 +206,12 @@ async def run_supervisor(
                         "experiment_id": result.metadata.get("experiment_id", ""),
                     })
                     logger.info("[%s] %s awaiting human approval", run_id, agent.name)
+                    # Halt the pipeline at the gate: the run stays in
+                    # waiting_approval until a human decides (approval then
+                    # deploys the gated action — see routers/approvals.py).
+                    # Without this return the loop would fall through to the
+                    # unconditional "completed" below and the gate would be lost.
+                    return
             except Exception as exc:
                 error_msg = f"{agent.name} failed: {exc}"
                 logger.error("[%s] %s", run_id, error_msg)

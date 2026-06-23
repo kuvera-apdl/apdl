@@ -11,6 +11,8 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
+from app.framework import get_agent, is_registered
+from app.graphs.experiment_design import deploy_experiment
 from app.graphs.supervisor import run_supervisor
 from app.store.proposals import enqueue_proposals
 
@@ -27,6 +29,30 @@ class ApprovalResponse(BaseModel):
     run_id: str
     status: str
     message: str
+
+
+def _parse_config(raw: Any) -> dict[str, Any]:
+    """agent_runs.config is JSONB stored as a JSON string; parse defensively."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _has_later_agents(gated_agent: str, analysis_types: list[str]) -> bool:
+    """True if any requested agent runs after ``gated_agent`` in pipeline order."""
+    if not gated_agent or not is_registered(gated_agent):
+        return False
+    gated_order = get_agent(gated_agent).order
+    return any(
+        is_registered(name) and get_agent(name).order > gated_order
+        for name in analysis_types
+    )
 
 
 @router.post("/{run_id}/approve", response_model=ApprovalResponse)
@@ -46,7 +72,7 @@ async def approve_action(
 
     async with pool.acquire() as conn:
         row: Any = await conn.fetchrow(
-            "SELECT run_id, status, phase, project_id, autonomy_level "
+            "SELECT run_id, status, phase, project_id, autonomy_level, config "
             "FROM agent_runs WHERE run_id = $1",
             run_id,
         )
@@ -86,13 +112,43 @@ async def approve_action(
         )
 
     if body.approved:
-        await _kick_code_implementation(
-            request.app,
-            background_tasks,
-            run_id=run_id,
-            project_id=row["project_id"],
-            autonomy_level=row["autonomy_level"],
-        )
+        gated_agent = (row["phase"] or "").removesuffix("_approval")
+        config = _parse_config(row["config"])
+        analysis_types = config.get("analysis_types") or []
+
+        # 1. Apply the gated action the human just approved. Experiment designs
+        # are deployed here — they never auto-deploy (medium risk, see
+        # framework/gating), so a run halted at experiment_design holds a
+        # safety-passed design awaiting exactly this. Other gates (feature
+        # proposals) kick the code-implementation → PR path.
+        if gated_agent == "experiment_design":
+            await _deploy_approved_experiments(
+                request.app, run_id=run_id, project_id=row["project_id"]
+            )
+        else:
+            await _kick_code_implementation(
+                request.app,
+                background_tasks,
+                run_id=run_id,
+                project_id=row["project_id"],
+                autonomy_level=row["autonomy_level"],
+            )
+
+        # 2. Resume the pipeline so later agents run in the SAME run, each gated
+        # in turn. Skipped when the approved agent was the pipeline's last —
+        # nothing remains to run.
+        if _has_later_agents(gated_agent, analysis_types):
+            background_tasks.add_task(
+                run_supervisor,
+                pool=pool,
+                vector_store=request.app.state.vector_store,
+                run_id=run_id,
+                project_id=row["project_id"],
+                analysis_types=analysis_types,
+                time_range_days=int(config.get("time_range_days", 7)),
+                autonomy_level=row["autonomy_level"],
+                resume=True,
+            )
 
     action_word = "approved" if body.approved else "rejected"
     logger.info("Run %s %s by human reviewer", run_id, action_word)
@@ -170,3 +226,39 @@ async def _kick_code_implementation(
         )
     except Exception:
         logger.exception("Failed to kick code_implementation from run %s", run_id)
+
+
+async def _deploy_approved_experiments(app: Any, *, run_id: str, project_id: str) -> None:
+    """Deploy the experiment(s) a human just approved, from the persisted design.
+
+    Best-effort — a deploy failure must never break the approval response.
+    """
+    pool: asyncpg.Pool = app.state.pg_pool
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT output FROM agent_run_results
+                WHERE run_id = $1 AND produces = 'experiment_designs'
+                """,
+                run_id,
+            )
+
+        designs: list[dict[str, Any]] = []
+        for record in rows:
+            output = record["output"]
+            data = json.loads(output) if isinstance(output, str) else output
+            if isinstance(data, list):
+                designs.extend(d for d in data if isinstance(d, dict))
+            elif isinstance(data, dict):
+                designs.append(data)
+
+        for design in designs:
+            await deploy_experiment(project_id, design)
+            logger.info(
+                "Deployed approved experiment %s from run %s",
+                design.get("experiment_id", ""),
+                run_id,
+            )
+    except Exception:
+        logger.exception("Failed to deploy approved experiment(s) from run %s", run_id)

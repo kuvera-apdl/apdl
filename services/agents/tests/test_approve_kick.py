@@ -56,13 +56,19 @@ class _FakePool:
         return _Acquire(self.conn)
 
 
-def _run_row(status: str = "waiting_approval", level: int = 3) -> dict[str, Any]:
+def _run_row(
+    status: str = "waiting_approval",
+    level: int = 3,
+    phase: str = "feature_proposal_approval",
+    analysis_types: tuple[str, ...] = ("feature_proposal",),
+) -> dict[str, Any]:
     return {
         "run_id": "run-1",
         "status": status,
-        "phase": "feature_proposal_approval",
+        "phase": phase,
         "project_id": "demo",
         "autonomy_level": level,
+        "config": json.dumps({"analysis_types": list(analysis_types), "time_range_days": 7}),
     }
 
 
@@ -138,3 +144,40 @@ async def test_rejection_never_kicks(monkeypatch):
     assert resp.json()["status"] == "rejected"
     assert enq == []
     assert kicked == []
+
+
+@pytest.mark.asyncio
+async def test_experiment_design_approval_deploys_experiment_and_resumes(monkeypatch):
+    enq, kicked = _patch(monkeypatch)
+    deployed: list = []
+
+    async def fake_deploy(project_id, experiment):
+        deployed.append((project_id, experiment))
+        return True
+
+    monkeypatch.setattr(approvals, "deploy_experiment", fake_deploy)
+
+    design = {"experiment_id": "exp_demo", "flag_config": {"key": "exp_demo"}, "variants": []}
+    store = {
+        "run": _run_row(
+            phase="experiment_design_approval",
+            analysis_types=("experiment_design", "feature_proposal"),
+        ),
+        "results": [{"output": json.dumps([design])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "approved"
+    # The approved experiment is deployed...
+    assert deployed and deployed[0][0] == "demo"
+    assert deployed[0][1]["experiment_id"] == "exp_demo"
+    # ...and the SAME run resumes to continue the pipeline (feature_proposal),
+    # rather than kicking the code-implementation path.
+    resume_calls = [k for k in kicked if k.get("resume")]
+    assert resume_calls and resume_calls[0]["run_id"] == "run-1"
+    assert resume_calls[0]["analysis_types"] == ["experiment_design", "feature_proposal"]
+    assert not any(k.get("analysis_types") == ["code_implementation"] for k in kicked)
+    assert enq == []
