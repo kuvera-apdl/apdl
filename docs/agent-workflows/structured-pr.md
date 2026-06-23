@@ -24,9 +24,9 @@ git branch --show-current
 git diff -- <path> [<path> ...]
 
 # Phase 1 - run lint/tests for the touched area before committing
-cd services/<service> && .venv/bin/ruff check app/
-# or
-cd sdk/javascript && npx tsc --noEmit
+make lint-<area>   # e.g. lint-config, lint-sdk, lint-admin
+# and, for non-trivial changes, the matching tests
+make test-<area>
 
 # Phase 2 - create a branch first if still on main
 git checkout -b <kebab-case-topic>
@@ -66,24 +66,27 @@ git diff main...HEAD --stat
 
 ## Phase 1 - Lint and test before committing
 
-CI runs `ruff` on the four Python services and the Python SDK, `pytest` on the
-Python SDK, and `tsc` on the JS SDK. Run the relevant linter for each touched
-area:
+Run the linter for each touched area with its `make lint-<area>` target, and the
+matching `make test-<area>` target when the change is non-trivial:
 
-| Touched path | Lint command |
-|---|---|
-| `services/ingestion/` | `cd services/ingestion && .venv/bin/ruff check app/` |
-| `services/config/` | `cd services/config && .venv/bin/ruff check app/` |
-| `services/query/` | `cd services/query && .venv/bin/ruff check app/` |
-| `services/agents/` | `cd services/agents && .venv/bin/ruff check app/` |
-| `services/codegen/` | `cd services/codegen && .venv/bin/ruff check app/` |
-| `sdk/javascript/` | `cd sdk/javascript && npx tsc --noEmit` |
-| `sdk/python/` | `cd sdk/python && .venv/bin/ruff check apdl/ tests/` |
+| Touched path | Lint | Test |
+|---|---|---|
+| `services/ingestion/` | `make lint-ingestion` | `make test-ingestion` |
+| `services/config/` | `make lint-config` | `make test-config` |
+| `services/query/` | `make lint-query` | `make test-query` |
+| `services/agents/` | `make lint-agents` | `make test-agents` |
+| `services/codegen/` | `make lint-codegen` | `make test-codegen` |
+| `services/admin/` | `make lint-admin` | `make test-admin` |
+| `sdk/javascript/` | `make lint-sdk` | `make test-sdk` |
+| `sdk/python/` | `make lint-sdk-python` | `make test-sdk-python` |
+| `pipeline/etl/` | `make lint-etl` | `make test-etl` |
 
-Run the relevant tests too if the change is non-trivial, using
-`make test-<service>` or the single-test commands in the repo agent guidance.
-Fix lint/test failures before proceeding. Do not open a PR with a red diff unless
-the user explicitly instructs you to and the failure is documented in the PR.
+CI on push/PR to `main` lints `ingestion`, `config`, `query`, and `agents` with
+`ruff`; lints and tests the Python SDK and `pipeline/etl`; and lints, tests, and
+builds the JS SDK and the Admin Console. `codegen` is not yet wired into CI, so
+lint it locally before committing. Fix lint/test failures before proceeding. Do
+not open a PR with a red diff unless the user explicitly instructs you to and the
+failure is documented in the PR.
 
 ## Phase 2 - Branch
 
