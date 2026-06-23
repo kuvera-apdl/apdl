@@ -9,8 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
+import { EventCombobox } from './EventCombobox'
 import {
-  COMMON_EVENTS,
   emptyFilter,
   EXISTENCE_FILTER_OPERATORS,
   LIST_FILTER_OPERATORS,
@@ -51,18 +51,11 @@ export function SelectorBuilder({ value, onChange, eventLabel = 'Event name' }: 
 
   return (
     <div className="space-y-2">
-      <datalist id="apdl-common-events">
-        {COMMON_EVENTS.map((event) => (
-          <option key={event} value={event} />
-        ))}
-      </datalist>
-      <Input
+      <EventCombobox
         value={value.event_name}
-        onChange={(event) => onChange({ ...value, event_name: event.target.value })}
-        placeholder="page — exact event name"
-        list="apdl-common-events"
-        className="font-mono text-xs"
-        aria-label={eventLabel}
+        onChange={(name) => onChange({ ...value, event_name: name })}
+        ariaLabel={eventLabel}
+        clearable
       />
       {value.filters.map((filter, index) => (
         <div key={index} className="flex flex-wrap items-center gap-2 pl-3">

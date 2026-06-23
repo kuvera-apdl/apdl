@@ -49,6 +49,15 @@ const server = setupServer(
       overall_conversion: 25,
     })
   }),
+  http.post('http://localhost:8082/v1/query/events/names', async () => {
+    return HttpResponse.json({
+      events: [
+        { event_name: 'page', event_count: 76, unique_users: 11 },
+        { event_name: '$click', event_count: 162, unique_users: 7 },
+        { event_name: '$web_vital', event_count: 49, unique_users: 5 },
+      ],
+    })
+  }),
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -89,7 +98,7 @@ describe('EventsExplorerPage', () => {
 
   test('refuses to run with an invalid selector', async () => {
     renderPage(<EventsExplorerPage />)
-    await userEvent.clear(screen.getByLabelText('Selector 1 event name'))
+    await userEvent.click(screen.getByRole('button', { name: 'Clear Selector 1 event name' }))
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))
     expect(requests).toHaveLength(0)
   })

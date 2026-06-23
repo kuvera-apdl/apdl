@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
@@ -21,6 +22,7 @@ import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
+import { EventCombobox } from '@/features/analytics/EventCombobox'
 import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
 import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
@@ -197,11 +199,12 @@ function LiveStreamCard() {
 
 function ThroughputCard() {
   const { projectId } = useWorkspace()
+  const [chartEvent, setChartEvent] = useState('page')
   const tsBody = projectId
     ? {
         project_id: projectId,
         ...lastDays(2),
-        selector: { event_name: 'page', filters: [] },
+        selector: { event_name: chartEvent, filters: [] },
         interval: '1 HOUR' as const,
       }
     : null
@@ -222,10 +225,34 @@ function ThroughputCard() {
     <Card className="lg:col-span-2">
       <CardHeader>
         <CardTitle>Event throughput</CardTitle>
-        <CardDescription>
-          {totalToday !== null
-            ? `${totalToday.toLocaleString()} events today across known event names · hourly page below`
-            : 'Hourly page volume (the API has no match-all selector yet — gap G4).'}
+        <CardDescription className="flex flex-wrap items-center gap-1.5">
+          {totalToday !== null ? (
+            <>
+              <span>
+                {totalToday.toLocaleString()} events today across known event names · hourly
+              </span>
+              <EventCombobox
+                value={chartEvent}
+                onChange={setChartEvent}
+                ariaLabel="Chart event"
+                className="w-44"
+                triggerClassName="h-7"
+              />
+              <span>below</span>
+            </>
+          ) : (
+            <>
+              <span>Hourly</span>
+              <EventCombobox
+                value={chartEvent}
+                onChange={setChartEvent}
+                ariaLabel="Chart event"
+                className="w-44"
+                triggerClassName="h-7"
+              />
+              <span>volume (the API has no match-all selector yet — gap G4).</span>
+            </>
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -236,8 +263,8 @@ function ThroughputCard() {
         ) : buckets.length === 0 ? (
           totalToday !== null && totalToday > 0 ? (
             <EmptyState
-              title="No page events in the last 2 days"
-              description="Other event types are coming in, but there are no page events to chart yet."
+              title={`No ${chartEvent || 'matching'} events in the last 2 days`}
+              description="Other event types are coming in, but none of this type to chart yet."
             >
               <Link to="/analytics/events" className="text-sm font-medium underline underline-offset-4">
                 Explore events →

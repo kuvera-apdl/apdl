@@ -271,3 +271,29 @@ export const cohortResponseSchema = z
     cohorts: z.array(cohortEntrySchema),
   })
   .strict()
+
+// ---------- Event catalog (discovery, gap G4) ----------
+
+export const eventCatalogRequestSchema = z
+  .object({
+    project_id: z.string().min(1),
+    start_date: dateSchema,
+    end_date: dateSchema,
+    limit: z.number().int().min(1).max(1000),
+  })
+  .strict()
+  .superRefine(dateOrder)
+
+const eventCatalogEntrySchema = z
+  .object({
+    event_name: z.string(),
+    event_count: z.number(),
+    unique_users: z.number(),
+  })
+  .strict()
+
+export const eventCatalogResponseSchema = z
+  .object({
+    events: z.array(eventCatalogEntrySchema),
+  })
+  .strict()
