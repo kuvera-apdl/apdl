@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
@@ -12,6 +12,7 @@ import { RelativeTime } from '@/components/shared/RelativeTime'
 import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 
@@ -23,6 +24,7 @@ import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { EventCombobox } from '@/features/analytics/EventCombobox'
+import { densifyBuckets } from '@/features/analytics/timeseries'
 import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
 import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
@@ -197,62 +199,75 @@ function LiveStreamCard() {
   )
 }
 
+type ThroughputPeriod = 'today' | 'week' | 'month'
+
+const THROUGHPUT_PERIODS: Record<
+  ThroughputPeriod,
+  { label: string; days: number; interval: '1 HOUR' | '1 DAY'; granularity: 'hour' | 'day'; cadence: string }
+> = {
+  today: { label: 'today', days: 1, interval: '1 HOUR', granularity: 'hour', cadence: 'hourly' },
+  week: { label: 'this week', days: 7, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
+  month: { label: 'this month', days: 30, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
+}
+
 function ThroughputCard() {
   const { projectId } = useWorkspace()
   const [chartEvent, setChartEvent] = useState('page')
+  const [period, setPeriod] = useState<ThroughputPeriod>('today')
+  const config = THROUGHPUT_PERIODS[period]
+  const range = lastDays(config.days)
   const tsBody = projectId
     ? {
         project_id: projectId,
-        ...lastDays(2),
+        ...range,
         selector: { event_name: chartEvent, filters: [] },
-        interval: '1 HOUR' as const,
+        interval: config.interval,
       }
     : null
   const tsQuery = useAnalyticsQuery('overview-throughput', tsBody, timeseriesEvents)
   const countBody = projectId
     ? {
         project_id: projectId,
-        ...lastDays(1),
+        ...range,
         selectors: COMMON_EVENTS.map((event) => ({ event_name: event, filters: [] })),
       }
     : null
   const countQuery = useAnalyticsQuery('overview-counts', countBody, countEvents)
 
-  const totalToday = countQuery.data?.total_events ?? null
+  const totalEvents = countQuery.data?.total_events ?? null
   const buckets = tsQuery.data?.buckets ?? []
+  // The API returns only slots that had events; fill the gaps so the chart shows
+  // every slot in the window (zeroed where there were none).
+  const filledBuckets = useMemo(
+    () => densifyBuckets(buckets, range.start_date, range.end_date, config.granularity),
+    [buckets, range.start_date, range.end_date, config.granularity],
+  )
 
   return (
     <Card className="lg:col-span-2">
       <CardHeader>
         <CardTitle>Event throughput</CardTitle>
         <CardDescription className="flex flex-wrap items-center gap-1.5">
-          {totalToday !== null ? (
-            <>
-              <span>
-                {totalToday.toLocaleString()} events today across known event names · hourly
-              </span>
-              <EventCombobox
-                value={chartEvent}
-                onChange={setChartEvent}
-                ariaLabel="Chart event"
-                className="w-44"
-                triggerClassName="h-7"
-              />
-              <span>below</span>
-            </>
-          ) : (
-            <>
-              <span>Hourly</span>
-              <EventCombobox
-                value={chartEvent}
-                onChange={setChartEvent}
-                ariaLabel="Chart event"
-                className="w-44"
-                triggerClassName="h-7"
-              />
-              <span>volume (the API has no match-all selector yet — gap G4).</span>
-            </>
-          )}
+          <span>{totalEvents !== null ? `${totalEvents.toLocaleString()} events` : 'Events'}</span>
+          <Select
+            value={period}
+            onChange={(event) => setPeriod(event.target.value as ThroughputPeriod)}
+            className="h-7 w-auto"
+            aria-label="Time period"
+          >
+            <option value="today">today</option>
+            <option value="week">this week</option>
+            <option value="month">this month</option>
+          </Select>
+          <span>across known event names · {config.cadence}</span>
+          <EventCombobox
+            value={chartEvent}
+            onChange={setChartEvent}
+            ariaLabel="Chart event"
+            className="w-44"
+            triggerClassName="h-7"
+          />
+          <span>below</span>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -261,9 +276,9 @@ function ThroughputCard() {
         ) : tsQuery.error ? (
           <ErrorState error={tsQuery.error} onRetry={() => void tsQuery.refetch()} />
         ) : buckets.length === 0 ? (
-          totalToday !== null && totalToday > 0 ? (
+          totalEvents !== null && totalEvents > 0 ? (
             <EmptyState
-              title={`No ${chartEvent || 'matching'} events in the last 2 days`}
+              title={`No ${chartEvent || 'matching'} events ${config.label}`}
               description="Other event types are coming in, but none of this type to chart yet."
             >
               <Link to="/analytics/events" className="text-sm font-medium underline underline-offset-4">
@@ -271,14 +286,14 @@ function ThroughputCard() {
               </Link>
             </EmptyState>
           ) : (
-            <EmptyState title="No events in the last 24h" description="Is the SDK wired up?">
+            <EmptyState title={`No events ${config.label}`} description="Is the SDK wired up?">
               <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
                 Verify your integration →
               </Link>
             </EmptyState>
           )
         ) : (
-          <TimeseriesChart buckets={buckets} mode="bar" />
+          <TimeseriesChart buckets={filledBuckets} mode="bar" />
         )}
       </CardContent>
     </Card>
