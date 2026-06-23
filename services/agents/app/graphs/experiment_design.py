@@ -32,6 +32,56 @@ from app.tools.experiments import create_experiment_config, get_active_experimen
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
 
+_CANONICAL_VARIANT_FIELDS = ("key", "weight")
+
+
+def _is_canonical_rule(rule: Any) -> bool:
+    """True for a flag rule the safety validator accepts: a valid rollout and no
+    variant-assignment fields."""
+    if not isinstance(rule, dict):
+        return False
+    if "variants" in rule or "default_variant" in rule:
+        return False
+    rollout = rule.get("rollout")
+    if not isinstance(rollout, dict) or set(rollout) - {"percentage", "bucket_by"}:
+        return False
+    percentage = rollout.get("percentage")
+    return (
+        isinstance(percentage, int | float)
+        and not isinstance(percentage, bool)
+        and 0 <= percentage <= 100
+        and isinstance(rollout.get("bucket_by"), str)
+        and bool(rollout.get("bucket_by"))
+    )
+
+
+def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
+    """Coerce an LLM-authored ``flag_config`` into the canonical shape the safety
+    validator enforces, mutating ``experiment`` in place.
+
+    Variants keep only ``key``/``weight`` (models tend to add a ``description``,
+    which fails the strict variant check); non-canonical rules — typically
+    rollout-less, variant-assignment rules — are dropped, since experiment
+    targeting lives in the top-level ``targeting`` field, not the flag rules.
+    The top-level ``variants`` are left intact (the config service accepts an
+    optional per-variant description on deploy).
+    """
+    flag_config = experiment.get("flag_config")
+    if not isinstance(flag_config, dict):
+        return
+
+    variants = flag_config.get("variants")
+    if isinstance(variants, list):
+        flag_config["variants"] = [
+            {field: variant[field] for field in _CANONICAL_VARIANT_FIELDS if field in variant}
+            for variant in variants
+            if isinstance(variant, dict)
+        ]
+
+    rules = flag_config.get("rules")
+    if isinstance(rules, list):
+        flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
+
 
 @register_agent
 class ExperimentDesignAgent(BaseAgent):
@@ -80,6 +130,12 @@ class ExperimentDesignAgent(BaseAgent):
     ) -> dict[str, Any]:
         if not output:
             return {"deployed": False, "experiment_id": ""}
+
+        # LLMs drift from the canonical flag schema (descriptive variant fields,
+        # rollout-less rules), which fails the validator's variant_config check.
+        # Normalize before validating, deploying, and persisting so a sound
+        # design is not halted on shape alone.
+        _canonicalize_flag_config(output)
 
         safety = await self._safety_check(ctx, output, working.get("active_experiments", []))
         decision = gate_action(ctx.autonomy_level, safety)
