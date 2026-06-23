@@ -6,6 +6,12 @@ all: build
 
 CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
+# Full-stack Compose command. `-f infra/docker/docker-compose.yml` makes Compose
+# use that folder as its project dir (and its default `.env` lookup), so the
+# repo-root `.env` is otherwise ignored — load it explicitly when it exists.
+COMPOSE_FILE ?= infra/docker/docker-compose.yml
+COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_FILE)
+
 setup:
 	@bash scripts/setup.sh
 
@@ -32,6 +38,8 @@ deps:
 	cd services/query && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Agents service"
 	cd services/agents && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up Codegen service"
+	cd services/codegen && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
 	@echo "==> Setting up ETL framework"
@@ -41,9 +49,9 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-etl test-admin
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-etl test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -147,6 +155,20 @@ lint-agents:
 run-agents:
 	cd services/agents && .venv/bin/uvicorn app.main:app --reload --port 8083
 
+# ─── Codegen Service (Python) ────────────────────────────────
+
+test-codegen:
+	cd services/codegen && .venv/bin/python -m pytest -v
+
+lint-codegen:
+	cd services/codegen && .venv/bin/ruff check app/
+
+run-codegen:
+	cd services/codegen && .venv/bin/uvicorn app.main:app --reload --port 8084
+
+build-codegen-sandbox:
+	docker build -f services/codegen/Dockerfile.worker -t apdl-codegen-sandbox:latest services/codegen
+
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:
@@ -170,15 +192,15 @@ dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
-	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-pipeline"
+	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
 dev-all:
-	docker compose -f infra/docker/docker-compose.yml up -d --build redis clickhouse postgres
-	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.yml
-	docker compose -f infra/docker/docker-compose.yml up --build ingestion config query agents clickhouse-writer admin gateway
+	$(COMPOSE) up -d --build redis clickhouse postgres
+	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
+	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin gateway
 
 dev-down:
-	docker compose -f infra/docker/docker-compose.yml down
+	$(COMPOSE) down
 	docker compose -f infra/docker/docker-compose.deps.yml down
 
 # Container status + service health endpoints.
@@ -191,4 +213,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-etl test-etl lint-admin test-admin
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl test-etl lint-admin test-admin

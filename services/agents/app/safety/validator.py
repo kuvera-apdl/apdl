@@ -22,6 +22,8 @@ class ActionType(str, Enum):
     update_flag = "update_flag"
     update_ui_config = "update_ui_config"
     feature_proposal = "feature_proposal"
+    open_pull_request = "open_pull_request"
+    merge_pull_request = "merge_pull_request"
 
 
 class AgentAction(BaseModel):
@@ -46,6 +48,8 @@ _MAX_ACTIONS_PER_HOUR: dict[ActionType, int] = {
     ActionType.update_flag: 20,
     ActionType.update_ui_config: 30,
     ActionType.feature_proposal: 3,
+    ActionType.open_pull_request: 10,
+    ActionType.merge_pull_request: 5,
 }
 
 _REJECTED_FLAG_FIELDS = {
@@ -492,6 +496,24 @@ class SafetyValidator:
                 "message": "UI config has targeting criteria.",
             }
 
+        if action.type == ActionType.merge_pull_request:
+            diff_stat = config.get("diff_stat", {})
+            files = diff_stat.get("files", 0) if isinstance(diff_stat, dict) else 0
+            if files > 50:
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": (
+                        f"Diff touches {files} files, exceeding the 50-file "
+                        "auto-merge safety limit."
+                    ),
+                }
+            return {
+                "name": "blast_radius",
+                "passed": True,
+                "message": f"Diff touches {files} file(s).",
+            }
+
         return {
             "name": "blast_radius",
             "passed": True,
@@ -564,6 +586,44 @@ class SafetyValidator:
                 "message": "Proposal includes required risks and success criteria.",
             }
 
+        if action.type == ActionType.open_pull_request:
+            if not config.get("title"):
+                return {
+                    "name": "guardrails",
+                    "passed": False,
+                    "message": "Pull request is missing a title.",
+                }
+            if len(config.get("spec", "")) < 10:
+                return {
+                    "name": "guardrails",
+                    "passed": False,
+                    "message": "Pull request spec is missing or too short.",
+                }
+            return {
+                "name": "guardrails",
+                "passed": True,
+                "message": "Pull request has a title and spec.",
+            }
+
+        if action.type == ActionType.merge_pull_request:
+            if not config.get("changeset_id"):
+                return {
+                    "name": "guardrails",
+                    "passed": False,
+                    "message": "Merge action is missing a changeset_id.",
+                }
+            if config.get("ci_status") != "passed":
+                return {
+                    "name": "guardrails",
+                    "passed": False,
+                    "message": "Merge requires green CI (ci_status must be 'passed').",
+                }
+            return {
+                "name": "guardrails",
+                "passed": True,
+                "message": "Changeset CI is green.",
+            }
+
         return {
             "name": "guardrails",
             "passed": True,
@@ -594,6 +654,8 @@ class SafetyValidator:
             ActionType.update_flag: "medium",
             ActionType.create_experiment: "medium",
             ActionType.feature_proposal: "high",
+            ActionType.open_pull_request: "low",
+            ActionType.merge_pull_request: "high",
         }
 
         return inherent_risk.get(action.type, "medium")
