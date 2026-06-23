@@ -78,3 +78,35 @@ export function densifyBuckets(
   out.sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0))
   return out
 }
+
+/**
+ * The `hours` most recent whole UTC hours, oldest→newest, each carrying the
+ * matching API count (zeroed where none). Powers the "today" view as a rolling
+ * window that ends at the current UTC hour, rather than the local calendar day.
+ *
+ * The API buckets in UTC and returns keys like `YYYY-MM-DDTHH:00:00`, so the
+ * generated slot keys line up exactly with returned buckets. Buckets outside the
+ * window are dropped (the caller fetches whole UTC dates, which can overhang).
+ */
+export function rollingHourBuckets(buckets: readonly TimeBucket[], hours: number): TimeBucket[] {
+  const byKey = new Map(buckets.map((bucket) => [bucket.bucket, bucket]))
+  const now = new Date()
+  const currentHourMs = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    now.getUTCHours(),
+  )
+  const out: TimeBucket[] = []
+  for (let i = hours - 1; i >= 0; i--) {
+    const slot = new Date(currentHourMs - i * 3_600_000)
+    const key = `${slot.getUTCFullYear()}-${pad(slot.getUTCMonth() + 1)}-${pad(slot.getUTCDate())}T${pad(slot.getUTCHours())}:00:00`
+    const existing = byKey.get(key)
+    out.push({
+      bucket: key,
+      event_count: existing?.event_count ?? 0,
+      unique_users: existing?.unique_users ?? 0,
+    })
+  }
+  return out
+}

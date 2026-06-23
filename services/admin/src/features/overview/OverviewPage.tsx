@@ -24,8 +24,13 @@ import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { EventCombobox } from '@/features/analytics/EventCombobox'
-import { densifyBuckets } from '@/features/analytics/timeseries'
-import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
+import { densifyBuckets, rollingHourBuckets } from '@/features/analytics/timeseries'
+import {
+  COMMON_EVENTS,
+  lastDays,
+  todayUtcIso,
+  utcDateRangeForLastHours,
+} from '@/features/analytics/selectorModel'
 import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
 import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
@@ -205,9 +210,15 @@ const THROUGHPUT_PERIODS: Record<
   ThroughputPeriod,
   { label: string; days: number; interval: '1 HOUR' | '1 DAY'; granularity: 'hour' | 'day'; cadence: string }
 > = {
-  today: { label: 'today', days: 1, interval: '1 HOUR', granularity: 'hour', cadence: 'hourly' },
+  today: { label: 'in the last 24h', days: 1, interval: '1 HOUR', granularity: 'hour', cadence: 'hourly' },
   week: { label: 'this week', days: 7, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
   month: { label: 'this month', days: 30, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
+}
+
+/** Current wall-clock in UTC as HH:MM — the timezone the throughput chart bins in. */
+function formatUtcHm(ms: number): string {
+  const date = new Date(ms)
+  return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`
 }
 
 function ThroughputCard() {
@@ -215,7 +226,15 @@ function ThroughputCard() {
   const [chartEvent, setChartEvent] = useState('page')
   const [period, setPeriod] = useState<ThroughputPeriod>('today')
   const config = THROUGHPUT_PERIODS[period]
-  const range = lastDays(config.days)
+  const isToday = period === 'today'
+  // "today" is a rolling last-24h window in UTC — the pipeline buckets timestamps
+  // in UTC, so the bins line up with the API's bucket strings (and with the UTC
+  // clock shown in the header). Week/month stay calendar-date windows.
+  const range = isToday ? utcDateRangeForLastHours(24) : lastDays(config.days)
+  // The count API is date-granular and can't express "last 24h"; for today we
+  // count the current UTC day. Week/month count their full date range.
+  const countRange = isToday ? { start_date: todayUtcIso(), end_date: todayUtcIso() } : range
+  const nowUtc = formatUtcHm(useNow(30_000))
   const tsBody = projectId
     ? {
         project_id: projectId,
@@ -228,7 +247,7 @@ function ThroughputCard() {
   const countBody = projectId
     ? {
         project_id: projectId,
-        ...range,
+        ...countRange,
         selectors: COMMON_EVENTS.map((event) => ({ event_name: event, filters: [] })),
       }
     : null
@@ -237,10 +256,14 @@ function ThroughputCard() {
   const totalEvents = countQuery.data?.total_events ?? null
   const buckets = tsQuery.data?.buckets ?? []
   // The API returns only slots that had events; fill the gaps so the chart shows
-  // every slot in the window (zeroed where there were none).
+  // every slot in the window (zeroed where there were none). "today" is a rolling
+  // 24 UTC-hour window; week/month densify across their calendar dates.
   const filledBuckets = useMemo(
-    () => densifyBuckets(buckets, range.start_date, range.end_date, config.granularity),
-    [buckets, range.start_date, range.end_date, config.granularity],
+    () =>
+      isToday
+        ? rollingHourBuckets(buckets, 24)
+        : densifyBuckets(buckets, range.start_date, range.end_date, config.granularity),
+    [isToday, buckets, range.start_date, range.end_date, config.granularity],
   )
 
   return (
@@ -268,6 +291,7 @@ function ThroughputCard() {
             triggerClassName="h-7"
           />
           <span>below</span>
+          <span className="text-muted-foreground">· now {nowUtc} UTC</span>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -293,7 +317,12 @@ function ThroughputCard() {
             </EmptyState>
           )
         ) : (
-          <TimeseriesChart buckets={filledBuckets} mode="bar" />
+          <>
+            <p className="mb-2 text-xs text-muted-foreground">
+              {isToday ? 'Rolling last 24 hours · UTC' : 'UTC'}
+            </p>
+            <TimeseriesChart buckets={filledBuckets} mode="bar" />
+          </>
         )}
       </CardContent>
     </Card>

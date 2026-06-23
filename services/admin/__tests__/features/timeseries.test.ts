@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { densifyBuckets, type TimeBucket } from '../../src/features/analytics/timeseries'
+import {
+  densifyBuckets,
+  rollingHourBuckets,
+  type TimeBucket,
+} from '../../src/features/analytics/timeseries'
 
 describe('densifyBuckets — hourly (today)', () => {
   test('fills missing hours with zeroed buckets', () => {
@@ -63,5 +67,38 @@ describe('densifyBuckets — daily (week / month)', () => {
     )
     expect(out).toHaveLength(2)
     expect(out.at(-1)).toEqual({ bucket: '2026-07-01', event_count: 9, unique_users: 3 })
+  })
+})
+
+describe('rollingHourBuckets — last 24h (today, UTC)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  test('returns 24 UTC-hour slots ending at the current hour', () => {
+    vi.setSystemTime(new Date('2026-06-22T22:30:00Z'))
+    const out = rollingHourBuckets([], 24)
+
+    expect(out).toHaveLength(24)
+    // Window crosses UTC midnight: starts the previous day, ends at the current hour.
+    expect(out[0].bucket).toBe('2026-06-21T23:00:00')
+    expect(out[23].bucket).toBe('2026-06-22T22:00:00')
+    expect(out.every((bucket) => bucket.event_count === 0)).toBe(true)
+  })
+
+  test('maps API counts onto matching slots and drops buckets outside the window', () => {
+    vi.setSystemTime(new Date('2026-06-22T22:30:00Z'))
+    const out = rollingHourBuckets(
+      [
+        { bucket: '2026-06-22T22:00:00', event_count: 7, unique_users: 3 },
+        { bucket: '2026-06-21T23:00:00', event_count: 2, unique_users: 1 },
+        { bucket: '2026-06-20T10:00:00', event_count: 99, unique_users: 9 },
+      ],
+      24,
+    )
+
+    expect(out[0]).toEqual({ bucket: '2026-06-21T23:00:00', event_count: 2, unique_users: 1 })
+    expect(out[23]).toEqual({ bucket: '2026-06-22T22:00:00', event_count: 7, unique_users: 3 })
+    expect(out[12]).toEqual({ bucket: '2026-06-22T11:00:00', event_count: 0, unique_users: 0 })
+    expect(out.some((bucket) => bucket.event_count === 99)).toBe(false)
   })
 })
