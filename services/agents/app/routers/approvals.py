@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app.framework import get_agent, is_registered
 from app.graphs.experiment_design import deploy_experiment
 from app.graphs.supervisor import run_supervisor
+from app.safety.audit import AuditLogger
 from app.store.proposals import enqueue_proposals
 
 logger = logging.getLogger(__name__)
@@ -100,16 +101,17 @@ async def approve_action(
             new_phase,
         )
 
-        # Record in audit log
-        await conn.execute(
-            """
-            INSERT INTO agent_audit_log (run_id, action_type, config, approval_status)
-            VALUES ($1, 'human_approval', $2, $3)
-            """,
-            run_id,
-            {"comment": body.comment},
-            new_status,
-        )
+    # Record the human decision via AuditLogger, which serializes config with
+    # json.dumps + ::jsonb and is exception-isolated. Binding a raw dict to the
+    # JSONB column (as this did before) makes asyncpg raise "expected str, got
+    # dict" — and since the status flip above already committed, that crash
+    # aborted the deploy/resume below and wedged the run at phase="resuming".
+    await AuditLogger(pool).log(
+        run_id,
+        "human_approval",
+        {"comment": body.comment},
+        approval_status=new_status,
+    )
 
     if body.approved:
         gated_agent = (row["phase"] or "").removesuffix("_approval")

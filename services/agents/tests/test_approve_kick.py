@@ -22,6 +22,7 @@ class _FakeConn:
     def __init__(self, store: dict[str, Any]) -> None:
         self.store = store
         self.executed: list[tuple[str, tuple]] = []
+        self.fetchvals: list[tuple[str, tuple]] = []
 
     async def fetchrow(self, query: str, *args: Any):
         if "FROM agent_runs" in query:
@@ -35,6 +36,10 @@ class _FakeConn:
 
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
+
+    async def fetchval(self, query: str, *args: Any):
+        self.fetchvals.append((query, args))
+        return 1
 
 
 class _Acquire:
@@ -117,6 +122,18 @@ async def test_approval_enqueues_and_kicks_implementation(monkeypatch):
     )
     assert isinstance(run_insert_args[-1], str)
     assert json.loads(run_insert_args[-1])["analysis_types"] == ["code_implementation"]
+
+    # The human decision is audited via AuditLogger with a JSON-*string* config.
+    # Binding a raw dict to the jsonb column raised "expected str, got dict",
+    # which committed the status flip then crashed before the deploy/kick —
+    # wedging the run at phase="resuming" with no human_approval row ever written.
+    audit_calls = [a for q, a in app.state.pg_pool.conn.fetchvals if "agent_audit_log" in q]
+    assert audit_calls, "human_approval must be recorded"
+    audit_args = audit_calls[0]
+    assert audit_args[1] == "human_approval"
+    assert isinstance(audit_args[2], str)
+    assert json.loads(audit_args[2]) == {"comment": None}
+    assert audit_args[4] == "approved"
 
 
 @pytest.mark.asyncio
