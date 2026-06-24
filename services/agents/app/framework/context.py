@@ -28,6 +28,9 @@ class AgentContext:
     project_id: str
     autonomy_level: int = 2
     time_range_days: int = 7
+    #: When set, a forked code_implementation run targets exactly this proposal
+    #: (one PR per approved proposal) instead of draining the project queue.
+    target_proposal_id: str | None = None
 
 
 @dataclass

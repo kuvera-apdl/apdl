@@ -10,9 +10,12 @@ single source of truth for what still needs building.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 FEATURE_PROPOSALS_DDL = """
 CREATE TABLE IF NOT EXISTS feature_proposals (
@@ -32,8 +35,27 @@ CREATE TABLE IF NOT EXISTS feature_proposals (
 
 
 def _spec_of(proposal: dict[str, Any]) -> str:
-    spec = proposal.get("spec") or proposal.get("description") or ""
-    return spec.strip() if isinstance(spec, str) else json.dumps(spec)
+    """Build a codegen spec from an LLM proposal.
+
+    Real proposals carry ``proposed_solution`` / ``implementation_spec`` /
+    ``problem_statement`` rather than ``spec`` / ``description``; fall back
+    across all of them (and append the structured ``implementation_spec``) so a
+    proposal is never silently dropped for an empty spec — the cause of the
+    "claimed 0 proposals" handoff failure.
+    """
+
+    def _text(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        return json.dumps(value, default=str) if value else ""
+
+    prose = ""
+    for key in ("proposed_solution", "spec", "description", "problem_statement"):
+        prose = _text(proposal.get(key))
+        if prose:
+            break
+    detail = _text(proposal.get("implementation_spec"))
+    return "\n\n".join(part for part in (prose, detail) if part)
 
 
 async def enqueue_proposals(
@@ -47,6 +69,12 @@ async def enqueue_proposals(
             title = str(proposal.get("title") or "").strip()
             spec = _spec_of(proposal)
             if not proposal_id or not title or not spec:
+                logger.warning(
+                    "Skipping proposal with missing fields (id=%r title=%r spec_empty=%s)",
+                    proposal_id,
+                    title,
+                    not spec,
+                )
                 continue
             await conn.execute(
                 """
@@ -67,27 +95,46 @@ async def enqueue_proposals(
 
 
 async def claim_proposals(
-    pool: asyncpg.Pool, project_id: str, limit: int = 5
+    pool: asyncpg.Pool,
+    project_id: str,
+    limit: int = 5,
+    proposal_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Claim up to ``limit`` approved proposals, marking them ``implementing``.
 
     ``FOR UPDATE SKIP LOCKED`` makes concurrent claims disjoint, so the drain is
-    safe to run from both the approval kick and a scheduled sweep.
+    safe to run from both the approval kick and a scheduled sweep. When
+    ``proposal_id`` is given, claim only that proposal (one PR per approved
+    proposal); the ``status='approved'`` guard still applies, so an
+    already-claimed proposal yields an empty (no-op) claim rather than a
+    duplicate build.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-            rows = await conn.fetch(
-                """
-                SELECT proposal_id, title, spec, priority
-                FROM feature_proposals
-                WHERE project_id = $1 AND status = 'approved'
-                ORDER BY created_at
-                LIMIT $2
-                FOR UPDATE SKIP LOCKED
-                """,
-                project_id,
-                limit,
-            )
+            if proposal_id is not None:
+                rows = await conn.fetch(
+                    """
+                    SELECT proposal_id, title, spec, priority
+                    FROM feature_proposals
+                    WHERE project_id = $1 AND status = 'approved' AND proposal_id = $2
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    project_id,
+                    proposal_id,
+                )
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT proposal_id, title, spec, priority
+                    FROM feature_proposals
+                    WHERE project_id = $1 AND status = 'approved'
+                    ORDER BY created_at
+                    LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    project_id,
+                    limit,
+                )
             claimed = [dict(r) for r in rows]
             if claimed:
                 await conn.execute(

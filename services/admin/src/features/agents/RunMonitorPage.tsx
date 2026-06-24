@@ -22,7 +22,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
-import { ResultList } from '@/features/agents/ResultCards'
+import { ResultCard, ResultList } from '@/features/agents/ResultCards'
 import { RunAuditSection } from '@/features/agents/RunAuditSection'
 import { loadTrackedRuns, updateTrackedRunStatus } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
@@ -102,6 +102,17 @@ function gatedItems(run: RunStatus, results: RunResults | null): { items: unknow
   return { items: results[key], kind: agent }
 }
 
+// The stable id used to match a per-item decision to a gated item — mirrors
+// the server's _item_id (experiment_id / flag_config.key for designs,
+// proposal_id for proposals). Falls back to a positional id the server accepts
+// for a single unkeyed item.
+function itemId(item: unknown, kind: string, index: number): string {
+  const rec = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {}
+  const flag = rec.flag_config as Record<string, unknown> | undefined
+  const raw = kind === 'experiment_design' ? (rec.experiment_id ?? flag?.key) : rec.proposal_id
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : `__index_${index}`
+}
+
 function ApprovalPanel({
   run,
   results,
@@ -113,21 +124,44 @@ function ApprovalPanel({
 }) {
   const { active } = useWorkspace()
   const [comment, setComment] = useState('')
-  const [submitting, setSubmitting] = useState<'approve' | 'reject' | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
-  const decide = async (approved: boolean) => {
+  const agent = run.phase.replace(/_approval$/, '').replace(/_/g, ' ')
+  const gated = gatedItems(run, results)
+  const items = gated?.items ?? []
+  const kind = gated?.kind
+  const hasItems = items.length > 0 && kind !== undefined
+
+  const ids = items.map((item, index) => itemId(item, kind ?? '', index))
+  // Per-item verdicts, defaulting to approve; re-seeded when the item set changes.
+  const [decisions, setDecisions] = useState<Record<string, boolean>>({})
+  const idsKey = ids.join('|')
+  useEffect(() => {
+    setDecisions((prev) => Object.fromEntries(ids.map((id) => [id, prev[id] ?? true])))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsKey])
+
+  const isApproved = (id: string) => decisions[id] !== false
+  const anyRejected = hasItems && ids.some((id) => !isApproved(id))
+  const approvedCount = ids.filter(isApproved).length
+
+  const submit = async (body: { decisions?: { item_id: string; approved: boolean }[]; approved?: boolean }, needsComment: boolean) => {
     if (!active) return
-    if (!approved && comment.trim() === '') {
+    if (needsComment && comment.trim() === '') {
       toast.error('A comment is required when rejecting')
       return
     }
-    setSubmitting(approved ? 'approve' : 'reject')
+    setSubmitting(true)
     try {
-      await approveRun(serviceConnection(active, 'agents'), run.run_id, {
-        approved,
+      const res = await approveRun(serviceConnection(active, 'agents'), run.run_id, {
+        ...body,
         ...(comment.trim() ? { comment: comment.trim() } : {}),
       })
-      toast.success(approved ? 'Approved — run resumes' : 'Rejected — run halts')
+      const forked = res.forked_runs.length
+      toast.success(
+        `${res.approved_count} approved, ${res.rejected_count} rejected — run resumes` +
+          (forked ? ` · ${forked} PR run(s) forked` : ''),
+      )
       onDecided()
     } catch (error) {
       if (error instanceof ApiError && error.status === 400) {
@@ -138,12 +172,9 @@ function ApprovalPanel({
         toast.error(error instanceof ApiError ? error.message : 'Decision failed')
       }
     } finally {
-      setSubmitting(null)
+      setSubmitting(false)
     }
   }
-
-  const agent = run.phase.replace(/_approval$/, '').replace(/_/g, ' ')
-  const gated = gatedItems(run, results)
 
   return (
     <Card className="border-amber-400 dark:border-amber-700">
@@ -153,14 +184,45 @@ function ApprovalPanel({
           {agent} awaiting approval
         </CardTitle>
         <CardDescription>
-          {gated && gated.items.length > 0
-            ? 'This run is gated by its autonomy level — review exactly what would be applied below.'
+          {hasItems
+            ? 'Approve or reject each item, then submit. Each approved proposal opens its own PR; approved experiments deploy individually.'
             : 'This run is gated by its autonomy level. No persisted payload is available for this phase — review the agents-service logs before deciding.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {gated && gated.items.length > 0 ? (
-          <ResultList label="What you're approving" items={gated.items} kind={gated.kind === 'behavior_analysis' ? 'insight' : gated.kind} />
+        {hasItems ? (
+          <div className="space-y-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              What you&apos;re approving ({items.length})
+            </p>
+            {items.map((item, index) => {
+              const id = ids[index]!
+              const approved = isApproved(id)
+              return (
+                <div key={id} className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <ResultCard item={item} kind={kind === 'behavior_analysis' ? 'insight' : kind!} />
+                  </div>
+                  <div className="flex shrink-0 flex-col gap-1 pt-1">
+                    <Button
+                      size="sm"
+                      variant={approved ? 'default' : 'outline'}
+                      onClick={() => setDecisions((prev) => ({ ...prev, [id]: true }))}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={approved ? 'outline' : 'destructive'}
+                      onClick={() => setDecisions((prev) => ({ ...prev, [id]: false }))}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         ) : null}
         <div className="space-y-1.5">
           <Label htmlFor="approval-comment">Comment (required when rejecting)</Label>
@@ -171,20 +233,39 @@ function ApprovalPanel({
             placeholder="Why approve / reject?"
           />
         </div>
-        <div className="flex gap-2">
-          <Button onClick={() => void decide(true)} disabled={submitting !== null}>
-            {submitting === 'approve' ? <Loader2 className="animate-spin" /> : null}
-            Approve
-          </Button>
-          <Button
-            variant="destructive"
-            onClick={() => void decide(false)}
-            disabled={submitting !== null || comment.trim() === ''}
-          >
-            {submitting === 'reject' ? <Loader2 className="animate-spin" /> : null}
-            Reject
-          </Button>
-        </div>
+        {hasItems ? (
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={() =>
+                void submit(
+                  { decisions: ids.map((id) => ({ item_id: id, approved: isApproved(id) })) },
+                  anyRejected,
+                )
+              }
+              disabled={submitting}
+            >
+              {submitting ? <Loader2 className="animate-spin" /> : null}
+              Submit decisions
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {approvedCount} of {ids.length} approved
+            </span>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <Button onClick={() => void submit({ approved: true }, false)} disabled={submitting}>
+              {submitting ? <Loader2 className="animate-spin" /> : null}
+              Approve
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void submit({ approved: false }, true)}
+              disabled={submitting || comment.trim() === ''}
+            >
+              Reject
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

@@ -61,9 +61,19 @@ export const runStatusSchema = z
   })
   .strict()
 
+export const itemDecisionSchema = z
+  .object({
+    item_id: z.string(),
+    approved: z.boolean(),
+  })
+  .strict()
+
+// Per-item batched decisions (one per gated item) OR a legacy whole-gate
+// `approved`. The server requires exactly one; the console sends `decisions`.
 export const approvalRequestSchema = z
   .object({
-    approved: z.boolean(),
+    decisions: z.array(itemDecisionSchema).optional(),
+    approved: z.boolean().optional(),
     comment: z.string().optional(),
   })
   .strict()
@@ -72,6 +82,9 @@ export const approvalResponseSchema = z
   .object({
     run_id: z.string(),
     status: z.string(),
+    approved_count: z.number().int(),
+    rejected_count: z.number().int(),
+    forked_runs: z.array(z.string()),
     message: z.string(),
   })
   .strict()

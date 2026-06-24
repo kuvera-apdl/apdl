@@ -48,7 +48,14 @@ class CodeImplementationAgent(BaseAgent):
         if ctx.autonomy_level <= 1:
             return {"claimed_proposals": []}
         try:
-            claimed = await claim_proposals(ctx.pool, ctx.project_id, self.max_proposals)
+            # A forked run carries target_proposal_id and claims exactly that
+            # proposal (one PR per approval); an unscoped run drains the queue.
+            claimed = await claim_proposals(
+                ctx.pool,
+                ctx.project_id,
+                self.max_proposals,
+                proposal_id=ctx.target_proposal_id,
+            )
         except Exception as exc:
             logger.warning("Could not claim feature proposals: %s", exc)
             claimed = []

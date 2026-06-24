@@ -110,11 +110,18 @@ async def run_supervisor(
     time_range_days: int,
     autonomy_level: int,
     resume: bool = False,
+    target_proposal_id: str | None = None,
 ) -> None:
     """Execute the supervisor orchestration as a background task.
 
     Resolves the requested ``analysis_types`` against the agent registry, runs
     each in pipeline order, and passes outputs forward via shared state.
+
+    ``target_proposal_id`` scopes a forked ``code_implementation`` run to a
+    single approved proposal (one PR per proposal). On ``resume``, agents
+    already present in the persisted results are skipped, so the just-approved
+    gated agent never re-runs (and never re-gates) — only not-yet-run downstream
+    agents execute, or the run finalizes to ``done`` when none remain.
     """
     audit = AuditLogger(pool)
     ctx = AgentContext(
@@ -125,6 +132,7 @@ async def run_supervisor(
         project_id=project_id,
         autonomy_level=autonomy_level,
         time_range_days=time_range_days,
+        target_proposal_id=target_proposal_id,
     )
     state: dict[str, Any] = {
         "project_id": project_id,
