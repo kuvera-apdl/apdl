@@ -215,12 +215,6 @@ const THROUGHPUT_PERIODS: Record<
   month: { label: 'this month', days: 30, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
 }
 
-/** Current wall-clock in UTC as HH:MM — the timezone the throughput chart bins in. */
-function formatUtcHm(ms: number): string {
-  const date = new Date(ms)
-  return `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`
-}
-
 function ThroughputCard() {
   const { projectId } = useWorkspace()
   const [chartEvent, setChartEvent] = useState('page')
@@ -234,7 +228,6 @@ function ThroughputCard() {
   // The count API is date-granular and can't express "last 24h"; for today we
   // count the current UTC day. Week/month count their full date range.
   const countRange = isToday ? { start_date: todayUtcIso(), end_date: todayUtcIso() } : range
-  const nowUtc = formatUtcHm(useNow(30_000))
   const tsBody = projectId
     ? {
         project_id: projectId,
@@ -291,7 +284,6 @@ function ThroughputCard() {
             triggerClassName="h-7"
           />
           <span>below</span>
-          <span className="text-muted-foreground">· now {nowUtc} UTC</span>
         </CardDescription>
       </CardHeader>
       <CardContent>
