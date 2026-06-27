@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import codegen_agent_timeout, postgres_url
 from app.db import ALL_DDL
@@ -101,9 +102,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# No CORS middleware: codegen is an internal-only service (the admin console
-# reaches it server-side, never from a browser), so there is no cross-origin
-# request to permit — and "*" origins with credentials is invalid anyway.
+# The admin console (localhost:5174) calls these endpoints directly from the
+# browser, so cross-origin requests must be permitted. Starlette reflects the
+# request origin when allow_origins=["*"] and allow_credentials=True, matching
+# the other services (config/query/agents).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(connections.router)
 app.include_router(changesets.router)
