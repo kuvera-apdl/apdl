@@ -85,6 +85,7 @@ export const approvalResponseSchema = z
     approved_count: z.number().int(),
     rejected_count: z.number().int(),
     forked_runs: z.array(z.string()),
+    opened_changesets: z.array(z.string()),
     message: z.string(),
   })
   .strict()
@@ -106,6 +107,7 @@ export const runResultsSchema = z
     experiment_designs: z.array(z.unknown()),
     personalizations: z.array(z.unknown()),
     feature_proposals: z.array(z.unknown()),
+    changesets: z.array(z.unknown()),
   })
   .strict()
 

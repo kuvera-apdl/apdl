@@ -92,6 +92,16 @@ const GATED_RESULT_KEYS = {
   personalization: 'personalizations',
   feature_proposal: 'feature_proposals',
   behavior_analysis: 'insights',
+  code_implementation: 'changesets',
+} as const
+
+// Map a gated agent to its ResultCard renderer kind (most align 1:1).
+const GATE_CARD_KIND = {
+  experiment_design: 'experiment_design',
+  personalization: 'personalization',
+  feature_proposal: 'feature_proposal',
+  behavior_analysis: 'insight',
+  code_implementation: 'changeset',
 } as const
 
 function gatedItems(run: RunStatus, results: RunResults | null): { items: unknown[]; kind: keyof typeof GATED_RESULT_KEYS } | null {
@@ -158,9 +168,11 @@ function ApprovalPanel({
         ...(comment.trim() ? { comment: comment.trim() } : {}),
       })
       const forked = res.forked_runs.length
+      const opened = res.opened_changesets.length
       toast.success(
         `${res.approved_count} approved, ${res.rejected_count} rejected — run resumes` +
-          (forked ? ` · ${forked} PR run(s) forked` : ''),
+          (forked ? ` · ${forked} PR run(s) forked` : '') +
+          (opened ? ` · ${opened} PR(s) opened` : ''),
       )
       onDecided()
     } catch (error) {
@@ -201,7 +213,7 @@ function ApprovalPanel({
               return (
                 <div key={id} className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
-                    <ResultCard item={item} kind={kind === 'behavior_analysis' ? 'insight' : kind!} />
+                    <ResultCard item={item} kind={GATE_CARD_KIND[kind!]} />
                   </div>
                   <div className="flex shrink-0 flex-col gap-1 pt-1">
                     <Button

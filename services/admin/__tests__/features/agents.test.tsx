@@ -62,6 +62,7 @@ const server = setupServer(
       ],
       personalizations: [],
       feature_proposals: [],
+      changesets: [],
     }),
   ),
   http.get('http://localhost:8083/v1/agents/:runId/audit', () =>
@@ -94,6 +95,7 @@ const server = setupServer(
       approved_count: 1,
       rejected_count: 0,
       forked_runs: [],
+      opened_changesets: [],
       message: 'Run approved',
     })
   }),

@@ -148,6 +148,22 @@ async def claim_proposals(
     return claimed
 
 
+async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] | None:
+    """Fetch a single proposal's durable row (title/spec/status) by id.
+
+    The durable ``feature_proposals`` queue is the source of truth (D2), so the
+    approval handler can open a PR for a gated changeset even when the persisted
+    gate item predates the self-describing title/spec fields.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT proposal_id, project_id, title, spec, status FROM feature_proposals "
+            "WHERE proposal_id = $1",
+            proposal_id,
+        )
+    return dict(row) if row is not None else None
+
+
 async def mark_implemented(pool: asyncpg.Pool, proposal_id: str, changeset_id: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(

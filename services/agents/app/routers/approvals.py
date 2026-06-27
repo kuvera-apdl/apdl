@@ -22,7 +22,8 @@ from pydantic import BaseModel, model_validator
 from app.graphs.experiment_design import deploy_experiment
 from app.graphs.supervisor import run_supervisor
 from app.safety.audit import AuditLogger
-from app.store.proposals import enqueue_proposals
+from app.store.proposals import enqueue_proposals, get_proposal, mark_failed, mark_implemented
+from app.tools.code import open_changeset
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -31,6 +32,7 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"])
 _GATE_RESULT_KEY = {
     "experiment_design": "experiment_designs",
     "feature_proposal": "feature_proposals",
+    "code_implementation": "changesets",
 }
 
 
@@ -65,6 +67,9 @@ class ApprovalResponse(BaseModel):
     approved_count: int
     rejected_count: int
     forked_runs: list[str]
+    #: Changeset ids whose draft PR was opened by approving a code_implementation
+    #: gate (Phase 6). Empty for every other gate type.
+    opened_changesets: list[str] = []
     message: str
 
 
@@ -192,8 +197,8 @@ async def approve_action(
         items = await _load_gate_items(pool, run_id, produces)
         approved_items, rejected_items = _resolve_decisions(body, gated_agent, items)
     else:
-        # Gates without a per-item payload (e.g. code_implementation changesets):
-        # record the decision and resume; never re-kick (would duplicate PRs).
+        # An unknown gate with no persisted payload: record the decision and
+        # resume without acting on items.
         approved_items, rejected_items = [], []
 
     gate_status = "approved" if _any_approved(body) else "rejected"
@@ -235,6 +240,7 @@ async def approve_action(
         )
 
     forked_runs: list[str] = []
+    opened_changesets: list[str] = []
     if gated_agent == "experiment_design":
         for design in approved_items:
             try:
@@ -242,6 +248,24 @@ async def approve_action(
                 logger.info("[%s] Deployed approved experiment %s", run_id, _item_id(gated_agent, design))
             except Exception:
                 logger.exception("[%s] Failed to deploy experiment %s", run_id, _item_id(gated_agent, design))
+    elif gated_agent == "code_implementation":
+        # Phase 6: the agent gated BEFORE opening the PR (a draft PR is the
+        # reversible action a human approves). Approval is what actually opens
+        # it — open each approved changeset exactly once; mark a rejected
+        # proposal failed so it never stays wedged at 'implementing'.
+        for changeset in approved_items:
+            opened = await _open_approved_changeset(
+                request.app, run_id=run_id, project_id=project_id, changeset=changeset
+            )
+            if opened:
+                opened_changesets.append(opened)
+        for changeset in rejected_items:
+            proposal_id = str(changeset.get("proposal_id") or "").strip()
+            if proposal_id:
+                try:
+                    await mark_failed(pool, proposal_id, "PR rejected at the approval gate.")
+                except Exception:
+                    logger.exception("[%s] Could not mark rejected proposal %s", run_id, proposal_id)
     elif gated_agent == "feature_proposal":
         for proposal in approved_items:
             try:
@@ -266,6 +290,7 @@ async def approve_action(
             "approved": len(approved_items),
             "rejected": len(rejected_items),
             "forked_runs": forked_runs,
+            "opened_changesets": opened_changesets,
         },
         approval_status=gate_status,
     )
@@ -285,19 +310,92 @@ async def approve_action(
     )
 
     logger.info(
-        "Run %s gate %s decided: %d approved, %d rejected, %d forked",
-        run_id, gated_agent, len(approved_items), len(rejected_items), len(forked_runs),
+        "Run %s gate %s decided: %d approved, %d rejected, %d forked, %d PR(s) opened",
+        run_id, gated_agent, len(approved_items), len(rejected_items),
+        len(forked_runs), len(opened_changesets),
     )
+    opened_note = f" · {len(opened_changesets)} PR(s) opened" if opened_changesets else ""
     return ApprovalResponse(
         run_id=run_id,
         status=gate_status,
         approved_count=len(approved_items),
         rejected_count=len(rejected_items),
         forked_runs=forked_runs,
+        opened_changesets=opened_changesets,
         message=(
             f"{len(approved_items)} approved, {len(rejected_items)} rejected — run resumes."
+            + opened_note
         ),
     )
+
+
+async def _open_approved_changeset(
+    app: Any,
+    *,
+    run_id: str,
+    project_id: str,
+    changeset: dict[str, Any],
+) -> str | None:
+    """Open the draft PR for one approved code_implementation changeset.
+
+    The gated changeset carries the proposal's ``title``/``spec`` (self-describing
+    since Phase 6); older items fall back to the durable ``feature_proposals``
+    row. Best-effort: a codegen failure marks the proposal failed and is logged,
+    never raised — the approval handler must still resume the run.
+    """
+    pool: asyncpg.Pool = app.state.pg_pool
+    proposal_id = str(changeset.get("proposal_id") or "").strip()
+    title = str(changeset.get("title") or "").strip()
+    spec = str(changeset.get("spec") or "").strip()
+
+    if (not title or not spec) and proposal_id:
+        try:
+            proposal = await get_proposal(pool, proposal_id)
+        except Exception:
+            logger.exception("[%s] Could not load proposal %s", run_id, proposal_id)
+            proposal = None
+        if proposal:
+            title = title or str(proposal.get("title") or "")
+            spec = spec or str(proposal.get("spec") or "")
+
+    if not title or not spec:
+        logger.warning(
+            "[%s] Cannot open PR for proposal %r — missing title/spec", run_id, proposal_id
+        )
+        if proposal_id:
+            try:
+                await mark_failed(pool, proposal_id, "Missing title/spec at approval.")
+            except Exception:
+                logger.exception("[%s] Could not mark proposal %s failed", run_id, proposal_id)
+        return None
+
+    try:
+        result = await open_changeset(
+            project_id=project_id,
+            title=title,
+            spec=spec,
+            run_id=run_id,
+            constraints=["All existing tests must pass."],
+        )
+    except Exception as exc:
+        logger.exception("[%s] Failed to open changeset for %s", run_id, proposal_id)
+        if proposal_id:
+            try:
+                await mark_failed(pool, proposal_id, str(exc))
+            except Exception:
+                logger.exception("[%s] Could not mark proposal %s failed", run_id, proposal_id)
+        return None
+
+    changeset_id = str(result.get("changeset_id") or "").strip()
+    if changeset_id and proposal_id:
+        try:
+            await mark_implemented(pool, proposal_id, changeset_id)
+        except Exception:
+            logger.exception("[%s] Could not mark proposal %s implemented", run_id, proposal_id)
+    logger.info(
+        "[%s] Opened changeset %s for approved proposal %s", run_id, changeset_id, proposal_id
+    )
+    return changeset_id or None
 
 
 async def _fork_proposal(

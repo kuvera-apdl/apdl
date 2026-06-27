@@ -111,6 +111,7 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
+      CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}

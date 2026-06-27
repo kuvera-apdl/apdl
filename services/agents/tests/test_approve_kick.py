@@ -326,6 +326,83 @@ async def test_code_implementation_gate_does_not_refork(monkeypatch):
     assert _resumes(kicked)
 
 
+_CHANGESET = {
+    "proposal_id": "p1",
+    "title": "Add dark mode",
+    "spec": "Implement a dark-mode toggle across the app.",
+    "decision": "approve",
+}
+
+
+@pytest.mark.asyncio
+async def test_code_implementation_gate_opens_pr_on_approval(monkeypatch):
+    """Phase 6: approving the changeset gate opens the PR (it was gated before
+    opening) and marks the proposal implemented — without forking a new run."""
+    _, kicked, _ = _patch(monkeypatch)
+    opened: list = []
+    implemented: list = []
+
+    async def fake_open(**kwargs):
+        opened.append(kwargs)
+        return {"changeset_id": "cs_1", "status": "queued"}
+
+    async def fake_implemented(pool, proposal_id, changeset_id):
+        implemented.append((proposal_id, changeset_id))
+
+    monkeypatch.setattr(approvals, "open_changeset", fake_open)
+    monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
+
+    store = {
+        "run": _run_row(phase="code_implementation_approval", analysis_types=("code_implementation",)),
+        "results": [{"output": json.dumps([_CHANGESET])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["approved_count"] == 1 and body["opened_changesets"] == ["cs_1"]
+    assert opened and opened[0]["title"] == "Add dark mode"
+    assert opened[0]["project_id"] == "demo" and opened[0]["run_id"] == "run-1"
+    assert implemented == [("p1", "cs_1")]
+    # Opening a PR is not a new run fork — no kicked run carries a target proposal.
+    assert not any(k.get("target_proposal_id") for k in kicked)
+    assert _resumes(kicked)  # the run still resumes to finalize
+
+
+@pytest.mark.asyncio
+async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
+    """Rejecting the gate opens nothing and unsticks the proposal from 'implementing'."""
+    _, kicked, _ = _patch(monkeypatch)
+    opened: list = []
+    failed: list = []
+
+    async def fake_open(**kwargs):
+        opened.append(kwargs)
+        return {"changeset_id": "cs_1"}
+
+    async def fake_failed(pool, proposal_id, error):
+        failed.append((proposal_id, error))
+
+    monkeypatch.setattr(approvals, "open_changeset", fake_open)
+    monkeypatch.setattr(approvals, "mark_failed", fake_failed)
+
+    store = {
+        "run": _run_row(phase="code_implementation_approval", analysis_types=("code_implementation",)),
+        "results": [{"output": json.dumps([_CHANGESET])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": False})
+
+    assert resp.status_code == 200
+    assert opened == []  # nothing opened on reject
+    assert failed == [("p1", "PR rejected at the approval gate.")]
+    assert resp.json()["opened_changesets"] == []
+    assert _resumes(kicked)
+
+
 @pytest.mark.asyncio
 async def test_not_waiting_approval_is_400(monkeypatch):
     _patch(monkeypatch)
