@@ -115,3 +115,13 @@ def codegen_agent_timeout() -> int:
 def codegen_test_timeout() -> int:
     """Repo test-command timeout, seconds."""
     return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
+
+
+def codegen_max_concurrent_jobs() -> int:
+    """Max changeset jobs allowed to run at once (default 1 — serialize).
+
+    Each job runs a coding agent plus the repo's build/test, which is CPU- and
+    memory-heavy; running several at once thrashes a small host. Jobs over the
+    limit wait in ``queued`` until a slot frees. Floor of 1.
+    """
+    return max(1, int(os.getenv("CODEGEN_MAX_CONCURRENT_JOBS", "1")))

@@ -9,6 +9,7 @@ unexpected fault lands the changeset in ``error``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -16,6 +17,7 @@ from typing import Any
 
 import asyncpg
 
+from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
 from app.models.changeset import ChangesetStatus, TaskSpec
 from app.safety.gates import evaluate_pre_push
@@ -27,6 +29,18 @@ logger = logging.getLogger(__name__)
 
 TokenMinter = Callable[[int, str], Awaitable[str]]
 PROpener = Callable[..., Awaitable[Any]]
+
+#: Serializes changeset jobs to the configured concurrency (default 1). Created
+#: lazily so it binds to the running event loop; safe under a single-threaded
+#: loop (no await between the None check and assignment).
+_job_semaphore: asyncio.Semaphore | None = None
+
+
+def _job_slot() -> asyncio.Semaphore:
+    global _job_semaphore
+    if _job_semaphore is None:
+        _job_semaphore = asyncio.Semaphore(codegen_max_concurrent_jobs())
+    return _job_semaphore
 
 
 def _slug(text: str) -> str:
@@ -48,6 +62,25 @@ def _pr_body(task: TaskSpec) -> str:
 
 
 async def run_changeset_job(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    editor: Editor,
+    mint_token: TokenMinter,
+    open_pr: PROpener,
+) -> None:
+    """Run one changeset, gated by the concurrency slot.
+
+    Excess jobs wait here (the changeset stays ``queued``) until a slot frees, so
+    a small host never runs more coding-agent + build pipelines than it can take.
+    """
+    async with _job_slot():
+        await _execute_changeset_job(
+            pool, changeset_id, editor=editor, mint_token=mint_token, open_pr=open_pr
+        )
+
+
+async def _execute_changeset_job(
     pool: asyncpg.Pool,
     changeset_id: str,
     *,
