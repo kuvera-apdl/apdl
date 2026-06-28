@@ -92,6 +92,18 @@ def codegen_aider_bin() -> str:
     return os.getenv("CODEGEN_AIDER_BIN", "aider")
 
 
+def codegen_cache_prompts() -> bool:
+    """Enable Aider prompt caching (default on).
+
+    Aider's `--cache-prompts` marks the static prefix (system prompt + repo map +
+    read-only files) as cacheable, so the `--auto-test` retry loop re-reads it at
+    ~0.1x instead of full input price on each iteration — a large saving on a
+    context-heavy editor like this. Harmless on models without cache support
+    (Aider only applies it where the provider allows). Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_CACHE_PROMPTS", "true").lower() != "false"
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()

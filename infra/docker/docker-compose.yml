@@ -143,6 +143,10 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
       CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
+      # Aider prompt caching (default on): caches the static prefix (system + repo
+      # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
+      # "false" to disable.
+      CODEGEN_CACHE_PROMPTS: ${CODEGEN_CACHE_PROMPTS:-true}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

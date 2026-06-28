@@ -136,3 +136,41 @@ async def test_implement_never_raises_on_unexpected_fault(monkeypatch, tmp_path)
     assert "kaboom" in (result.error or "")
     # The throwaway workdir is cleaned up even on the failure path.
     assert not list(tmp_path.iterdir())
+
+
+async def _capture_aider_argv(editor: AiderEditor, monkeypatch) -> list[str]:
+    """Drive implement() far enough to capture the aider invocation's argv."""
+    captured: dict = {}
+
+    async def fake_git(*_args, **_kwargs):
+        return 0, ""  # clone / checkout / config all succeed
+
+    async def fake_exec(argv, **_kwargs):
+        captured["argv"] = argv
+        return 1, "stop"  # non-zero bails right after the aider call
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", fake_exec)
+
+    await editor.implement(
+        EditRequest(
+            repo="acme/widgets", base_branch="main", branch="apdl/x",
+            token="ghs_tok", title="x", spec="do a thing",
+        )
+    )
+    return captured["argv"]
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_caches_prompts_by_default(monkeypatch, tmp_path):
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    assert "--cache-prompts" in argv
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_cache_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_CACHE_PROMPTS", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    assert "--cache-prompts" not in argv

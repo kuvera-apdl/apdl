@@ -199,6 +199,7 @@ class AiderEditor:
     ) -> None:
         self._model = model or config.codegen_model()
         self._aider_bin = aider_bin or config.codegen_aider_bin()
+        self._cache_prompts = config.codegen_cache_prompts()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
@@ -249,6 +250,10 @@ class AiderEditor:
             argv = [self._aider_bin, "--model", self._model,
                     "--model-settings-file", str(settings_file),
                     "--yes-always", "--no-stream", "--no-pretty"]
+            if self._cache_prompts:
+                # Cache the static prefix (system + repo map) so the auto-test
+                # retry loop re-reads it at ~0.1x instead of full input price.
+                argv.append("--cache-prompts")
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
             argv += ["--message", _build_message(request.spec, request.constraints)]
