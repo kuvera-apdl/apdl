@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import shutil
@@ -57,14 +58,18 @@ _ENV_PASSTHROUGH: tuple[str, ...] = (
 )
 
 #: Best-effort test-command detection when the connection policy doesn't set one.
+#: package.json is handled separately (see ``_npm_test_cmd``) because it needs a
+#: dependency install and a scripts lookup, not a fixed command.
 _TEST_DETECTORS: tuple[tuple[str, str], ...] = (
     ("pyproject.toml", "python -m pytest -q"),
     ("pytest.ini", "python -m pytest -q"),
     ("tox.ini", "python -m pytest -q"),
-    ("package.json", "npm test --silent"),
     ("go.mod", "go test ./..."),
     ("Cargo.toml", "cargo test"),
 )
+
+#: npm needs deps before any script runs; a fresh clone has no node_modules.
+_NPM_INSTALL = "npm install --no-audit --no-fund --silent"
 
 
 def _basic_auth_header(token: str) -> str:
@@ -109,6 +114,35 @@ def _parse_numstat(numstat: str) -> dict[str, int]:
     return {"files": files, "additions": additions, "deletions": deletions}
 
 
+def _npm_test_cmd(package_json: Path) -> str | None:
+    """Pick an npm verification command from a repo's ``package.json`` scripts.
+
+    A freshly cloned repo has no ``node_modules``, so any npm script must be
+    preceded by an install. Prefer a real ``test`` script; fall back to ``build``
+    (the meaningful gate for apps without unit tests, e.g. a Next.js site); skip
+    with a warning if neither exists — blindly running ``npm test`` on a repo with
+    no ``test`` script fails with an opaque "Missing script" error (which the
+    ``--silent`` flag then swallows, surfacing as an empty failure).
+    """
+    try:
+        scripts = json.loads(
+            package_json.read_text(encoding="utf-8", errors="ignore")
+        ).get("scripts", {})
+    except (OSError, ValueError):
+        scripts = {}
+    if not isinstance(scripts, dict):
+        scripts = {}
+    if scripts.get("test"):
+        return f"{_NPM_INSTALL} && npm test --silent"
+    if scripts.get("build"):
+        return f"{_NPM_INSTALL} && npm run build"
+    logger.warning(
+        "package.json in %s has no 'test' or 'build' script; skipping the verify step.",
+        package_json.parent,
+    )
+    return None
+
+
 def _detect_test_cmd(repo_dir: Path) -> str | None:
     """Best-effort repo test command when the connection policy sets none."""
     makefile = repo_dir / "Makefile"
@@ -119,6 +153,9 @@ def _detect_test_cmd(repo_dir: Path) -> str | None:
             text = ""
         if any(line.startswith("test:") for line in text.splitlines()):
             return "make test"
+    package_json = repo_dir / "package.json"
+    if package_json.is_file():
+        return _npm_test_cmd(package_json)
     for filename, cmd in _TEST_DETECTORS:
         if (repo_dir / filename).is_file():
             return cmd

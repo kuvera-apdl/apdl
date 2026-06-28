@@ -41,14 +41,31 @@ def test_detect_test_cmd_prefers_makefile_test_target(tmp_path):
     assert _detect_test_cmd(tmp_path) == "make test"
 
 
-def test_detect_test_cmd_python_and_node(tmp_path):
+def test_detect_test_cmd_python(tmp_path):
     (tmp_path / "pyproject.toml").write_text("[project]\n")
     assert _detect_test_cmd(tmp_path) == "python -m pytest -q"
 
-    node = tmp_path / "node"
-    node.mkdir()
-    (node / "package.json").write_text("{}")
-    assert _detect_test_cmd(node) == "npm test --silent"
+
+def test_detect_test_cmd_npm_prefers_test_script(tmp_path):
+    # A real `test` script → install then test (fresh clone has no node_modules).
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    assert _detect_test_cmd(tmp_path) == (
+        "npm install --no-audit --no-fund --silent && npm test --silent"
+    )
+
+
+def test_detect_test_cmd_npm_falls_back_to_build(tmp_path):
+    # No `test` script but a `build` (e.g. a Next.js app) → build is the gate.
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "next build"}}')
+    assert _detect_test_cmd(tmp_path) == (
+        "npm install --no-audit --no-fund --silent && npm run build"
+    )
+
+
+def test_detect_test_cmd_npm_skips_without_test_or_build(tmp_path):
+    # No usable script → skip the verify step rather than run a doomed `npm test`.
+    (tmp_path / "package.json").write_text("{}")
+    assert _detect_test_cmd(tmp_path) is None
 
 
 def test_detect_test_cmd_none_when_unknown(tmp_path):

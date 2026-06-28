@@ -2,8 +2,13 @@ FROM python:3.12-slim
 # git: the in-process editor clones/commits with it.
 # docker.io (CLI): only used when CODEGEN_SANDBOX=docker (Option B) to launch the
 #   per-changeset sandbox container via a mounted Docker socket; unused otherwise.
+# nodejs (Node 20 LTS via NodeSource, bundles npm): the default in-process editor
+#   runs the customer repo's build/test command here, so JS/TS repos need a Node
+#   toolchain to satisfy detected commands like `npm install && npm run build`.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git docker.io \
+    && apt-get install -y --no-install-recommends git docker.io curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml .

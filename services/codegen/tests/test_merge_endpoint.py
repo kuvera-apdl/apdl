@@ -20,8 +20,9 @@ def _client(pool: FakePool) -> AsyncClient:
 def _patch_merge(monkeypatch, *, merged: bool = True) -> dict:
     calls: dict = {}
 
-    async def fake_mint(installation_id: int):
+    async def fake_mint(installation_id: int, repo: str):
         calls["installation_id"] = installation_id
+        calls["repo"] = repo
         return InstallationToken(
             token="ghs_tok", expires_at=datetime(2026, 6, 17, tzinfo=timezone.utc)
         )
@@ -30,7 +31,7 @@ def _patch_merge(monkeypatch, *, merged: bool = True) -> dict:
         calls["merge"] = kwargs
         return MergeResult(merged=merged, sha="abc123")
 
-    monkeypatch.setattr(changesets, "mint_installation_token", fake_mint)
+    monkeypatch.setattr(changesets, "mint_token_for_repo", fake_mint)
     monkeypatch.setattr(changesets, "merge_pull_request", fake_merge)
     return calls
 

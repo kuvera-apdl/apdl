@@ -8,7 +8,7 @@ from app.store import changesets as store
 from tests.fakes import FakePool
 
 
-async def _mint(installation_id: int) -> str:
+async def _mint(installation_id: int, repo: str) -> str:
     return "ghs_tok"
 
 

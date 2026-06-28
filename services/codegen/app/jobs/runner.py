@@ -25,7 +25,7 @@ from app.store import connections as connections_store
 
 logger = logging.getLogger(__name__)
 
-TokenMinter = Callable[[int], Awaitable[str]]
+TokenMinter = Callable[[int, str], Awaitable[str]]
 PROpener = Callable[..., Awaitable[Any]]
 
 
@@ -81,7 +81,7 @@ async def run_changeset_job(
 
         base_branch = changeset.base_branch or connection.default_base_branch
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.cloning)
-        token = await mint_token(connection.installation_id)
+        token = await mint_token(connection.installation_id, connection.repo)
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"

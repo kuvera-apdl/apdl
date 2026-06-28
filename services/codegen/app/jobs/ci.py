@@ -19,7 +19,7 @@ from app.store import connections as connections_store
 logger = logging.getLogger(__name__)
 
 CIStatusReader = Callable[[str, str, str], Awaitable[str]]  # (repo, ref, token) -> status
-TokenMinter = Callable[[int], Awaitable[str]]
+TokenMinter = Callable[[int, str], Awaitable[str]]
 ReadyMarker = Callable[..., Awaitable[None]]
 
 #: Statuses from which CI status is still meaningful to (re)sync.
@@ -53,7 +53,7 @@ async def sync_ci_status(
     if connection is None:
         return None
 
-    token = await mint_token(connection.installation_id)
+    token = await mint_token(connection.installation_id, connection.repo)
     status = await get_status(connection.repo, changeset.branch, token)
 
     # Ensure we are in ci_running before recording a terminal CI result (also

@@ -16,7 +16,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from app.auth import require_internal_token
-from app.github.app_auth import mint_installation_token
+from app.github.app_auth import mint_token_for_repo
 from app.github.pulls import merge_pull_request
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
@@ -139,7 +139,9 @@ async def merge_changeset(
     if connection is None:
         raise HTTPException(status_code=404, detail="Repository connection is missing.")
 
-    token = (await mint_installation_token(connection.installation_id)).token
+    token = (
+        await mint_token_for_repo(connection.installation_id, connection.repo)
+    ).token
     merge = await merge_pull_request(
         repo=connection.repo,
         number=changeset.pr_number,

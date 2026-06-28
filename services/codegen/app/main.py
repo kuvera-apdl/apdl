@@ -23,7 +23,7 @@ from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
-from app.github.app_auth import mint_installation_token
+from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
 from app.routers import changesets, connections, webhooks
@@ -32,9 +32,13 @@ from app.store import changesets as changeset_store
 logger = logging.getLogger(__name__)
 
 
-async def _mint_token(installation_id: int) -> str:
-    """Mint a short-lived installation token (string) for the changeset job."""
-    token = await mint_installation_token(installation_id)
+async def _mint_token(installation_id: int, repo: str) -> str:
+    """Mint a short-lived installation token (string) for the changeset job.
+
+    Delegates to :func:`mint_token_for_repo`, which self-heals a stale (rotated)
+    installation id on a 404 by re-resolving it from the repo.
+    """
+    token = await mint_token_for_repo(installation_id, repo)
     return token.token
 
 
