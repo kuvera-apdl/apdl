@@ -137,3 +137,13 @@ def codegen_max_concurrent_jobs() -> int:
     limit wait in ``queued`` until a slot frees. Floor of 1.
     """
     return max(1, int(os.getenv("CODEGEN_MAX_CONCURRENT_JOBS", "1")))
+
+
+def codegen_ci_poll_interval() -> int:
+    """Seconds between CI-status polls (default 60). Set ``0`` to disable.
+
+    Polling is the zero-config trigger that advances open changesets without a
+    public webhook endpoint. Disable it only when the GitHub webhook is wired and
+    you want it to be the sole driver. Floor of 0; any positive value is honored.
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))

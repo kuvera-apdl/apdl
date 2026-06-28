@@ -10,6 +10,8 @@ service, which calls this one over the internal API.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -18,7 +20,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import codegen_agent_timeout, postgres_url
+from app.config import codegen_agent_timeout, codegen_ci_poll_interval, postgres_url
 from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
@@ -26,6 +28,7 @@ from app.editor.container_editor import ContainerAiderEditor
 from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
+from app.jobs.ci_poller import run_ci_poller
 from app.routers import changesets, connections, webhooks
 from app.store import changesets as changeset_store
 
@@ -86,16 +89,33 @@ async def lifespan(application: FastAPI):
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
-    # Dependencies for CI-status sync (driven by the GitHub webhook).
+    # Dependencies for CI-status sync, shared by the poller and the (optional)
+    # GitHub webhook receiver.
     application.state.ci_deps = {
         "get_status": get_ci_status,
         "mint_token": _mint_token,
         "mark_ready": mark_ready_for_review,
     }
 
+    # CI poller: the zero-config trigger that keeps open changesets advancing
+    # without an inbound webhook (the common self-hosted case). Disabled when the
+    # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
+    poller_task: asyncio.Task | None = None
+    poll_interval = codegen_ci_poll_interval()
+    if poll_interval > 0:
+        poller_task = asyncio.create_task(
+            run_ci_poller(pool, interval_seconds=poll_interval, **application.state.ci_deps)
+        )
+    else:
+        logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
+
     logger.info("Codegen service started: PostgreSQL pool and schema initialized")
     yield
 
+    if poller_task is not None:
+        poller_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller_task
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 

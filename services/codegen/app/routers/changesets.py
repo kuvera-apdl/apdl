@@ -173,7 +173,10 @@ async def merge_changeset(
             status_code=409,
             detail=f"Changeset is '{changeset.status.value}', not mergeable.",
         )
-    if changeset.ci_status != "passed":
+    # "passed" = CI green; "none" = the repo has no CI configured, so there is no
+    # gate to clear (sync_ci_status records this). Any other value (pending /
+    # failed / unset) still blocks the merge.
+    if changeset.ci_status not in ("passed", "none"):
         raise HTTPException(status_code=409, detail="Merge requires green CI.")
     if changeset.pr_number is None:
         raise HTTPException(status_code=409, detail="Changeset has no open pull request.")

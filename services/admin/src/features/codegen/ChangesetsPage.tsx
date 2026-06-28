@@ -130,8 +130,11 @@ interface RowProps {
 }
 
 function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert }: RowProps) {
+  // 'passed' = CI green; 'none' = the repo has no CI configured, so there is no
+  // gate to clear and merge is allowed. Anything else (pending/failed) blocks.
   const mergeable =
-    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') && cs.ci_status === 'passed'
+    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
+    (cs.ci_status === 'passed' || cs.ci_status === 'none')
 
   return (
     <TableRow>
@@ -139,7 +142,9 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert }: RowProps) {
       <TableCell>
         <ChangesetStatusPill status={cs.status} />
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">{cs.ci_status ?? '—'}</TableCell>
+      <TableCell className="text-sm text-muted-foreground">
+        {cs.ci_status === 'none' ? 'no CI' : (cs.ci_status ?? '—')}
+      </TableCell>
       <TableCell>
         {cs.pr_url ? (
           <a

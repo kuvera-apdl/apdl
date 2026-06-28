@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 
 import asyncpg
 
-from app.models.changeset import ChangesetStatus
+from app.models.changeset import CI_SYNCABLE_STATUSES, ChangesetStatus
 from app.store import changesets as store
 from app.store import connections as connections_store
 
@@ -21,13 +21,6 @@ logger = logging.getLogger(__name__)
 CIStatusReader = Callable[[str, str, str], Awaitable[str]]  # (repo, ref, token) -> status
 TokenMinter = Callable[[int, str], Awaitable[str]]
 ReadyMarker = Callable[..., Awaitable[None]]
-
-#: Statuses from which CI status is still meaningful to (re)sync.
-_SYNCABLE = {
-    ChangesetStatus.pr_open,
-    ChangesetStatus.ci_running,
-    ChangesetStatus.ci_failed,
-}
 
 
 async def sync_ci_status(
@@ -40,13 +33,16 @@ async def sync_ci_status(
 ) -> str | None:
     """Pull the latest CI status for a changeset's branch and advance its state.
 
-    Returns the resolved CI status (``passed`` / ``failed`` / ``pending``), or
-    ``None`` if the changeset is not in a state where CI applies.
+    Returns the resolved CI status (``passed`` / ``failed`` / ``pending`` /
+    ``none``), or ``None`` if the changeset is not in a state where CI applies.
+    ``none`` means the repo has no CI configured: there is nothing to wait on, so
+    the changeset advances to ``ci_passed`` (recorded as ``ci_status="none"``)
+    and the Merge button is unblocked — a human still makes the merge decision.
     """
     changeset = await store.get_changeset(pool, changeset_id)
     if changeset is None or changeset.branch is None:
         return None
-    if changeset.status not in _SYNCABLE:
+    if changeset.status not in CI_SYNCABLE_STATUSES:
         return None
 
     connection = await connections_store.get_connection(pool, changeset.project_id)
@@ -63,9 +59,11 @@ async def sync_ci_status(
             pool, changeset_id, target=ChangesetStatus.ci_running, ci_status="pending"
         )
 
-    if status == "passed":
+    # "passed" (CI green) and "none" (repo has no CI to wait on) both clear the
+    # CI gate; the ci_status column preserves which one it was for the audit/UI.
+    if status in ("passed", "none"):
         await store.set_ci_status(
-            pool, changeset_id, target=ChangesetStatus.ci_passed, ci_status="passed"
+            pool, changeset_id, target=ChangesetStatus.ci_passed, ci_status=status
         )
         if mark_ready is not None and changeset.pr_node_id:
             try:

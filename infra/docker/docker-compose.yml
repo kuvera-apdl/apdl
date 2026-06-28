@@ -159,6 +159,10 @@ services:
       # build/test (CPU/memory heavy), so the default serializes (1); raise only
       # on a host with cores to spare. Excess jobs wait in `queued`.
       CODEGEN_MAX_CONCURRENT_JOBS: ${CODEGEN_MAX_CONCURRENT_JOBS:-1}
+      # CI-status poll interval (seconds). The zero-config trigger that advances
+      # open changesets without an inbound webhook. Default 60; set 0 to disable
+      # (e.g. once a low-latency GitHub webhook is wired as the sole driver).
+      CODEGEN_CI_POLL_INTERVAL: ${CODEGEN_CI_POLL_INTERVAL:-60}
     # Optional bind mounts — uncomment `volumes:` and the line(s) you need:
     #  * Private key via GITHUB_APP_PRIVATE_KEY_PATH: mounts your .pem read-only
     #    at the SAME path inside the container, so set that path in .env (use an

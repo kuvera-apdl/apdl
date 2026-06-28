@@ -12,7 +12,13 @@ from typing import Any
 
 import asyncpg
 
-from app.models.changeset import Changeset, ChangesetStatus, TaskSpec, assert_transition
+from app.models.changeset import (
+    CI_SYNCABLE_STATUSES,
+    Changeset,
+    ChangesetStatus,
+    TaskSpec,
+    assert_transition,
+)
 from app.store.jsonb import loads_jsonb
 
 #: Pre-PR pipeline states a running job actively drives. The job runner uses
@@ -125,6 +131,26 @@ async def list_changesets(
             limit,
         )
     return [_row_to_changeset(r) for r in rows]
+
+
+async def list_syncable_changeset_ids(pool: asyncpg.Pool) -> list[str]:
+    """Ids of changesets whose CI status a poll can still advance, oldest first.
+
+    The CI poller sweeps these every interval. ``sync_ci_status`` re-checks each
+    one under a row lock, so an id that has moved to a terminal/ineligible state
+    by the time it runs is simply a no-op.
+    """
+    statuses = [s.value for s in CI_SYNCABLE_STATUSES]
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT changeset_id FROM codegen_changesets
+            WHERE status = ANY($1::text[])
+            ORDER BY updated_at ASC
+            """,
+            statuses,
+        )
+    return [r["changeset_id"] for r in rows]
 
 
 async def _guarded_update(

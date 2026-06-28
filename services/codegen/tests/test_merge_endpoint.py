@@ -54,6 +54,36 @@ async def test_merge_succeeds_when_ci_green(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_merge_succeeds_when_repo_has_no_ci(monkeypatch):
+    # ci_status="none" means the repo has no CI to gate on — merge is allowed.
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=7)
+    pool.add_changeset(
+        "cs_none", "demo", status="ci_passed", ci_status="none", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_none/merge", json={})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "merged"
+    assert calls["merge"]["number"] == 5
+
+
+@pytest.mark.asyncio
+async def test_merge_refused_when_ci_pending(monkeypatch):
+    # "pending" must still block — only "passed"/"none" clear the gate.
+    _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_mp", "demo", status="ci_passed", ci_status="pending", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_mp/merge", json={})
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_merge_refused_without_green_ci(monkeypatch):
     _patch_merge(monkeypatch)
     pool = FakePool()

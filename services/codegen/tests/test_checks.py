@@ -6,12 +6,16 @@ import pytest
 from app.github.checks import get_ci_status
 
 
-def _transport(state: str, total: int, check_runs: list[dict]) -> httpx.MockTransport:
+def _transport(
+    state: str, total: int, check_runs: list[dict], *, workflow_count: int = 0
+) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/status"):
             return httpx.Response(200, json={"state": state, "total_count": total})
         if request.url.path.endswith("/check-runs"):
             return httpx.Response(200, json={"check_runs": check_runs})
+        if request.url.path.endswith("/actions/workflows"):
+            return httpx.Response(200, json={"total_count": workflow_count})
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
@@ -51,5 +55,14 @@ async def test_passed_when_all_check_runs_green():
 
 
 @pytest.mark.asyncio
-async def test_pending_when_no_signal_at_all():
-    assert await _status(_transport("pending", 0, [])) == "pending"
+async def test_none_when_no_signal_and_no_workflows():
+    # No statuses, no check-runs, and the repo has zero Actions workflows → the
+    # repo has no CI to wait on, so report "none" (merge is not blocked on CI).
+    assert await _status(_transport("pending", 0, [], workflow_count=0)) == "none"
+
+
+@pytest.mark.asyncio
+async def test_pending_when_no_signal_yet_but_workflows_exist():
+    # No checks reported yet, but the repo HAS workflows — they are most likely
+    # queued (e.g. right after the PR opened), so hold as pending, not "none".
+    assert await _status(_transport("pending", 0, [], workflow_count=2)) == "pending"
