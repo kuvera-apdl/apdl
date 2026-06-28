@@ -1,5 +1,6 @@
 """APDL Config Service -- FastAPI application entry point."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -9,6 +10,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.experiments import expiry
 from app.routers import admin, evaluate, flags, stream
 from app.sse.broadcaster import SSEBroadcaster
 
@@ -339,12 +341,26 @@ async def lifespan(application: FastAPI):
     await broadcaster.start()
     logger.info("SSE broadcaster started")
 
+    # Experiment expiry monitor: completes running experiments past their
+    # end_date (cascading to disable their backing flags). Nothing else acts on
+    # end_date, so without this they run forever.
+    expiry_task = _start_expiry_monitor(pg_pool, redis_client, broadcaster)
+
     # Store in app state
     application.state.pg_pool = pg_pool
     application.state.redis = redis_client
     application.state.broadcaster = broadcaster
+    application.state.expiry_task = expiry_task
 
     yield
+
+    if expiry_task is not None:
+        expiry_task.cancel()
+        try:
+            await expiry_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Experiment expiry monitor stopped")
 
     # Shutdown
     await broadcaster.stop()
@@ -355,6 +371,22 @@ async def lifespan(application: FastAPI):
 
     await pg_pool.close()
     logger.info("PostgreSQL connection pool closed")
+
+
+def _start_expiry_monitor(pg_pool, redis_client, broadcaster) -> asyncio.Task | None:
+    if os.environ.get("EXPERIMENT_EXPIRY_ENABLED", "true").lower() != "true":
+        logger.info("Experiment expiry monitor disabled")
+        return None
+    interval_seconds = int(os.environ.get("EXPERIMENT_EXPIRY_INTERVAL_SECONDS", "300"))
+    logger.info("Starting experiment expiry monitor every %ds", interval_seconds)
+    return asyncio.create_task(
+        expiry.run_expiry_monitor(
+            pg_pool,
+            redis_client,
+            broadcaster,
+            interval_seconds=interval_seconds,
+        )
+    )
 
 
 app = FastAPI(
