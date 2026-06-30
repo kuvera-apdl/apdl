@@ -221,6 +221,11 @@ function ThroughputCard() {
   const [period, setPeriod] = useState<ThroughputPeriod>('today')
   const config = THROUGHPUT_PERIODS[period]
   const isToday = period === 'today'
+  // rollingHourBuckets reads the current UTC hour internally, but the date-string
+  // range deps don't change on a same-day hour rollover — so the rolling window
+  // would lag by a slot until the next refetch. Tick once a minute and fold the
+  // current UTC hour into the memo deps so it recomputes when the hour turns.
+  const hourTick = Math.floor(useNow(60_000) / 3_600_000)
   // "today" is a rolling last-24h window in UTC — the pipeline buckets timestamps
   // in UTC, so the bins line up with the API's bucket strings (and with the UTC
   // clock shown in the header). Week/month stay calendar-date windows.
@@ -256,7 +261,8 @@ function ThroughputCard() {
       isToday
         ? rollingHourBuckets(buckets, 24)
         : densifyBuckets(buckets, range.start_date, range.end_date, config.granularity),
-    [isToday, buckets, range.start_date, range.end_date, config.granularity],
+    // hourTick only matters for the isToday rolling window; harmless otherwise.
+    [isToday, hourTick, buckets, range.start_date, range.end_date, config.granularity],
   )
 
   return (
