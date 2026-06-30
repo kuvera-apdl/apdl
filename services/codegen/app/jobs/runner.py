@@ -33,6 +33,12 @@ PROpener = Callable[..., Awaitable[Any]]
 #: Serializes changeset jobs to the configured concurrency (default 1). Created
 #: lazily so it binds to the running event loop; safe under a single-threaded
 #: loop (no await between the None check and assignment).
+#:
+#: NB: this is a PER-PROCESS limit. It only bounds host load if the service runs
+#: a single uvicorn worker — N workers each get their own semaphore, so effective
+#: concurrency becomes N×limit. The Dockerfile pins ``--workers 1``; if that ever
+#: changes, coordinate the slot out-of-process (Postgres advisory lock / DB
+#: running-count) instead of relying on this.
 _job_semaphore: asyncio.Semaphore | None = None
 
 

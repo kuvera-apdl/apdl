@@ -24,4 +24,8 @@ COPY app/ app/
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser /app
 USER appuser
 EXPOSE 8084
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8084"]
+# Pin a single worker: the job-concurrency limit (jobs/runner.py) is a per-process
+# asyncio.Semaphore, so N workers would multiply effective concurrency to N×limit
+# and defeat the host-protection intent. Keep this 1 unless concurrency is moved
+# out-of-process (e.g. a Postgres advisory lock / DB running-count).
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8084", "--workers", "1"]
