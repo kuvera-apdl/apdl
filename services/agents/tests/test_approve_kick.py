@@ -404,6 +404,49 @@ async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_blanket_approve_skips_safety_halted_changeset(monkeypatch):
+    """A multi-proposal drain can put a safety-halted changeset (decision='halt',
+    already failed) in the same gate as an approvable one. A blanket approve must
+    open ONLY the approvable item and skip the halted one — never open a PR for a
+    changeset that failed safety nor overwrite its failed status."""
+    _, kicked, _ = _patch(monkeypatch)
+    opened: list = []
+    implemented: list = []
+
+    async def fake_open(**kwargs):
+        opened.append(kwargs)
+        return {"changeset_id": "cs_ok", "status": "queued"}
+
+    async def fake_implemented(pool, proposal_id, changeset_id):
+        implemented.append((proposal_id, changeset_id))
+
+    monkeypatch.setattr(approvals, "open_changeset", fake_open)
+    monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
+
+    halted = {
+        "proposal_id": "p2",
+        "title": "Risky change",
+        "spec": "Touches something safety flagged.",
+        "decision": "halt",
+        "safety_result": {"passed": False},
+    }
+    store = {
+        "run": _run_row(phase="code_implementation_approval", analysis_types=("code_implementation",)),
+        "results": [{"output": json.dumps([_CHANGESET, halted])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    # Only the approvable changeset (p1) is opened; the halted p2 is skipped.
+    assert [o["title"] for o in opened] == ["Add dark mode"]
+    assert implemented == [("p1", "cs_ok")]
+    assert resp.json()["opened_changesets"] == ["cs_ok"]
+    assert _resumes(kicked)
+
+
+@pytest.mark.asyncio
 async def test_not_waiting_approval_is_400(monkeypatch):
     _patch(monkeypatch)
     store = {"run": _run_row(status="running"), "results": []}

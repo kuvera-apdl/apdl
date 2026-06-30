@@ -86,6 +86,22 @@ def _parse_config(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _changeset_openable(changeset: dict[str, Any]) -> bool:
+    """True if a code_implementation gate item is safe to open a PR for.
+
+    Only items the agent gated as ``approve`` (passed safety, genuinely awaiting a
+    human) are openable. Safety-halted items (``decision == "halt"`` /
+    ``safety_result.passed is False``) are already failed and must never be opened
+    even if a blanket approve sweeps them up alongside a sibling that is ``approve``.
+    """
+    if str(changeset.get("decision") or "") != "approve":
+        return False
+    safety = changeset.get("safety_result")
+    if isinstance(safety, dict) and safety.get("passed") is False:
+        return False
+    return True
+
+
 def _item_id(gated_agent: str, item: dict[str, Any]) -> str:
     """The stable id used to match a decision to a persisted gate item."""
     if gated_agent == "experiment_design":
@@ -254,6 +270,28 @@ async def approve_action(
         # it — open each approved changeset exactly once; mark a rejected
         # proposal failed so it never stays wedged at 'implementing'.
         for changeset in approved_items:
+            # Only changesets the agent itself decided to 'approve' (passed
+            # safety, awaiting a human) are openable. In a multi-proposal drain a
+            # safety-halted item (decision != "approve", already mark_failed) can
+            # land in the same gate and be swept up by a blanket approve — opening
+            # its PR and overwriting its 'failed' status. Skip and audit those.
+            if not _changeset_openable(changeset):
+                await audit.log(
+                    run_id,
+                    "approval_skipped",
+                    {
+                        "item_id": _item_id(gated_agent, changeset),
+                        "kind": gated_agent,
+                        "reason": "changeset did not pass safety / was not awaiting approval",
+                        "decision": changeset.get("decision"),
+                    },
+                    approval_status="skipped",
+                )
+                logger.warning(
+                    "[%s] Skipped approving changeset %s — decision=%r, not openable",
+                    run_id, _item_id(gated_agent, changeset), changeset.get("decision"),
+                )
+                continue
             opened = await _open_approved_changeset(
                 request.app, run_id=run_id, project_id=project_id, changeset=changeset
             )
