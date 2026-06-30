@@ -79,3 +79,18 @@ def test_invalid_base64_falls_back_to_empty(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_BASE64", "not%%%base64%%%")
     assert config.github_app_private_key() == ""
+
+
+def test_cors_origins_default_to_local_admin(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CORS_ORIGINS", raising=False)
+    origins = config.codegen_cors_origins()
+    assert "http://localhost:5174" in origins
+    assert "*" not in origins  # never wildcard — this service merges PRs
+
+
+def test_cors_origins_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CORS_ORIGINS", "https://admin.example.com, https://ops.example.com ")
+    assert config.codegen_cors_origins() == [
+        "https://admin.example.com",
+        "https://ops.example.com",
+    ]

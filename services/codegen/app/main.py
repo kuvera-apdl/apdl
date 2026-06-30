@@ -20,7 +20,12 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import codegen_agent_timeout, codegen_ci_poll_interval, postgres_url
+from app.config import (
+    codegen_agent_timeout,
+    codegen_ci_poll_interval,
+    codegen_cors_origins,
+    postgres_url,
+)
 from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
@@ -126,13 +131,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# The admin console (localhost:5174) calls these endpoints directly from the
-# browser, so cross-origin requests must be permitted. Starlette reflects the
-# request origin when allow_origins=["*"] and allow_credentials=True, matching
-# the other services (config/query/agents).
+# The admin console calls these endpoints directly from the browser, so CORS
+# must be permitted — but this service opens/merges PRs on customer repos, so it
+# uses an explicit origin allow-list rather than wildcard-with-credentials (which
+# would let any site issue credentialed cross-origin requests). Configure prod
+# origins via CODEGEN_CORS_ORIGINS; defaults to the local admin-console origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=codegen_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

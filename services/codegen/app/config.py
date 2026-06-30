@@ -19,6 +19,24 @@ def postgres_url() -> str:
     return os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
 
 
+# Local dev admin-console origins (Vite). Override in prod via CODEGEN_CORS_ORIGINS.
+_DEFAULT_CORS_ORIGINS = ("http://localhost:5174", "http://localhost:5173")
+
+
+def codegen_cors_origins() -> list[str]:
+    """Explicit allow-list of browser origins permitted to call this service.
+
+    This service opens/merges/abandons PRs on customer repos, so it must NOT use
+    wildcard CORS with credentials: Starlette would reflect any Origin and set
+    Access-Control-Allow-Credentials, letting any site a victim visits issue
+    credentialed cross-origin requests. Read a comma-separated CODEGEN_CORS_ORIGINS
+    in prod; default to the local admin-console origins.
+    """
+    raw = os.getenv("CODEGEN_CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or list(_DEFAULT_CORS_ORIGINS)
+
+
 def internal_token() -> str:
     """Shared internal service token (``X-APDL-Internal-Token``).
 
