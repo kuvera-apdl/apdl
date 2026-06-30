@@ -12,6 +12,7 @@ from typing import Any
 
 import asyncpg
 
+from app.config import codegen_ci_sync_max_age_seconds
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
     Changeset,
@@ -133,22 +134,34 @@ async def list_changesets(
     return [_row_to_changeset(r) for r in rows]
 
 
-async def list_syncable_changeset_ids(pool: asyncpg.Pool) -> list[str]:
+async def list_syncable_changeset_ids(
+    pool: asyncpg.Pool, *, max_age_seconds: int | None = None
+) -> list[str]:
     """Ids of changesets whose CI status a poll can still advance, oldest first.
 
     The CI poller sweeps these every interval. ``sync_ci_status`` re-checks each
     one under a row lock, so an id that has moved to a terminal/ineligible state
     by the time it runs is simply a no-op.
+
+    ``ci_failed`` is syncable (a re-run can flip it green) but is never abandoned
+    automatically, so an age cap (``max_age_seconds``, default from config) drops
+    changesets that haven't moved in a long time — otherwise the failed set grows
+    unbounded and the poller re-mints a token for each one every interval. Pass
+    ``0`` to disable the cap.
     """
+    if max_age_seconds is None:
+        max_age_seconds = codegen_ci_sync_max_age_seconds()
     statuses = [s.value for s in CI_SYNCABLE_STATUSES]
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT changeset_id FROM codegen_changesets
             WHERE status = ANY($1::text[])
+              AND ($2 <= 0 OR updated_at >= now() - $2 * interval '1 second')
             ORDER BY updated_at ASC
             """,
             statuses,
+            max_age_seconds,
         )
     return [r["changeset_id"] for r in rows]
 

@@ -179,6 +179,18 @@ def codegen_ci_poll_interval() -> int:
     return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))
 
 
+def codegen_ci_sync_max_age_seconds() -> int:
+    """Age cap (default 7 days) for what the CI poller re-sweeps.
+
+    list_syncable_changeset_ids includes ci_failed, which is never abandoned
+    automatically — so without a cap the poller re-mints a token and re-queries
+    CI every interval for every changeset that ever failed, a set that only
+    grows. Skip changesets whose updated_at is older than this; a long-dead PR is
+    not going to flip green. Set ``0`` to disable the cap (sweep everything).
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", str(7 * 24 * 3600))))
+
+
 def codegen_ci_none_grace_seconds() -> int:
     """Grace window (default 300s) before a ``none`` CI result clears the gate.
 
