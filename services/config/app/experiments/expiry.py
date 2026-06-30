@@ -39,6 +39,14 @@ def parse_end_date(raw) -> date | None:
     Accepts ``YYYY-MM-DD`` (what the console writes) and full ISO-8601 datetimes
     (which the API also accepts). Anything unparseable is treated as "no end
     date" so a typo can never silently disable an experiment.
+
+    Semantics are date-only by design: an offset datetime is truncated to its
+    *wall-clock* date (``candidate[:10]`` / ``.date()``), not its UTC instant. So
+    an explicit non-UTC offset like ``2026-06-01T20:00:00-08:00`` (UTC 06-02) is
+    read as 06-01, and ``is_expired`` compares it against today's UTC date. This
+    is intended — the console only ever writes ``YYYY-MM-DD`` and ``Z`` datetimes,
+    both of which are unaffected; only hand-supplied non-UTC offsets shift by a
+    day, which is acceptable for a daily expiry sweep.
     """
     if not isinstance(raw, str):
         return None
