@@ -159,3 +159,18 @@ def codegen_ci_poll_interval() -> int:
     you want it to be the sole driver. Floor of 0; any positive value is honored.
     """
     return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))
+
+
+def codegen_ci_none_grace_seconds() -> int:
+    """Grace window (default 300s) before a ``none`` CI result clears the gate.
+
+    ``get_ci_status`` returns ``none`` for "repo has no CI", but commit-status-only
+    CI (classic Travis/CircleCI) reports neither a check-suite nor an Actions
+    workflow until its first status post — so right after a PR opens it can look
+    identical to a no-CI repo. Acting on ``none`` immediately would advance the
+    changeset to ``ci_passed`` (a state never re-synced) and permanently clear the
+    merge gate before that CI ever reports. Holding ``none`` as pending until the
+    changeset has been awaiting CI this long lets a late-arriving status demote it
+    first. Set ``0`` to act on ``none`` immediately (no grace).
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_NONE_GRACE_SECONDS", "300")))

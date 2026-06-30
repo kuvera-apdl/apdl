@@ -7,13 +7,20 @@ from app.github.checks import get_ci_status
 
 
 def _transport(
-    state: str, total: int, check_runs: list[dict], *, workflow_count: int = 0
+    state: str,
+    total: int,
+    check_runs: list[dict],
+    *,
+    workflow_count: int = 0,
+    check_suites: list[dict] | None = None,
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/status"):
             return httpx.Response(200, json={"state": state, "total_count": total})
         if request.url.path.endswith("/check-runs"):
             return httpx.Response(200, json={"check_runs": check_runs})
+        if request.url.path.endswith("/check-suites"):
+            return httpx.Response(200, json={"check_suites": check_suites or []})
         if request.url.path.endswith("/actions/workflows"):
             return httpx.Response(200, json={"total_count": workflow_count})
         return httpx.Response(404)
@@ -66,3 +73,22 @@ async def test_pending_when_no_signal_yet_but_workflows_exist():
     # No checks reported yet, but the repo HAS workflows — they are most likely
     # queued (e.g. right after the PR opened), so hold as pending, not "none".
     assert await _status(_transport("pending", 0, [], workflow_count=2)) == "pending"
+
+
+@pytest.mark.asyncio
+async def test_pending_when_third_party_check_suite_queued_without_workflows():
+    # A third-party Checks app (CircleCI/Buildkite) registers a queued check-suite
+    # before any status/check-run surfaces, and reports via the Checks API, not an
+    # Actions workflow. A non-completed suite must hold as pending, never "none".
+    suites = [{"status": "queued", "conclusion": None}]
+    status = await _status(_transport("pending", 0, [], workflow_count=0, check_suites=suites))
+    assert status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_none_when_only_completed_suites_and_no_workflows():
+    # All check-suites are completed (with no surfaced check-runs/statuses) and the
+    # repo has no workflows — nothing is pending, so "none" is correct.
+    suites = [{"status": "completed", "conclusion": None}]
+    status = await _status(_transport("", 0, [], workflow_count=0, check_suites=suites))
+    assert status == "none"

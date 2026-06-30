@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 
 import asyncpg
 
+from app.config import codegen_ci_none_grace_seconds
 from app.models.changeset import CI_SYNCABLE_STATUSES, ChangesetStatus
 from app.store import changesets as store
 from app.store import connections as connections_store
@@ -21,6 +23,21 @@ logger = logging.getLogger(__name__)
 CIStatusReader = Callable[[str, str, str], Awaitable[str]]  # (repo, ref, token) -> status
 TokenMinter = Callable[[int, str], Awaitable[str]]
 ReadyMarker = Callable[..., Awaitable[None]]
+
+
+def _within_none_grace(awaiting_since: datetime | None) -> bool:
+    """True if a ``none`` result should still be held as pending.
+
+    ``awaiting_since`` is the changeset's ``updated_at`` — when it entered (or last
+    re-entered) the CI-waiting states. Naive timestamps are read as UTC.
+    """
+    grace = codegen_ci_none_grace_seconds()
+    if grace <= 0 or awaiting_since is None:
+        return False
+    if awaiting_since.tzinfo is None:
+        awaiting_since = awaiting_since.replace(tzinfo=timezone.utc)
+    elapsed = (datetime.now(timezone.utc) - awaiting_since).total_seconds()
+    return elapsed < grace
 
 
 async def sync_ci_status(
@@ -51,6 +68,23 @@ async def sync_ci_status(
 
     token = await mint_token(connection.installation_id, connection.repo)
     status = await get_status(connection.repo, changeset.branch, token)
+
+    # A "none" result inside the grace window is most likely "CI hasn't reported
+    # yet" rather than "repo has no CI" — commit-status-only CI registers no
+    # check-suite/workflow until its first post (see config docstring). Hold it as
+    # pending and leave the changeset in ci_running so a late status can still
+    # demote it; only let "none" clear the gate once we've waited long enough.
+    if status == "none" and _within_none_grace(changeset.updated_at):
+        if changeset.status in (ChangesetStatus.pr_open, ChangesetStatus.ci_failed):
+            await store.set_ci_status(
+                pool, changeset_id, target=ChangesetStatus.ci_running, ci_status="pending"
+            )
+        logger.info(
+            "CI reports 'none' for changeset %s but it is within the no-CI grace "
+            "window; holding as pending pending a possible late status.",
+            changeset_id,
+        )
+        return "pending"
 
     # Ensure we are in ci_running before recording a terminal CI result (also
     # handles a re-run after a previous ci_failed).
