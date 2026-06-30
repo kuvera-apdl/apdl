@@ -38,6 +38,7 @@ from pathlib import Path
 
 from app import config
 from app.editor.base import EditRequest, EditResult
+from app.editor.conventions import CONVENTIONS_MD
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,7 @@ class AiderEditor:
         self._model = model or config.codegen_model()
         self._aider_bin = aider_bin or config.codegen_aider_bin()
         self._cache_prompts = config.codegen_cache_prompts()
+        self._conventions = config.codegen_conventions_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
@@ -250,6 +252,14 @@ class AiderEditor:
             argv = [self._aider_bin, "--model", self._model,
                     "--model-settings-file", str(settings_file),
                     "--yes-always", "--no-stream", "--no-pretty"]
+            if self._conventions:
+                # Standing house rules as a read-only context file (kept outside
+                # repo_dir so it never enters the diff). It joins the cacheable
+                # static prefix, so --cache-prompts re-reads it at ~0.1x on each
+                # auto-test retry instead of bloating the per-task message.
+                conventions_file = work / "CONVENTIONS.md"
+                conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
+                argv += ["--read", str(conventions_file)]
             if self._cache_prompts:
                 # Cache the static prefix (system + repo map) so the auto-test
                 # retry loop re-reads it at ~0.1x instead of full input price.

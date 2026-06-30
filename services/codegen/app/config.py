@@ -104,6 +104,18 @@ def codegen_cache_prompts() -> bool:
     return os.getenv("CODEGEN_CACHE_PROMPTS", "true").lower() != "false"
 
 
+def codegen_conventions_enabled() -> bool:
+    """Pass the standing house-rules conventions file to the agent (default on).
+
+    Loads ``app/editor/conventions.py`` as an Aider ``--read`` file so the edit
+    bar is "wired in and exercised" rather than "builds green" (reachability,
+    reuse the repo's SDK/primitives, test the new behavior). It joins the
+    cacheable static prefix, so with ``--cache-prompts`` it costs ~0.1x on each
+    auto-test retry. Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_CONVENTIONS", "true").lower() != "false"
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()

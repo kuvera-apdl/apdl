@@ -6,6 +6,7 @@ invoking ``aider`` or touching the network.
 """
 
 import base64
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,7 @@ from app.editor.aider_editor import (
     _parse_numstat,
 )
 from app.editor.base import EditRequest
+from app.editor.conventions import CONVENTIONS_MD
 
 
 def test_parse_numstat_sums_files_and_lines():
@@ -174,3 +176,27 @@ async def test_aider_argv_omits_cache_when_disabled(monkeypatch, tmp_path):
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     argv = await _capture_aider_argv(editor, monkeypatch)
     assert "--cache-prompts" not in argv
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_reads_conventions_by_default(monkeypatch, tmp_path):
+    # Keep the workdir so the written CONVENTIONS.md survives for assertion
+    # (it is otherwise rmtree'd in the run's finally block).
+    monkeypatch.setenv("CODEGEN_KEEP_WORKDIR", "true")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    # --read points at a CONVENTIONS.md written outside the cloned repo so it
+    # never enters the diff, and the file actually carries the house rules.
+    assert "--read" in argv
+    read_path = Path(argv[argv.index("--read") + 1])
+    assert read_path.name == "CONVENTIONS.md"
+    assert "repo" not in read_path.parts  # outside repo_dir → not in the diff
+    assert read_path.read_text(encoding="utf-8") == CONVENTIONS_MD
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_conventions_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    assert "--read" not in argv
