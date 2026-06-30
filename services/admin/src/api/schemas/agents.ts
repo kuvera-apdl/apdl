@@ -77,6 +77,12 @@ export const approvalRequestSchema = z
     comment: z.string().optional(),
   })
   .strict()
+  // The server requires exactly one of `decisions` / `approved` (400s otherwise).
+  // Enforce it here so a future caller is caught client-side, not after a round
+  // trip. Current callers always send exactly one.
+  .refine((v) => (v.decisions !== undefined) !== (v.approved !== undefined), {
+    message: 'Provide exactly one of `decisions` or `approved`.',
+  })
 
 // The count/array fields were added after the original { run_id, status,
 // message } envelope. Services deploy independently, so the console may briefly

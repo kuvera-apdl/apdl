@@ -2,7 +2,7 @@
 // on the old envelope, and the approval request must enforce exactly-one-of.
 import { describe, expect, test } from 'vitest'
 
-import { approvalResponseSchema } from '../../src/api/schemas/agents'
+import { approvalRequestSchema, approvalResponseSchema } from '../../src/api/schemas/agents'
 
 describe('approvalResponseSchema', () => {
   test('accepts the full current envelope', () => {
@@ -31,5 +31,21 @@ describe('approvalResponseSchema', () => {
     expect(res.success).toBe(true)
     expect(res.data?.approved_count).toBeUndefined()
     expect(res.data?.forked_runs).toBeUndefined()
+  })
+})
+
+describe('approvalRequestSchema', () => {
+  test('accepts exactly one of decisions / approved', () => {
+    expect(approvalRequestSchema.safeParse({ approved: true }).success).toBe(true)
+    expect(
+      approvalRequestSchema.safeParse({ decisions: [{ item_id: 'p1', approved: true }] }).success,
+    ).toBe(true)
+  })
+
+  test('rejects neither and both (mirrors the server 400)', () => {
+    expect(approvalRequestSchema.safeParse({ comment: 'hi' }).success).toBe(false)
+    expect(
+      approvalRequestSchema.safeParse({ approved: true, decisions: [] }).success,
+    ).toBe(false)
   })
 })
