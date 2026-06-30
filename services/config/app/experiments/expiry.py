@@ -106,12 +106,13 @@ async def _complete_experiment(pool, redis, broadcaster, exp: dict) -> bool:
 
     completed = dict(exp)
     completed["status"] = "completed"
-    if not await pg_store.update_experiment(pool, completed):
-        logger.error("expiry: failed to persist completion for %s/%s", project_id, key)
-        return False
 
-    # Cascade: a completed experiment disables its backing flag (full resync so
-    # the flag can never drift from the experiment).
+    # Disable the backing flag FIRST, then persist the experiment — mirroring the
+    # admin update_experiment endpoint, "so a stored experiment never describes a
+    # flag that failed to apply". The old order (persist completed, then disable)
+    # could leave an experiment 'completed' while its flag kept serving: a
+    # concurrent flag edit makes update_flag return None, and since the
+    # experiment is no longer 'running' the sweep never retries → permanent leak.
     backing = await pg_store.get_flag(pool, project_id, flag_key)
     if backing is not None:
         flag_update = experiment_flag.build_flag_update(
@@ -130,24 +131,31 @@ async def _complete_experiment(pool, redis, broadcaster, exp: dict) -> bool:
         merged = {**backing, **updates}
         updated = await pg_store.update_flag(pool, merged, backing["version"])
         if updated is None:
+            # Optimistic-version mismatch from a concurrent edit. Leave the
+            # experiment 'running' and bail so the next sweep retries the whole
+            # cascade — never mark it completed with a still-enabled flag.
             logger.warning(
-                "expiry: backing flag %s/%s changed concurrently; skipped flag sync",
+                "expiry: backing flag %s/%s changed concurrently; will retry next sweep",
                 project_id,
                 flag_key,
             )
-        else:
-            await pg_store.create_flag_audit_entry(
-                pool,
-                project_id=project_id,
-                flag_key=flag_key,
-                action="flag_disabled",
-                actor=EXPIRY_ACTOR,
-                before=backing,
-                after=updated,
-                reason=EXPIRY_REASON,
-            )
-            await redis_cache.invalidate_flags(redis, project_id)
-            await _broadcast_flag(broadcaster, project_id, updated)
+            return False
+        await pg_store.create_flag_audit_entry(
+            pool,
+            project_id=project_id,
+            flag_key=flag_key,
+            action="flag_disabled",
+            actor=EXPIRY_ACTOR,
+            before=backing,
+            after=updated,
+            reason=EXPIRY_REASON,
+        )
+        await redis_cache.invalidate_flags(redis, project_id)
+        await _broadcast_flag(broadcaster, project_id, updated)
+
+    if not await pg_store.update_experiment(pool, completed):
+        logger.error("expiry: failed to persist completion for %s/%s", project_id, key)
+        return False
 
     await redis_cache.invalidate_experiments(redis, project_id)
     if broadcaster is not None:

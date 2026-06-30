@@ -104,6 +104,32 @@ async def test_expire_due_completes_and_disables_backing_flag(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_expire_due_aborts_when_flag_sync_loses_race(monkeypatch):
+    # A concurrent flag edit makes update_flag return None (optimistic-version
+    # mismatch). The experiment must stay 'running' (not persisted as completed)
+    # so the next sweep retries — never a completed experiment with a live flag.
+    exp = _running_experiment("2026-06-01")
+    monkeypatch.setattr(expiry.pg_store, "get_running_experiments_with_end_date",
+                        AsyncMock(return_value=[exp]))
+    update_experiment = AsyncMock(return_value=True)
+    monkeypatch.setattr(expiry.pg_store, "update_experiment", update_experiment)
+    monkeypatch.setattr(expiry.pg_store, "get_flag", AsyncMock(return_value=_backing_flag()))
+    monkeypatch.setattr(expiry.pg_store, "update_flag", AsyncMock(return_value=None))
+    audit = AsyncMock()
+    monkeypatch.setattr(expiry.pg_store, "create_flag_audit_entry", audit)
+    monkeypatch.setattr(expiry.redis_cache, "invalidate_flags", AsyncMock())
+    monkeypatch.setattr(expiry.redis_cache, "invalidate_experiments", AsyncMock())
+
+    completed = await expiry.expire_due_experiments(
+        pool=None, redis=None, broadcaster=AsyncMock(), today=date(2026, 6, 28)
+    )
+
+    assert completed == 0
+    update_experiment.assert_not_awaited()  # never marked completed
+    audit.assert_not_awaited()              # no spurious disable audit
+
+
+@pytest.mark.asyncio
 async def test_expire_due_skips_unexpired(monkeypatch):
     monkeypatch.setattr(expiry.pg_store, "get_running_experiments_with_end_date",
                         AsyncMock(return_value=[_running_experiment("2026-12-31")]))
