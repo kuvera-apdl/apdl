@@ -31,7 +31,7 @@ SELECT
     %({label_param})s AS selector,
     %({prefix}_event_name)s AS event_name,
     count() AS event_count,
-    uniq(if(user_id != '', user_id, anonymous_id)) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -61,7 +61,7 @@ SELECT
     %(selector_label)s AS selector,
     toStartOfInterval(timestamp, INTERVAL {interval}) AS bucket,
     count() AS event_count,
-    uniq(if(user_id != '', user_id, anonymous_id)) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -80,7 +80,7 @@ SELECT
     %(selector_label)s AS selector,
     JSONExtractString(properties, %(property)s) AS property_value,
     count() AS event_count,
-    uniq(if(user_id != '', user_id, anonymous_id)) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -272,7 +272,7 @@ SELECT
     JSONExtractString(properties, %(cohort_property)s) AS cohort_value,
     toStartOfInterval(timestamp, INTERVAL 1 DAY) AS day,
     count() AS event_count,
-    uniq(if(user_id != '', user_id, anonymous_id)) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -293,7 +293,7 @@ def build_event_catalog_query(params: dict[str, Any]) -> str:
 SELECT
     event_name,
     count() AS event_count,
-    uniq(if(user_id != '', user_id, anonymous_id)) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
