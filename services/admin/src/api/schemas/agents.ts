@@ -78,14 +78,19 @@ export const approvalRequestSchema = z
   })
   .strict()
 
+// The count/array fields were added after the original { run_id, status,
+// message } envelope. Services deploy independently, so the console may briefly
+// run against a backend that still returns the old shape — keep these tolerant
+// (optional + default) so a successful approval never trips schema_mismatch and
+// surfaces a spurious "Decision failed" while the run was approved server-side.
 export const approvalResponseSchema = z
   .object({
     run_id: z.string(),
     status: z.string(),
-    approved_count: z.number().int(),
-    rejected_count: z.number().int(),
-    forked_runs: z.array(z.string()),
-    opened_changesets: z.array(z.string()),
+    approved_count: z.number().int().optional(),
+    rejected_count: z.number().int().optional(),
+    forked_runs: z.array(z.string()).optional(),
+    opened_changesets: z.array(z.string()).optional(),
     message: z.string(),
   })
   .strict()

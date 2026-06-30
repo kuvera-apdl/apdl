@@ -167,10 +167,10 @@ function ApprovalPanel({
         ...body,
         ...(comment.trim() ? { comment: comment.trim() } : {}),
       })
-      const forked = res.forked_runs.length
-      const opened = res.opened_changesets.length
+      const forked = (res.forked_runs ?? []).length
+      const opened = (res.opened_changesets ?? []).length
       toast.success(
-        `${res.approved_count} approved, ${res.rejected_count} rejected — run resumes` +
+        `${res.approved_count ?? 0} approved, ${res.rejected_count ?? 0} rejected — run resumes` +
           (forked ? ` · ${forked} PR run(s) forked` : '') +
           (opened ? ` · ${opened} PR(s) opened` : ''),
       )
