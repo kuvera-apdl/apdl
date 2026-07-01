@@ -10,6 +10,7 @@ import { RetentionPage } from '@/features/analytics/RetentionPage'
 import { RunMonitorPage } from '@/features/agents/RunMonitorPage'
 import { RunsPage } from '@/features/agents/RunsPage'
 import { TriggerPage } from '@/features/agents/TriggerPage'
+import { ChangesetDetailPage } from '@/features/codegen/ChangesetDetailPage'
 import { ChangesetsPage } from '@/features/codegen/ChangesetsPage'
 import {
   ExperimentCreatePage,
@@ -62,6 +63,7 @@ export function createRouter() {
             { path: '/agents/trigger', element: <TriggerPage /> },
             { path: '/agents/runs/:runId', element: <RunMonitorPage /> },
             { path: '/codegen', element: <ChangesetsPage /> },
+            { path: '/codegen/:id', element: <ChangesetDetailPage /> },
             { path: '/settings/verify', element: <VerificationPage /> },
             { path: '/system/health', element: <HealthPage /> },
           ],
