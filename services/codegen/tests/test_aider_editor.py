@@ -24,9 +24,31 @@ from app.editor.aider_editor import (
     _parse_numstat,
     _probe_repo,
     _repo_has_test_runner,
+    _tail,
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
+
+
+def test_tail_returns_full_text_when_under_limit():
+    assert _tail("short error", limit=800) == "short error"
+
+
+def test_tail_snaps_to_line_boundary_and_marks_truncation():
+    # A long first line then a clean second line; the tail budget lands inside
+    # the first line, so the excerpt must drop that partial line, not begin
+    # mid-word, and must announce how much was dropped.
+    text = "verification failed: apdl-oss/sdk/dist/apdl.esm.js\n" + "x" * 50 + "\nreal error line"
+    out = _tail(text, limit=20)
+    assert out.startswith("[…truncated ")
+    body = out.split("\n", 1)[1]
+    # No partial leading line survived: the body starts at a real line boundary.
+    assert "apdl-oss/sdk" not in body
+    assert body.endswith("real error line")
+
+
+def test_tail_strips_before_measuring():
+    assert _tail("   hi   ", limit=800) == "hi"
 
 
 def test_parse_numstat_sums_files_and_lines():

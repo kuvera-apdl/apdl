@@ -45,7 +45,33 @@ from app.editor.sdk_reference import detect_sdk_references
 logger = logging.getLogger(__name__)
 
 _DIFF_TEXT_CAP = 1_000_000  # cap the diff text fed to the secret scan (chars)
-_ERR_TAIL = 800  # how much subprocess output to surface on failure
+_ERR_TAIL = 800  # how much subprocess output to surface on a generic failure
+# Verification/test failures are the actionable ``tests_failed`` case an operator
+# reads to fix the change, so they get a much larger budget: a build/test log's
+# real error (failing file, import, assertion, stack) needs room to survive.
+_VERIFY_ERR_TAIL = 6000
+
+
+def _tail(text: str, limit: int = _ERR_TAIL) -> str:
+    """Return the last ``limit`` chars of ``text`` as a clean failure excerpt.
+
+    Two fixes over a bare ``text[-limit:]`` so a surfaced error is actually
+    informative: (1) the slice is snapped to the next line boundary so the
+    excerpt never begins mid-line (which reads as corrupted — e.g. an import
+    path shown as ``s/sdk/dist/...``), and (2) when content is dropped a marker
+    naming how much was truncated is prepended, so a reader knows the head of the
+    log is missing rather than assuming they have the whole story.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    clipped = text[-limit:]
+    # Drop the partial leading line so the excerpt starts on a clean boundary.
+    newline = clipped.find("\n")
+    if 0 <= newline < len(clipped) - 1:
+        clipped = clipped[newline + 1 :]
+    dropped = len(text) - len(clipped)
+    return f"[…truncated {dropped} leading chars of {len(text)}…]\n{clipped}"
 
 # Env vars forwarded to the agent + test subprocesses. LLM access only: the
 # GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
@@ -371,10 +397,10 @@ class AiderEditor:
                 auth_header=header,
             )
             if rc != 0:
-                return fail(f"clone failed: {out.strip()[-_ERR_TAIL:]}")
+                return fail(f"clone failed: {_tail(out)}")
             rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
             if rc != 0:
-                return fail(f"branch failed: {out.strip()[-_ERR_TAIL:]}")
+                return fail(f"branch failed: {_tail(out)}")
             # Local commit identity so Aider's commits succeed without a global config.
             await self._git(repo_dir, ["config", "user.email", "codegen@apdl.dev"])
             await self._git(repo_dir, ["config", "user.name", "APDL Codegen"])
@@ -423,7 +449,7 @@ class AiderEditor:
                 argv, cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout
             )
             if rc != 0:
-                return fail(f"aider exited {rc}: {out.strip()[-_ERR_TAIL:]}")
+                return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
 
             # 4. Verify the change is actually green, outside the agent's control.
             #    Fail closed: a change we could not verify does not get a PR unless
@@ -431,7 +457,9 @@ class AiderEditor:
             if test_cmd:
                 ok, tout = await self._run_tests(repo_dir, test_cmd)
                 if not ok:
-                    return fail(f"verification failed: {tout.strip()[-_ERR_TAIL:]}")
+                    return fail(
+                        f"verification failed (`{test_cmd}`):\n{_tail(tout, _VERIFY_ERR_TAIL)}"
+                    )
             elif self._require_verify:
                 return fail(
                     "no verification command could be established for this repo; "
@@ -452,7 +480,7 @@ class AiderEditor:
             if rc != 0 or not changed_paths:
                 # Surface aider's own output so a no-op edit (e.g. an unreachable
                 # or misnamed model) is diagnosable from the changeset error.
-                return fail(f"The agent produced no changes. aider: {out.strip()[-_ERR_TAIL:]}")
+                return fail(f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}")
             _, numstat = await self._git(repo_dir, ["diff", "--numstat", f"{base}..HEAD"])
             _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
 
@@ -463,7 +491,7 @@ class AiderEditor:
                 auth_header=header,
             )
             if rc != 0:
-                return fail(f"push failed: {out.strip()[-_ERR_TAIL:]}")
+                return fail(f"push failed: {_tail(out)}")
 
             return EditResult(
                 success=True,
