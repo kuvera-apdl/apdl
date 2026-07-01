@@ -111,6 +111,7 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
+      CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
@@ -142,6 +143,10 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
       CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
+      # Aider prompt caching (default on): caches the static prefix (system + repo
+      # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
+      # "false" to disable.
+      CODEGEN_CACHE_PROMPTS: ${CODEGEN_CACHE_PROMPTS:-true}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
@@ -150,6 +155,14 @@ services:
       # image (`make build-codegen-sandbox`) + the Docker socket mounted below.
       CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-}
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
+      # Max changeset jobs to run at once. Each runs a coding agent + the repo's
+      # build/test (CPU/memory heavy), so the default serializes (1); raise only
+      # on a host with cores to spare. Excess jobs wait in `queued`.
+      CODEGEN_MAX_CONCURRENT_JOBS: ${CODEGEN_MAX_CONCURRENT_JOBS:-1}
+      # CI-status poll interval (seconds). The zero-config trigger that advances
+      # open changesets without an inbound webhook. Default 60; set 0 to disable
+      # (e.g. once a low-latency GitHub webhook is wired as the sole driver).
+      CODEGEN_CI_POLL_INTERVAL: ${CODEGEN_CI_POLL_INTERVAL:-60}
     # Optional bind mounts — uncomment `volumes:` and the line(s) you need:
     #  * Private key via GITHUB_APP_PRIVATE_KEY_PATH: mounts your .pem read-only
     #    at the SAME path inside the container, so set that path in .env (use an

@@ -48,7 +48,14 @@ class CodeImplementationAgent(BaseAgent):
         if ctx.autonomy_level <= 1:
             return {"claimed_proposals": []}
         try:
-            claimed = await claim_proposals(ctx.pool, ctx.project_id, self.max_proposals)
+            # A forked run carries target_proposal_id and claims exactly that
+            # proposal (one PR per approval); an unscoped run drains the queue.
+            claimed = await claim_proposals(
+                ctx.pool,
+                ctx.project_id,
+                self.max_proposals,
+                proposal_id=ctx.target_proposal_id,
+            )
         except Exception as exc:
             logger.warning("Could not claim feature proposals: %s", exc)
             claimed = []
@@ -96,14 +103,20 @@ class CodeImplementationAgent(BaseAgent):
         decision = gate_action(ctx.autonomy_level, safety)
         result: dict[str, Any] = {
             "proposal_id": proposal_id,
+            # Carry the spec on the gate item so the approval handler can open
+            # the PR straight from the persisted changeset (Phase 6) without a
+            # re-read, and the console can show what is being approved.
+            "title": title,
+            "spec": spec,
             "decision": decision.value,
             "safety_result": safety,
         }
 
         if decision is not GateDecision.deploy:
             # Suggest-only (L1) or awaiting approval (L2). A safety halt is a
-            # genuine failure; an approval hold leaves the proposal claimed for a
-            # later resume (Phase 6 wires that).
+            # genuine failure; an approval hold leaves the proposal claimed
+            # ('implementing') so the approval handler opens its PR on approval
+            # (Phase 6, see routers/approvals.py).
             if decision is GateDecision.halt and not safety.get("passed", False):
                 await self._safe_fail(ctx, proposal_id, "Failed safety validation.")
             return result

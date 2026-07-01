@@ -288,6 +288,23 @@ function LiveIndicator() {
   )
 }
 
+/** Server-time clock — the analytics pipeline buckets every timestamp in UTC. */
+function UtcClock() {
+  const now = useNow(30_000)
+  const date = new Date(now)
+  const label = `${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')} UTC`
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex cursor-default items-center text-sm tabular-nums text-muted-foreground">
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>Server time — analytics are bucketed in UTC</TooltipContent>
+    </Tooltip>
+  )
+}
+
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
   const next: Record<Theme, Theme> = { light: 'dark', dark: 'system', system: 'light' }
@@ -322,6 +339,7 @@ export function AppShell() {
             ) : null}
           </div>
           <div className="flex items-center gap-3">
+            <UtcClock />
             <LiveIndicator />
             {active ? (
               <span className="hidden text-sm text-muted-foreground md:inline">

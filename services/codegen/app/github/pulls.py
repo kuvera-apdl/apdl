@@ -121,3 +121,22 @@ async def mark_ready_for_review(
             json={"query": query, "variables": {"id": node_id}},
         )
         resp.raise_for_status()
+
+
+async def close_pull_request(
+    *,
+    repo: str,
+    number: int,
+    token: str,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Close a pull request without merging (``PATCH`` state=closed).
+
+    Used by ``/abandon``: the change is being dropped, not landed. GitHub returns
+    200 even if the PR is already closed, so this is safe to call idempotently.
+    The head branch is intentionally left in place (it can be reopened/inspected).
+    """
+    url = f"{github_api_url()}/repos/{repo}/pulls/{number}"
+    async with gh_client(client) as c:
+        resp = await c.patch(url, headers=gh_headers(token), json={"state": "closed"})
+        resp.raise_for_status()

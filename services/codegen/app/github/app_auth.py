@@ -85,3 +85,79 @@ async def mint_installation_token(
 
     expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
     return InstallationToken(token=data["token"], expires_at=expires_at)
+
+
+async def resolve_installation_id(
+    repo: str,
+    *,
+    app_id: str | None = None,
+    private_key_pem: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> int:
+    """Resolve the live installation id for an ``owner/repo`` via an App JWT.
+
+    Installation ids rotate when the App is uninstalled/reinstalled, so a stored
+    id eventually goes stale and 404s on token mint. GitHub's per-repo lookup
+    (``GET /repos/{owner}/{repo}/installation``) always returns the current one,
+    letting a reinstall self-heal instead of erroring every run.
+
+    Args:
+        repo: ``owner/repo`` slug.
+        app_id: Override the configured App ID (used in tests).
+        private_key_pem: Override the configured private key (used in tests).
+        client: Injectable httpx client (used in tests).
+
+    Returns:
+        The current installation id for the repo.
+    """
+    resolved_app_id = app_id or github_app_id()
+    resolved_key = private_key_pem or github_app_private_key()
+    app_jwt = build_app_jwt(resolved_app_id, resolved_key)
+
+    url = f"{github_api_url()}/repos/{repo}/installation"
+    async with gh_client(client, timeout=15.0) as c:
+        resp = await c.get(url, headers=gh_headers(app_jwt))
+        resp.raise_for_status()
+        return int(resp.json()["id"])
+
+
+async def mint_token_for_repo(
+    installation_id: int,
+    repo: str,
+    *,
+    app_id: str | None = None,
+    private_key_pem: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> InstallationToken:
+    """Mint an installation token, self-healing a stale (reinstalled) id.
+
+    Tries the stored ``installation_id`` first (keeping the happy path a single
+    request); on a 404 — the App was uninstalled/reinstalled, rotating the id —
+    it re-resolves the live id for the repo and retries once.
+
+    Args:
+        installation_id: The stored installation id to try first.
+        repo: ``owner/repo`` slug, used to re-resolve a rotated id.
+        app_id: Override the configured App ID (used in tests).
+        private_key_pem: Override the configured private key (used in tests).
+        client: Injectable httpx client (used in tests).
+    """
+    try:
+        return await mint_installation_token(
+            installation_id,
+            app_id=app_id,
+            private_key_pem=private_key_pem,
+            client=client,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            raise
+        live_id = await resolve_installation_id(
+            repo, app_id=app_id, private_key_pem=private_key_pem, client=client
+        )
+        return await mint_installation_token(
+            live_id,
+            app_id=app_id,
+            private_key_pem=private_key_pem,
+            client=client,
+        )

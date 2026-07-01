@@ -116,3 +116,56 @@ async def test_revert_unknown_changeset_404():
     async with _client(FakePool()) as client:
         resp = await client.post("/v1/changesets/cs_nope/revert")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_abandon_open_pr_closes_it_on_github(monkeypatch):
+    """Abandoning a changeset with an open PR closes that PR on GitHub."""
+    import types
+
+    from app.routers import changesets as router_mod
+
+    closed: dict = {}
+
+    async def fake_mint(installation_id, repo):
+        return types.SimpleNamespace(token="tok")
+
+    async def fake_close(*, repo, number, token):
+        closed.update(repo=repo, number=number, token=token)
+
+    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
+    monkeypatch.setattr(router_mod, "close_pull_request", fake_close)
+
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=42)
+    pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_open/abandon")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "abandoned"
+    assert closed == {"repo": "acme/widgets", "number": 7, "token": "tok"}
+
+
+@pytest.mark.asyncio
+async def test_abandon_survives_github_close_failure(monkeypatch):
+    """A GitHub failure while closing the PR is best-effort: abandon still wins."""
+    import types
+
+    from app.routers import changesets as router_mod
+
+    async def fake_mint(installation_id, repo):
+        return types.SimpleNamespace(token="tok")
+
+    async def boom(*, repo, number, token):
+        raise RuntimeError("github down")
+
+    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
+    monkeypatch.setattr(router_mod, "close_pull_request", boom)
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_open/abandon")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "abandoned"

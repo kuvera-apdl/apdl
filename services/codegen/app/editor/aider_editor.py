@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import shutil
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from app import config
 from app.editor.base import EditRequest, EditResult
+from app.editor.conventions import CONVENTIONS_MD
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +59,18 @@ _ENV_PASSTHROUGH: tuple[str, ...] = (
 )
 
 #: Best-effort test-command detection when the connection policy doesn't set one.
+#: package.json is handled separately (see ``_npm_test_cmd``) because it needs a
+#: dependency install and a scripts lookup, not a fixed command.
 _TEST_DETECTORS: tuple[tuple[str, str], ...] = (
     ("pyproject.toml", "python -m pytest -q"),
     ("pytest.ini", "python -m pytest -q"),
     ("tox.ini", "python -m pytest -q"),
-    ("package.json", "npm test --silent"),
     ("go.mod", "go test ./..."),
     ("Cargo.toml", "cargo test"),
 )
+
+#: npm needs deps before any script runs; a fresh clone has no node_modules.
+_NPM_INSTALL = "npm install --no-audit --no-fund --silent"
 
 
 def _basic_auth_header(token: str) -> str:
@@ -109,6 +115,35 @@ def _parse_numstat(numstat: str) -> dict[str, int]:
     return {"files": files, "additions": additions, "deletions": deletions}
 
 
+def _npm_test_cmd(package_json: Path) -> str | None:
+    """Pick an npm verification command from a repo's ``package.json`` scripts.
+
+    A freshly cloned repo has no ``node_modules``, so any npm script must be
+    preceded by an install. Prefer a real ``test`` script; fall back to ``build``
+    (the meaningful gate for apps without unit tests, e.g. a Next.js site); skip
+    with a warning if neither exists — blindly running ``npm test`` on a repo with
+    no ``test`` script fails with an opaque "Missing script" error (which the
+    ``--silent`` flag then swallows, surfacing as an empty failure).
+    """
+    try:
+        scripts = json.loads(
+            package_json.read_text(encoding="utf-8", errors="ignore")
+        ).get("scripts", {})
+    except (OSError, ValueError):
+        scripts = {}
+    if not isinstance(scripts, dict):
+        scripts = {}
+    if scripts.get("test"):
+        return f"{_NPM_INSTALL} && npm test --silent"
+    if scripts.get("build"):
+        return f"{_NPM_INSTALL} && npm run build"
+    logger.warning(
+        "package.json in %s has no 'test' or 'build' script; skipping the verify step.",
+        package_json.parent,
+    )
+    return None
+
+
 def _detect_test_cmd(repo_dir: Path) -> str | None:
     """Best-effort repo test command when the connection policy sets none."""
     makefile = repo_dir / "Makefile"
@@ -119,6 +154,9 @@ def _detect_test_cmd(repo_dir: Path) -> str | None:
             text = ""
         if any(line.startswith("test:") for line in text.splitlines()):
             return "make test"
+    package_json = repo_dir / "package.json"
+    if package_json.is_file():
+        return _npm_test_cmd(package_json)
     for filename, cmd in _TEST_DETECTORS:
         if (repo_dir / filename).is_file():
             return cmd
@@ -162,6 +200,8 @@ class AiderEditor:
     ) -> None:
         self._model = model or config.codegen_model()
         self._aider_bin = aider_bin or config.codegen_aider_bin()
+        self._cache_prompts = config.codegen_cache_prompts()
+        self._conventions = config.codegen_conventions_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
@@ -212,6 +252,18 @@ class AiderEditor:
             argv = [self._aider_bin, "--model", self._model,
                     "--model-settings-file", str(settings_file),
                     "--yes-always", "--no-stream", "--no-pretty"]
+            if self._conventions:
+                # Standing house rules as a read-only context file (kept outside
+                # repo_dir so it never enters the diff). It joins the cacheable
+                # static prefix, so --cache-prompts re-reads it at ~0.1x on each
+                # auto-test retry instead of bloating the per-task message.
+                conventions_file = work / "CONVENTIONS.md"
+                conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
+                argv += ["--read", str(conventions_file)]
+            if self._cache_prompts:
+                # Cache the static prefix (system + repo map) so the auto-test
+                # retry loop re-reads it at ~0.1x instead of full input price.
+                argv.append("--cache-prompts")
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
             argv += ["--message", _build_message(request.spec, request.constraints)]

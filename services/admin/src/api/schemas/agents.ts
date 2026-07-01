@@ -61,17 +61,42 @@ export const runStatusSchema = z
   })
   .strict()
 
-export const approvalRequestSchema = z
+export const itemDecisionSchema = z
   .object({
+    item_id: z.string(),
     approved: z.boolean(),
-    comment: z.string().optional(),
   })
   .strict()
 
+// Per-item batched decisions (one per gated item) OR a legacy whole-gate
+// `approved`. The server requires exactly one; the console sends `decisions`.
+export const approvalRequestSchema = z
+  .object({
+    decisions: z.array(itemDecisionSchema).optional(),
+    approved: z.boolean().optional(),
+    comment: z.string().optional(),
+  })
+  .strict()
+  // The server requires exactly one of `decisions` / `approved` (400s otherwise).
+  // Enforce it here so a future caller is caught client-side, not after a round
+  // trip. Current callers always send exactly one.
+  .refine((v) => (v.decisions !== undefined) !== (v.approved !== undefined), {
+    message: 'Provide exactly one of `decisions` or `approved`.',
+  })
+
+// The count/array fields were added after the original { run_id, status,
+// message } envelope. Services deploy independently, so the console may briefly
+// run against a backend that still returns the old shape — keep these tolerant
+// (optional + default) so a successful approval never trips schema_mismatch and
+// surfaces a spurious "Decision failed" while the run was approved server-side.
 export const approvalResponseSchema = z
   .object({
     run_id: z.string(),
     status: z.string(),
+    approved_count: z.number().int().optional(),
+    rejected_count: z.number().int().optional(),
+    forked_runs: z.array(z.string()).optional(),
+    opened_changesets: z.array(z.string()).optional(),
     message: z.string(),
   })
   .strict()
@@ -93,6 +118,7 @@ export const runResultsSchema = z
     experiment_designs: z.array(z.unknown()),
     personalizations: z.array(z.unknown()),
     feature_proposals: z.array(z.unknown()),
+    changesets: z.array(z.unknown()),
   })
   .strict()
 

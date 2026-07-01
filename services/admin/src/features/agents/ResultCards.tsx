@@ -20,7 +20,7 @@ const PRIORITY_STYLES: Record<string, string> = {
 
 interface ResultCardProps {
   item: unknown
-  kind: 'insight' | 'experiment_design' | 'personalization' | 'feature_proposal'
+  kind: 'insight' | 'experiment_design' | 'personalization' | 'feature_proposal' | 'changeset'
 }
 
 const KIND_TITLE_FIELDS: Record<ResultCardProps['kind'], string[]> = {
@@ -28,6 +28,7 @@ const KIND_TITLE_FIELDS: Record<ResultCardProps['kind'], string[]> = {
   experiment_design: ['hypothesis', 'title', 'name'],
   personalization: ['title', 'name', 'component', 'description'],
   feature_proposal: ['title', 'name'],
+  changeset: ['title', 'name', 'proposal_id'],
 }
 
 const KIND_BODY_FIELDS: Record<ResultCardProps['kind'], string[]> = {
@@ -35,6 +36,7 @@ const KIND_BODY_FIELDS: Record<ResultCardProps['kind'], string[]> = {
   experiment_design: ['description', 'rationale', 'success_metric', 'metric'],
   personalization: ['rationale', 'description', 'change'],
   feature_proposal: ['rationale', 'description'],
+  changeset: ['spec', 'description'],
 }
 
 export function ResultCard({ item, kind }: ResultCardProps) {

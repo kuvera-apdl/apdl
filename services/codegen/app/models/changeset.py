@@ -78,6 +78,13 @@ TERMINAL_STATUSES: frozenset[ChangesetStatus] = frozenset(
     status for status, nxt in ALLOWED_TRANSITIONS.items() if not nxt
 )
 
+#: Statuses from which a CI poll/webhook sync can still advance a changeset (its
+#: PR is open and CI may report or be re-run). The single source of truth shared
+#: by the sync (``jobs.ci``) and the poller's "what to sweep" query (``store``).
+CI_SYNCABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
+    {ChangesetStatus.pr_open, ChangesetStatus.ci_running, ChangesetStatus.ci_failed}
+)
+
 
 class InvalidTransition(ValueError):
     """Raised when a changeset is moved between non-adjacent lifecycle states."""

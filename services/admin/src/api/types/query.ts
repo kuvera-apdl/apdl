@@ -8,6 +8,8 @@ import type {
   breakdownResponseSchema,
   cohortRequestSchema,
   cohortResponseSchema,
+  eventCatalogRequestSchema,
+  eventCatalogResponseSchema,
   eventCountRequestSchema,
   eventCountResponseSchema,
   eventFilterOperatorSchema,
@@ -28,6 +30,8 @@ export type EventFilterOperator = z.infer<typeof eventFilterOperatorSchema>
 export type EventPropertyFilter = z.infer<typeof eventPropertyFilterSchema>
 export type EventSelector = z.infer<typeof eventSelectorSchema>
 export type TimeInterval = z.infer<typeof timeIntervalSchema>
+export type EventCatalogRequest = z.infer<typeof eventCatalogRequestSchema>
+export type EventCatalogResponse = z.infer<typeof eventCatalogResponseSchema>
 export type EventCountRequest = z.infer<typeof eventCountRequestSchema>
 export type EventCountResponse = z.infer<typeof eventCountResponseSchema>
 export type TimeseriesRequest = z.infer<typeof timeseriesRequestSchema>

@@ -22,7 +22,13 @@ from app.safety.audit import AuditLogger
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
-RESULT_KEYS = ("insights", "experiment_designs", "personalizations", "feature_proposals")
+RESULT_KEYS = (
+    "insights",
+    "experiment_designs",
+    "personalizations",
+    "feature_proposals",
+    "changesets",
+)
 
 
 class RunListResponse(BaseModel):
@@ -36,6 +42,7 @@ class RunResults(BaseModel):
     experiment_designs: list[Any]
     personalizations: list[Any]
     feature_proposals: list[Any]
+    changesets: list[Any]
 
 
 class RunAuditResponse(BaseModel):

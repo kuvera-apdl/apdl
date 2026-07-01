@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
@@ -11,6 +12,7 @@ import { RelativeTime } from '@/components/shared/RelativeTime'
 import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 
@@ -21,7 +23,14 @@ import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
-import { COMMON_EVENTS, lastDays } from '@/features/analytics/selectorModel'
+import { EventCombobox } from '@/features/analytics/EventCombobox'
+import { densifyBuckets, rollingHourBuckets } from '@/features/analytics/timeseries'
+import {
+  COMMON_EVENTS,
+  lastDays,
+  todayUtcIso,
+  utcDateRangeForLastHours,
+} from '@/features/analytics/selectorModel'
 import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
 import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
@@ -195,37 +204,92 @@ function LiveStreamCard() {
   )
 }
 
+type ThroughputPeriod = 'today' | 'week' | 'month'
+
+const THROUGHPUT_PERIODS: Record<
+  ThroughputPeriod,
+  { label: string; days: number; interval: '1 HOUR' | '1 DAY'; granularity: 'hour' | 'day'; cadence: string }
+> = {
+  today: { label: 'in the last 24h', days: 1, interval: '1 HOUR', granularity: 'hour', cadence: 'hourly' },
+  week: { label: 'this week', days: 7, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
+  month: { label: 'this month', days: 30, interval: '1 DAY', granularity: 'day', cadence: 'daily' },
+}
+
 function ThroughputCard() {
   const { projectId } = useWorkspace()
+  const [chartEvent, setChartEvent] = useState('page')
+  const [period, setPeriod] = useState<ThroughputPeriod>('today')
+  const config = THROUGHPUT_PERIODS[period]
+  const isToday = period === 'today'
+  // rollingHourBuckets reads the current UTC hour internally, but the date-string
+  // range deps don't change on a same-day hour rollover — so the rolling window
+  // would lag by a slot until the next refetch. Tick once a minute and fold the
+  // current UTC hour into the memo deps so it recomputes when the hour turns.
+  const hourTick = Math.floor(useNow(60_000) / 3_600_000)
+  // "today" is a rolling last-24h window in UTC — the pipeline buckets timestamps
+  // in UTC, so the bins line up with the API's bucket strings (and with the UTC
+  // clock shown in the header). Week/month stay calendar-date windows.
+  const range = isToday ? utcDateRangeForLastHours(24) : lastDays(config.days)
+  // The count API is date-granular and can't express "last 24h"; for today we
+  // count the current UTC day. Week/month count their full date range.
+  const countRange = isToday ? { start_date: todayUtcIso(), end_date: todayUtcIso() } : range
   const tsBody = projectId
     ? {
         project_id: projectId,
-        ...lastDays(2),
-        selector: { event_name: '$pageview', filters: [] },
-        interval: '1 HOUR' as const,
+        ...range,
+        selector: { event_name: chartEvent, filters: [] },
+        interval: config.interval,
       }
     : null
   const tsQuery = useAnalyticsQuery('overview-throughput', tsBody, timeseriesEvents)
   const countBody = projectId
     ? {
         project_id: projectId,
-        ...lastDays(1),
+        ...countRange,
         selectors: COMMON_EVENTS.map((event) => ({ event_name: event, filters: [] })),
       }
     : null
   const countQuery = useAnalyticsQuery('overview-counts', countBody, countEvents)
 
-  const totalToday = countQuery.data?.total_events ?? null
+  const totalEvents = countQuery.data?.total_events ?? null
   const buckets = tsQuery.data?.buckets ?? []
+  // The API returns only slots that had events; fill the gaps so the chart shows
+  // every slot in the window (zeroed where there were none). "today" is a rolling
+  // 24 UTC-hour window; week/month densify across their calendar dates.
+  const filledBuckets = useMemo(
+    () =>
+      isToday
+        ? rollingHourBuckets(buckets, 24)
+        : densifyBuckets(buckets, range.start_date, range.end_date, config.granularity),
+    // hourTick only matters for the isToday rolling window; harmless otherwise.
+    [isToday, hourTick, buckets, range.start_date, range.end_date, config.granularity],
+  )
 
   return (
     <Card className="lg:col-span-2">
       <CardHeader>
         <CardTitle>Event throughput</CardTitle>
-        <CardDescription>
-          {totalToday !== null
-            ? `${totalToday.toLocaleString()} events today across known event names · hourly $pageview below`
-            : 'Hourly $pageview volume (the API has no match-all selector yet — gap G4).'}
+        <CardDescription className="flex flex-wrap items-center gap-1.5">
+          <span>{totalEvents !== null ? `${totalEvents.toLocaleString()} events` : 'Events'}</span>
+          <Select
+            value={period}
+            onChange={(event) => setPeriod(event.target.value as ThroughputPeriod)}
+            className="h-7 w-auto"
+            aria-label="Time period"
+          >
+            <option value="today">today</option>
+            <option value="week">this week</option>
+            <option value="month">this month</option>
+          </Select>
+          <span>across known event names · {config.cadence}</span>
+          <EventCombobox
+            value={chartEvent}
+            onChange={setChartEvent}
+            ariaLabel="Chart event"
+            className="w-44"
+            triggerClassName="h-7"
+          />
+          <span>below</span>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -233,14 +297,30 @@ function ThroughputCard() {
           <Skeleton className="h-48 w-full" />
         ) : tsQuery.error ? (
           <ErrorState error={tsQuery.error} onRetry={() => void tsQuery.refetch()} />
-        ) : buckets.length === 0 && (totalToday === null || totalToday === 0) ? (
-          <EmptyState title="No events in the last 24h" description="Is the SDK wired up?">
-            <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
-              Verify your integration →
-            </Link>
-          </EmptyState>
+        ) : buckets.length === 0 ? (
+          totalEvents !== null && totalEvents > 0 ? (
+            <EmptyState
+              title={`No ${chartEvent || 'matching'} events ${config.label}`}
+              description="Other event types are coming in, but none of this type to chart yet."
+            >
+              <Link to="/analytics/events" className="text-sm font-medium underline underline-offset-4">
+                Explore events →
+              </Link>
+            </EmptyState>
+          ) : (
+            <EmptyState title={`No events ${config.label}`} description="Is the SDK wired up?">
+              <Link to="/settings/verify" className="text-sm font-medium underline underline-offset-4">
+                Verify your integration →
+              </Link>
+            </EmptyState>
+          )
         ) : (
-          <TimeseriesChart buckets={buckets} mode="bar" />
+          <>
+            <p className="mb-2 text-xs text-muted-foreground">
+              {isToday ? 'Rolling last 24 hours · UTC' : 'UTC'}
+            </p>
+            <TimeseriesChart buckets={filledBuckets} mode="bar" />
+          </>
         )}
       </CardContent>
     </Card>

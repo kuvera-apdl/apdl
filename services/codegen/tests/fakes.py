@@ -128,6 +128,16 @@ class FakeConn:
                     row["updated_at"] = _T0
                     swept.append({"changeset_id": row["changeset_id"]})
             return swept
+        if "SELECT changeset_id FROM codegen_changesets" in query and "status = ANY" in query:
+            # list_syncable_changeset_ids: rows whose status is in the given set.
+            wanted = set(args[0])
+            rows = [
+                {"changeset_id": r["changeset_id"]}
+                for r in self.store["changesets"].values()
+                if r["status"] in wanted
+            ]
+            rows.sort(key=lambda r: r["changeset_id"])
+            return rows
         if "FROM codegen_changesets" in query and "WHERE project_id" in query:
             rows = [
                 r for r in self.store["changesets"].values() if r["project_id"] == args[0]

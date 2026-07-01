@@ -20,8 +20,9 @@ def _client(pool: FakePool) -> AsyncClient:
 def _patch_merge(monkeypatch, *, merged: bool = True) -> dict:
     calls: dict = {}
 
-    async def fake_mint(installation_id: int):
+    async def fake_mint(installation_id: int, repo: str):
         calls["installation_id"] = installation_id
+        calls["repo"] = repo
         return InstallationToken(
             token="ghs_tok", expires_at=datetime(2026, 6, 17, tzinfo=timezone.utc)
         )
@@ -30,7 +31,7 @@ def _patch_merge(monkeypatch, *, merged: bool = True) -> dict:
         calls["merge"] = kwargs
         return MergeResult(merged=merged, sha="abc123")
 
-    monkeypatch.setattr(changesets, "mint_installation_token", fake_mint)
+    monkeypatch.setattr(changesets, "mint_token_for_repo", fake_mint)
     monkeypatch.setattr(changesets, "merge_pull_request", fake_merge)
     return calls
 
@@ -50,6 +51,36 @@ async def test_merge_succeeds_when_ci_green(monkeypatch):
     assert calls["merge"]["repo"] == "acme/widgets"
     assert calls["merge"]["number"] == 5
     assert calls["installation_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_merge_succeeds_when_repo_has_no_ci(monkeypatch):
+    # ci_status="none" means the repo has no CI to gate on — merge is allowed.
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=7)
+    pool.add_changeset(
+        "cs_none", "demo", status="ci_passed", ci_status="none", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_none/merge", json={})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "merged"
+    assert calls["merge"]["number"] == 5
+
+
+@pytest.mark.asyncio
+async def test_merge_refused_when_ci_pending(monkeypatch):
+    # "pending" must still block — only "passed"/"none" clear the gate.
+    _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_mp", "demo", status="ci_passed", ci_status="pending", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_mp/merge", json={})
+    assert resp.status_code == 409
 
 
 @pytest.mark.asyncio

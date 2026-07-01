@@ -28,20 +28,71 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
         return data.get("experiments", []) if isinstance(data, dict) else data
 
 
+# Maps loose LLM operators onto the Config service's strict ConditionOperator
+# set. Canonical operators map to themselves; anything not here is dropped.
+_CONDITION_OPERATOR_ALIASES = {
+    "equals": "equals", "not_equals": "not_equals", "gt": "gt", "gte": "gte",
+    "lt": "lt", "lte": "lte", "contains": "contains", "not_contains": "not_contains",
+    "starts_with": "starts_with", "ends_with": "ends_with", "regex": "regex",
+    "in": "in", "not_in": "not_in", "exists": "exists", "not_exists": "not_exists",
+    # common model aliases
+    "eq": "equals", "==": "equals", "equal": "equals",
+    "ne": "not_equals", "neq": "not_equals", "!=": "not_equals", "not_equal": "not_equals",
+    "greater_than": "gt", "greater": "gt",
+    "greater_than_or_equal": "gte", "greater_equal": "gte",
+    "less_than": "lt", "less": "lt", "less_than_or_equal": "lte", "less_equal": "lte",
+    "startswith": "starts_with", "endswith": "ends_with", "matches": "regex",
+    "is_null": "not_exists", "isnull": "not_exists", "null": "not_exists",
+    "is_absent": "not_exists", "absent": "not_exists",
+    "is_not_null": "exists", "isnotnull": "exists", "not_null": "exists",
+    "is_present": "exists", "present": "exists",
+}
+_VALUELESS_OPERATORS = {"exists", "not_exists"}
+
+
+def _canonical_condition(condition: Any) -> dict[str, Any] | None:
+    """Project one loose LLM condition onto the strict ``GateCondition`` shape.
+
+    Keeps only ``attribute``/``operator``/``value`` (the model often adds a
+    ``description``, which the strict schema rejects), maps the operator onto the
+    canonical set, and drops the condition when the operator is unknown or a
+    value-taking operator has no value. ``exists``/``not_exists`` carry no value.
+    """
+    if not isinstance(condition, dict):
+        return None
+    attribute = condition.get("attribute") or condition.get("property") or condition.get("field")
+    if not isinstance(attribute, str) or not attribute.strip():
+        return None
+    operator = _CONDITION_OPERATOR_ALIASES.get(str(condition.get("operator", "equals")).strip().lower())
+    if operator is None:
+        return None
+    clean: dict[str, Any] = {"attribute": attribute.strip(), "operator": operator}
+    if operator not in _VALUELESS_OPERATORS:
+        value = condition.get("value")
+        if value is None:
+            return None
+        clean["value"] = value
+    return clean
+
+
 def _targeting_to_rules(targeting: dict[str, Any] | list | None) -> list[dict[str, Any]]:
     """Canonicalize loose targeting conditions into the flag's GateRule shape.
 
     The experiment-design output expresses targeting as a list of conditions;
-    the Config experiment schema now requires canonical ``GateRule`` objects
-    (each with an ``id`` and a ``rollout``). Matching users are fully included
-    in the experiment; variant split is by weight.
+    the Config experiment schema requires canonical ``GateRule`` objects (each
+    with an ``id`` and a ``rollout``) whose conditions pass the strict
+    ``GateCondition`` validator. Each condition is projected onto that shape
+    (extra fields stripped, operator aliases mapped); conditions that can't be
+    canonicalized are dropped. Matching users are fully included; variant split
+    is by weight.
     """
     if isinstance(targeting, dict):
-        conditions = targeting.get("conditions", [])
+        raw_conditions = targeting.get("conditions", [])
     elif isinstance(targeting, list):
-        conditions = targeting
+        raw_conditions = targeting
     else:
-        conditions = []
+        raw_conditions = []
+    conditions = [c for c in (_canonical_condition(rc) for rc in raw_conditions) if c is not None]
     if not conditions:
         return []
     return [
