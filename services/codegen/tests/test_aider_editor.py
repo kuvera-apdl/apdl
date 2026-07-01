@@ -10,14 +10,20 @@ from pathlib import Path
 
 import pytest
 
+import app.editor.aider_editor as aider_editor
 from app.editor.aider_editor import (
     AiderEditor,
+    _RepoProbe,
     _agent_env,
     _basic_auth_header,
     _build_message,
+    _capability_preamble,
     _detect_test_cmd,
     _model_settings_yaml,
+    _npm_verify_cmd,
     _parse_numstat,
+    _probe_repo,
+    _repo_has_test_runner,
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
@@ -72,6 +78,81 @@ def test_detect_test_cmd_npm_skips_without_test_or_build(tmp_path):
 
 def test_detect_test_cmd_none_when_unknown(tmp_path):
     assert _detect_test_cmd(tmp_path) is None
+
+
+def test_npm_verify_chains_build_and_test_with_typecheck(tmp_path):
+    # test + build present → install, then the build (its own type-check), then test.
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "next build", "test": "vitest run"}}'
+    )
+    assert _npm_verify_cmd(tmp_path / "package.json") == (
+        "npm install --no-audit --no-fund --silent && npm run build && npm test --silent"
+    )
+
+
+def test_npm_verify_adds_tsc_typecheck_when_no_build_script(tmp_path):
+    # A TS repo with tests but no build script still gets a type gate — a missing
+    # import must not slip past unit tests (the PR #7 failure mode).
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    (tmp_path / "tsconfig.json").write_text("{}")
+    assert _npm_verify_cmd(tmp_path / "package.json") == (
+        "npm install --no-audit --no-fund --silent "
+        "&& npx --no-install tsc --noEmit && npm test --silent"
+    )
+
+
+def test_npm_verify_none_when_nothing_to_check(tmp_path):
+    # No build, no tsconfig, no test → nothing meaningful to verify.
+    (tmp_path / "package.json").write_text('{"scripts": {"lint": "eslint"}}')
+    assert _npm_verify_cmd(tmp_path / "package.json") is None
+
+
+def test_has_test_runner_via_test_script(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    assert _repo_has_test_runner(tmp_path) is True
+
+
+def test_has_test_runner_via_dev_dependency(tmp_path):
+    # A runner installed but not scripted still counts as "the repo can test".
+    (tmp_path / "package.json").write_text('{"devDependencies": {"vitest": "^1.0.0"}}')
+    assert _repo_has_test_runner(tmp_path) is True
+
+
+def test_has_test_runner_false_for_next_app_without_tests(tmp_path):
+    # The PR #7 repo shape: build/lint scripts, no runner anywhere.
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "next build", "lint": "eslint"}}'
+    )
+    assert _repo_has_test_runner(tmp_path) is False
+
+
+def test_capability_preamble_warns_when_no_runner():
+    text = _capability_preamble(has_test_runner=False, verify_cmd="npm run build")
+    assert "NO test framework" in text
+    assert "npm run build" in text
+    assert "do NOT import a test library" in text.lower() or "not import a test" in text.lower()
+
+
+def test_capability_preamble_invites_tests_when_runner_present():
+    text = _capability_preamble(has_test_runner=True, verify_cmd="npm test")
+    assert "HAS a test framework" in text
+    assert "ALREADY depends on" in text
+
+
+def test_probe_repo_prefers_override_cmd_but_keeps_repo_runner_signal(tmp_path):
+    # A Next.js app (no runner) with an operator-supplied gate command.
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "next build"}}')
+    probe = _probe_repo(tmp_path, override_cmd="make ci")
+    assert probe.verify_cmd == "make ci"  # override wins as the gate
+    assert probe.has_test_runner is False  # signal still read from the repo
+    assert "NO test framework" in probe.preamble
+
+
+def test_build_message_prepends_preamble():
+    msg = _build_message("Do the thing.", ["keep it small"], preamble="## Context\nrepo has no tests")
+    assert msg.startswith("## Context\nrepo has no tests")
+    assert msg.endswith("Constraints:\n- keep it small")
+    assert "Do the thing." in msg
 
 
 def test_build_message_appends_constraints():
@@ -197,6 +278,126 @@ async def test_aider_argv_reads_conventions_by_default(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_aider_argv_omits_conventions_when_disabled(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
+    # Also silence the SDK reference so the only --read source is conventions.
+    monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     argv = await _capture_aider_argv(editor, monkeypatch)
     assert "--read" not in argv
+
+
+def _fake_probe_with_refs(refs):
+    """A probe with no verify context but the given SDK references."""
+    return _RepoProbe(
+        verify_cmd=None, has_test_runner=False, preamble="", sdk_references=refs
+    )
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_reads_matching_sdk_reference(monkeypatch, tmp_path):
+    # A repo whose manifest calls for the JS SDK gets its reference --read in,
+    # written outside the clone (so it never enters the diff) with the real body.
+    monkeypatch.setenv("CODEGEN_KEEP_WORKDIR", "true")
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _fake_probe_with_refs((("APDL_SDK_JS.md", "JS REF BODY"),)),
+    )
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+
+    read_paths = [Path(argv[i + 1]) for i, a in enumerate(argv) if a == "--read"]
+    js_ref = next(p for p in read_paths if p.name == "APDL_SDK_JS.md")
+    assert "repo" not in js_ref.parts  # outside repo_dir → not in the diff
+    assert js_ref.read_text(encoding="utf-8") == "JS REF BODY"
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_sdk_reference_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _fake_probe_with_refs((("APDL_SDK_JS.md", "JS REF BODY"),)),
+    )
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+
+    read_names = [Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--read"]
+    assert "APDL_SDK_JS.md" not in read_names
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_sdk_reference_when_repo_has_none(monkeypatch, tmp_path):
+    # No APDL SDK in the repo ⇒ no reference attached (the faked clone is empty).
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    read_names = [Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--read"]
+    assert not any(n.startswith("APDL_SDK_") for n in read_names)
+
+
+@pytest.mark.asyncio
+async def test_aider_message_carries_verification_context(monkeypatch, tmp_path):
+    # The per-repo testing reality must reach the agent's message. The clone is
+    # faked (empty), so the probe reports no runner and no verify command.
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    message = argv[argv.index("--message") + 1]
+    assert "Repository verification context" in message
+    assert "NO test framework" in message
+
+
+@pytest.mark.asyncio
+async def test_implement_fails_closed_when_unverifiable(monkeypatch, tmp_path):
+    """No detectable gate + CODEGEN_REQUIRE_VERIFY on ⇒ no PR, clean failure."""
+    monkeypatch.delenv("CODEGEN_REQUIRE_VERIFY", raising=False)  # default: on
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+
+    async def fake_git(*_args, **_kwargs):
+        return 0, ""  # clone / checkout / config succeed
+
+    async def fake_exec(_argv, **_kwargs):
+        return 0, "done"  # aider "succeeds" (empty clone → nothing to verify)
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", fake_exec)
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/widgets", base_branch="main", branch="apdl/x",
+            token="ghs_tok", title="x", spec="do a thing",
+        )
+    )
+
+    assert result.success is False
+    assert "unverified" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_path):
+    """CODEGEN_REQUIRE_VERIFY=false ⇒ the unverifiable-repo path no longer blocks.
+
+    It fails later for a different reason (the faked clone has no diff), proving
+    the fail-closed guard was bypassed rather than the run stopping at it.
+    """
+    monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+
+    async def fake_git(*_args, **_kwargs):
+        return 0, ""
+
+    async def fake_exec(_argv, **_kwargs):
+        return 0, "done"
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", fake_exec)
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/widgets", base_branch="main", branch="apdl/x",
+            token="ghs_tok", title="x", spec="do a thing",
+        )
+    )
+
+    assert result.success is False
+    assert "unverified" not in (result.error or "")
+    assert "no changes" in (result.error or "")

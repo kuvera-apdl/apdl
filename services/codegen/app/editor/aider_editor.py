@@ -34,11 +34,13 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from app import config
 from app.editor.base import EditRequest, EditResult
 from app.editor.conventions import CONVENTIONS_MD
+from app.editor.sdk_reference import detect_sdk_references
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,13 @@ _TEST_DETECTORS: tuple[tuple[str, str], ...] = (
 
 #: npm needs deps before any script runs; a fresh clone has no node_modules.
 _NPM_INSTALL = "npm install --no-audit --no-fund --silent"
+
+#: JS/TS test runners that count as "the repo has a test framework" even when no
+#: ``test`` script is wired up. Used only to shape the agent's guidance (whether
+#: it may add tests), never to run anything.
+_JS_TEST_RUNNERS: tuple[str, ...] = (
+    "vitest", "jest", "mocha", "ava", "@playwright/test", "cypress", "node:test",
+)
 
 
 def _basic_auth_header(token: str) -> str:
@@ -115,60 +124,186 @@ def _parse_numstat(numstat: str) -> dict[str, int]:
     return {"files": files, "additions": additions, "deletions": deletions}
 
 
-def _npm_test_cmd(package_json: Path) -> str | None:
-    """Pick an npm verification command from a repo's ``package.json`` scripts.
-
-    A freshly cloned repo has no ``node_modules``, so any npm script must be
-    preceded by an install. Prefer a real ``test`` script; fall back to ``build``
-    (the meaningful gate for apps without unit tests, e.g. a Next.js site); skip
-    with a warning if neither exists — blindly running ``npm test`` on a repo with
-    no ``test`` script fails with an opaque "Missing script" error (which the
-    ``--silent`` flag then swallows, surfacing as an empty failure).
-    """
+def _npm_scripts(package_json: Path) -> dict:
+    """Return a repo's ``package.json`` ``scripts`` map (empty on any error)."""
     try:
         scripts = json.loads(
             package_json.read_text(encoding="utf-8", errors="ignore")
         ).get("scripts", {})
     except (OSError, ValueError):
         scripts = {}
-    if not isinstance(scripts, dict):
-        scripts = {}
-    if scripts.get("test"):
-        return f"{_NPM_INSTALL} && npm test --silent"
+    return scripts if isinstance(scripts, dict) else {}
+
+
+def _npm_verify_cmd(package_json: Path) -> str | None:
+    """Compose an npm verification command: install, then a type/build gate, then tests.
+
+    A freshly cloned repo has no ``node_modules``, so we install first. We ALWAYS
+    run a type/build gate for a JS/TS repo — a ``test`` script alone does not
+    type-check the whole project, and ``next build`` / ``tsc --noEmit`` reject an
+    unresolved import (e.g. a test file importing a runner the repo never
+    installed) that ``eslint`` and unit tests happily ignore. That gap is exactly
+    how a build-breaking PR ships past a "tests passed" check. Tests run last when
+    a ``test`` script exists. Returns ``None`` only when there is genuinely nothing
+    to verify (no build, no tsconfig, no tests) — the caller decides whether that
+    blocks the PR (see ``codegen_require_verify``).
+    """
+    scripts = _npm_scripts(package_json)
+    steps = [_NPM_INSTALL]
+
+    # Type/build gate: prefer the repo's own build; else a bare tsc --noEmit when
+    # the repo is TypeScript. A JS-only repo with no build has no type gate.
     if scripts.get("build"):
-        return f"{_NPM_INSTALL} && npm run build"
-    logger.warning(
-        "package.json in %s has no 'test' or 'build' script; skipping the verify step.",
-        package_json.parent,
-    )
-    return None
+        steps.append("npm run build")
+    elif (package_json.parent / "tsconfig.json").is_file():
+        steps.append("npx --no-install tsc --noEmit")
+
+    if scripts.get("test"):
+        steps.append("npm test --silent")
+
+    if len(steps) == 1:  # install only → nothing meaningful to verify
+        logger.warning(
+            "package.json in %s has no build/tsconfig/test to verify against.",
+            package_json.parent,
+        )
+        return None
+    return " && ".join(steps)
+
+
+def _makefile_has_test(repo_dir: Path) -> bool:
+    """True when the repo's ``Makefile`` declares a ``test:`` target."""
+    makefile = repo_dir / "Makefile"
+    if not makefile.is_file():
+        return False
+    try:
+        text = makefile.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return any(line.startswith("test:") for line in text.splitlines())
 
 
 def _detect_test_cmd(repo_dir: Path) -> str | None:
-    """Best-effort repo test command when the connection policy sets none."""
-    makefile = repo_dir / "Makefile"
-    if makefile.is_file():
-        try:
-            text = makefile.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            text = ""
-        if any(line.startswith("test:") for line in text.splitlines()):
-            return "make test"
+    """Best-effort repo verification command when the connection policy sets none.
+
+    For a JS/TS repo this is a chained install + type/build gate + tests (see
+    ``_npm_verify_cmd``); for other ecosystems it is the native test command.
+    """
+    if _makefile_has_test(repo_dir):
+        return "make test"
     package_json = repo_dir / "package.json"
     if package_json.is_file():
-        return _npm_test_cmd(package_json)
+        return _npm_verify_cmd(package_json)
     for filename, cmd in _TEST_DETECTORS:
         if (repo_dir / filename).is_file():
             return cmd
     return None
 
 
-def _build_message(spec: str, constraints: list[str]) -> str:
-    """Compose the single headless instruction handed to Aider."""
+def _repo_has_test_runner(repo_dir: Path) -> bool:
+    """Whether the repo already has a test framework the agent may write tests in.
+
+    Shapes the agent's guidance only (never runs anything). For JS/TS: a ``test``
+    script or a known runner in the manifest. For other ecosystems: presence of a
+    pytest/go/cargo config or a Makefile ``test`` target — those detectors are
+    real test commands, so a runner exists.
+    """
+    package_json = repo_dir / "package.json"
+    if package_json.is_file():
+        if _npm_scripts(package_json).get("test"):
+            return True
+        try:
+            data = json.loads(
+                package_json.read_text(encoding="utf-8", errors="ignore")
+            )
+        except (OSError, ValueError):
+            return False
+        deps: dict = {}
+        for key in ("dependencies", "devDependencies"):
+            section = data.get(key)
+            if isinstance(section, dict):
+                deps.update(section)
+        return any(runner in deps for runner in _JS_TEST_RUNNERS)
+    if _makefile_has_test(repo_dir):
+        return True
+    return any((repo_dir / filename).is_file() for filename, _ in _TEST_DETECTORS)
+
+
+def _capability_preamble(has_test_runner: bool, verify_cmd: str | None) -> str:
+    """The per-repo 'testing reality' block prepended to the agent's message.
+
+    Grounds the agent in what this specific repo can run, so it neither fabricates
+    a test framework the repo lacks (which breaks the build) nor skips tests where
+    a runner exists.
+    """
+    lines = ["## Repository verification context (read before writing code)"]
+    if verify_cmd:
+        lines.append(
+            f"Your change is gated on this command passing: `{verify_cmd}`. It "
+            "runs a type/build check and any tests; a change that fails it is "
+            "rejected, not merged. Make sure everything you add passes it."
+        )
+    else:
+        lines.append(
+            "No automated verification command was detected for this repo. Keep "
+            "the change minimal and self-contained."
+        )
+    if has_test_runner:
+        lines.append(
+            "This repo HAS a test framework. Add a test that exercises the new "
+            "behavior, using the framework the repo ALREADY depends on — never a "
+            "different one."
+        )
+    else:
+        lines.append(
+            "This repo has NO test framework configured. Do NOT add test files and "
+            "do NOT import a test library (vitest/jest/pytest/…): the dependency is "
+            "absent, so the import will fail the build/type-check. Rely on the "
+            "verification command above. Only add a runner if it is essential to "
+            "the feature, and then add it to the manifest + lockfile in this change."
+        )
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class _RepoProbe:
+    """What the sandbox learned about a cloned repo before invoking the agent."""
+
+    verify_cmd: str | None
+    has_test_runner: bool
+    preamble: str
+    #: ``(filename, markdown)`` SDK references the repo's manifests call for.
+    sdk_references: tuple[tuple[str, str], ...] = ()
+
+
+def _probe_repo(repo_dir: Path, override_cmd: str | None) -> _RepoProbe:
+    """Resolve the verification command + agent guidance for a cloned repo.
+
+    ``override_cmd`` (the connection policy's ``test_cmd``) wins as the gate when
+    set; the runner-presence signal still comes from the repo so the agent's
+    guidance stays accurate.
+    """
+    verify_cmd = override_cmd or _detect_test_cmd(repo_dir)
+    has_runner = _repo_has_test_runner(repo_dir)
+    return _RepoProbe(
+        verify_cmd=verify_cmd,
+        has_test_runner=has_runner,
+        preamble=_capability_preamble(has_runner, verify_cmd),
+        sdk_references=tuple(detect_sdk_references(repo_dir)),
+    )
+
+
+def _build_message(spec: str, constraints: list[str], preamble: str = "") -> str:
+    """Compose the single headless instruction handed to Aider.
+
+    ``preamble`` (the per-repo verification context) leads the message so the
+    agent reads the repo's testing reality before the task itself.
+    """
     message = spec.strip()
     if constraints:
         bullets = "\n".join(f"- {c}" for c in constraints)
         message = f"{message}\n\nConstraints:\n{bullets}"
+    if preamble.strip():
+        message = f"{preamble.strip()}\n\n{message}"
     return message
 
 
@@ -202,10 +337,12 @@ class AiderEditor:
         self._aider_bin = aider_bin or config.codegen_aider_bin()
         self._cache_prompts = config.codegen_cache_prompts()
         self._conventions = config.codegen_conventions_enabled()
+        self._sdk_reference = config.codegen_sdk_reference_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
         self._test_timeout = config.codegen_test_timeout()
+        self._require_verify = config.codegen_require_verify()
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
@@ -242,8 +379,10 @@ class AiderEditor:
             await self._git(repo_dir, ["config", "user.email", "codegen@apdl.dev"])
             await self._git(repo_dir, ["config", "user.name", "APDL Codegen"])
 
-            # 2. Resolve the test command: connection policy first, then detect.
-            test_cmd = request.test_cmd or _detect_test_cmd(repo_dir)
+            # 2. Probe the repo: resolve the verification command (connection
+            #    policy first, then detect) and the agent-facing testing reality.
+            probe = _probe_repo(repo_dir, request.test_cmd)
+            test_cmd = probe.verify_cmd
 
             # 3. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
@@ -260,27 +399,49 @@ class AiderEditor:
                 conventions_file = work / "CONVENTIONS.md"
                 conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
                 argv += ["--read", str(conventions_file)]
+            if self._sdk_reference:
+                # Language-scoped SDK call-path reference(s) for whichever APDL
+                # SDK the repo depends on. Written outside repo_dir so they never
+                # enter the diff; they give the agent the real track()/identify()
+                # path the SDK (in node_modules / site-packages) hides from the
+                # repo map. Only refs for an SDK actually present are attached.
+                for ref_name, ref_body in probe.sdk_references:
+                    ref_file = work / ref_name
+                    ref_file.write_text(ref_body, encoding="utf-8")
+                    argv += ["--read", str(ref_file)]
             if self._cache_prompts:
                 # Cache the static prefix (system + repo map) so the auto-test
                 # retry loop re-reads it at ~0.1x instead of full input price.
                 argv.append("--cache-prompts")
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
-            argv += ["--message", _build_message(request.spec, request.constraints)]
+            argv += [
+                "--message",
+                _build_message(request.spec, request.constraints, probe.preamble),
+            ]
             rc, out = await self._exec(
                 argv, cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout
             )
             if rc != 0:
                 return fail(f"aider exited {rc}: {out.strip()[-_ERR_TAIL:]}")
 
-            # 4. Verify tests are actually green, outside the agent's control.
+            # 4. Verify the change is actually green, outside the agent's control.
+            #    Fail closed: a change we could not verify does not get a PR unless
+            #    an operator has explicitly opted out (CODEGEN_REQUIRE_VERIFY=false).
             if test_cmd:
                 ok, tout = await self._run_tests(repo_dir, test_cmd)
                 if not ok:
-                    return fail(f"tests failed: {tout.strip()[-_ERR_TAIL:]}")
+                    return fail(f"verification failed: {tout.strip()[-_ERR_TAIL:]}")
+            elif self._require_verify:
+                return fail(
+                    "no verification command could be established for this repo; "
+                    "refusing to open an unverified PR "
+                    "(set CODEGEN_REQUIRE_VERIFY=false to override)"
+                )
             else:
                 logger.warning(
-                    "No test command for %s; opening PR without a verify step.",
+                    "No verify command for %s; opening PR unverified "
+                    "(CODEGEN_REQUIRE_VERIFY=false).",
                     request.repo,
                 )
 

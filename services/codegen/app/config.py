@@ -134,6 +134,20 @@ def codegen_conventions_enabled() -> bool:
     return os.getenv("CODEGEN_CONVENTIONS", "true").lower() != "false"
 
 
+def codegen_sdk_reference_enabled() -> bool:
+    """Attach the APDL SDK integration reference for the repo's SDK (default on).
+
+    Loads ``app/editor/sdk_reference.py`` as an Aider ``--read`` file, but only
+    the reference for an SDK the repo actually depends on (``@apdl-oss/sdk`` for
+    JS, ``apdl`` for Python). The SDK lives in ``node_modules`` / site-packages,
+    which is outside Aider's repo map, so without this the agent cannot see the
+    real ``track``/``identify`` call path and guesses (e.g. a ``window.apdl``
+    global the SDK never reads). It joins the cacheable static prefix like the
+    conventions. Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_SDK_REFERENCE", "true").lower() != "false"
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()
@@ -157,6 +171,19 @@ def codegen_agent_timeout() -> int:
 def codegen_test_timeout() -> int:
     """Repo test-command timeout, seconds."""
     return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
+
+
+def codegen_require_verify() -> bool:
+    """Refuse to open a PR that could not be verified locally (default on).
+
+    When on (the default), a changeset for which no verification command could be
+    established — no test/build/typecheck gate for the repo — fails as
+    ``tests_failed`` instead of opening an unverified PR. This is the fail-closed
+    posture: an unverifiable change is worse than no change, and a green-looking
+    draft with a broken build erodes trust in the loop. Set to "false" only for
+    exotic repos with no detectable gate, where a human reviews every PR.
+    """
+    return os.getenv("CODEGEN_REQUIRE_VERIFY", "true").lower() != "false"
 
 
 def codegen_max_concurrent_jobs() -> int:
