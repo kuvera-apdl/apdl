@@ -29,18 +29,28 @@ This repo depends on `@apdl-oss/sdk`. Emit analytics through THIS SDK. Every
 call below enqueues to the SDK's own transport → the ingestion backend and is
 tagged with the SDK's resolved identity, so events join the app's identity graph.
 
-## Emitting — use one of these, nothing else
-- Module singleton (simplest for a new call site; auto-inits from env config):
+## Emitting — get the client via `APDL.init`, nothing else
+The package's exported entrypoint is the `APDL` class. There is NO lowercase
+`apdl` module-singleton export in the published SDK — `import { apdl }` resolves
+to nothing and FAILS the build. `APDL.init()` is an idempotent singleton:
+repeated calls resolve the SAME client instance (keyed by the env client key), so
+calling it at a new call site REUSES the app's existing client rather than
+creating a second one. It is SSR-safe (returns an inert no-op on the server) and
+falls back to env config, so a bare `APDL.init()` needs no arguments. Never
+construct `APDLClient` by hand.
+
   ```ts
-  import { apdl } from '@apdl-oss/sdk';
-  apdl.track('event_name', { key: 'value' }); // custom event
-  apdl.identify(userId, { plan: 'pro' });      // set identity + traits
-  apdl.page('/route', { section: 'home' });    // pageview
-  apdl.getVariant('flag_key');                 // feature-flag / experiment variant
+  import { APDL } from '@apdl-oss/sdk';
+  const apdl = APDL.init();                    // reuses the app's env-configured client
+  apdl.track('event_name', { key: 'value' });  // custom event
+  apdl.identify(userId, { plan: 'pro' });       // set identity + traits
+  apdl.page('/route', { section: 'home' });     // pageview
+  apdl.getVariant('flag_key');                  // feature-flag / experiment variant
   ```
-- Explicit instance: apps usually init once in a bootstrap component (e.g.
-  `APDLInit` calling `APDL.init({ endpoint, auth, ... })`). Reuse that client and
-  call the same methods on it — do NOT call `APDL.init` a second time.
+
+Apps usually init once in a bootstrap component (e.g. `APDLInit` calling
+`APDL.init({ endpoint, auth, ... })`); a bare `APDL.init()` elsewhere returns
+that same instance, so reuse it freely — do NOT re-pass config or open a client.
 
 Client surface (`APDLClient`): `track`, `identify`, `group`, `page`, `reset`,
 `getVariant`, `getVariantDetails`, `onVariantChange`, `shutdown`.
@@ -51,7 +61,7 @@ Client surface (`APDLClient`): `track`, `identify`, `group`, `page`, `reset`,
   and never hand-roll `fetch`/`sendBeacon` to the ingestion URL. The SDK does not
   read those sinks; such events reach no backend and carry no identity.
 - If an existing app helper (e.g. a local `trackEvent`) is the intended path,
-  FIRST confirm it terminates in `apdl.track` / an `APDL.init` client. If it
+  FIRST confirm it terminates in an `APDL.init` client's `track`. If it
   writes to a `window.*` global instead, it is broken — call the SDK directly.
 - A test that asserts emission should spy on the SDK's `track` (or the client
   returned by `APDL.init`), never on a `window` global.
