@@ -155,7 +155,7 @@ async def enqueue_proposals(
                     not spec,
                 )
                 continue
-            await conn.execute(
+            status = await conn.execute(
                 """
                 INSERT INTO feature_proposals
                     (proposal_id, project_id, run_id, status, title, spec, priority)
@@ -169,7 +169,10 @@ async def enqueue_proposals(
                 spec,
                 str(proposal.get("priority") or ""),
             )
-            inserted += 1
+            # "INSERT 0 0" means the row already existed (conflict skipped) —
+            # counting it would make the return value lie on retries.
+            if status.endswith(" 1"):
+                inserted += 1
     return inserted
 
 

@@ -16,7 +16,29 @@ logger = logging.getLogger(__name__)
 
 # bge-small-en-v1.5 ships as ONNX via fastembed and emits 384-dim vectors.
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-EMBEDDING_DIMENSIONS = 384
+
+#: Known fastembed models → vector width. The dimension MUST track the model:
+#: the agent_memory column is declared/migrated from this constant, so a model
+#: change with a stale width breaks every store()/search() at runtime.
+_MODEL_DIMENSIONS = {
+    "BAAI/bge-small-en-v1.5": 384,
+    "BAAI/bge-base-en-v1.5": 768,
+    "BAAI/bge-large-en-v1.5": 1024,
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "intfloat/multilingual-e5-large": 1024,
+}
+
+if os.getenv("EMBEDDING_DIMENSIONS"):
+    EMBEDDING_DIMENSIONS = int(os.environ["EMBEDDING_DIMENSIONS"])
+elif EMBEDDING_MODEL in _MODEL_DIMENSIONS:
+    EMBEDDING_DIMENSIONS = _MODEL_DIMENSIONS[EMBEDDING_MODEL]
+else:
+    # Fail fast at import: a silently-wrong width would surface later as a
+    # pgvector dimension mismatch on every memory operation.
+    raise RuntimeError(
+        f"Unknown EMBEDDING_MODEL {EMBEDDING_MODEL!r}: set EMBEDDING_DIMENSIONS "
+        f"explicitly, or use one of {sorted(_MODEL_DIMENSIONS)}"
+    )
 _CACHE_DIR = os.getenv("FASTEMBED_CACHE_DIR", "/app/.fastembed_cache")
 
 _model: Any = None
