@@ -83,6 +83,21 @@ def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
         flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
 
 
+def _designed_traffic_percentage(flag_config: dict[str, Any]) -> float:
+    """The traffic share the safety validator judged: the design's fallthrough
+    rollout percentage. Deploying at a hardcoded 100% while the validator
+    computed blast radius from this number would void the check entirely.
+    Absent/malformed designs deploy at 100% — exactly what the validator
+    assumes when no rollout is specified.
+    """
+    fallthrough = flag_config.get("fallthrough")
+    rollout = fallthrough.get("rollout") if isinstance(fallthrough, dict) else None
+    percentage = rollout.get("percentage") if isinstance(rollout, dict) else None
+    if isinstance(percentage, int | float) and not isinstance(percentage, bool):
+        return float(min(max(percentage, 0.0), 100.0))
+    return 100.0
+
+
 async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
     """Create a running experiment (and its canonical backing flag) from a design.
 
@@ -92,6 +107,8 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
     """
     try:
         flag_config = experiment.get("flag_config", {})
+        if not isinstance(flag_config, dict):
+            flag_config = {}
         experiment_id = experiment.get("experiment_id", "")
         flag_key = flag_config.get("key") or experiment_id
         variants = experiment.get("variants") or flag_config.get("variants", [])
@@ -108,6 +125,7 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
             targeting=experiment.get("targeting"),
             estimated_duration_days=experiment.get("estimated_duration_days", 14),
             flag_key=flag_key,
+            traffic_percentage=_designed_traffic_percentage(flag_config),
         )
         logger.info("Experiment %s deployed successfully", experiment_id)
         return True

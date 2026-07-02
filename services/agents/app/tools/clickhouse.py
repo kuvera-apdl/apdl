@@ -109,6 +109,13 @@ async def query_timeseries(
         end_date: End date (YYYY-MM-DD).
         interval: Bucket interval — "1 HOUR", "1 DAY", "1 WEEK", or "1 MONTH".
     """
+    # Allowlist at this boundary: interval is often LLM-authored and plausibly
+    # ends up interpolated into SQL downstream in the query service.
+    allowed = {"1 HOUR", "1 DAY", "1 WEEK", "1 MONTH"}
+    if interval.upper() not in allowed:
+        interval = "1 DAY"
+    else:
+        interval = interval.upper()
     return await _post("/v1/query/events/timeseries", {
         "project_id": project_id,
         "selector": selector,

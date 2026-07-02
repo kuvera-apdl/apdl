@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -115,6 +116,7 @@ async def create_experiment_config(
     targeting: dict[str, Any] | None = None,
     estimated_duration_days: int = 14,
     flag_key: str | None = None,
+    traffic_percentage: float = 100.0,
 ) -> dict[str, Any]:
     """Create a running experiment via the Config service.
 
@@ -133,6 +135,10 @@ async def create_experiment_config(
         targeting: User targeting conditions.
         estimated_duration_days: Expected experiment runtime.
         flag_key: Backing flag key to use (defaults to experiment_id).
+        traffic_percentage: Share of traffic the backing flag exposes to the
+            experiment. Must be the same number the safety validator judged
+            (the design's fallthrough rollout) — deploying at a hardcoded 100%
+            would void the blast-radius check.
 
     Returns:
         The created experiment configuration.
@@ -143,7 +149,7 @@ async def create_experiment_config(
         "status": "running",
         "description": hypothesis,
         "variants": variants,
-        "traffic_percentage": 100.0,
+        "traffic_percentage": traffic_percentage,
     }
     if isinstance(primary_metric, dict) and primary_metric.get("event"):
         payload["primary_metric"] = {
@@ -199,7 +205,7 @@ async def calculate_sample_size(
 async def get_experiment_results(
     experiment_id: str,
     metric: str,
-    project_id: str = "default",
+    project_id: str,
     method: str = "frequentist",
     flag_key: str | None = None,
 ) -> dict[str, Any]:
@@ -220,7 +226,7 @@ async def get_experiment_results(
     """
     async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
         resp = await client.get(
-            f"/v1/query/experiment/{experiment_id}",
+            f"/v1/query/experiment/{quote(experiment_id, safe='')}",
             params={
                 "metric": metric,
                 "method": method,
@@ -251,18 +257,25 @@ class _AnalyzerRef:
 
 
 class _InlineAnalyzer:
-    """Minimal sample-size calculator for use within the agents service."""
+    """Minimal sample-size calculator for use within the agents service.
+
+    Stdlib only — scipy is not a dependency of this service, so the previous
+    ``from scipy import stats`` raised ModuleNotFoundError on first use.
+    """
 
     def calculate_sample_size(
         self, baseline_rate: float, mde: float,
         alpha: float = 0.05, power: float = 0.8,
     ) -> int:
         import math
-        from scipy import stats as sp_stats
-        p1, p2 = baseline_rate, baseline_rate + mde
+        from statistics import NormalDist
+
+        p1 = min(max(baseline_rate, 0.0), 1.0)
+        # Clamp so baseline_rate + mde > 1 doesn't put a negative under sqrt.
+        p2 = min(max(p1 + mde, 0.0), 1.0)
         p_bar = (p1 + p2) / 2.0
-        z_alpha = sp_stats.norm.ppf(1 - alpha / 2)
-        z_beta = sp_stats.norm.ppf(power)
+        z_alpha = NormalDist().inv_cdf(1 - alpha / 2)
+        z_beta = NormalDist().inv_cdf(power)
         num = (z_alpha * math.sqrt(2 * p_bar * (1 - p_bar))
                + z_beta * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
         return math.ceil(num / (mde ** 2)) if mde != 0 else 0
