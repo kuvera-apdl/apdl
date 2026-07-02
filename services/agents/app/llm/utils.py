@@ -9,16 +9,15 @@ from typing import Any
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
-def _balanced_region(text: str) -> str | None:
-    """Extract the first balanced ``{...}`` or ``[...]`` region, if any.
+def _balanced_region(text: str, open_ch: str) -> str | None:
+    """Extract the first balanced ``open_ch...close`` region, if any.
 
     Handles prose-wrapped JSON ("Here is the JSON: {...} hope that helps").
     Brace counting ignores brackets inside string literals.
     """
-    start = min((i for i in (text.find("{"), text.find("[")) if i != -1), default=-1)
+    start = text.find(open_ch)
     if start == -1:
         return None
-    open_ch = text[start]
     close_ch = "}" if open_ch == "{" else "]"
     depth = 0
     in_str = False
@@ -56,9 +55,12 @@ def parse_llm_json(response: str, fallback: Any = None) -> Any:
 
     candidates = [response]
     candidates.extend(m.group(1) for m in _FENCE_RE.finditer(response))
-    region = _balanced_region(response)
-    if region is not None:
-        candidates.append(region)
+    # Prefer an object region over an array one: prose like "Sources [1] say…
+    # {...}" contains a valid-JSON "[1]" that would otherwise win.
+    for open_ch in ("{", "["):
+        region = _balanced_region(response, open_ch)
+        if region is not None:
+            candidates.append(region)
 
     for candidate in candidates:
         try:
