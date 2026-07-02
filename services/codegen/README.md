@@ -33,6 +33,7 @@ All `/v1` endpoints require the `X-APDL-Internal-Token` header when
 |---|---|---|
 | POST | `/v1/connections` | Register/update a project's repo binding (`installation_id`, `repo`) |
 | GET | `/v1/connections/{project_id}` | Resolve a project's repo binding |
+| GET | `/v1/connections/{project_id}/repo-context` | Compact repo facts (stack, layout, scripts) for planning agents |
 | POST | `/v1/changesets` | Enqueue a changeset for a connected project |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
 | GET | `/v1/changesets/{id}` | Fetch one changeset |
