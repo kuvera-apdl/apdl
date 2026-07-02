@@ -54,21 +54,23 @@ def _detect_framework(dependencies: set[str], paths: list[str]) -> str:
     return "unknown"
 
 
-def _filtered_paths(tree: list[dict]) -> tuple[list[str], bool]:
-    """File paths from a git tree response, noise excluded, capped."""
+def _filtered_paths(tree: list[dict]) -> list[str]:
+    """ALL file paths from a git tree response, noise excluded (not capped).
+
+    The cap is applied only to the paths returned in the document; detection
+    (manifests, framework markers) must see the full list — trees list
+    alphabetically, so a root ``package.json`` sorts after a large ``app/``
+    subtree and would fall outside any prefix cap.
+    """
     paths: list[str] = []
-    truncated = False
     for entry in tree:
         if entry.get("type") != "blob":
             continue
         path = str(entry.get("path") or "")
         if not path or any(seg in _EXCLUDE_SEGMENTS for seg in path.split("/")):
             continue
-        if len(paths) >= _MAX_PATHS:
-            truncated = True
-            break
         paths.append(path)
-    return paths, truncated
+    return paths
 
 
 async def _fetch_json(c: httpx.AsyncClient, url: str, token: str, **params) -> dict | None:
@@ -111,11 +113,16 @@ async def fetch_repo_context(
             params={"recursive": "1"},
         )
         tree_resp.raise_for_status()
-        paths, truncated = _filtered_paths(tree_resp.json().get("tree", []))
+        tree_json = tree_resp.json()
+        all_paths = _filtered_paths(tree_json.get("tree", []))
+        paths = all_paths[:_MAX_PATHS]
+        # Truncated if we capped it — or if GitHub itself truncated the tree
+        # listing (huge repos), in which case even all_paths is incomplete.
+        truncated = len(all_paths) > _MAX_PATHS or bool(tree_json.get("truncated"))
 
         scripts: dict = {}
         dependencies: set[str] = set()
-        if "package.json" in paths:
+        if "package.json" in all_paths:
             manifest_raw = _decode_content(
                 await _fetch_json(
                     c, f"{api}/repos/{repo}/contents/package.json", token, ref=branch
@@ -139,7 +146,7 @@ async def fetch_repo_context(
     return {
         "repo": repo,
         "branch": branch,
-        "framework": _detect_framework(dependencies, paths),
+        "framework": _detect_framework(dependencies, all_paths),
         "scripts": scripts,
         "dependencies": sorted(dependencies),
         "paths": paths,

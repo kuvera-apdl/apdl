@@ -96,6 +96,59 @@ async def test_fetch_repo_context_excludes_noise_paths():
     assert context["paths"] == ["src/a.ts"]
 
 
+@pytest.mark.asyncio
+async def test_manifest_detection_survives_the_path_cap():
+    # Trees list alphabetically, so a root package.json sorts after a large
+    # app/ subtree; detection must see the FULL tree, not the capped list.
+    files = [f"app/components/c{i:04d}.tsx" for i in range(450)]
+    manifest = {"scripts": {"test": "vitest run"}, "dependencies": {"next": "^15"}}
+    transport = _mock_transport(
+        {
+            "/git/trees/main": _tree(*files, "package.json"),
+            "/contents/package.json": httpx.Response(
+                200, json={"encoding": "base64", "content": _b64(json.dumps(manifest))}
+            ),
+        }
+    )
+
+    context = await fetch_repo_context(
+        repo="acme/big",
+        branch="main",
+        token="ghs_tok",
+        client=httpx.AsyncClient(transport=transport),
+    )
+
+    assert context["framework"] == "Next.js (App Router)"
+    assert context["has_test_script"] is True
+    assert "next" in context["dependencies"]
+    assert len(context["paths"]) == 400  # document stays bounded
+    assert context["paths_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_github_truncated_tree_flag_marks_paths_truncated():
+    transport = _mock_transport(
+        {
+            "/git/trees/main": httpx.Response(
+                200,
+                json={
+                    "tree": [{"path": "src/a.ts", "type": "blob"}],
+                    "truncated": True,
+                },
+            )
+        }
+    )
+
+    context = await fetch_repo_context(
+        repo="acme/huge",
+        branch="main",
+        token="ghs_tok",
+        client=httpx.AsyncClient(transport=transport),
+    )
+
+    assert context["paths_truncated"] is True
+
+
 def test_detect_framework_variants():
     assert _detect_framework({"next"}, ["pages/index.tsx"]) == "Next.js (Pages Router)"
     assert _detect_framework({"react"}, []) == "React"
