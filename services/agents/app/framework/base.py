@@ -87,10 +87,26 @@ class BaseAgent(ABC):
         """
 
     def parse(self, response: str) -> Any:
-        """Parse the raw LLM response. Override for custom fallbacks."""
+        """Parse the raw LLM response. Override for custom fallbacks.
+
+        Enforces the declared shape all the way down: consumers (act hooks,
+        memory_entries, downstream agents) index into dicts, so a valid-JSON
+        response of the wrong shape (a bare list of strings, a list where an
+        object was asked for) must degrade to empty output here rather than
+        crash mid-lifecycle and lose the whole agent result.
+        """
         out = parse_llm_json(response, self.empty_output())
-        if self.parse_as == "list" and not isinstance(out, list):
-            out = [out] if out else []
+        if self.parse_as == "list":
+            if not isinstance(out, list):
+                out = [out] if out else []
+            out = [item for item in out if isinstance(item, dict)]
+        elif self.parse_as == "object" and not isinstance(out, dict):
+            # Models often wrap a single object in a one-element list.
+            if isinstance(out, list) and len(out) == 1 and isinstance(out[0], dict):
+                out = out[0]
+            else:
+                logger.warning("[%s] LLM output was not an object; treating as empty", self.name)
+                out = self.empty_output()
         return out
 
     async def act(

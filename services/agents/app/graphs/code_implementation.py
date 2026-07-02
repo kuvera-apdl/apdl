@@ -131,11 +131,21 @@ class CodeImplementationAgent(BaseAgent):
             )
             result["changeset_id"] = changeset.get("changeset_id", "")
             result["status"] = changeset.get("status", "")
-            await mark_implemented(ctx.pool, proposal_id, result["changeset_id"])
         except Exception as exc:
             logger.error("Failed to open changeset for %s: %s", proposal_id, exc)
             result["error"] = str(exc)
             await self._safe_fail(ctx, proposal_id, str(exc))
+            return result
+
+        # The PR is open at this point — a bookkeeping failure must not mark
+        # the proposal 'failed' with a live PR attached (a state that lies and
+        # that no future sweep could distinguish from a real failure).
+        try:
+            await mark_implemented(ctx.pool, proposal_id, result["changeset_id"])
+        except Exception as exc:
+            logger.error(
+                "PR opened for %s but could not mark it implemented: %s", proposal_id, exc
+            )
         return result
 
     @staticmethod
