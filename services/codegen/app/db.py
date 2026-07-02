@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     pr_number     INTEGER,
     pr_node_id    TEXT,
     ci_status     TEXT,
+    merge_sha     TEXT,
     task          JSONB NOT NULL DEFAULT '{}',
     diff_stat     JSONB NOT NULL DEFAULT '{}',
     error         TEXT,
@@ -44,4 +45,15 @@ CREATE INDEX IF NOT EXISTS idx_codegen_changesets_project
 ON codegen_changesets (project_id, created_at DESC);
 """
 
-ALL_DDL = (CONNECTIONS_DDL, CHANGESETS_DDL, CHANGESETS_INDEX_DDL)
+# Additive migration for deployments whose table predates the column (the
+# CREATE above is IF NOT EXISTS, so it never alters an existing table).
+CHANGESETS_MERGE_SHA_DDL = """
+ALTER TABLE codegen_changesets ADD COLUMN IF NOT EXISTS merge_sha TEXT;
+"""
+
+ALL_DDL = (
+    CONNECTIONS_DDL,
+    CHANGESETS_DDL,
+    CHANGESETS_INDEX_DDL,
+    CHANGESETS_MERGE_SHA_DDL,
+)

@@ -22,11 +22,12 @@ from app.models.changeset import (
 )
 from app.store.jsonb import loads_jsonb
 
-#: Pre-PR pipeline states a running job actively drives. The job runner uses
-#: in-process background tasks, so a process restart orphans any changeset
-#: sitting here — :func:`fail_stale_changesets` sweeps the stale ones.
-_TRANSIENT_STATUSES: tuple[ChangesetStatus, ...] = (
-    ChangesetStatus.queued,
+#: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
+#: a queued row hasn't started, so a restart re-enqueues it rather than failing
+#: it — see :func:`list_queued_changeset_ids`). The job runner uses in-process
+#: background tasks, so a process restart orphans any changeset sitting here —
+#: :func:`fail_stale_changesets` sweeps the stale ones.
+_ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
     ChangesetStatus.cloning,
     ChangesetStatus.editing,
     ChangesetStatus.testing,
@@ -47,6 +48,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         pr_number=row["pr_number"],
         pr_node_id=row["pr_node_id"],
         ci_status=row["ci_status"],
+        merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
         error=row["error"],
         created_at=row["created_at"],
@@ -247,6 +249,23 @@ async def mark_pr_open(
     )
 
 
+async def mark_merged(
+    pool: asyncpg.Pool, changeset_id: str, *, merge_sha: str
+) -> Changeset | None:
+    """Transition to ``merged`` and persist the merge commit SHA.
+
+    The SHA is what a later ``/revert`` reverts deterministically (``git
+    revert``) instead of asking the agent to reconstruct the change from prose.
+    """
+    return await _guarded_update(
+        pool,
+        changeset_id,
+        ChangesetStatus.merged,
+        set_clause="merge_sha = $3",
+        params=(merge_sha,),
+    )
+
+
 async def set_ci_status(
     pool: asyncpg.Pool,
     changeset_id: str,
@@ -268,20 +287,42 @@ async def set_ci_status(
     )
 
 
+async def list_queued_changeset_ids(pool: asyncpg.Pool) -> list[str]:
+    """Ids of changesets still in ``queued``, oldest first.
+
+    Used at startup to re-enqueue work a restart orphaned before it began: a
+    queued row has produced nothing (no clone, no branch), so re-running it is
+    safe — and the job's queued → cloning claim transition guarantees only one
+    worker wins even if a concurrent replica re-enqueues the same rows.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT changeset_id FROM codegen_changesets
+            WHERE status = ANY($1::text[])
+            ORDER BY created_at ASC
+            """,
+            [ChangesetStatus.queued.value],
+        )
+    return [r["changeset_id"] for r in rows]
+
+
 async def fail_stale_changesets(
     pool: asyncpg.Pool, *, older_than_seconds: int, error: str
 ) -> list[str]:
     """Fail changesets orphaned mid-pipeline past a deadline; return their ids.
 
     The job runner uses in-process background tasks, so a process restart leaves
-    any changeset in a transient (pre-PR) state stuck there forever — no later
-    step ever runs to advance or fail it. This sweep (run once at startup) moves
-    those rows to ``error`` so they surface instead of hanging. The
-    ``older_than_seconds`` deadline guards against killing work a *concurrent*
-    codegen replica may still be running on the shared database: set it longer
-    than any single job can take (e.g. ``2 × CODEGEN_TIMEOUT``).
+    any changeset in an active (pre-PR, post-claim) state stuck there forever —
+    no later step ever runs to advance or fail it. This sweep (run at startup
+    and periodically — see ``jobs.runner.run_stale_sweeper``) moves those rows
+    to ``error`` so they surface instead of hanging. ``queued`` rows are NOT
+    swept: they are re-enqueued at startup instead. The ``older_than_seconds``
+    deadline guards against killing work a *concurrent* codegen replica may
+    still be running on the shared database: set it longer than any single job
+    can take (e.g. ``2 ×`` the job pipeline budget).
     """
-    statuses = [s.value for s in _TRANSIENT_STATUSES]
+    statuses = [s.value for s in _ACTIVE_STATUSES]
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """

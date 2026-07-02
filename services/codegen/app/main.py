@@ -19,11 +19,13 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import (
-    codegen_agent_timeout,
     codegen_ci_poll_interval,
     codegen_cors_origins,
+    codegen_job_budget,
+    codegen_stale_sweep_interval,
     postgres_url,
 )
 from app.db import ALL_DDL
@@ -34,8 +36,14 @@ from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
 from app.jobs.ci_poller import run_ci_poller
+from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.routers import changesets, connections, webhooks
 from app.store import changesets as changeset_store
+
+#: Error recorded on changesets the orphan sweeps fail (startup + periodic).
+_ORPHAN_ERROR = (
+    "Orphaned mid-pipeline (codegen restarted or the job died); no PR was produced."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +82,15 @@ async def lifespan(application: FastAPI):
             await conn.execute(ddl)
 
     # Recover orphans: in-process background jobs can't survive a restart, so any
-    # changeset left in a transient (pre-PR) state from before this boot is dead.
-    # Sweep it to error rather than let it hang in a non-terminal status forever.
-    # The deadline (2× the per-job budget) keeps a concurrent replica's in-flight
-    # work safe on the shared database.
+    # changeset left in an active (post-claim, pre-PR) state from before this
+    # boot is dead. Sweep it to error rather than let it hang in a non-terminal
+    # status forever. The deadline (2× the full per-job pipeline budget) keeps a
+    # concurrent replica's in-flight work safe on the shared database; rows
+    # younger than that are caught by the periodic sweeper once they age out.
     swept = await changeset_store.fail_stale_changesets(
         pool,
-        older_than_seconds=2 * codegen_agent_timeout(),
-        error="Orphaned by a codegen restart while mid-pipeline; no PR was produced.",
+        older_than_seconds=2 * codegen_job_budget(),
+        error=_ORPHAN_ERROR,
     )
     if swept:
         logger.warning(
@@ -94,6 +103,24 @@ async def lifespan(application: FastAPI):
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
+
+    # Re-enqueue work a restart orphaned before it began: a queued row produced
+    # nothing yet, so re-running it is safe, and the job's queued → cloning
+    # claim transition guarantees a single winner even with a concurrent
+    # replica doing the same. (References are held so the tasks aren't GC'd.)
+    queued_ids = await changeset_store.list_queued_changeset_ids(pool)
+    application.state.requeued_jobs = [
+        asyncio.create_task(
+            run_changeset_job(pool, changeset_id, **application.state.job_deps)
+        )
+        for changeset_id in queued_ids
+    ]
+    if queued_ids:
+        logger.info(
+            "Re-enqueued %d queued changeset(s) from before this boot: %s",
+            len(queued_ids),
+            ", ".join(queued_ids),
+        )
     # Dependencies for CI-status sync, shared by the poller and the (optional)
     # GitHub webhook receiver.
     application.state.ci_deps = {
@@ -114,13 +141,31 @@ async def lifespan(application: FastAPI):
     else:
         logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
 
+    # Periodic orphan sweep: catches active-state rows that were too young for
+    # the startup sweep (e.g. orphaned minutes before a restart) once they age
+    # past the deadline, without waiting for some future restart.
+    sweeper_task: asyncio.Task | None = None
+    sweep_interval = codegen_stale_sweep_interval()
+    if sweep_interval > 0:
+        sweeper_task = asyncio.create_task(
+            run_stale_sweeper(
+                pool,
+                interval_seconds=sweep_interval,
+                older_than_seconds=2 * codegen_job_budget(),
+                error=_ORPHAN_ERROR,
+            )
+        )
+    else:
+        logger.info("Stale sweeper disabled (CODEGEN_STALE_SWEEP_INTERVAL=0)")
+
     logger.info("Codegen service started: PostgreSQL pool and schema initialized")
     yield
 
-    if poller_task is not None:
-        poller_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await poller_task
+    for task in (poller_task, sweeper_task):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -157,7 +202,11 @@ async def health_check():
 
 @app.get("/ready")
 async def readiness_check():
-    """Readiness probe — verifies PostgreSQL connectivity."""
+    """Readiness probe — verifies PostgreSQL connectivity.
+
+    Returns 503 (not 200-with-a-sad-body) on failure: orchestrators and load
+    balancers key on the status code, not the payload.
+    """
     try:
         pool: asyncpg.Pool = app.state.pg_pool
         async with pool.acquire() as conn:
@@ -165,4 +214,6 @@ async def readiness_check():
         return {"status": "ready"}
     except Exception as exc:
         logger.error("Readiness check failed: %s", exc)
-        return {"status": "not_ready", "error": str(exc)}
+        return JSONResponse(
+            status_code=503, content={"status": "not_ready", "error": str(exc)}
+        )

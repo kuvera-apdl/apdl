@@ -145,6 +145,8 @@ class Changeset(BaseModel):
     pr_number: int | None = None
     pr_node_id: str | None = None
     ci_status: str | None = None
+    #: Merge commit SHA recorded at merge time; the deterministic revert target.
+    merge_sha: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: datetime
