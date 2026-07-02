@@ -44,6 +44,8 @@ def _request_from_env() -> EditRequest:
         spec=os.environ["CS_SPEC"],
         constraints=json.loads(os.environ.get("CS_CONSTRAINTS", "[]")),
         test_cmd=(os.environ.get("CS_TEST_CMD") or None),
+        gates_policy=json.loads(os.environ.get("CS_GATES_POLICY") or "null"),
+        revert_sha=(os.environ.get("CS_REVERT_SHA") or None),
     )
     # The token now lives only in `request`; keep it out of every child's view.
     os.environ.pop("GH_TOKEN", None)

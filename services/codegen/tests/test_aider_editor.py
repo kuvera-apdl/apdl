@@ -439,21 +439,26 @@ def _request(test_cmd: str | None = "make test") -> EditRequest:
 class _Pipeline:
     """Scripted git/aider/test doubles that drive implement() end-to-end."""
 
-    def __init__(self, editor, monkeypatch, *, test_results=None):
+    def __init__(self, editor, monkeypatch, *, test_results=None, diff_text=None):
         self.aider_messages: list[str] = []
         self.pushed = False
+        self.git_calls: list[list[str]] = []
         self._test_results = list(test_results or [])
+        self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
 
         async def fake_git(cwd, args, **_kwargs):
+            self.git_calls.append(list(args))
             if args[0] == "diff" and "--name-only" in args:
                 return 0, "app/x.ts\n"
             if args[0] == "diff" and "--numstat" in args:
                 return 0, "5\t1\tapp/x.ts\n"
             if args[0] == "diff":
-                return 0, "diff --git a/app/x.ts b/app/x.ts\n+new"
+                return 0, self._diff_text
+            if args[0] == "rev-list":
+                return 0, "abc123 parent1\n"  # single-parent commit
             if args[0] == "push":
                 self.pushed = True
-            return 0, ""  # clone / checkout / config
+            return 0, ""  # clone / checkout / config / fetch / revert
 
         async def fake_exec(argv, **_kwargs):
             self.aider_messages.append(argv[argv.index("--message") + 1])
@@ -609,3 +614,181 @@ async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
     assert result.success is True
     assert pipeline.pushed is True
     assert "Build a bot filter." in pipeline.aider_messages[0]
+
+
+# --- Pre-push gates run inside the editor, BEFORE anything reaches the remote --
+
+
+@pytest.mark.asyncio
+async def test_secret_in_diff_blocks_the_push_itself(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch,
+        diff_text="diff --git a/.env.local b/.env.local\n+AWS_KEY=AKIAIOSFODNN7EXAMPLE",
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "gate" in (result.error or "").lower()
+    # The branch never left the sandbox — this is the point of gating pre-push.
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_gates_honor_the_connection_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)  # numstat reports 6 changed lines
+
+    request = _request()
+    request.gates_policy = {"max_lines": 5}
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert "exceeding" in (result.error or "")
+    assert pipeline.pushed is False
+
+
+# --- The verify subprocess must not see provider keys -------------------------
+
+
+def test_test_env_strips_llm_provider_keys(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xyz")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xyz")
+    monkeypatch.setenv("HOME", "/home/codegen")
+
+    env = aider_editor._test_env()
+
+    # Untrusted repo code (npm postinstall, test files) runs under this env.
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["HOME"] == "/home/codegen"
+    assert "PATH" in env
+
+
+# --- Retry messages keep the original work order ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_retry_keeps_the_task_and_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "boom"), (True, "")]
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    retry = pipeline.aider_messages[1]
+    # A fresh aider process has no chat history: the retry must re-carry the
+    # task and the repo context, not just the failure.
+    assert "Build a bot filter." in retry
+    assert "Repository verification context" in retry
+    assert "FAILED the verification command" in retry
+
+
+@pytest.mark.asyncio
+async def test_brief_message_does_not_duplicate_the_preamble(monkeypatch, tmp_path):
+    # The brief is compiled WITH the verification context as input; prepending
+    # it again would put the same block in the message twice.
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert "Repository verification context" not in pipeline.aider_messages[0]
+
+
+# --- Deterministic revert ------------------------------------------------------
+
+
+def _revert_request() -> EditRequest:
+    request = _request()
+    request.revert_sha = "abc123"
+    request.spec = "Revert pull request #7."
+    return request
+
+
+@pytest.mark.asyncio
+async def test_revert_applies_git_revert_without_invoking_the_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert pipeline.aider_messages == []  # the revert is mechanical, not prose
+    reverts = [c for c in pipeline.git_calls if c[0] == "revert"]
+    assert reverts == [["revert", "--no-edit", "abc123"]]
+    # The target commit was fetched into the shallow clone first.
+    assert any(c[0] == "fetch" and "abc123" in c for c in pipeline.git_calls)
+
+
+@pytest.mark.asyncio
+async def test_revert_falls_back_to_the_agent_when_verification_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "type error after revert"), (True, "")]
+    )
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    # One agent round: repair the reverted tree with the failure in hand.
+    assert len(pipeline.aider_messages) == 1
+    assert "type error after revert" in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_revert_skips_the_quality_review(monkeypatch, tmp_path):
+    # A mechanical revert's diff is not judged against the spec — a reviewer
+    # rejection here would be noise, not signal.
+    rejected = '{"approved": false, "problems": ["looks weird"], "fix_instructions": "x"}'
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected]),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+
+
+@pytest.mark.asyncio
+async def test_revert_conflict_fails_cleanly(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    async def conflicting_git(cwd, args, **_kwargs):
+        pipeline.git_calls.append(list(args))
+        if args[0] == "rev-list":
+            return 0, "abc123 parent1\n"
+        if args[0] == "revert" and "--abort" not in args:
+            return 1, "error: could not revert abc123"
+        return 0, ""
+
+    monkeypatch.setattr(editor, "_git", conflicting_git)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is False
+    assert "conflicts" in (result.error or "")
+    assert pipeline.pushed is False
+    # The conflicted revert was aborted, not left half-applied.
+    assert ["revert", "--abort"] in pipeline.git_calls

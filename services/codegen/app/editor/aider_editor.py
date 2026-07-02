@@ -44,6 +44,7 @@ from app.editor.conventions import CONVENTIONS_MD
 from app.editor.llm import CompleteFn, resolve_completer
 from app.editor.review import ReviewVerdict, review_change
 from app.editor.sdk_reference import detect_sdk_references
+from app.safety.gates import evaluate_pre_push
 
 logger = logging.getLogger(__name__)
 
@@ -118,11 +119,25 @@ def _basic_auth_header(token: str) -> str:
 
 
 def _agent_env() -> dict[str, str]:
-    """Minimal environment for the agent/test subprocess — LLM keys only."""
+    """Minimal environment for the agent subprocess — LLM keys only."""
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
     env.setdefault("PATH", os.defpath)
     env["AIDER_ANALYTICS"] = "false"  # headless: no phone-home / update prompts
     env["AIDER_CHECK_UPDATE"] = "false"
+    return env
+
+
+#: Env vars for the repo's own build/test subprocess. NO provider keys: the test
+#: command executes untrusted repo code (npm postinstall scripts, test files),
+#: which must never see the LLM API keys. Aider necessarily runs its test loop
+#: with its own env, but the independent verify run has no reason to.
+_TEST_ENV_PASSTHROUGH: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
+
+
+def _test_env() -> dict[str, str]:
+    """Stripped environment for running the repo's verification command."""
+    env = {k: os.environ[k] for k in _TEST_ENV_PASSTHROUGH if k in os.environ}
+    env.setdefault("PATH", os.defpath)
     return env
 
 
@@ -336,8 +351,19 @@ def _build_message(spec: str, constraints: list[str], preamble: str = "") -> str
     return message
 
 
+def _with_feedback(base_message: str, feedback: str) -> str:
+    """Compose a retry message: the ORIGINAL work order plus the failure feedback.
+
+    Each aider invocation is a fresh process with no chat history, so a retry
+    that carried only the failure text would strip the agent of the task, the
+    constraints, and the repo's testing reality — exactly the round most likely
+    to do something desperate without them.
+    """
+    return f"{base_message}\n\n# Previous attempt — feedback to address first\n\n{feedback}"
+
+
 def _verify_retry_message(test_cmd: str, output: str) -> str:
-    """Follow-up agent message after the post-edit verification failed.
+    """Follow-up agent feedback after the post-edit verification failed.
 
     The agent's commits are already in the clone, so a follow-up invocation sees
     its own work; the message carries the failing output so the fix is informed,
@@ -353,7 +379,7 @@ def _verify_retry_message(test_cmd: str, output: str) -> str:
 
 
 def _review_retry_message(verdict: ReviewVerdict) -> str:
-    """Follow-up agent message after the pre-push quality review rejected the diff."""
+    """Follow-up agent feedback after the pre-push quality review rejected the diff."""
     problems = "\n".join(f"- {p}" for p in verdict.problems)
     instructions = verdict.fix_instructions.strip() or "Address every problem above."
     return (
@@ -453,12 +479,16 @@ class AiderEditor:
             #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
             #    spec runs, which is what would have happened anyway). The brief
             #    replaces the spec in the agent's message; the ORIGINAL spec
-            #    stays the contract the post-edit review judges against.
+            #    stays the contract the post-edit review judges against. A
+            #    deterministic revert needs no brief — the change is mechanical.
+            need_brief = self._brief_enabled and request.revert_sha is None
+            need_review = self._review_enabled and request.revert_sha is None
             complete = self._complete
-            if complete is None and (self._brief_enabled or self._review_enabled):
+            if complete is None and (need_brief or need_review):
                 complete = resolve_completer()
             task_text = request.spec
-            if self._brief_enabled and complete is not None:
+            brief_used = False
+            if need_brief and complete is not None:
                 brief = await compile_brief(
                     title=request.title,
                     spec=request.spec,
@@ -468,6 +498,7 @@ class AiderEditor:
                 )
                 if brief:
                     task_text = brief
+                    brief_used = True
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
@@ -501,21 +532,43 @@ class AiderEditor:
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
 
+            # 4b. A revert changeset is applied deterministically with
+            #     ``git revert`` — the agent cannot see the merged commits (the
+            #     clone is shallow) and must not reconstruct the revert from
+            #     prose. The agent only steps in afterwards, if verification
+            #     fails on the reverted tree.
+            agent_pending = True
+            if request.revert_sha:
+                revert_error = await self._revert_commit(
+                    repo_dir, request.revert_sha, header
+                )
+                if revert_error:
+                    return fail(revert_error)
+                agent_pending = False
+
             # 5. The edit loop: aider → verify → review, with a bounded number of
             #    feedback rounds. A verification or review failure re-invokes the
             #    agent with the failure in hand (its commits are already in the
             #    clone) instead of terminally failing the changeset — most
-            #    first-round failures are fixable with the error visible.
-            message = _build_message(task_text, request.constraints, probe.preamble)
+            #    first-round failures are fixable with the error visible. The
+            #    brief already embeds the verification context, so it is only
+            #    prepended when the raw spec runs.
+            initial_message = _build_message(
+                task_text, request.constraints, "" if brief_used else probe.preamble
+            )
+            message = initial_message
             retries_left = self._edit_retries
             base = request.base_branch
+            out = ""
             while True:
-                rc, out = await self._exec(
-                    [*argv, "--message", message],
-                    cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout,
-                )
-                if rc != 0:
-                    return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
+                if agent_pending:
+                    rc, out = await self._exec(
+                        [*argv, "--message", message],
+                        cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout,
+                    )
+                    if rc != 0:
+                        return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
+                agent_pending = True
 
                 # Verify the change is actually green, outside the agent's
                 # control. Fail closed: a change we could not verify does not get
@@ -526,7 +579,9 @@ class AiderEditor:
                     if not ok:
                         if retries_left > 0:
                             retries_left -= 1
-                            message = _verify_retry_message(test_cmd, tout)
+                            message = _with_feedback(
+                                initial_message, _verify_retry_message(test_cmd, tout)
+                            )
                             logger.info(
                                 "Verification failed for %s; retrying the edit "
                                 "with the failure output.",
@@ -566,8 +621,9 @@ class AiderEditor:
                 # Review the diff against the ORIGINAL spec before pushing: green
                 # builds happily ship a token diff that implements none of the
                 # task. Fail-open on infrastructure, fail-closed on judgment
-                # (see app.editor.review).
-                if self._review_enabled and complete is not None:
+                # (see app.editor.review). A deterministic revert's diff is
+                # mechanically derived, so it is not judged.
+                if need_review and complete is not None:
                     verdict = await review_change(
                         spec=request.spec,
                         diff_text=diff_text,
@@ -577,7 +633,9 @@ class AiderEditor:
                     if not verdict.approved:
                         if retries_left > 0:
                             retries_left -= 1
-                            message = _review_retry_message(verdict)
+                            message = _with_feedback(
+                                initial_message, _review_retry_message(verdict)
+                            )
                             logger.info(
                                 "Quality review rejected the change for %s; "
                                 "retrying the edit with the reviewer's instructions.",
@@ -589,6 +647,23 @@ class AiderEditor:
                 break
 
             _, numstat = await self._git(repo_dir, ["diff", "--numstat", f"{base}..HEAD"])
+            diff_stat = _parse_numstat(numstat)
+
+            # Deterministic pre-push gates on the FULL diff, before anything
+            # reaches the remote: a secret-bearing or protected-path change must
+            # never land on GitHub, not merely be denied a PR. (The job runner
+            # re-checks the same gates as a backstop before opening the PR.)
+            gate = evaluate_pre_push(
+                diff_stat=diff_stat,
+                changed_paths=changed_paths,
+                diff_text=diff_text,
+                policy=request.gates_policy,
+            )
+            if not gate.passed:
+                return fail(
+                    "pre-push gate failed; branch NOT pushed: "
+                    + "; ".join(gate.violations)
+                )
 
             # 6. Push the branch from the orchestrator (token via one-shot header).
             rc, out = await self._git(
@@ -602,7 +677,7 @@ class AiderEditor:
             return EditResult(
                 success=True,
                 branch=request.branch,
-                diff_stat=_parse_numstat(numstat),
+                diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
             )
@@ -630,11 +705,43 @@ class AiderEditor:
         argv += args
         return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
 
+    async def _revert_commit(
+        self, repo_dir: Path, sha: str, auth_header: str
+    ) -> str | None:
+        """Apply ``git revert`` of ``sha`` in the clone; return an error or None.
+
+        The clone is shallow (depth 1 of the base branch), so the revert target
+        and its parent are fetched first — GitHub serves reachable SHAs directly.
+        A conflicting revert is aborted and surfaced rather than handed to the
+        agent on top of a conflicted tree.
+        """
+        rc, out = await self._git(
+            repo_dir,
+            ["fetch", "--depth", "2", "origin", sha],
+            auth_header=auth_header,
+        )
+        if rc != 0:
+            return f"could not fetch revert target {sha}: {_tail(out)}"
+        rc, out = await self._git(repo_dir, ["rev-list", "--parents", "-n", "1", sha])
+        if rc != 0:
+            return f"could not inspect revert target {sha}: {_tail(out)}"
+        revert = ["revert", "--no-edit"]
+        if len(out.split()) > 2:  # merge commit → revert against mainline parent 1
+            revert += ["-m", "1"]
+        rc, out = await self._git(repo_dir, [*revert, sha])
+        if rc != 0:
+            await self._git(repo_dir, ["revert", "--abort"])
+            return (
+                f"git revert of {sha} conflicts with later changes on the base "
+                f"branch; revert it manually. {_tail(out)}"
+            )
+        return None
+
     async def _run_tests(self, repo_dir: Path, test_cmd: str) -> tuple[bool, str]:
         proc = await asyncio.create_subprocess_shell(
             test_cmd,
             cwd=str(repo_dir),
-            env=_agent_env(),
+            env=_test_env(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

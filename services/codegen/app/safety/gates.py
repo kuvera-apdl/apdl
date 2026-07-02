@@ -1,10 +1,11 @@
 """Deterministic pre-push safety gates.
 
-These run on the produced diff BEFORE codegen opens a PR — outside the editing
-agent's control, so a prompt-injected or careless edit cannot bypass them. They
-are pure functions over the diff: its size, the paths it touches, and — when the
-diff text is available — secret patterns. Never trust the LLM to self-police;
-these gates are the backstop.
+These run on the produced diff BEFORE the branch is pushed (inside the editor,
+on the full diff text) and again as a backstop before the PR is opened (in the
+job runner) — outside the editing agent's control, so a prompt-injected or
+careless edit cannot bypass them. They are pure functions over the diff: its
+size, the paths it touches, and — when the diff text is available — secret
+patterns. Never trust the LLM to self-police; these gates are the backstop.
 """
 
 from __future__ import annotations

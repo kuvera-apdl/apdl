@@ -227,6 +227,34 @@ def codegen_test_timeout() -> int:
     return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
 
 
+def codegen_job_budget() -> int:
+    """Wall-clock budget for one FULL changeset pipeline, seconds.
+
+    The agent timeout (``CODEGEN_TIMEOUT``) bounds a *single* aider invocation;
+    a whole job is clone + (1 + retries) × (aider + verify) + push. This derived
+    budget is what must bound anything wrapping the pipeline as a unit: the
+    sandbox container's ``docker run`` (killing it at the bare agent timeout
+    truncates legitimate retry rounds) and the stale-changeset sweep deadline.
+    Override explicitly with ``CODEGEN_JOB_BUDGET`` if the derivation doesn't
+    fit (e.g. a huge clone).
+    """
+    override = os.getenv("CODEGEN_JOB_BUDGET", "")
+    if override.strip():
+        return max(1, int(override))
+    rounds = 1 + codegen_edit_retries()
+    return rounds * (codegen_agent_timeout() + codegen_test_timeout()) + 2 * codegen_git_timeout()
+
+
+def codegen_stale_sweep_interval() -> int:
+    """Seconds between periodic stale-changeset sweeps (default 300; 0 disables).
+
+    The sweep fails active-state changesets whose ``updated_at`` is older than
+    ``2 × codegen_job_budget()`` — orphans of a crashed/restarted process that
+    the startup sweep was too early to catch. See ``jobs.runner.run_stale_sweeper``.
+    """
+    return max(0, int(os.getenv("CODEGEN_STALE_SWEEP_INTERVAL", "300")))
+
+
 def codegen_require_verify() -> bool:
     """Refuse to open a PR that could not be verified locally (default on).
 
