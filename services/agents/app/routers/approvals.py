@@ -349,6 +349,25 @@ async def approve_action(
                     forked_runs.append(forked)
             except Exception:
                 logger.exception("[%s] Failed to fork proposal %s", run_id, _item_id(gated_agent, proposal))
+            # Approved proposals go to long-term memory so future proposal
+            # runs can recall them (the agent itself defers persistence to
+            # this human gate). Best-effort.
+            try:
+                await request.app.state.vector_store.store(
+                    project_id=project_id,
+                    content=json.dumps(proposal, default=str),
+                    metadata={
+                        "type": "feature_proposal",
+                        "proposal_id": str(proposal.get("proposal_id") or ""),
+                        "priority": str(proposal.get("priority") or "P2"),
+                        "status": "approved",
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "[%s] Could not store approved proposal %s to memory",
+                    run_id, _item_id(gated_agent, proposal),
+                )
 
     await audit.log(
         run_id,
@@ -489,6 +508,19 @@ async def _fork_proposal(
         return None
 
     await enqueue_proposals(pool, run_id, project_id, [proposal])
+
+    # Enqueue is idempotent (ON CONFLICT DO NOTHING) and skips rows failing
+    # field validation, so the row may not be claimable: an id reused from an
+    # earlier run can sit at implemented/failed, or the insert may have been
+    # skipped entirely. Forking anyway would create a run that claims nothing
+    # and reports success while the approval silently did nothing.
+    row = await get_proposal(pool, proposal_id)
+    if row is None or row.get("status") != "approved":
+        logger.warning(
+            "[%s] Proposal %s is not claimable after enqueue (status=%r) — not forking",
+            run_id, proposal_id, row.get("status") if row else None,
+        )
+        return None
 
     new_run_id = str(uuid.uuid4())
     async with pool.acquire() as conn:

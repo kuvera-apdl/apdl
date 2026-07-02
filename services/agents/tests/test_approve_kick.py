@@ -36,6 +36,13 @@ class _FakeConn:
     async def fetchrow(self, query: str, *args: Any):
         if "FROM agent_runs" in query:
             return self.store["run"]
+        if "FROM feature_proposals" in query:
+            # The post-enqueue claimability check: the enqueued proposal
+            # exists as an approved row unless the test says otherwise.
+            proposal_id = args[0]
+            return self.store.get(
+                "proposal_rows", {}
+            ).get(proposal_id, {"proposal_id": proposal_id, "status": "approved"})
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
     async def fetch(self, query: str, *args: Any):
@@ -110,9 +117,18 @@ def _patch(monkeypatch):
     return enq, kicked, deployed
 
 
+class _FakeVectorStore:
+    def __init__(self) -> None:
+        self.stored: list[dict[str, Any]] = []
+
+    async def store(self, project_id: str, content: str, metadata: dict | None = None):
+        self.stored.append({"project_id": project_id, "content": content, "metadata": metadata})
+        return len(self.stored)
+
+
 def _client(store: dict[str, Any]) -> AsyncClient:
     app.state.pg_pool = _FakePool(store)
-    app.state.vector_store = object()
+    app.state.vector_store = _FakeVectorStore()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 

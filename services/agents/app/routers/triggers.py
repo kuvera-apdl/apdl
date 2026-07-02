@@ -69,6 +69,26 @@ async def trigger_agent_run(
 
     pool: asyncpg.Pool = request.app.state.pg_pool
 
+    # One pipeline per project at a time: concurrent runs duplicate LLM spend
+    # and can deploy duplicate experiments from the same insight. (Runs parked
+    # at waiting_approval don't block — they're not executing.)
+    async with pool.acquire() as conn:
+        active = await conn.fetchval(
+            """
+            SELECT run_id FROM agent_runs
+            WHERE project_id = $1
+              AND (status IN ('started', 'running')
+                   OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
+            LIMIT 1
+            """,
+            body.project_id,
+        )
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project {body.project_id} already has an active run ({active}).",
+        )
+
     run_id = str(uuid.uuid4())
 
     async with pool.acquire() as conn:
