@@ -121,7 +121,15 @@ async def _load_gate_items(pool: asyncpg.Pool, run_id: str, produces: str) -> li
     items: list[dict[str, Any]] = []
     for record in rows:
         output = record["output"]
-        data = json.loads(output) if isinstance(output, str) else output
+        if isinstance(output, str):
+            # A malformed row must not 500 the gate forever — the human could
+            # never submit a decision. Skip it and decide the rest.
+            try:
+                output = json.loads(output)
+            except (json.JSONDecodeError, ValueError):
+                logger.error("[%s] Skipping malformed %s result row", run_id, produces)
+                continue
+        data = output
         if isinstance(data, list):
             items.extend(d for d in data if isinstance(d, dict))
         elif isinstance(data, dict):
@@ -149,6 +157,11 @@ def _resolve_decisions(
             # A single unkeyed item (e.g. an experiment design lacking an
             # experiment_id) aligns positionally with a lone decision.
             iid = next(iter(decisions)) if len(items) == 1 and len(decisions) == 1 else f"__index_{index}"
+        if iid in by_id:
+            # Two items sharing an id (LLM emitted duplicate experiment_ids)
+            # must both stay addressable — silently collapsing one would let it
+            # bypass the gate undecided.
+            iid = f"{iid}#{index}"
         by_id[iid] = item
 
     unknown = sorted(set(decisions) - set(by_id))
@@ -220,17 +233,21 @@ async def approve_action(
     gate_status = "approved" if _any_approved(body) else "rejected"
 
     # Atomically claim the gate: only one request flips it off waiting_approval,
-    # so a duplicate/concurrent submit 400s instead of double-forking.
+    # so a duplicate/concurrent submit 400s instead of double-forking. The claim
+    # also pins the snapshotted phase — a delayed duplicate that snapshotted an
+    # earlier gate must not consume a *later* gate the run has since reached
+    # (its decisions were resolved against the earlier gate's items).
     async with pool.acquire() as conn:
         claimed = await conn.fetchval(
             """
             UPDATE agent_runs
             SET status = $2, phase = 'resuming', updated_at = now()
-            WHERE run_id = $1 AND status = 'waiting_approval'
+            WHERE run_id = $1 AND status = 'waiting_approval' AND phase = $3
             RETURNING run_id
             """,
             run_id,
             gate_status,
+            row["phase"],
         )
     if claimed is None:
         raise HTTPException(
@@ -260,10 +277,23 @@ async def approve_action(
     if gated_agent == "experiment_design":
         for design in approved_items:
             try:
-                await deploy_experiment(project_id, design)
-                logger.info("[%s] Deployed approved experiment %s", run_id, _item_id(gated_agent, design))
+                deployed = await deploy_experiment(project_id, design)
             except Exception:
+                deployed = False
                 logger.exception("[%s] Failed to deploy experiment %s", run_id, _item_id(gated_agent, design))
+            if deployed:
+                logger.info("[%s] Deployed approved experiment %s", run_id, _item_id(gated_agent, design))
+            else:
+                # deploy_experiment swallows HTTP failures into False — record
+                # it, or the human sees "approved" for an experiment that
+                # doesn't exist.
+                await audit.log(
+                    run_id,
+                    "deploy_failed",
+                    {"item_id": _item_id(gated_agent, design), "kind": gated_agent},
+                    approval_status="approved",
+                )
+                logger.error("[%s] Deploy failed for approved experiment %s", run_id, _item_id(gated_agent, design))
     elif gated_agent == "code_implementation":
         # Phase 6: the agent gated BEFORE opening the PR (a draft PR is the
         # reversible action a human approves). Approval is what actually opens

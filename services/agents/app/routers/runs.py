@@ -56,7 +56,7 @@ def _row_to_status(row: Any) -> RunStatus:
         run_id=row["run_id"],
         project_id=row["project_id"],
         status=row["status"],
-        phase=row["phase"],
+        phase=row["phase"] or "initializing",
         insights_count=row["insights_count"],
         experiments_count=row["experiments_count"],
         started_at=row["started_at"].isoformat(),
@@ -126,9 +126,17 @@ async def get_run_results(run_id: str, request: Request) -> RunResults:
     for row in rows:
         output = row["output"]
         if isinstance(output, str):
-            output = json.loads(output)
+            # One malformed row must not 500 the whole endpoint.
+            try:
+                output = json.loads(output)
+            except (json.JSONDecodeError, ValueError):
+                logger.error("[%s] Skipping malformed %s result row", run_id, row["produces"])
+                continue
         if row["produces"] in payload and isinstance(output, list):
-            payload[row["produces"]] = output
+            # Extend, don't overwrite — two agents can persist under the same
+            # produces key (PK is run_id+agent_name), and the approval path
+            # already merges across rows.
+            payload[row["produces"]].extend(output)
 
     return RunResults(run_id=run_id, **payload)
 

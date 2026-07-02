@@ -8,9 +8,10 @@ import uuid
 from enum import Enum
 
 import asyncpg
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.framework.registry import is_registered
 from app.graphs.supervisor import run_supervisor
 
 logger = logging.getLogger(__name__)
@@ -24,10 +25,12 @@ class TriggerType(str, Enum):
 
 
 class TriggerRequest(BaseModel):
-    project_id: str
+    project_id: str = Field(min_length=1)
     trigger_type: TriggerType
     analysis_types: list[str] = Field(
         default_factory=lambda: ["behavior_analysis"],
+        min_length=1,
+        max_length=16,
         description="Agent graphs to run: behavior_analysis, experiment_design, personalization, feature_proposal, code_implementation",
     )
     time_range_days: int = Field(default=7, ge=1, le=90)
@@ -55,6 +58,15 @@ async def trigger_agent_run(
     Creates a run record in PostgreSQL and launches the supervisor graph
     as a background task.
     """
+    unknown = sorted({t for t in body.analysis_types if not is_registered(t)})
+    if unknown:
+        # Reject up front — otherwise the caller gets a 200 "started" for a
+        # run the supervisor will only skip through.
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown analysis_types: {unknown}",
+        )
+
     pool: asyncpg.Pool = request.app.state.pg_pool
 
     run_id = str(uuid.uuid4())

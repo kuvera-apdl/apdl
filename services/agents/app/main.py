@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
@@ -137,10 +138,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# No cookie/session auth is used, so credentialed CORS is never needed — and
+# combining allow_credentials with a wildcard origin makes Starlette echo any
+# Origin back, letting arbitrary websites make credentialed requests.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -166,5 +170,7 @@ async def readiness_check():
             await conn.fetchval("SELECT 1")
         return {"status": "ready"}
     except Exception as exc:
+        # 503 so LB/K8s probes (which key on the status code) stop routing
+        # here; the raw exception stays in the logs — it can carry DSN details.
         logger.error("Readiness check failed: %s", exc)
-        return {"status": "not_ready", "error": str(exc)}
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
