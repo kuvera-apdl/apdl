@@ -188,6 +188,32 @@ async def merge_changeset(
     token = (
         await mint_token_for_repo(connection.installation_id, connection.repo)
     ).token
+
+    # The stored ci_status was recorded when CI last reported and is never
+    # re-synced out of ci_passed — a push to the PR branch since then would not
+    # have demoted it. Re-check live before the irreversible action; fail open
+    # only on a transport fault (GitHub being down blocks the merge call anyway).
+    ci_deps = getattr(request.app.state, "ci_deps", None)
+    if ci_deps and changeset.branch:
+        try:
+            live = await ci_deps["get_status"](connection.repo, changeset.branch, token)
+        except Exception:
+            logger.warning(
+                "Live CI re-check failed for changeset %s; merging on the stored "
+                "ci_status.",
+                changeset_id,
+                exc_info=True,
+            )
+            live = None
+        if live in ("failed", "pending"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Live CI status for branch '{changeset.branch}' is '{live}'; "
+                    "the stored result is stale. Merge requires green CI."
+                ),
+            )
+
     merge = await merge_pull_request(
         repo=connection.repo,
         number=changeset.pr_number,
@@ -203,7 +229,8 @@ async def merge_changeset(
             detail=merge.reason or "GitHub declined the merge (the PR is not mergeable).",
         )
 
-    return await store.transition_changeset(pool, changeset_id, ChangesetStatus.merged)
+    # Record the merge commit SHA: it is the deterministic /revert target.
+    return await store.mark_merged(pool, changeset_id, merge_sha=merge.sha)
 
 
 @router.post("/{changeset_id}/revert", response_model=Changeset, status_code=202)
@@ -231,17 +258,26 @@ async def revert_changeset(
     new_id = f"cs_{uuid.uuid4().hex[:24]}"
     base = original.base_branch or "main"
     pr_ref = f"#{original.pr_number}" if original.pr_number else f"branch `{original.branch}`"
+    # ``revert_sha`` (recorded at merge time) makes the revert deterministic:
+    # the editor runs ``git revert <sha>`` instead of asking the agent to
+    # reconstruct the change from prose it cannot see in a shallow clone. A
+    # changeset merged before the SHA was recorded falls back to the prose path.
+    context: dict = {
+        "reverts_changeset": changeset_id,
+        "reverts_pr_number": original.pr_number,
+    }
+    sha_note = ""
+    if original.merge_sha:
+        context["revert_sha"] = original.merge_sha
+        sha_note = f" The merge commit to revert is `{original.merge_sha}`."
     revert_task = {
         "title": f"Revert: {original.task.title}",
         "spec": (
             f"Revert pull request {pr_ref} (branch `{original.branch}`), which was "
-            f"merged into `{base}`. Produce a clean revert of all its changes and "
-            "keep the test suite green."
+            f"merged into `{base}`.{sha_note} Produce a clean revert of all its "
+            "changes and keep the test suite green."
         ),
-        "context": {
-            "reverts_changeset": changeset_id,
-            "reverts_pr_number": original.pr_number,
-        },
+        "context": context,
         "constraints": ["All existing tests must pass."],
     }
     new_changeset = await store.create_changeset(
