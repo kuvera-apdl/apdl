@@ -257,26 +257,50 @@ class SafetyValidator:
         """Run all safety checks on the proposed action.
 
         Returns a SafetyResult indicating whether the action is safe to proceed.
+        Checks fail closed: a crash on a malformed (LLM-shaped) config becomes a
+        failed check rather than an exception that kills the whole agent run.
         """
         checks: list[dict[str, Any]] = [
-            self._check_rate_limits(action),
-            self._check_conflicts(action),
-            self._check_variant_config(action),
-            self._check_blast_radius(action),
-            self._check_guardrails(action),
+            self._run_check("conflict_check", self._check_conflicts, action),
+            self._run_check("variant_config", self._check_variant_config, action),
+            self._run_check("blast_radius", self._check_blast_radius, action),
+            self._run_check("guardrails", self._check_guardrails, action),
         ]
+
+        # Rate-limit last, and only count actions that pass the other checks —
+        # a burst of rejected drafts must not exhaust the quota for the
+        # eventual legitimate action.
+        record = all(c["passed"] for c in checks)
+        checks.insert(0, self._check_rate_limits(action, record=record))
 
         passed = all(c["passed"] for c in checks)
         risk_level = self._assess_risk(action, checks)
 
         return SafetyResult(passed=passed, checks=checks, risk_level=risk_level)
 
+    @staticmethod
+    def _run_check(name: str, fn: Any, action: AgentAction) -> dict[str, Any]:
+        try:
+            return fn(action)
+        except Exception as exc:
+            logger.exception("Safety check %s crashed on %s action", name, action.type.value)
+            return {
+                "name": name,
+                "passed": False,
+                "message": f"Check could not evaluate the config ({type(exc).__name__}): {exc}",
+            }
+
     # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
 
-    def _check_rate_limits(self, action: AgentAction) -> dict[str, Any]:
-        """Ensure the agent is not exceeding action rate limits."""
+    def _check_rate_limits(self, action: AgentAction, record: bool = True) -> dict[str, Any]:
+        """Ensure the agent is not exceeding action rate limits.
+
+        ``record=False`` checks the budget without consuming it — used for
+        actions already failing other checks, so rejected drafts don't starve
+        the eventual legitimate action.
+        """
         key = f"{action.project_id}:{action.type.value}"
         now = datetime.now(timezone.utc)
 
@@ -302,8 +326,8 @@ class SafetyValidator:
                 ),
             }
 
-        # Record this action
-        _action_timestamps[key].append(now)
+        if record:
+            _action_timestamps[key].append(now)
 
         return {
             "name": "rate_limit",
@@ -322,7 +346,10 @@ class SafetyValidator:
 
         if action.type == ActionType.create_experiment:
             experiment_id = config.get("experiment_id", "")
-            flag_key = config.get("flag_key", config.get("flag_config", {}).get("key", ""))
+            flag_config = config.get("flag_config")
+            flag_key = config.get("flag_key") or (
+                flag_config.get("key", "") if isinstance(flag_config, dict) else ""
+            )
 
             if not experiment_id:
                 return {
@@ -480,10 +507,74 @@ class SafetyValidator:
                 ),
             }
 
+        if action.type == ActionType.update_flag:
+            variants = config.get("variants")
+            rollout_percentage = _max_rollout_percentage(config)
+            if variants is None and rollout_percentage is None:
+                return {
+                    "name": "blast_radius",
+                    "passed": True,
+                    "message": "Update changes no traffic-affecting fields.",
+                }
+
+            # The update changes traffic — hold it to the same exposure cap as
+            # create_experiment, or an agent could route 99% of users to a
+            # treatment via update_flag that create_experiment would reject.
+            default_variant = config.get("default_variant", "")
+            variant_weights = _variant_weights(variants or [])
+            total_weight = sum(variant_weights.values())
+            if (
+                not default_variant
+                or total_weight <= 0
+                or default_variant not in variant_weights
+                or rollout_percentage is None
+            ):
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": (
+                        "Flag update changes traffic allocation but blast radius "
+                        "cannot be assessed — include variants, default_variant, "
+                        "and a rollout percentage."
+                    ),
+                }
+
+            non_default_exposure_shares = [
+                (weight / total_weight) * rollout_percentage
+                for key, weight in variant_weights.items()
+                if key != default_variant
+            ]
+            max_non_default_exposure = max(non_default_exposure_shares, default=0.0)
+            if max_non_default_exposure > 50:
+                return {
+                    "name": "blast_radius",
+                    "passed": False,
+                    "message": (
+                        f"A non-default variant would reach {max_non_default_exposure:.1f}% "
+                        "of users, exceeding the 50% safety limit."
+                    ),
+                }
+            return {
+                "name": "blast_radius",
+                "passed": True,
+                "message": (
+                    f"Traffic allocation is safe: {rollout_percentage:.1f}% rollout, "
+                    f"max non-default exposure {max_non_default_exposure:.1f}%."
+                ),
+            }
+
         if action.type == ActionType.update_ui_config:
-            targeting = config.get("targeting", {})
-            # If there's no targeting, it affects all users — flag as high blast radius
-            if not targeting or (not targeting.get("segment") and not targeting.get("conditions")):
+            targeting = config.get("targeting")
+            # If there's no targeting, it affects all users — flag as high
+            # blast radius. LLMs emit targeting as either a conditions dict or
+            # a bare list of conditions.
+            if isinstance(targeting, dict):
+                has_targeting = bool(targeting.get("segment") or targeting.get("conditions"))
+            elif isinstance(targeting, list):
+                has_targeting = bool(targeting)
+            else:
+                has_targeting = False
+            if not has_targeting:
                 return {
                     "name": "blast_radius",
                     "passed": False,
@@ -541,15 +632,15 @@ class SafetyValidator:
                     ),
                 }
 
-            primary_metric = config.get("primary_metric", {})
-            if not primary_metric.get("event"):
+            primary_metric = config.get("primary_metric")
+            if not (isinstance(primary_metric, dict) and primary_metric.get("event")):
                 return {
                     "name": "guardrails",
                     "passed": False,
                     "message": "Primary metric event is not defined.",
                 }
 
-            hypothesis = config.get("hypothesis", "")
+            hypothesis = str(config.get("hypothesis") or "")
             if len(hypothesis) < 10:
                 return {
                     "name": "guardrails",
@@ -593,7 +684,7 @@ class SafetyValidator:
                     "passed": False,
                     "message": "Pull request is missing a title.",
                 }
-            if len(config.get("spec", "")) < 10:
+            if len(str(config.get("spec") or "")) < 10:
                 return {
                     "name": "guardrails",
                     "passed": False,
