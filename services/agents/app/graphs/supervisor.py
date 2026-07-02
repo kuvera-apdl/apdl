@@ -96,8 +96,19 @@ async def _load_prior_results(
     for row in rows:
         completed.add(row["agent_name"])
         output = row["output"]
-        data = json.loads(output) if isinstance(output, str) else output
-        state[row["produces"]] = data if data is not None else []
+        if isinstance(output, str):
+            # A malformed row must not kill the resume — the run would wedge
+            # at 'resuming' with no way to re-kick it (same defense as the
+            # approval gate's _load_gate_items).
+            try:
+                output = json.loads(output)
+            except (json.JSONDecodeError, ValueError):
+                logger.error(
+                    "[%s] Skipping malformed persisted output for %s", run_id, row["agent_name"]
+                )
+                state.setdefault(row["produces"], [])
+                continue
+        state[row["produces"]] = output if output is not None else []
     return completed
 
 
@@ -143,38 +154,47 @@ async def run_supervisor(
         "errors": [],
     }
 
-    completed: set[str] = set()
-    if resume:
-        completed = await _load_prior_results(pool, run_id, state)
-        await audit.log(run_id, "supervisor_resume", {
-            "analysis_types": analysis_types,
-            "completed": sorted(completed),
-        })
-    else:
-        await audit.log(run_id, "supervisor_start", {
-            "analysis_types": analysis_types,
-            "autonomy_level": autonomy_level,
-            "time_range_days": time_range_days,
-        })
-
-    # Resolve requested agents, warn on unknown names, order by pipeline order.
-    agents = []
-    for name in analysis_types:
-        if not is_registered(name):
-            msg = f"Unknown agent '{name}' requested — skipping."
-            logger.warning("[%s] %s", run_id, msg)
-            state["errors"].append(msg)
-            continue
-        agents.append(get_agent(name))
-    agents.sort(key=lambda a: a.order)
-
     def _counts() -> dict[str, int]:
         return {
             "insights_count": len(state["insights"]),
             "experiments_count": len(state["experiment_designs"]),
         }
 
+    # Everything — including resume initialization — runs inside the try: a
+    # transient DB error while reloading prior results used to kill the task
+    # before any status update, wedging the run at phase 'resuming' forever.
     try:
+        completed: set[str] = set()
+        if resume:
+            completed = await _load_prior_results(pool, run_id, state)
+            await audit.log(run_id, "supervisor_resume", {
+                "analysis_types": analysis_types,
+                "completed": sorted(completed),
+            })
+        else:
+            await audit.log(run_id, "supervisor_start", {
+                "analysis_types": analysis_types,
+                "autonomy_level": autonomy_level,
+                "time_range_days": time_range_days,
+            })
+
+        # Resolve requested agents, warn on unknown names, order by pipeline
+        # order. Duplicates run once — a repeated name would double LLM spend
+        # and double deploy attempts.
+        agents = []
+        seen: set[str] = set()
+        for name in analysis_types:
+            if name in seen:
+                continue
+            seen.add(name)
+            if not is_registered(name):
+                msg = f"Unknown agent '{name}' requested — skipping."
+                logger.warning("[%s] %s", run_id, msg)
+                state["errors"].append(msg)
+                continue
+            agents.append(get_agent(name))
+        agents.sort(key=lambda a: a.order)
+
         for agent in agents:
             if agent.name in completed:
                 logger.info("[%s] Skipping %s — already completed (resume)", run_id, agent.name)
@@ -249,8 +269,17 @@ async def run_supervisor(
 
     except Exception as exc:
         logger.error("[%s] Supervisor failed: %s\n%s", run_id, exc, traceback.format_exc())
-        await _update_run(pool, run_id, "failed", "error")
-        await audit.log(run_id, "supervisor_error", {
-            "error": str(exc),
-            "traceback": traceback.format_exc(),
-        })
+        # The failure path itself must be crash-proof (the original error is
+        # often DB-related, so these updates can fail too) and must not zero
+        # out real progress counters.
+        try:
+            await _update_run(pool, run_id, "failed", "error", **_counts())
+        except Exception:
+            logger.exception("[%s] Could not mark run failed", run_id)
+        try:
+            await audit.log(run_id, "supervisor_error", {
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            })
+        except Exception:
+            logger.exception("[%s] Could not audit supervisor error", run_id)

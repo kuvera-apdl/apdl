@@ -122,6 +122,29 @@ async def lifespan(application: FastAPI):
         """)
         await conn.execute(FEATURE_PROPOSALS_DDL)
 
+    # Crash/restart reconciliation. Supervisor runs live only as in-process
+    # background tasks, so at startup every run still marked in-flight is
+    # definitionally dead (a deploy/OOM killed it mid-run) — without this it
+    # would sit at 'started'/'running'/'resuming' forever, and the proposals
+    # it claimed would stay 'implementing', permanently excluded from claims.
+    async with pool.acquire() as conn:
+        orphaned_runs = await conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = 'failed', phase = 'orphaned', updated_at = now()
+            WHERE status IN ('started', 'running')
+               OR (phase = 'resuming' AND status IN ('approved', 'rejected'))
+            """
+        )
+        reclaimed = await conn.execute(
+            "UPDATE feature_proposals SET status = 'approved', updated_at = now() "
+            "WHERE status = 'implementing'"
+        )
+    if not orphaned_runs.endswith(" 0"):
+        logger.warning("Startup reconciliation: %s orphaned run(s) marked failed", orphaned_runs)
+    if not reclaimed.endswith(" 0"):
+        logger.warning("Startup reconciliation: %s stale proposal claim(s) re-approved", reclaimed)
+
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store
 
