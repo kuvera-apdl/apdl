@@ -73,8 +73,18 @@ CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` / `CODEGEN_TEST_TIMEOUT` /
-`CODEGEN_GIT_TIMEOUT` second caps. A repo's test command comes from the connection
-`policy.test_cmd`; if unset, the editor auto-detects it (pytest / npm / make / …).
+`CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
+bounded by the derived `codegen_job_budget()` — `(1 + retries) × (agent + test)
++ git slack` — which also caps the sandbox container and the orphan-sweep
+deadline; override with `CODEGEN_JOB_BUDGET` if the derivation doesn't fit. A
+repo's test command comes from the connection `policy.test_cmd`; if unset, the
+editor auto-detects it (pytest / npm / make / …). The pre-push gates run inside
+the editor on the full diff (a violating branch never reaches GitHub), with the
+connection `policy.gates` overrides; the job runner re-checks them as a backstop
+before opening the PR. Orphan recovery: queued changesets are re-enqueued at
+startup (the queued → cloning transition is the dedup claim); active-state
+orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
+(default 300s) once older than twice the job budget.
 
 Two auxiliary LLM passes bracket the edit (both default on; both skip silently
 when LiteLLM or the provider key is absent): `CODEGEN_BRIEF` compiles the
@@ -84,8 +94,16 @@ criteria), and `CODEGEN_REVIEW` judges the produced diff against the original
 spec before the push — a green build alone happily ships a token diff that
 implements none of the task. A verify or review failure re-invokes the agent
 with the failure output (`CODEGEN_EDIT_RETRIES`, default 1) before the changeset
-fails. `CODEGEN_HELPER_MODEL` runs these passes on a different model than the
-editor (default: `CODEGEN_MODEL`).
+fails; the retry message re-carries the full work order, since each aider
+invocation is a fresh process. `CODEGEN_HELPER_MODEL` runs these passes on a
+different model than the editor (default: `CODEGEN_MODEL`).
+
+Merging records the merge commit SHA, and `/revert` uses it deterministically:
+the editor fetches the commit into the shallow clone and runs `git revert`
+(mainline parent 1 for merge commits), falling back to the agent only if
+verification fails on the reverted tree. Merge also re-checks live CI status
+before acting — the stored `ci_passed` is not re-synced after later pushes to
+the branch, so it alone never authorizes the merge.
 
 ## Develop
 
