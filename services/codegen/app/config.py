@@ -148,6 +148,60 @@ def codegen_sdk_reference_enabled() -> bool:
     return os.getenv("CODEGEN_SDK_REFERENCE", "true").lower() != "false"
 
 
+def codegen_helper_model() -> str:
+    """LiteLLM model id for the auxiliary calls (brief compile + diff review).
+
+    Defaults to the editing model so a single ``CODEGEN_MODEL`` configures the
+    whole pipeline; override with ``CODEGEN_HELPER_MODEL`` to run the auxiliary
+    steps on a cheaper/faster model than the editor.
+    """
+    return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
+
+
+def codegen_llm_timeout() -> float:
+    """Per-auxiliary-LLM-call timeout, seconds (brief compile / diff review)."""
+    return float(os.getenv("CODEGEN_LLM_TIMEOUT", "240"))
+
+
+def codegen_brief_enabled() -> bool:
+    """Compile the task spec into a repo-grounded engineering brief (default on).
+
+    Approved feature proposals arrive written at product altitude — they can
+    reference organizational actions and infrastructure the connected repo does
+    not have. A pre-edit LLM pass translates the spec into a work order grounded
+    in the actual repo (concrete files, explicit descoping of non-repo asks,
+    checkable acceptance criteria) before the editing agent sees it. Skipped
+    silently when LiteLLM or the provider key is absent. Set "false" to hand the
+    raw spec to the editor unchanged.
+    """
+    return os.getenv("CODEGEN_BRIEF", "true").lower() != "false"
+
+
+def codegen_review_enabled() -> bool:
+    """Review the produced diff against the spec before pushing (default on).
+
+    The verification command only proves the change *builds*; it happily passes
+    a two-line diff that implements none of the spec (the observed nav-link-to-a-
+    404 failure). A post-edit LLM review judges whether the diff plausibly
+    delivers the spec's repo-implementable core and that new surfaces are
+    reachable; a rejection feeds one retry with the reviewer's instructions,
+    then fails the changeset. Skipped silently when LiteLLM or the provider key
+    is absent. Set "false" to disable.
+    """
+    return os.getenv("CODEGEN_REVIEW", "true").lower() != "false"
+
+
+def codegen_edit_retries() -> int:
+    """Extra editing rounds after a verification or review failure (default 1).
+
+    A failed verify/review re-invokes the agent with the failure output appended
+    instead of terminally failing the changeset — most first-round failures
+    (a bad import, a skipped requirement) are fixable with the error in hand.
+    Floor of 0 (fail on the first failure, the pre-existing behavior).
+    """
+    return max(0, int(os.getenv("CODEGEN_EDIT_RETRIES", "1")))
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()

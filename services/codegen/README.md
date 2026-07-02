@@ -76,6 +76,17 @@ Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDI
 `CODEGEN_GIT_TIMEOUT` second caps. A repo's test command comes from the connection
 `policy.test_cmd`; if unset, the editor auto-detects it (pytest / npm / make / …).
 
+Two auxiliary LLM passes bracket the edit (both default on; both skip silently
+when LiteLLM or the provider key is absent): `CODEGEN_BRIEF` compiles the
+approved spec into a repo-grounded engineering brief before the agent runs
+(concrete files, explicit descoping of non-repo asks, checkable acceptance
+criteria), and `CODEGEN_REVIEW` judges the produced diff against the original
+spec before the push — a green build alone happily ships a token diff that
+implements none of the task. A verify or review failure re-invokes the agent
+with the failure output (`CODEGEN_EDIT_RETRIES`, default 1) before the changeset
+fails. `CODEGEN_HELPER_MODEL` runs these passes on a different model than the
+editor (default: `CODEGEN_MODEL`).
+
 ## Develop
 
 ```bash

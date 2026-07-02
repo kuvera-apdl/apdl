@@ -423,3 +423,189 @@ async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_
     assert result.success is False
     assert "unverified" not in (result.error or "")
     assert "no changes" in (result.error or "")
+
+
+# --- The edit loop: brief → aider → verify → review, with feedback retries ----
+
+
+def _request(test_cmd: str | None = "make test") -> EditRequest:
+    return EditRequest(
+        repo="acme/widgets", base_branch="main", branch="apdl/x",
+        token="ghs_tok", title="Bot filter", spec="Build a bot filter.",
+        test_cmd=test_cmd,
+    )
+
+
+class _Pipeline:
+    """Scripted git/aider/test doubles that drive implement() end-to-end."""
+
+    def __init__(self, editor, monkeypatch, *, test_results=None):
+        self.aider_messages: list[str] = []
+        self.pushed = False
+        self._test_results = list(test_results or [])
+
+        async def fake_git(cwd, args, **_kwargs):
+            if args[0] == "diff" and "--name-only" in args:
+                return 0, "app/x.ts\n"
+            if args[0] == "diff" and "--numstat" in args:
+                return 0, "5\t1\tapp/x.ts\n"
+            if args[0] == "diff":
+                return 0, "diff --git a/app/x.ts b/app/x.ts\n+new"
+            if args[0] == "push":
+                self.pushed = True
+            return 0, ""  # clone / checkout / config
+
+        async def fake_exec(argv, **_kwargs):
+            self.aider_messages.append(argv[argv.index("--message") + 1])
+            return 0, "aider ok"
+
+        async def fake_run_tests(_repo_dir, _test_cmd):
+            return self._test_results.pop(0) if self._test_results else (True, "")
+
+        monkeypatch.setattr(editor, "_git", fake_git)
+        monkeypatch.setattr(editor, "_exec", fake_exec)
+        monkeypatch.setattr(editor, "_run_tests", fake_run_tests)
+
+
+def _routing_complete(brief_reply=None, review_replies=None):
+    """One completer serving both auxiliary passes, routed by system prompt."""
+    replies = list(review_replies or [])
+
+    async def complete(system: str, _user: str):
+        if "engineering briefs" in system:
+            return brief_reply
+        return replies.pop(0) if replies else '{"approved": true}'
+
+    return complete
+
+
+_BRIEF = (
+    "## Goal\nShip the bot filter.\n\n## Scope decisions\n- none\n\n"
+    "## Implementation plan\n- edit app/x.ts\n\n## Acceptance criteria\n1. filter works"
+) + "." * 200
+
+
+@pytest.mark.asyncio
+async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path):
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert len(pipeline.aider_messages) == 1
+    assert "Ship the bot filter." in pipeline.aider_messages[0]
+    assert "Build a bot filter." not in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_edit_loop_keeps_raw_spec_when_brief_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert "Build a bot filter." in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_retries_with_the_failing_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch,
+        test_results=[(False, "Module not found: hashBucket"), (True, "")],
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert len(pipeline.aider_messages) == 2
+    retry = pipeline.aider_messages[1]
+    assert "FAILED the verification command" in retry
+    assert "hashBucket" in retry
+    assert "do not revert" in retry
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_exhausts_retries_then_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "boom one"), (False, "boom two")]
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "verification failed" in (result.error or "")
+    assert "boom two" in (result.error or "")
+    assert len(pipeline.aider_messages) == 2
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    rejected = (
+        '{"approved": false, "problems": ["link targets a route that does not exist"],'
+        ' "fix_instructions": "Create the page and wire it in."}'
+    )
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected, '{"approved": true}']),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert len(pipeline.aider_messages) == 2
+    retry = pipeline.aider_messages[1]
+    assert "REJECTED" in retry
+    assert "Create the page and wire it in." in retry
+
+
+@pytest.mark.asyncio
+async def test_review_rejection_without_retries_fails_the_changeset(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "0")
+    rejected = '{"approved": false, "problems": ["a token diff"], "fix_instructions": "x"}'
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected]),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "quality review rejected" in (result.error or "")
+    assert "a token diff" in (result.error or "")
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
+    """No LiteLLM / no key ⇒ both auxiliary passes skip and the edit still ships."""
+    monkeypatch.setattr(aider_editor, "resolve_completer", lambda: None)
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert "Build a bot filter." in pipeline.aider_messages[0]

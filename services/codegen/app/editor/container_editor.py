@@ -120,6 +120,17 @@ class ContainerAiderEditor:
         ]
         if request.test_cmd:
             argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
+        # Auxiliary-pass knobs (non-secret) ride along so the AiderEditor inside
+        # the sandbox behaves exactly like the in-process one; unset values fall
+        # back to the same defaults in both places.
+        for key in (
+            "CODEGEN_BRIEF",
+            "CODEGEN_REVIEW",
+            "CODEGEN_HELPER_MODEL",
+            "CODEGEN_EDIT_RETRIES",
+        ):
+            if os.environ.get(key):
+                argv += ["-e", f"{key}={os.environ[key]}"]
         # Secrets by NAME only → docker reads the value from our env, never argv.
         argv += ["-e", "GH_TOKEN"]
         for key in self._present_secret_keys():

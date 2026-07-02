@@ -39,7 +39,10 @@ from pathlib import Path
 
 from app import config
 from app.editor.base import EditRequest, EditResult
+from app.editor.brief import build_repo_digest, compile_brief
 from app.editor.conventions import CONVENTIONS_MD
+from app.editor.llm import CompleteFn, resolve_completer
+from app.editor.review import ReviewVerdict, review_change
 from app.editor.sdk_reference import detect_sdk_references
 
 logger = logging.getLogger(__name__)
@@ -333,6 +336,34 @@ def _build_message(spec: str, constraints: list[str], preamble: str = "") -> str
     return message
 
 
+def _verify_retry_message(test_cmd: str, output: str) -> str:
+    """Follow-up agent message after the post-edit verification failed.
+
+    The agent's commits are already in the clone, so a follow-up invocation sees
+    its own work; the message carries the failing output so the fix is informed,
+    and pins the intent so the "fix" is a repair, not a revert.
+    """
+    return (
+        "Your previous change is committed in this repository but FAILED the "
+        f"verification command: `{test_cmd}`.\n\n"
+        f"Failing output (tail):\n```\n{_tail(output, _VERIFY_ERR_TAIL)}\n```\n\n"
+        "Fix the failure while keeping the implemented feature intact — repair "
+        "the code; do not revert the work to make the command pass."
+    )
+
+
+def _review_retry_message(verdict: ReviewVerdict) -> str:
+    """Follow-up agent message after the pre-push quality review rejected the diff."""
+    problems = "\n".join(f"- {p}" for p in verdict.problems)
+    instructions = verdict.fix_instructions.strip() or "Address every problem above."
+    return (
+        "An automated reviewer compared your committed change against the task "
+        "spec and REJECTED it.\n\n"
+        f"Problems found:\n{problems or '- (see instructions below)'}\n\n"
+        f"Do this now:\n{instructions}"
+    )
+
+
 def _model_settings_yaml(model: str) -> str:
     """Aider model-settings that disable ``temperature``.
 
@@ -358,6 +389,7 @@ class AiderEditor:
         model: str | None = None,
         aider_bin: str | None = None,
         workdir_base: str | None = None,
+        complete: CompleteFn | None = None,
     ) -> None:
         self._model = model or config.codegen_model()
         self._aider_bin = aider_bin or config.codegen_aider_bin()
@@ -369,6 +401,13 @@ class AiderEditor:
         self._agent_timeout = config.codegen_agent_timeout()
         self._test_timeout = config.codegen_test_timeout()
         self._require_verify = config.codegen_require_verify()
+        # Auxiliary LLM passes around the edit (brief compile + diff review).
+        # ``complete`` is the injection seam for tests; production resolves a
+        # LiteLLM-backed completer per run (None → the passes are skipped).
+        self._complete = complete
+        self._brief_enabled = config.codegen_brief_enabled()
+        self._review_enabled = config.codegen_review_enabled()
+        self._edit_retries = config.codegen_edit_retries()
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
@@ -410,7 +449,27 @@ class AiderEditor:
             probe = _probe_repo(repo_dir, request.test_cmd)
             test_cmd = probe.verify_cmd
 
-            # 3. Run Aider headless. It edits + commits locally; it does NOT push.
+            # 3. Compile the spec into a repo-grounded engineering brief
+            #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
+            #    spec runs, which is what would have happened anyway). The brief
+            #    replaces the spec in the agent's message; the ORIGINAL spec
+            #    stays the contract the post-edit review judges against.
+            complete = self._complete
+            if complete is None and (self._brief_enabled or self._review_enabled):
+                complete = resolve_completer()
+            task_text = request.spec
+            if self._brief_enabled and complete is not None:
+                brief = await compile_brief(
+                    title=request.title,
+                    spec=request.spec,
+                    repo_digest=build_repo_digest(repo_dir),
+                    verification_context=probe.preamble,
+                    complete=complete,
+                )
+                if brief:
+                    task_text = brief
+
+            # 4. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
             settings_file = work / "aider.model.settings.yml"
             settings_file.write_text(_model_settings_yaml(self._model), encoding="utf-8")
@@ -441,48 +500,95 @@ class AiderEditor:
                 argv.append("--cache-prompts")
             if test_cmd:
                 argv += ["--auto-test", "--test-cmd", test_cmd]
-            argv += [
-                "--message",
-                _build_message(request.spec, request.constraints, probe.preamble),
-            ]
-            rc, out = await self._exec(
-                argv, cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout
-            )
-            if rc != 0:
-                return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
 
-            # 4. Verify the change is actually green, outside the agent's control.
-            #    Fail closed: a change we could not verify does not get a PR unless
-            #    an operator has explicitly opted out (CODEGEN_REQUIRE_VERIFY=false).
-            if test_cmd:
-                ok, tout = await self._run_tests(repo_dir, test_cmd)
-                if not ok:
-                    return fail(
-                        f"verification failed (`{test_cmd}`):\n{_tail(tout, _VERIFY_ERR_TAIL)}"
-                    )
-            elif self._require_verify:
-                return fail(
-                    "no verification command could be established for this repo; "
-                    "refusing to open an unverified PR "
-                    "(set CODEGEN_REQUIRE_VERIFY=false to override)"
-                )
-            else:
-                logger.warning(
-                    "No verify command for %s; opening PR unverified "
-                    "(CODEGEN_REQUIRE_VERIFY=false).",
-                    request.repo,
-                )
-
-            # 5. Compute the diff for the pre-push gates. No diff → no PR.
+            # 5. The edit loop: aider → verify → review, with a bounded number of
+            #    feedback rounds. A verification or review failure re-invokes the
+            #    agent with the failure in hand (its commits are already in the
+            #    clone) instead of terminally failing the changeset — most
+            #    first-round failures are fixable with the error visible.
+            message = _build_message(task_text, request.constraints, probe.preamble)
+            retries_left = self._edit_retries
             base = request.base_branch
-            rc, names = await self._git(repo_dir, ["diff", "--name-only", f"{base}..HEAD"])
-            changed_paths = [p for p in names.splitlines() if p.strip()]
-            if rc != 0 or not changed_paths:
-                # Surface aider's own output so a no-op edit (e.g. an unreachable
-                # or misnamed model) is diagnosable from the changeset error.
-                return fail(f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}")
+            while True:
+                rc, out = await self._exec(
+                    [*argv, "--message", message],
+                    cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout,
+                )
+                if rc != 0:
+                    return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
+
+                # Verify the change is actually green, outside the agent's
+                # control. Fail closed: a change we could not verify does not get
+                # a PR unless an operator has explicitly opted out
+                # (CODEGEN_REQUIRE_VERIFY=false).
+                if test_cmd:
+                    ok, tout = await self._run_tests(repo_dir, test_cmd)
+                    if not ok:
+                        if retries_left > 0:
+                            retries_left -= 1
+                            message = _verify_retry_message(test_cmd, tout)
+                            logger.info(
+                                "Verification failed for %s; retrying the edit "
+                                "with the failure output.",
+                                request.repo,
+                            )
+                            continue
+                        return fail(
+                            f"verification failed (`{test_cmd}`):\n"
+                            f"{_tail(tout, _VERIFY_ERR_TAIL)}"
+                        )
+                elif self._require_verify:
+                    return fail(
+                        "no verification command could be established for this repo; "
+                        "refusing to open an unverified PR "
+                        "(set CODEGEN_REQUIRE_VERIFY=false to override)"
+                    )
+                else:
+                    logger.warning(
+                        "No verify command for %s; opening PR unverified "
+                        "(CODEGEN_REQUIRE_VERIFY=false).",
+                        request.repo,
+                    )
+
+                # Compute the diff for the review + pre-push gates. No diff → no PR.
+                rc, names = await self._git(
+                    repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                )
+                changed_paths = [p for p in names.splitlines() if p.strip()]
+                if rc != 0 or not changed_paths:
+                    # Surface aider's own output so a no-op edit (e.g. an unreachable
+                    # or misnamed model) is diagnosable from the changeset error.
+                    return fail(
+                        f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}"
+                    )
+                _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
+
+                # Review the diff against the ORIGINAL spec before pushing: green
+                # builds happily ship a token diff that implements none of the
+                # task. Fail-open on infrastructure, fail-closed on judgment
+                # (see app.editor.review).
+                if self._review_enabled and complete is not None:
+                    verdict = await review_change(
+                        spec=request.spec,
+                        diff_text=diff_text,
+                        changed_paths=changed_paths,
+                        complete=complete,
+                    )
+                    if not verdict.approved:
+                        if retries_left > 0:
+                            retries_left -= 1
+                            message = _review_retry_message(verdict)
+                            logger.info(
+                                "Quality review rejected the change for %s; "
+                                "retrying the edit with the reviewer's instructions.",
+                                request.repo,
+                            )
+                            continue
+                        problems = "; ".join(verdict.problems) or verdict.fix_instructions
+                        return fail(f"quality review rejected the change: {problems}")
+                break
+
             _, numstat = await self._git(repo_dir, ["diff", "--numstat", f"{base}..HEAD"])
-            _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
 
             # 6. Push the branch from the orchestrator (token via one-shot header).
             rc, out = await self._git(
