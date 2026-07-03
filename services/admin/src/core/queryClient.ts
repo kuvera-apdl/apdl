@@ -29,6 +29,7 @@ export const queryKeys = {
   serviceHealth: (wsId: string, service: string) => [wsId, 'health', service] as const,
   experiments: (wsId: string) => [wsId, 'experiments'] as const,
   changesets: (wsId: string) => [wsId, 'changesets'] as const,
+  repoConnection: (wsId: string) => [wsId, 'repo-connection'] as const,
   changeset: (wsId: string, id: string) => [wsId, 'changeset', id] as const,
   // One prefix covers list, detail, and the combined definitions listing —
   // a custom-agent write invalidates all three.

@@ -19,6 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { queryKeys } from '@/core/queryClient'
 import { projectIdFromKey, serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
 import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
+import { GitHubConnectionCard } from '@/features/codegen/GitHubConnectionCard'
 
 const REFETCH_MS = 5000
 const TERMINAL = new Set(['merged', 'abandoned', 'tests_failed', 'error'])
@@ -79,6 +80,7 @@ export function ChangesetsPage() {
         title="Code changes"
         description="Autonomous changesets — branches, draft PRs, and merges on connected repos. Polled every 5s."
       />
+      <GitHubConnectionCard />
       {query.isPending ? (
         <Skeleton className="h-48 w-full" />
       ) : query.isError ? (

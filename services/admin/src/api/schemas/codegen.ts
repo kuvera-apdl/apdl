@@ -77,3 +77,28 @@ export const mergeRequestSchema = z
     merge_method: z.enum(['squash', 'merge', 'rebase']),
   })
   .strict()
+
+// Repo connection registry (services/codegen/app/models/connection.py):
+// binds a project to a GitHub App installation + repository.
+export const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+export const repoConnectionSchema = z
+  .object({
+    project_id: z.string(),
+    installation_id: z.number().int(),
+    repo: z.string(),
+    default_base_branch: z.string(),
+    policy: z.record(z.unknown()),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict()
+
+export const repoConnectionCreateSchema = z
+  .object({
+    project_id: z.string().min(1),
+    installation_id: z.number().int().min(1),
+    repo: z.string().regex(REPO_SLUG_PATTERN, 'Format: owner/name'),
+    default_base_branch: z.string().min(1),
+  })
+  .strict()

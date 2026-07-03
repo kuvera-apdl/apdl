@@ -1,8 +1,14 @@
 // Codegen-service client. Guarded by the shared internal token (not the project
 // API key), passed via the X-APDL-Internal-Token header.
-import { request, type ServiceConnection } from './http'
-import { changesetListSchema, changesetSchema, mergeRequestSchema } from './schemas/codegen'
-import type { Changeset, MergeRequest } from './types/codegen'
+import { ApiError, request, type ServiceConnection } from './http'
+import {
+  changesetListSchema,
+  changesetSchema,
+  mergeRequestSchema,
+  repoConnectionCreateSchema,
+  repoConnectionSchema,
+} from './schemas/codegen'
+import type { Changeset, MergeRequest, RepoConnection, RepoConnectionCreate } from './types/codegen'
 
 function authHeaders(internalToken: string): Record<string, string> | undefined {
   return internalToken ? { 'X-APDL-Internal-Token': internalToken } : undefined
@@ -62,6 +68,49 @@ export function abandonChangeset(
   return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/abandon`, {
     method: 'POST',
     schema: changesetSchema,
+    headers: authHeaders(internalToken),
+  })
+}
+
+/** Resolve a project's repo binding; `null` means "not connected" (404). */
+export async function getRepoConnection(
+  conn: ServiceConnection,
+  internalToken: string,
+  projectId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<RepoConnection | null> {
+  try {
+    return await request(conn, `/v1/connections/${encodeURIComponent(projectId)}`, {
+      schema: repoConnectionSchema,
+      headers: authHeaders(internalToken),
+      signal: options.signal,
+    })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+export function connectRepo(
+  conn: ServiceConnection,
+  internalToken: string,
+  body: RepoConnectionCreate,
+): Promise<RepoConnection> {
+  return request(conn, '/v1/connections', {
+    method: 'POST',
+    body: repoConnectionCreateSchema.parse(body),
+    schema: repoConnectionSchema,
+    headers: authHeaders(internalToken),
+  })
+}
+
+export function disconnectRepo(
+  conn: ServiceConnection,
+  internalToken: string,
+  projectId: string,
+): Promise<void> {
+  return request(conn, `/v1/connections/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
     headers: authHeaders(internalToken),
   })
 }
