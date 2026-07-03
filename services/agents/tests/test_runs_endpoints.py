@@ -96,6 +96,11 @@ STORE = {
             "produces": "experiment_designs",
             "output": json.dumps([{"hypothesis": "Bigger CTA converts"}]),
         },
+        {
+            "run_id": "run-1",
+            "produces": "churn_signals",
+            "output": json.dumps([{"signal": "activation drop"}]),
+        },
     ],
     "audit": [
         {
@@ -154,6 +159,8 @@ async def test_run_results_aggregates_by_produces_with_empty_defaults():
         assert body["experiment_designs"] == [{"hypothesis": "Bigger CTA converts"}]
         assert body["personalizations"] == []
         assert body["feature_proposals"] == []
+        # A custom agent's produces key is surfaced, not silently dropped.
+        assert body["custom_outputs"] == {"churn_signals": [{"signal": "activation drop"}]}
 
 
 @pytest.mark.asyncio
