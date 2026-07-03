@@ -61,4 +61,5 @@ export const mergeRequestSchema = z
   .object({
     merge_method: z.enum(['squash', 'merge', 'rebase']),
   })
+    merge_sha: z.string().nullable(),
   .strict()

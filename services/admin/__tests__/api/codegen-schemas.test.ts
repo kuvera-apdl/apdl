@@ -18,6 +18,7 @@ const sample = {
   pr_number: 1,
   pr_node_id: 'PR_1',
   ci_status: 'passed',
+  merge_sha: null,
   diff_stat: { files: 2, additions: 30 },
   error: null,
   created_at: '2026-06-17T12:00:00Z',

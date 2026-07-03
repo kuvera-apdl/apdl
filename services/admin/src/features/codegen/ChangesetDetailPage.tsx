@@ -344,6 +344,9 @@ export function ChangesetDetailPage() {
                 const items = metaList(meta, key)
                 if (items.length === 0) return null
                 return (
+          <Fact label="Merge commit">
+            {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
+          </Fact>
                   <Fact key={key} label={key.replace(/_/g, ' ')}>
                     <ul className="list-disc space-y-1 pl-4 text-sm text-muted-foreground">
                       {items.map((item, i) => (
