@@ -20,7 +20,13 @@ const PRIORITY_STYLES: Record<string, string> = {
 
 interface ResultCardProps {
   item: unknown
-  kind: 'insight' | 'experiment_design' | 'personalization' | 'feature_proposal' | 'changeset'
+  kind:
+    | 'insight'
+    | 'experiment_design'
+    | 'personalization'
+    | 'feature_proposal'
+    | 'changeset'
+    | 'custom'
 }
 
 const KIND_TITLE_FIELDS: Record<ResultCardProps['kind'], string[]> = {
@@ -29,6 +35,8 @@ const KIND_TITLE_FIELDS: Record<ResultCardProps['kind'], string[]> = {
   personalization: ['title', 'name', 'component', 'description'],
   feature_proposal: ['title', 'name'],
   changeset: ['title', 'name', 'proposal_id'],
+  // Custom agents' output shape is author-defined — probe common field names.
+  custom: ['title', 'name', 'summary', 'finding', 'signal', 'insight'],
 }
 
 const KIND_BODY_FIELDS: Record<ResultCardProps['kind'], string[]> = {
@@ -37,6 +45,7 @@ const KIND_BODY_FIELDS: Record<ResultCardProps['kind'], string[]> = {
   personalization: ['rationale', 'description', 'change'],
   feature_proposal: ['rationale', 'description'],
   changeset: ['spec', 'description'],
+  custom: ['description', 'detail', 'rationale', 'evidence', 'why'],
 }
 
 export function ResultCard({ item, kind }: ResultCardProps) {

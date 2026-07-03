@@ -419,7 +419,8 @@ export function RunMonitorPage() {
       (results.insights.length > 0 ||
         results.experiment_designs.length > 0 ||
         results.personalizations.length > 0 ||
-        results.feature_proposals.length > 0) ? (
+        results.feature_proposals.length > 0 ||
+        Object.keys(results.custom_outputs ?? {}).length > 0) ? (
         <Card>
           <CardHeader className="flex-row items-start justify-between space-y-0">
             <div className="space-y-1.5">
@@ -438,6 +439,14 @@ export function RunMonitorPage() {
             <ResultList label="Experiment designs" items={results.experiment_designs} kind="experiment_design" />
             <ResultList label="Personalizations" items={results.personalizations} kind="personalization" />
             <ResultList label="Feature proposals" items={results.feature_proposals} kind="feature_proposal" />
+            {Object.entries(results.custom_outputs ?? {}).map(([produces, items]) => (
+              <ResultList
+                key={produces}
+                label={`${produces.replace(/_/g, ' ')} (custom)`}
+                items={items}
+                kind="custom"
+              />
+            ))}
           </CardContent>
         </Card>
       ) : null}

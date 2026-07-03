@@ -1,13 +1,13 @@
 // Client-local run history — the only run listing available until the
 // agents service grows a runs-list endpoint (plan gap G1).
-import type { AnalysisType } from '@/api/types/agents'
 
 export interface TrackedRun {
   run_id: string
   triggered_at: string
   last_status: string
   autonomy_level: number
-  analysis_types: AnalysisType[]
+  // Plain strings: custom agent slugs are valid analysis types too.
+  analysis_types: string[]
 }
 
 const LIMIT = 50
