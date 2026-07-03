@@ -15,6 +15,7 @@ from app.routers import triggers
 class _FakeConn:
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple]] = []
+        self.custom_rows: list[dict[str, Any]] = []
 
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
@@ -22,6 +23,12 @@ class _FakeConn:
     async def fetchval(self, query: str, *args: Any):
         # No active run exists — the concurrency guard passes.
         return None
+
+    async def fetch(self, query: str, *args: Any):
+        # Custom-agent slug resolution (fetch_active_by_slugs).
+        if "FROM custom_agents" in query:
+            return self.custom_rows
+        return []
 
 
 class _Acquire:
@@ -120,3 +127,73 @@ async def test_trigger_defaults_apply(monkeypatch):
         "analysis_types": ["behavior_analysis"],
         "time_range_days": 7,
     }
+
+
+def _custom_row(slug: str, project_id: str = "demo") -> dict[str, Any]:
+    return {
+        "agent_id": "agent-1",
+        "project_id": project_id,
+        "slug": slug,
+        "display_name": slug,
+        "description": "",
+        "system_prompt": "s",
+        "user_prompt_template": "u",
+        "model_tier": "fast",
+        "tools": "[]",
+        "requires": "[]",
+        "produces": "custom_out",
+        "parse_as": "list",
+        "memory_query": None,
+        "memory_top_k": 5,
+        "pipeline_order": 60,
+        "status": "active",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_trigger_accepts_active_custom_agent_slug(monkeypatch):
+    kicked: list = []
+
+    async def fake_supervisor(**kwargs):
+        kicked.append(kwargs)
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _FakePool()
+    pool.conn.custom_rows = [_custom_row("churn_watch")]
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["behavior_analysis", "churn_watch"],
+            },
+        )
+
+    assert resp.status_code == 200
+    assert kicked[0]["analysis_types"] == ["behavior_analysis", "churn_watch"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_rejects_slug_not_active_in_project(monkeypatch):
+    async def fake_supervisor(**kwargs):
+        raise AssertionError("supervisor must not start for an unknown agent")
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _FakePool()  # custom_rows empty: the slug resolves to nothing
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["ghost_agent"],
+            },
+        )
+
+    assert resp.status_code == 422
+    assert "ghost_agent" in resp.json()["detail"]

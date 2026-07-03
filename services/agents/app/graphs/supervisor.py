@@ -18,9 +18,10 @@ from typing import Any
 import asyncpg
 
 import app.graphs  # noqa: F401  ensures all agents are registered
-from app.framework import AgentContext, get_agent, is_registered
+from app.framework import AgentContext, BaseAgent, CustomAgent, get_agent, is_registered
 from app.memory.pgvector_store import PgVectorStore
 from app.safety.audit import AuditLogger
+from app.store.custom_agents import fetch_active_by_slugs
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,47 @@ async def _load_prior_results(
     return completed
 
 
+async def _resolve_agents(
+    pool: asyncpg.Pool,
+    run_id: str,
+    project_id: str,
+    analysis_types: list[str],
+    errors: list[str],
+) -> list[BaseAgent]:
+    """Resolve requested names to agent instances, in pipeline order.
+
+    Built-ins (registry) always win; remaining names resolve against the
+    project's active custom agents — hydrated from the DB at execution time,
+    so an edit between trigger (or gate) and run uses the latest definition,
+    and an archive turns the name into a skipped-with-error entry. Duplicates
+    run once — a repeated name would double LLM spend and deploy attempts.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in analysis_types:
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    custom_needed = [name for name in names if not is_registered(name)]
+    custom_defs = (
+        await fetch_active_by_slugs(pool, project_id, custom_needed) if custom_needed else {}
+    )
+
+    agents: list[BaseAgent] = []
+    for name in names:
+        if is_registered(name):
+            agents.append(get_agent(name))
+        elif name in custom_defs:
+            agents.append(CustomAgent(custom_defs[name]))
+        else:
+            msg = f"Unknown agent '{name}' requested — skipping."
+            logger.warning("[%s] %s", run_id, msg)
+            errors.append(msg)
+    agents.sort(key=lambda a: a.order)
+    return agents
+
+
 async def run_supervisor(
     pool: asyncpg.Pool,
     vector_store: PgVectorStore,
@@ -178,22 +220,9 @@ async def run_supervisor(
                 "time_range_days": time_range_days,
             })
 
-        # Resolve requested agents, warn on unknown names, order by pipeline
-        # order. Duplicates run once — a repeated name would double LLM spend
-        # and double deploy attempts.
-        agents = []
-        seen: set[str] = set()
-        for name in analysis_types:
-            if name in seen:
-                continue
-            seen.add(name)
-            if not is_registered(name):
-                msg = f"Unknown agent '{name}' requested — skipping."
-                logger.warning("[%s] %s", run_id, msg)
-                state["errors"].append(msg)
-                continue
-            agents.append(get_agent(name))
-        agents.sort(key=lambda a: a.order)
+        agents = await _resolve_agents(
+            pool, run_id, project_id, analysis_types, state["errors"]
+        )
 
         for agent in agents:
             if agent.name in completed:
