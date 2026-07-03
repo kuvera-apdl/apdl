@@ -1,14 +1,22 @@
 import type { z } from 'zod'
 
 import type {
+  agentDefinitionSchema,
+  agentDefinitionsResponseSchema,
   analysisTypeSchema,
   approvalRequestSchema,
   approvalResponseSchema,
+  customAgentSchema,
+  customAgentSpecSchema,
   runAuditEntrySchema,
   runAuditResponseSchema,
   runResultsSchema,
   runsListResponseSchema,
   runStatusSchema,
+  testRunRequestSchema,
+  testRunResponseSchema,
+  toolCatalogEntrySchema,
+  toolSelectionSchema,
   triggerRequestSchema,
   triggerResponseSchema,
   triggerTypeSchema,
@@ -25,3 +33,11 @@ export type RunsListResponse = z.infer<typeof runsListResponseSchema>
 export type RunResults = z.infer<typeof runResultsSchema>
 export type RunAuditEntry = z.infer<typeof runAuditEntrySchema>
 export type RunAuditResponse = z.infer<typeof runAuditResponseSchema>
+export type ToolSelection = z.infer<typeof toolSelectionSchema>
+export type CustomAgentSpec = z.infer<typeof customAgentSpecSchema>
+export type CustomAgent = z.infer<typeof customAgentSchema>
+export type AgentDefinition = z.infer<typeof agentDefinitionSchema>
+export type ToolCatalogEntry = z.infer<typeof toolCatalogEntrySchema>
+export type AgentDefinitionsResponse = z.infer<typeof agentDefinitionsResponseSchema>
+export type TestRunRequest = z.infer<typeof testRunRequestSchema>
+export type TestRunResponse = z.infer<typeof testRunResponseSchema>

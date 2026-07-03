@@ -14,7 +14,9 @@ export const triggerRequestSchema = z
   .object({
     project_id: z.string().min(1),
     trigger_type: triggerTypeSchema,
-    analysis_types: z.array(analysisTypeSchema).min(1),
+    // Plain strings, not the built-in enum: project-scoped custom agent slugs
+    // are valid analysis types too (the server validates against registry+DB).
+    analysis_types: z.array(z.string().min(1)).min(1),
     time_range_days: z.number().int().min(1).max(90),
     autonomy_level: z.number().int().min(1).max(4),
   })
@@ -119,6 +121,104 @@ export const runResultsSchema = z
     personalizations: z.array(z.unknown()),
     feature_proposals: z.array(z.unknown()),
     changesets: z.array(z.unknown()),
+    // Custom agents' outputs keyed by their produces. Optional: services
+    // deploy independently, so an older backend may omit it.
+    custom_outputs: z.record(z.array(z.unknown())).optional(),
+  })
+  .strict()
+
+// ---------- Custom agents (routers/custom_agents.py) ----------
+
+export const modelTierSchema = z.enum(['fast', 'reasoning'])
+export const parseAsSchema = z.enum(['object', 'list'])
+
+export const toolSelectionSchema = z
+  .object({
+    tool: z.string().min(1),
+    params: z.record(z.unknown()),
+  })
+  .strict()
+
+// Create/update body (CustomAgentSpec). Server-side validate_definition owns
+// the domain rules; these mirror the shape so bad payloads fail client-side.
+export const customAgentSpecSchema = z
+  .object({
+    slug: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{2,63}$/, 'lowercase letters, digits, underscores; 3-64 chars'),
+    display_name: z.string().min(1).max(120),
+    description: z.string().max(500),
+    system_prompt: z.string().min(1).max(20_000),
+    user_prompt_template: z.string().min(1).max(20_000),
+    model_tier: modelTierSchema,
+    tools: z.array(toolSelectionSchema).max(8),
+    requires: z.array(z.string()).max(5),
+    produces: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{2,63}$/, 'lowercase letters, digits, underscores; 3-64 chars'),
+    parse_as: parseAsSchema,
+    memory_query: z.string().max(500).nullable(),
+    memory_top_k: z.number().int().min(1).max(20),
+    pipeline_order: z.number().int().min(0).max(1000),
+  })
+  .strict()
+
+export const customAgentSchema = customAgentSpecSchema
+  .extend({
+    agent_id: z.string(),
+    project_id: z.string(),
+    status: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict()
+
+export const customAgentListSchema = z.array(customAgentSchema)
+
+export const agentDefinitionSchema = z
+  .object({
+    name: z.string(),
+    display_name: z.string(),
+    description: z.string(),
+    order: z.number().int(),
+    produces: z.string(),
+    requires: z.array(z.string()),
+    model_tier: z.string(),
+    is_custom: z.boolean(),
+    agent_id: z.string().nullable().optional(),
+  })
+  .strict()
+
+export const toolCatalogEntrySchema = z
+  .object({
+    name: z.string(),
+    description: z.string(),
+    params_schema: z.record(z.unknown()),
+  })
+  .strict()
+
+export const agentDefinitionsResponseSchema = z
+  .object({
+    agents: z.array(agentDefinitionSchema),
+    tool_catalog: z.array(toolCatalogEntrySchema),
+  })
+  .strict()
+
+export const testRunRequestSchema = z
+  .object({
+    project_id: z.string().min(1),
+    time_range_days: z.number().int().min(1).max(90),
+    definition: customAgentSpecSchema,
+  })
+  .strict()
+
+export const testRunResponseSchema = z
+  .object({
+    prompt: z.string(),
+    raw_response: z.string(),
+    parsed_output: z.unknown(),
+    tool_results: z.array(z.record(z.unknown())),
+    timings_ms: z.record(z.number()),
   })
   .strict()
 
