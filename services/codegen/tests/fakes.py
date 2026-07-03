@@ -28,6 +28,12 @@ class FakeConn:
         return _Txn()
 
     async def execute(self, query: str, *args: Any) -> None:
+        if "SET prompts" in query:
+            # set_prompts: (changeset_id, prompts_json)
+            row = self.store["changesets"].get(args[0])
+            if row is not None:
+                row["prompts"] = args[1]
+                row["updated_at"] = _T0
         return None
 
     async def fetchval(self, query: str, *args: Any):

@@ -4,14 +4,14 @@
 // UNTRUNCATED failure reason for a tests_failed / error run, which is the one
 // thing an operator needs to know why an autonomous PR never opened.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ExternalLink, GitBranch } from 'lucide-react'
+import { AlertTriangle, ChevronRight, ExternalLink, GitBranch } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { abandonChangeset, getChangeset, mergeChangeset, revertChangeset } from '@/api/codegen'
 import { ApiError } from '@/api/http'
 import { TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
-import type { Changeset } from '@/api/types/codegen'
+import type { Changeset, ChangesetPrompt } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
 import { RelativeTime } from '@/components/shared/RelativeTime'
@@ -110,6 +110,54 @@ function LifecycleStepper({ status }: { status: string }) {
         )
       })}
     </ol>
+  )
+}
+
+// Stage → pill styling for the prompt transcript. Unknown stages (a future
+// codegen version) fall back to a neutral pill rather than breaking the page.
+const PROMPT_STAGE_STYLES: Record<string, string> = {
+  brief: 'border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300',
+  edit: 'border-violet-300 bg-violet-50 text-violet-800 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300',
+  review:
+    'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300',
+}
+
+function PromptText({ label, text }: { label: string; text: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
+      <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
+        {text}
+      </pre>
+    </div>
+  )
+}
+
+function PromptEntry({ prompt }: { prompt: ChangesetPrompt }) {
+  const chars = (prompt.system?.length ?? 0) + prompt.user.length
+  return (
+    <details className="group rounded-md border">
+      <summary className="flex cursor-pointer select-none flex-wrap items-center gap-2 px-3 py-2 text-sm font-medium [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+        <span
+          className={cn(
+            'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium',
+            PROMPT_STAGE_STYLES[prompt.stage] ?? 'bg-muted text-muted-foreground',
+          )}
+        >
+          {prompt.stage}
+        </span>
+        {prompt.label}
+        <span className="ml-auto text-xs font-normal tabular-nums text-muted-foreground">
+          {chars.toLocaleString()} chars
+        </span>
+      </summary>
+      <div className="space-y-3 border-t px-3 py-3">
+        {prompt.notes ? <p className="text-xs text-muted-foreground">{prompt.notes}</p> : null}
+        {prompt.system !== null ? <PromptText label="System prompt" text={prompt.system} /> : null}
+        <PromptText label="User message" text={prompt.user} />
+      </div>
+    </details>
   )
 }
 
@@ -296,6 +344,9 @@ export function ChangesetDetailPage() {
             )}
           </Fact>
           <Fact label="CI status">{cs.ci_status === 'none' ? 'no CI configured' : (cs.ci_status ?? '—')}</Fact>
+          <Fact label="Merge commit">
+            {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
+          </Fact>
           <Fact label="Diff">
             {files !== null ? (
               <span className="tabular-nums">
@@ -344,9 +395,6 @@ export function ChangesetDetailPage() {
                 const items = metaList(meta, key)
                 if (items.length === 0) return null
                 return (
-          <Fact label="Merge commit">
-            {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
-          </Fact>
                   <Fact key={key} label={key.replace(/_/g, ' ')}>
                     <ul className="list-disc space-y-1 pl-4 text-sm text-muted-foreground">
                       {items.map((item, i) => (
@@ -368,6 +416,27 @@ export function ChangesetDetailPage() {
               </ul>
             </Fact>
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Prompts</CardTitle>
+          <CardDescription>
+            The complete system and user prompts this run sent, in order: the brief compilation
+            (spec → repo-grounded work order), each instruction handed to the coding agent, and
+            each pre-push diff review.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {cs.prompts.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No prompts recorded for this run yet. They appear once the editing stage runs; runs
+              from before prompt recording have none.
+            </p>
+          ) : (
+            cs.prompts.map((prompt, i) => <PromptEntry key={i} prompt={prompt} />)
+          )}
         </CardContent>
       </Card>
     </div>

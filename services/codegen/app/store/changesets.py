@@ -35,6 +35,21 @@ _ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
 )
 
 
+def _prompts_from_row(row: asyncpg.Record) -> list[dict[str, Any]]:
+    """The ``prompts`` column as a list, tolerant of rows that predate it.
+
+    JSONB arrives as ``str`` from asyncpg and as a Python value from the test
+    fakes; a row missing the column entirely (old fake fixtures) reads as empty.
+    """
+    try:
+        value = row["prompts"]
+    except KeyError:
+        return []
+    if isinstance(value, str):
+        value = json.loads(value)
+    return value or []
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -50,6 +65,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         ci_status=row["ci_status"],
         merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
+        prompts=_prompts_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -247,6 +263,28 @@ async def mark_pr_open(
         ),
         params=(branch, pr_url, pr_number, node_id, json.dumps(diff_stat)),
     )
+
+
+async def set_prompts(
+    pool: asyncpg.Pool, changeset_id: str, prompts: list[dict[str, Any]]
+) -> None:
+    """Persist the run's LLM prompt transcript (no status transition).
+
+    Written once per edit attempt — success or failure — so the admin console
+    can show exactly what the run sent to the model(s). Deliberately outside
+    the state machine: the transcript is diagnostic metadata, valid to record
+    in any state.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET prompts = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(prompts),
+        )
 
 
 async def mark_merged(

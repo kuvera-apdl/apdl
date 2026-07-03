@@ -94,6 +94,24 @@ def _parse_verdict(text: str) -> ReviewVerdict | None:
     )
 
 
+def build_review_user(
+    *, spec: str, diff_text: str, changed_paths: list[str]
+) -> str:
+    """The exact user message the review pass sends (diff already capped).
+
+    Shared with the editor's prompt transcript (``EditResult.prompts``) so what
+    the admin console shows is byte-for-byte what the model received.
+    """
+    diff = diff_text[:_REVIEW_DIFF_CAP]
+    if len(diff_text) > _REVIEW_DIFF_CAP:
+        diff += "\n[…diff truncated for review…]"
+    return (
+        f"# Task spec\n\n{spec.strip()}\n\n"
+        f"# Changed files\n\n{chr(10).join(changed_paths)}\n\n"
+        f"# Diff\n\n```diff\n{diff}\n```"
+    )
+
+
 async def review_change(
     *,
     spec: str,
@@ -102,13 +120,8 @@ async def review_change(
     complete: CompleteFn,
 ) -> ReviewVerdict:
     """Judge ``diff_text`` against ``spec``; skipped (approved) on infra failure."""
-    diff = diff_text[:_REVIEW_DIFF_CAP]
-    if len(diff_text) > _REVIEW_DIFF_CAP:
-        diff += "\n[…diff truncated for review…]"
-    user = (
-        f"# Task spec\n\n{spec.strip()}\n\n"
-        f"# Changed files\n\n{chr(10).join(changed_paths)}\n\n"
-        f"# Diff\n\n```diff\n{diff}\n```"
+    user = build_review_user(
+        spec=spec, diff_text=diff_text, changed_paths=changed_paths
     )
     text = await complete(REVIEW_SYSTEM, user)
     if text is None:

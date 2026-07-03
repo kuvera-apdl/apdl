@@ -47,6 +47,14 @@ class EditResult:
     diff_text: str = ""
     error: str | None = None
     logs_uri: str | None = None
+    #: Ordered transcript of the LLM prompts this attempt actually sent — the
+    #: brief compilation, each edit instruction handed to the coding agent, and
+    #: each pre-push diff review. Entries are
+    #: ``{"stage", "label", "system", "user", "notes"}`` dicts; ``system`` is
+    #: ``None`` for the edit stage (Aider supplies its own system prompt).
+    #: Populated on failure too — a failed run is exactly when an operator
+    #: needs to see what the model was told.
+    prompts: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Editor(Protocol):

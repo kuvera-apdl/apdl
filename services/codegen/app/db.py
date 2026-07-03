@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     merge_sha     TEXT,
     task          JSONB NOT NULL DEFAULT '{}',
     diff_stat     JSONB NOT NULL DEFAULT '{}',
+    prompts       JSONB NOT NULL DEFAULT '[]',
     error         TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -51,9 +52,15 @@ CHANGESETS_MERGE_SHA_DDL = """
 ALTER TABLE codegen_changesets ADD COLUMN IF NOT EXISTS merge_sha TEXT;
 """
 
+CHANGESETS_PROMPTS_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS prompts JSONB NOT NULL DEFAULT '[]';
+"""
+
 ALL_DDL = (
     CONNECTIONS_DDL,
     CHANGESETS_DDL,
     CHANGESETS_INDEX_DDL,
     CHANGESETS_MERGE_SHA_DDL,
+    CHANGESETS_PROMPTS_DDL,
 )

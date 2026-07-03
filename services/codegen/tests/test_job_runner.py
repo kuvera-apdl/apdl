@@ -285,3 +285,32 @@ async def test_jobs_serialize_at_concurrency_one(monkeypatch):
     assert editor.started == 2
     assert (await store.get_changeset(pool, "cs_one")).status == ChangesetStatus.pr_open
     assert (await store.get_changeset(pool, "cs_two")).status == ChangesetStatus.pr_open
+
+
+@pytest.mark.asyncio
+async def test_job_persists_prompt_transcript_on_success_and_failure():
+    """EditResult.prompts lands on the changeset row either way the edit ends."""
+    transcript = [
+        {"stage": "edit", "label": "Edit instruction (attempt 1)",
+         "system": None, "user": "do the thing", "notes": None},
+    ]
+
+    async def open_pr(**kwargs) -> PullRequest:
+        return PullRequest(url="https://github.com/acme/widgets/pull/9", number=9)
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_prompt_ok")
+    await _seed(pool, "cs_prompt_ko")
+
+    editor = FakeEditor(EditResult(success=True, prompts=transcript))
+    await run_changeset_job(pool, "cs_prompt_ok", editor=editor, mint_token=_mint, open_pr=open_pr)
+    ok = await store.get_changeset(pool, "cs_prompt_ok")
+    assert ok.status == ChangesetStatus.pr_open
+    assert ok.prompts == transcript
+
+    editor = FakeEditor(EditResult(success=False, error="tests red", prompts=transcript))
+    await run_changeset_job(pool, "cs_prompt_ko", editor=editor, mint_token=_mint, open_pr=open_pr)
+    ko = await store.get_changeset(pool, "cs_prompt_ko")
+    assert ko.status == ChangesetStatus.tests_failed
+    assert ko.prompts == transcript

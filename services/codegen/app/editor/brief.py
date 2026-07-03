@@ -133,6 +133,22 @@ def build_repo_digest(repo_dir: Path) -> str:
     return "\n\n".join(sections)
 
 
+def build_brief_user(
+    *, title: str, spec: str, repo_digest: str, verification_context: str
+) -> str:
+    """The exact user message the brief pass sends.
+
+    Shared with the editor's prompt transcript (``EditResult.prompts``) so what
+    the admin console shows is byte-for-byte what the model received.
+    """
+    return (
+        f"# Approved proposal\n\n## Title\n{title.strip()}\n\n"
+        f"## Spec\n{spec.strip()}\n\n"
+        f"# Repository digest\n\n{repo_digest.strip()}\n\n"
+        f"# Repository verification\n\n{verification_context.strip()}"
+    )
+
+
 async def compile_brief(
     *,
     title: str,
@@ -146,11 +162,11 @@ async def compile_brief(
     Fail-open by design: an unavailable or degenerate compilation must never
     block the changeset — the raw spec is what would have run anyway.
     """
-    user = (
-        f"# Approved proposal\n\n## Title\n{title.strip()}\n\n"
-        f"## Spec\n{spec.strip()}\n\n"
-        f"# Repository digest\n\n{repo_digest.strip()}\n\n"
-        f"# Repository verification\n\n{verification_context.strip()}"
+    user = build_brief_user(
+        title=title,
+        spec=spec,
+        repo_digest=repo_digest,
+        verification_context=verification_context,
     )
     brief = await complete(BRIEF_SYSTEM, user)
     if brief is None or len(brief) < _MIN_BRIEF_CHARS or "## Goal" not in brief:
