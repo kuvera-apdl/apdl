@@ -59,6 +59,8 @@ class FakeConn:
             return row
         if "SELECT * FROM codegen_connections" in query:
             return self.store["connections"].get(args[0])
+        if "DELETE FROM codegen_connections" in query:
+            return self.store["connections"].pop(args[0], None)
         if "INSERT INTO codegen_changesets" in query:
             row = {
                 "changeset_id": args[0],

@@ -32,6 +32,25 @@ async def test_create_and_get_connection():
 
 
 @pytest.mark.asyncio
+async def test_delete_connection():
+    pool = FakePool()
+    pool.add_connection("demo")
+    async with _client(pool) as client:
+        resp = await client.delete("/v1/connections/demo")
+        assert resp.status_code == 204
+
+        got = await client.get("/v1/connections/demo")
+        assert got.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_connection_404():
+    async with _client(FakePool()) as client:
+        resp = await client.delete("/v1/connections/nope")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_unknown_connection_404():
     async with _client(FakePool()) as client:
         resp = await client.get("/v1/connections/nope")

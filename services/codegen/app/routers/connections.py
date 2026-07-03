@@ -47,6 +47,21 @@ async def get_connection(project_id: str, request: Request) -> Connection:
     return connection
 
 
+@router.delete("/{project_id}", status_code=204)
+async def delete_connection(project_id: str, request: Request) -> None:
+    """Disconnect a project from its repository.
+
+    Removes the binding only — the GitHub App installation itself is managed on
+    github.com and is untouched, as are existing changesets and open PRs.
+    """
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    deleted = await store.delete_connection(pool, project_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404, detail=f"No repo connection for project '{project_id}'."
+        )
+
+
 @router.get("/{project_id}/repo-context")
 async def get_repo_context(project_id: str, request: Request) -> dict:
     """Compact repo facts (stack, layout, scripts, README) for planning agents.

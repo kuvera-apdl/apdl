@@ -55,3 +55,13 @@ async def get_connection(pool: asyncpg.Pool, project_id: str) -> Connection | No
             project_id,
         )
     return _row_to_connection(row) if row else None
+
+
+async def delete_connection(pool: asyncpg.Pool, project_id: str) -> bool:
+    """Remove the repo binding for a project. Returns ``False`` if none existed."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM codegen_connections WHERE project_id = $1 RETURNING project_id",
+            project_id,
+        )
+    return row is not None
