@@ -5,12 +5,23 @@ Tier 1 (fast): High-throughput, lower-cost tasks — summarisation, classificati
 Tier 2 (reasoning): Complex analysis, experiment design, feature proposals.
 
 Each tier tries providers in order and falls back on failure.
+
+Two entry points share the tier/fallback machinery:
+
+* :func:`chat_completion` — plain text in/out (the original API).
+* :func:`chat_completion_with_tools` — function calling. Conversations use the
+  OpenAI wire shape as the neutral format (assistant messages may carry
+  ``tool_calls``; tool results are ``{"role": "tool", ...}`` messages) and are
+  converted per provider, so a mid-conversation fallback to a different
+  provider can replay the same history.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Any
 
 import anthropic
@@ -268,6 +279,354 @@ async def chat_completion(
             return result
         except Exception as exc:
             logger.warning("LLM call failed (provider=%s, model=%s): %s", provider, model, exc)
+            last_exc = exc
+
+    raise RuntimeError(f"All LLM providers failed for tier '{model_tier}'") from last_exc
+
+
+# ---------------------------------------------------------------------------
+# Tool calling (function calling)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolCall:
+    """One tool invocation requested by the model, provider-normalized."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolCompletion:
+    """A completion that may request tool calls instead of (or with) text."""
+
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+def _parse_arguments(raw: Any) -> dict[str, Any]:
+    """Tolerate the model emitting arguments as a JSON string or a dict."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _openai_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["parameters"],
+            },
+        }
+        for t in tools
+    ]
+
+
+def _openai_tool_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-serialize normalized messages for the OpenAI wire (arguments as str)."""
+    wire: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg["role"] == "assistant" and msg.get("tool_calls"):
+            wire.append(
+                {
+                    "role": "assistant",
+                    "content": msg.get("content") or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"]),
+                            },
+                        }
+                        for tc in msg["tool_calls"]
+                    ],
+                }
+            )
+        elif msg["role"] == "tool":
+            wire.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": msg["tool_call_id"],
+                    "content": msg["content"],
+                }
+            )
+        else:
+            wire.append({"role": msg["role"], "content": msg.get("content") or ""})
+    return wire
+
+
+async def _openai_completion_tools(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    client: openai.AsyncOpenAI,
+    **kwargs: Any,
+) -> ToolCompletion:
+    if _is_openai_reasoning_model(model):
+        if "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        kwargs.pop("temperature", None)
+    if tools:
+        kwargs["tools"] = _openai_tools(tools)
+    resp = await client.chat.completions.create(
+        model=model, messages=_openai_tool_messages(messages), **kwargs
+    )
+    message = resp.choices[0].message
+    calls = [
+        ToolCall(
+            id=tc.id,
+            name=tc.function.name,
+            arguments=_parse_arguments(tc.function.arguments),
+        )
+        for tc in (message.tool_calls or [])
+    ]
+    return ToolCompletion(text=message.content or "", tool_calls=calls)
+
+
+def _anthropic_tool_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Convert normalized messages to Anthropic's (system, messages) shape.
+
+    Consecutive tool results merge into ONE user turn — Anthropic requires
+    every tool_result for an assistant turn's tool_use blocks to arrive in the
+    single following user message.
+    """
+    system_text = ""
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg["role"]
+        if role == "system":
+            system_text = msg["content"]
+        elif role == "assistant" and msg.get("tool_calls"):
+            blocks: list[dict[str, Any]] = []
+            if msg.get("content"):
+                blocks.append({"type": "text", "text": msg["content"]})
+            blocks.extend(
+                {"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["arguments"]}
+                for tc in msg["tool_calls"]
+            )
+            out.append({"role": "assistant", "content": blocks})
+        elif role == "tool":
+            result_block = {
+                "type": "tool_result",
+                "tool_use_id": msg["tool_call_id"],
+                "content": msg["content"],
+            }
+            if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
+                out[-1]["content"].append(result_block)
+            else:
+                out.append({"role": "user", "content": [result_block]})
+        else:
+            out.append({"role": role, "content": msg.get("content") or ""})
+    return system_text, out
+
+
+async def _anthropic_completion_tools(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    client: anthropic.AsyncAnthropic,
+    **kwargs: Any,
+) -> ToolCompletion:
+    system_text, chat_messages = _anthropic_tool_messages(messages)
+    max_tokens = kwargs.pop("max_tokens", 4096)
+    if tools:
+        kwargs["tools"] = [
+            {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+            for t in tools
+        ]
+    resp = await client.messages.create(
+        model=model,
+        system=system_text,
+        messages=chat_messages,
+        max_tokens=max_tokens,
+        **kwargs,
+    )
+    text_parts: list[str] = []
+    calls: list[ToolCall] = []
+    for block in resp.content:
+        block_type = getattr(block, "type", "")
+        if block_type == "tool_use":
+            calls.append(
+                ToolCall(
+                    id=block.id,
+                    name=block.name,
+                    arguments=_parse_arguments(block.input),
+                )
+            )
+        elif getattr(block, "text", None):
+            text_parts.append(block.text)
+    return ToolCompletion(text="\n".join(text_parts), tool_calls=calls)
+
+
+def _google_tool_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert normalized messages to google-genai (system_instruction, contents)."""
+    system_instruction: str | None = None
+    contents: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg["role"]
+        if role == "system":
+            system_instruction = msg["content"]
+        elif role == "assistant" and msg.get("tool_calls"):
+            parts: list[dict[str, Any]] = []
+            if msg.get("content"):
+                parts.append({"text": msg["content"]})
+            parts.extend(
+                {"function_call": {"name": tc["name"], "args": tc["arguments"]}}
+                for tc in msg["tool_calls"]
+            )
+            contents.append({"role": "model", "parts": parts})
+        elif role == "tool":
+            # Gemini matches responses by function NAME (it has no call ids).
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "function_response": {
+                                "name": msg.get("name", ""),
+                                "response": {"result": msg["content"]},
+                            }
+                        }
+                    ],
+                }
+            )
+        else:
+            gr = "model" if role == "assistant" else "user"
+            contents.append({"role": gr, "parts": [{"text": msg.get("content") or ""}]})
+    return system_instruction, contents
+
+
+async def _google_completion_tools(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    client: genai.Client,
+    **kwargs: Any,
+) -> ToolCompletion:
+    system_instruction, contents = _google_tool_contents(messages)
+    genai_tools = None
+    if tools:
+        genai_tools = [
+            genai_types.Tool(
+                function_declarations=[
+                    genai_types.FunctionDeclaration(
+                        name=t["name"],
+                        description=t["description"],
+                        # Raw JSON schema passthrough — genai's typed Schema
+                        # can't express pydantic's $defs/$ref output.
+                        parameters_json_schema=t["parameters"],
+                    )
+                    for t in tools
+                ]
+            )
+        ]
+    config = genai_types.GenerateContentConfig(
+        max_output_tokens=kwargs.get("max_tokens", 4096),
+        temperature=kwargs.get("temperature"),
+        system_instruction=system_instruction,
+        tools=genai_tools,
+    )
+    resp = await client.aio.models.generate_content(
+        model=model, contents=contents, config=config
+    )
+    text_parts: list[str] = []
+    calls: list[ToolCall] = []
+    candidates = resp.candidates or []
+    parts = candidates[0].content.parts if candidates and candidates[0].content else []
+    for index, part in enumerate(parts or []):
+        fc = getattr(part, "function_call", None)
+        if fc is not None:
+            calls.append(
+                ToolCall(
+                    # Gemini emits no ids; synthesize stable ones so the
+                    # neutral format (and a cross-provider fallback) still works.
+                    id=f"call_{index}_{fc.name}",
+                    name=fc.name,
+                    arguments=_parse_arguments(dict(fc.args or {})),
+                )
+            )
+        elif getattr(part, "text", None):
+            text_parts.append(part.text)
+    return ToolCompletion(text="\n".join(text_parts), tool_calls=calls)
+
+
+async def chat_completion_with_tools(
+    model_tier: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> ToolCompletion:
+    """Route a tool-enabled chat completion through the provider chain.
+
+    Args:
+        model_tier: "fast" or "reasoning".
+        messages: Normalized OpenAI-shape messages. Assistant messages may
+            carry ``tool_calls`` (list of ``{"id", "name", "arguments": dict}``);
+            tool results are ``{"role": "tool", "tool_call_id", "name", "content"}``.
+        tools: Neutral tool specs ``{"name", "description", "parameters"}``
+            (parameters = JSON schema). ``None``/empty sends no tools — the
+            model must answer with text (used to force a final answer).
+
+    Returns:
+        A :class:`ToolCompletion` with the assistant text and any tool calls.
+
+    Raises:
+        RuntimeError: If all providers fail.
+    """
+    if model_tier not in _TIER_DEFAULTS:
+        raise ValueError(
+            f"Unknown model_tier {model_tier!r} — expected one of {sorted(_TIER_DEFAULTS)}"
+        )
+    models = _tier_models(model_tier)
+    if not models:
+        raise RuntimeError(
+            f"No LLM providers configured for tier '{model_tier}'. "
+            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or LOCAL_LLM_URL."
+        )
+    merged = {**_TIER_DEFAULTS[model_tier], **kwargs}
+
+    last_exc: Exception | None = None
+    for entry in models:
+        provider = entry["provider"]
+        model = entry["model"]
+        try:
+            if provider == "openai":
+                result = await _openai_completion_tools(
+                    model, messages, tools, _get_openai(), **dict(merged)
+                )
+            elif provider == "anthropic":
+                result = await _anthropic_completion_tools(
+                    model, messages, tools, _get_anthropic(), **dict(merged)
+                )
+            elif provider == "google":
+                result = await _google_completion_tools(
+                    model, messages, tools, _get_google(), **dict(merged)
+                )
+            else:  # local — OpenAI-compatible servers speak the tools dialect
+                result = await _openai_completion_tools(
+                    model, messages, tools, _get_local(), **dict(merged)
+                )
+            logger.info(
+                "LLM tool call ok (provider=%s, model=%s, tool_calls=%d)",
+                provider, model, len(result.tool_calls),
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "LLM tool call failed (provider=%s, model=%s): %s", provider, model, exc
+            )
             last_exc = exc
 
     raise RuntimeError(f"All LLM providers failed for tier '{model_tier}'") from last_exc
