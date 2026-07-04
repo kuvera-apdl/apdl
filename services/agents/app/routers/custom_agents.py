@@ -56,7 +56,6 @@ class CustomAgentSpec(BaseModel):
     tools: list[str] = Field(default_factory=list)
     requires: list[str] = Field(default_factory=list)
     produces: str
-    parse_as: str = "object"
     memory_query: str | None = None
     memory_top_k: int = 5
     pipeline_order: int = 100

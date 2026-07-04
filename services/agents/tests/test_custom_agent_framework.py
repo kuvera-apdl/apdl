@@ -26,7 +26,6 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "tools": ["discover_events", "query_events"],
         "requires": [],
         "produces": "churn_signals",
-        "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 3,
         "pipeline_order": 60,
@@ -106,7 +105,7 @@ def test_build_prompt_blanks_legacy_tool_results_placeholder():
 
 
 def test_parse_enforces_list_shape():
-    agent = CustomAgent(_definition(parse_as="list"))
+    agent = CustomAgent(_definition())
     assert agent.parse('{"a": 1}') == [{"a": 1}]
     assert agent.parse("[1, 2]") == []  # non-dict items dropped
     assert agent.parse('[{"a": 1}]') == [{"a": 1}]
@@ -166,7 +165,6 @@ def test_bounds():
     assert any("memory_top_k" in e for e in _validate(memory_top_k=0))
     assert any("pipeline_order" in e for e in _validate(pipeline_order=-1))
     assert any("model_tier" in e for e in _validate(model_tier="turbo"))
-    assert any("parse_as" in e for e in _validate(parse_as="text"))
     assert any("requires" in e for e in _validate(requires=["a", "b", "c", "d", "e", "f"]))
     assert any("max_tool_steps" in e for e in _validate(max_tool_steps=0))
     assert any("max_tool_steps" in e for e in _validate(max_tool_steps=99))

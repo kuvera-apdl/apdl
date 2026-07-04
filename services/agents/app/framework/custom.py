@@ -97,7 +97,10 @@ class CustomAgent(BaseAgent):
         self.memory_top_k = int(definition.get("memory_top_k", 5))
         self.requires = tuple(definition.get("requires") or ())
         self.produces = definition["produces"]
-        self.parse_as = definition.get("parse_as", "object")
+        # Custom output is always a list of findings — everything downstream
+        # (result persistence, the run-results endpoint, the console cards)
+        # flattens to lists, and parse() coerces a single object to [obj].
+        self.parse_as = "list"
         self.user_prompt_template = definition["user_prompt_template"]
         # Allowed tools: an empty selection means the full catalog — the
         # wizard default. The stored subset only ever narrows.
@@ -168,8 +171,6 @@ def validate_definition(
 
     if fields.get("model_tier") not in ("fast", "reasoning"):
         errors.append("model_tier must be 'fast' or 'reasoning'")
-    if fields.get("parse_as") not in ("object", "list"):
-        errors.append("parse_as must be 'object' or 'list'")
 
     memory_query = fields.get("memory_query")
     if memory_query is not None and len(memory_query) > 500:

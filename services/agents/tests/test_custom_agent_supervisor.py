@@ -25,7 +25,6 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "tools": ["discover_events"],
         "requires": [],
         "produces": "churn_signals",
-        "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 15,
