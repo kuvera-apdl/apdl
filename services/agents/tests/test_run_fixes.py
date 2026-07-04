@@ -1,8 +1,11 @@
 """Regression tests for the agent-run failures found in the admin console.
 
-Covers: behavior-agent event discovery, event_count sending selectors (not the
-bad event_names kwarg), feature_proposal None-safety, and parse_llm_json never
-raising on malformed safety-review responses.
+Covers: feature_proposal None-safety and parse_llm_json never raising on
+malformed safety-review responses. (The behavior agent's plan-executor
+regressions — event_names vs selectors, catalog formatting — died with the
+plan-executor itself: the agent now drives the tool catalog agentically and
+every call is validated by the catalog's pydantic params models; see
+test_behavior_analysis_agent.py.)
 """
 
 from __future__ import annotations
@@ -12,9 +15,7 @@ from typing import Any
 import pytest
 
 from app.framework import AgentContext
-from app.graphs import behavior_analysis as ba
 from app.graphs import feature_proposal as fp
-from app.graphs.behavior_analysis import BehaviorAnalysisAgent, _format_event_catalog
 from app.llm.utils import parse_llm_json
 
 
@@ -28,82 +29,6 @@ def _ctx(**ov: Any) -> AgentContext:
         autonomy_level=ov.get("autonomy_level", 3),
         time_range_days=ov.get("time_range_days", 7),
     )
-
-
-# ---------------------------------------------------------------------------
-# Event catalog formatting / discovery
-# ---------------------------------------------------------------------------
-
-def test_format_event_catalog_lists_events():
-    out = _format_event_catalog(
-        [{"event_name": "page", "event_count": 57, "unique_users": 3}]
-    )
-    assert "page" in out
-    assert "57" in out
-
-
-def test_format_event_catalog_empty_warns_not_to_fabricate():
-    out = _format_event_catalog([])
-    assert "no events" in out.lower()
-
-
-@pytest.mark.asyncio
-async def test_discover_events_returns_catalog(monkeypatch):
-    async def fake_discover(**kwargs):
-        return {"events": [{"event_name": "page", "event_count": 57}]}
-
-    monkeypatch.setattr(ba, "discover_events", fake_discover)
-    catalog = await BehaviorAnalysisAgent()._discover_events(_ctx())
-    assert catalog == [{"event_name": "page", "event_count": 57}]
-
-
-@pytest.mark.asyncio
-async def test_discover_events_swallows_errors(monkeypatch):
-    async def boom(**kwargs):
-        raise RuntimeError("query service down")
-
-    monkeypatch.setattr(ba, "discover_events", boom)
-    assert await BehaviorAnalysisAgent()._discover_events(_ctx()) == []
-
-
-# ---------------------------------------------------------------------------
-# event_count must send `selectors`, never the unsupported `event_names` kwarg
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_event_count_sends_selectors(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    async def fake_query_events(**kwargs):
-        captured.update(kwargs)
-        return {"results": []}
-
-    monkeypatch.setattr(ba, "query_events", fake_query_events)
-    results = await BehaviorAnalysisAgent()._run_queries(
-        _ctx(),
-        [{"type": "event_count", "selectors": [{"event_name": "page", "filters": []}]}],
-    )
-    assert captured.get("selectors") == [{"event_name": "page", "filters": []}]
-    assert "event_names" not in captured
-    assert results[0].get("error") is None
-
-
-@pytest.mark.asyncio
-async def test_event_count_accepts_legacy_event_names(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    async def fake_query_events(**kwargs):
-        captured.update(kwargs)
-        return {"results": []}
-
-    monkeypatch.setattr(ba, "query_events", fake_query_events)
-    await BehaviorAnalysisAgent()._run_queries(
-        _ctx(), [{"type": "event_count", "event_names": ["page", "$click"]}]
-    )
-    assert captured["selectors"] == [
-        {"event_name": "page", "filters": []},
-        {"event_name": "$click", "filters": []},
-    ]
 
 
 # ---------------------------------------------------------------------------
