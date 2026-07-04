@@ -68,7 +68,7 @@ export function CustomAgentsPage() {
       <PageHeader
         backTo={{ to: '/agents', label: 'Agent runs' }}
         title="Custom agents"
-        description="Project-scoped, read-only analysis agents: your prompts plus a selection of query tools, run through the same supervisor pipeline as the built-ins. They never deploy anything."
+        description="Project-scoped, read-only analysis agents: your prompts plus the query tools you allow, driven agentically by the model through the same supervisor pipeline as the built-ins. They never deploy anything."
         actions={
           <>
             {conn && projectId ? (
@@ -136,7 +136,9 @@ export function CustomAgentsPage() {
                     <TableCell>
                       <Badge variant="secondary">{agent.model_tier}</Badge>
                     </TableCell>
-                    <TableCell className="tabular-nums">{agent.tools.length}</TableCell>
+                    <TableCell className="tabular-nums">
+                      {agent.tools.length === 0 ? 'all' : agent.tools.length}
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{agent.produces}</TableCell>
                     <TableCell className="tabular-nums">{agent.pipeline_order}</TableCell>
                     <TableCell>

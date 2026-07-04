@@ -2,6 +2,11 @@
 // Behavior → Test & save. Per-step validation gates Next; the final step can
 // dry-run the draft against real project data (POST /custom/test) before
 // anything is persisted.
+//
+// Custom agents are agentic: the model calls the read-only data tools itself
+// (picking parameters at run time) inside a bounded loop. The Data tools step
+// therefore selects which tools are ALLOWED — default all — not pre-baked
+// queries.
 import { ArrowLeft, ArrowRight, Check, FlaskConical, Save } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -45,13 +50,7 @@ const SLUG_RE = /^[a-z][a-z0-9_]{2,63}$/
 
 // Base placeholders always available to the user prompt template; one more
 // per selected `requires` key (documented inline in the Prompts step).
-const BASE_PLACEHOLDERS = ['{tool_results}', '{context}', '{project_id}', '{time_range_days}']
-
-interface ToolDraft {
-  tool: string
-  /** Params as JSON text — kept as text so partial edits never crash. */
-  paramsText: string
-}
+const BASE_PLACEHOLDERS = ['{context}', '{project_id}', '{time_range_days}']
 
 interface FormState {
   slug: string
@@ -61,7 +60,11 @@ interface FormState {
   system_prompt: string
   user_prompt_template: string
   model_tier: 'fast' | 'reasoning'
-  tools: ToolDraft[]
+  /** UI-only: false = whole catalog allowed (spec sends []); true = subset. */
+  limitTools: boolean
+  /** Allowed tool names; only meaningful when limitTools is true. */
+  tools: string[]
+  max_tool_steps: number
   requires: string[]
   produces: string
   parse_as: 'object' | 'list'
@@ -77,9 +80,11 @@ const EMPTY_FORM: FormState = {
   description: '',
   system_prompt: '',
   user_prompt_template:
-    'Analyse the following data for project {project_id} (last {time_range_days} days).\n\nRelevant past learnings:\n{context}\n\nData:\n{tool_results}\n\nRespond with a JSON array of findings.',
+    'Investigate project {project_id} over the last {time_range_days} days.\n\nRelevant past learnings:\n{context}\n\nUse your data tools to gather the evidence you need, then respond with a JSON array of findings.',
   model_tier: 'reasoning',
+  limitTools: false,
   tools: [],
+  max_tool_steps: 8,
   requires: [],
   produces: '',
   parse_as: 'list',
@@ -105,30 +110,15 @@ function toSpec(form: FormState): CustomAgentSpec {
     system_prompt: form.system_prompt,
     user_prompt_template: form.user_prompt_template,
     model_tier: form.model_tier,
-    tools: form.tools.map((draft) => ({
-      tool: draft.tool,
-      params: parseParams(draft.paramsText) ?? {},
-    })),
+    // Empty = whole catalog allowed (the server default).
+    tools: form.limitTools ? form.tools : [],
+    max_tool_steps: form.max_tool_steps,
     requires: form.requires,
     produces: form.produces,
     parse_as: form.parse_as,
     memory_query: form.memory_query.trim() === '' ? null : form.memory_query,
     memory_top_k: form.memory_top_k,
     pipeline_order: form.pipeline_order,
-  }
-}
-
-function parseParams(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim()
-  if (trimmed === '') return {}
-  try {
-    const value: unknown = JSON.parse(trimmed)
-    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      return value as Record<string, unknown>
-    }
-    return null
-  } catch {
-    return null
   }
 }
 
@@ -146,11 +136,10 @@ function stepProblems(step: number, form: FormState): string[] {
     if (form.user_prompt_template.trim() === '') problems.push('User prompt template is required.')
   }
   if (step === 2) {
-    for (const draft of form.tools) {
-      if (parseParams(draft.paramsText) === null) {
-        problems.push(`Parameters for ${draft.tool} must be a JSON object.`)
-      }
-    }
+    if (form.limitTools && form.tools.length === 0)
+      problems.push('Select at least one allowed tool, or switch back to allowing all tools.')
+    if (form.max_tool_steps < 1 || form.max_tool_steps > 16)
+      problems.push('Tool budget must be between 1 and 16 rounds.')
   }
   if (step === 3) {
     if (!SLUG_RE.test(form.produces))
@@ -161,26 +150,6 @@ function stepProblems(step: number, form: FormState): string[] {
       problems.push('Memory entries must be between 1 and 20.')
   }
   return problems
-}
-
-function defaultParamsFor(entry: ToolCatalogEntry): string {
-  // Seed the JSON editor from the schema's required fields so authors see
-  // the expected shape instead of an empty object.
-  const schema = entry.params_schema as {
-    properties?: Record<string, unknown>
-    required?: string[]
-  }
-  const required = schema.required ?? []
-  if (required.length === 0) return ''
-  const seed: Record<string, unknown> = {}
-  for (const key of required) {
-    const prop = (schema.properties?.[key] ?? {}) as { type?: string }
-    if (key === 'selectors' || key === 'steps') seed[key] = [{ event_name: '', filters: [] }]
-    else if (key.endsWith('_selector') || key === 'selector') seed[key] = { event_name: '', filters: [] }
-    else if (prop.type === 'integer' || prop.type === 'number') seed[key] = 0
-    else seed[key] = ''
-  }
-  return JSON.stringify(seed, null, 2)
 }
 
 export function CustomAgentWizardPage() {
@@ -225,10 +194,9 @@ export function CustomAgentWizardPage() {
       system_prompt: agent.system_prompt,
       user_prompt_template: agent.user_prompt_template,
       model_tier: agent.model_tier,
-      tools: agent.tools.map((tool) => ({
-        tool: tool.tool,
-        paramsText: Object.keys(tool.params).length > 0 ? JSON.stringify(tool.params, null, 2) : '',
-      })),
+      limitTools: agent.tools.length > 0,
+      tools: agent.tools,
+      max_tool_steps: agent.max_tool_steps,
       requires: agent.requires,
       produces: agent.produces,
       parse_as: agent.parse_as,
@@ -317,7 +285,7 @@ export function CustomAgentWizardPage() {
       <PageHeader
         backTo={{ to: '/agents/custom', label: 'Custom agents' }}
         title={isEdit ? `Edit ${existingQuery.data?.display_name ?? 'custom agent'}` : 'New custom agent'}
-        description="A read-only analysis agent: it gathers data with the tools you pick, reasons over it with your prompts, and stores its findings in run results. It never deploys or changes anything."
+        description="A read-only analysis agent: it investigates project data by calling the query tools you allow — choosing its own queries as it reasons — and stores its findings in run results. It never deploys or changes anything."
         actions={
           conn && projectId ? (
             <CurlButton
@@ -509,10 +477,10 @@ function PromptsStep({ form, update }: { form: FormState; update: (p: Partial<Fo
             className="font-mono text-xs"
             onChange={(event) => update({ user_prompt_template: event.target.value })}
           />
-          {form.tools.length > 0 && !form.user_prompt_template.includes('{tool_results}') ? (
+          {form.user_prompt_template.includes('{tool_results}') ? (
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              Tools are selected but the template never references {'{tool_results}'} — the
-              gathered data would be invisible to the model.
+              {'{tool_results}'} is a legacy placeholder and now renders empty — the agent calls
+              its data tools itself while reasoning, so the template no longer needs it.
             </p>
           ) : null}
         </div>
@@ -531,14 +499,14 @@ function ToolsStep({
   definitions: AgentDefinitionsResponse | undefined
 }) {
   const catalog = definitions?.tool_catalog ?? []
-  const selected = new Map(form.tools.map((draft) => [draft.tool, draft]))
+  const selected = new Set(form.tools)
 
   const toggle = (entry: ToolCatalogEntry) => {
-    if (selected.has(entry.name)) {
-      update({ tools: form.tools.filter((draft) => draft.tool !== entry.name) })
-    } else if (form.tools.length < 8) {
-      update({ tools: [...form.tools, { tool: entry.name, paramsText: defaultParamsFor(entry) }] })
-    }
+    update({
+      tools: selected.has(entry.name)
+        ? form.tools.filter((name) => name !== entry.name)
+        : [...form.tools, entry.name],
+    })
   }
 
   return (
@@ -546,64 +514,83 @@ function ToolsStep({
       <CardHeader>
         <CardTitle>Data tools</CardTitle>
         <CardDescription>
-          Read-only queries executed before the LLM call; results fill {'{tool_results}'}. Project
-          and date window are injected automatically from the run. Up to 8 tools.
+          The agent calls these read-only query tools itself while reasoning — it picks the
+          queries and parameters at run time. Project and date window are always injected from
+          the run, so it can never read outside its scope.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="space-y-4">
+        <div className="space-y-1">
+          {(
+            [
+              [false, 'All tools', 'the agent may use the entire catalog (default)'],
+              [true, 'Limit tools', 'restrict the agent to a subset you pick below'],
+            ] as const
+          ).map(([limited, label, hint]) => (
+            <label key={label} className="flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="limit-tools"
+                checked={form.limitTools === limited}
+                onChange={() => update({ limitTools: limited })}
+                className="accent-foreground"
+              />
+              <span className="font-medium">{label}</span>
+              <span className="text-xs text-muted-foreground">{hint}</span>
+            </label>
+          ))}
+        </div>
+
         {catalog.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Tool catalog unavailable — is the agents service reachable?
           </p>
-        ) : null}
-        {catalog.map((entry) => {
-          const draft = selected.get(entry.name)
-          const checked = draft !== undefined
-          const paramsInvalid = checked && parseParams(draft.paramsText) === null
-          return (
-            <div
-              key={entry.name}
-              className={cn('rounded-md border p-3', checked && 'border-foreground')}
-            >
-              <label className="flex cursor-pointer items-start gap-3">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => toggle(entry)}
-                  className="mt-1 accent-foreground"
-                />
-                <span>
-                  <span className="block font-mono text-sm font-medium">{entry.name}</span>
-                  <span className="block text-xs text-muted-foreground">{entry.description}</span>
-                </span>
-              </label>
-              {checked ? (
-                <div className="mt-2 space-y-1 pl-7">
-                  <Label htmlFor={`params-${entry.name}`} className="text-xs">
-                    Parameters (JSON)
-                  </Label>
-                  <Textarea
-                    id={`params-${entry.name}`}
-                    value={draft.paramsText}
-                    rows={draft.paramsText === '' ? 2 : Math.min(8, draft.paramsText.split('\n').length + 1)}
-                    className={cn('font-mono text-xs', paramsInvalid && 'border-destructive')}
-                    placeholder="{} — defaults"
-                    onChange={(event) =>
-                      update({
-                        tools: form.tools.map((t) =>
-                          t.tool === entry.name ? { ...t, paramsText: event.target.value } : t,
-                        ),
-                      })
-                    }
-                  />
-                  {paramsInvalid ? (
-                    <p className="text-xs text-destructive">Must be a JSON object.</p>
-                  ) : null}
+        ) : (
+          <div className={cn('space-y-2', !form.limitTools && 'pointer-events-none opacity-50')}>
+            {catalog.map((entry) => {
+              const checked = !form.limitTools || selected.has(entry.name)
+              return (
+                <div
+                  key={entry.name}
+                  className={cn('rounded-md border p-3', checked && 'border-foreground')}
+                >
+                  <label className="flex cursor-pointer items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={!form.limitTools}
+                      onChange={() => toggle(entry)}
+                      className="mt-1 accent-foreground"
+                    />
+                    <span>
+                      <span className="block font-mono text-sm font-medium">{entry.name}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {entry.description}
+                      </span>
+                    </span>
+                  </label>
                 </div>
-              ) : null}
-            </div>
-          )
-        })}
+              )
+            })}
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          <Label htmlFor="ca-tool-steps">Tool budget (rounds)</Label>
+          <Input
+            id="ca-tool-steps"
+            type="number"
+            min={1}
+            max={16}
+            value={form.max_tool_steps}
+            className="w-24 tabular-nums"
+            onChange={(event) => update({ max_tool_steps: Number(event.target.value) || 8 })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Maximum tool-calling rounds before the agent must produce its final answer. More
+            rounds mean deeper investigation and higher LLM cost.
+          </p>
+        </div>
       </CardContent>
     </Card>
   )
@@ -807,8 +794,9 @@ function TestStep({
         <CardHeader>
           <CardTitle>Test run</CardTitle>
           <CardDescription>
-            Executes the draft against real project data — tools plus one LLM call — without
-            saving anything. Costs one model call.
+            Runs the draft&rsquo;s full agentic loop against real project data — the model calls
+            its tools and answers — without saving anything. Costs up to the tool budget in model
+            calls.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -834,8 +822,7 @@ function TestStep({
           <CardHeader>
             <CardTitle>Test result</CardTitle>
             <CardDescription>
-              gather {result.timings_ms.gather ?? 0}ms · llm {result.timings_ms.llm ?? 0}ms · total{' '}
-              {result.timings_ms.total ?? 0}ms
+              agentic loop {result.timings_ms.llm ?? 0}ms · total {result.timings_ms.total ?? 0}ms
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -850,7 +837,9 @@ function TestStep({
             </section>
             {result.tool_results.length > 0 ? (
               <section className="space-y-1">
-                <h3 className="text-sm font-medium">Tool results</h3>
+                <h3 className="text-sm font-medium">
+                  Tool calls <Badge variant="secondary">{result.tool_results.length}</Badge>
+                </h3>
                 <JsonView data={result.tool_results} />
               </section>
             ) : null}

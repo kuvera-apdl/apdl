@@ -132,15 +132,11 @@ export const runResultsSchema = z
 export const modelTierSchema = z.enum(['fast', 'reasoning'])
 export const parseAsSchema = z.enum(['object', 'list'])
 
-export const toolSelectionSchema = z
-  .object({
-    tool: z.string().min(1),
-    params: z.record(z.unknown()),
-  })
-  .strict()
-
 // Create/update body (CustomAgentSpec). Server-side validate_definition owns
 // the domain rules; these mirror the shape so bad payloads fail client-side.
+// Custom agents are agentic: `tools` is the ALLOWED-tools selection (catalog
+// names the model may call in its tool loop); an empty list allows the whole
+// catalog. `max_tool_steps` bounds the loop's tool rounds.
 export const customAgentSpecSchema = z
   .object({
     slug: z
@@ -151,7 +147,7 @@ export const customAgentSpecSchema = z
     system_prompt: z.string().min(1).max(20_000),
     user_prompt_template: z.string().min(1).max(20_000),
     model_tier: modelTierSchema,
-    tools: z.array(toolSelectionSchema).max(8),
+    tools: z.array(z.string().min(1)),
     requires: z.array(z.string()).max(5),
     produces: z
       .string()
@@ -160,6 +156,7 @@ export const customAgentSpecSchema = z
     memory_query: z.string().max(500).nullable(),
     memory_top_k: z.number().int().min(1).max(20),
     pipeline_order: z.number().int().min(0).max(1000),
+    max_tool_steps: z.number().int().min(1).max(16),
   })
   .strict()
 
