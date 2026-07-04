@@ -25,9 +25,12 @@ def _make_ctx(level: int = 3) -> AgentContext:
 
 
 def _patch(monkeypatch, proposals, *, open_result=None):
-    calls: dict[str, list] = {"opened": [], "implemented": [], "failed": []}
+    calls: dict[str, list] = {"opened": [], "implemented": [], "failed": [], "claimed": []}
 
-    async def fake_claim(pool, project_id, limit=5):
+    async def fake_claim(pool, project_id, limit=5, proposal_id=None):
+        calls["claimed"].append({"limit": limit, "proposal_id": proposal_id})
+        if proposal_id is not None:
+            return [p for p in proposals if p.get("proposal_id") == proposal_id]
         return list(proposals)
 
     async def fake_open(**kwargs):
@@ -112,3 +115,17 @@ async def test_codegen_failure_marks_proposal_failed(monkeypatch):
 
     assert "error" in result.output[0]
     assert calls["failed"][0] == ("p1", "codegen down")
+
+
+@pytest.mark.asyncio
+async def test_forked_run_claims_only_its_target_proposal(monkeypatch):
+    other = {"proposal_id": "p2", "title": "Other", "spec": "Implement feature p2 fully across the app."}
+    calls = _patch(monkeypatch, [_PROPOSAL, other])
+
+    ctx = _make_ctx(3)
+    ctx.target_proposal_id = "p2"
+    result = await CodeImplementationAgent().run(ctx, {})
+
+    # gather forwards the target to claim_proposals, which returns only that one.
+    assert calls["claimed"][0]["proposal_id"] == "p2"
+    assert [o["proposal_id"] for o in result.output] == ["p2"]

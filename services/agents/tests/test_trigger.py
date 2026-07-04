@@ -1,0 +1,118 @@
+"""The trigger endpoint starts a run and stores config as JSONB."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.main import app
+from app.routers import triggers
+
+
+class _FakeConn:
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple]] = []
+
+    async def execute(self, query: str, *args: Any):
+        self.executed.append((query, args))
+
+
+class _Acquire:
+    def __init__(self, conn: _FakeConn) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> _FakeConn:
+        return self.conn
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _FakePool:
+    def __init__(self) -> None:
+        self.conn = _FakeConn()
+
+    def acquire(self) -> _Acquire:
+        return _Acquire(self.conn)
+
+
+def _client(pool: _FakePool) -> AsyncClient:
+    app.state.pg_pool = pool
+    app.state.vector_store = object()
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.mark.asyncio
+async def test_trigger_starts_run_and_serializes_config(monkeypatch):
+    kicked: list = []
+
+    async def fake_supervisor(**kwargs):
+        kicked.append(kwargs)
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["behavior_analysis", "experiment_design"],
+                "time_range_days": 7,
+                "autonomy_level": 3,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "started"
+    assert body["run_id"]
+
+    # The agent_runs insert must hand asyncpg a JSON *string* for the jsonb
+    # config column, never a raw dict — asyncpg rejects a dict with
+    # "invalid input for query argument ... (expected str, got dict)".
+    query, args = next(
+        (q, a) for q, a in pool.conn.executed if "INSERT INTO agent_runs" in q
+    )
+    assert "$5::jsonb" in query
+    config_arg = args[-1]
+    assert isinstance(config_arg, str)
+    assert json.loads(config_arg) == {
+        "analysis_types": ["behavior_analysis", "experiment_design"],
+        "time_range_days": 7,
+    }
+
+    # Supervisor is launched as a background task for the same run.
+    assert kicked and kicked[0]["analysis_types"] == [
+        "behavior_analysis",
+        "experiment_design",
+    ]
+    assert kicked[0]["run_id"] == body["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_defaults_apply(monkeypatch):
+    async def fake_supervisor(**kwargs):
+        return None
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "demo", "trigger_type": "scheduled"},
+        )
+
+    assert resp.status_code == 200
+    _, args = next(
+        (q, a) for q, a in pool.conn.executed if "INSERT INTO agent_runs" in q
+    )
+    assert json.loads(args[-1]) == {
+        "analysis_types": ["behavior_analysis"],
+        "time_range_days": 7,
+    }

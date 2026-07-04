@@ -18,14 +18,20 @@ def build_event_count_query(selectors: list[EventSelector], params: dict[str, An
         prefix = f"count_{index}"
         label_param = f"{prefix}_label"
         params[label_param] = selector_label(selector)
-        condition = build_selector_condition(selector, params, prefix)
+        # The literal event name is also aliased ``AS event_name`` below; qualify
+        # the filter column so ClickHouse binds it to the events table column and
+        # not that alias (otherwise the filter is always true and every selector
+        # matches all events).
+        condition = build_selector_condition(
+            selector, params, prefix, event_name_column="events.event_name"
+        )
         subqueries.append(
             f"""
 SELECT
     %({label_param})s AS selector,
     %({prefix}_event_name)s AS event_name,
     count() AS event_count,
-    uniq(user_id) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -55,7 +61,7 @@ SELECT
     %(selector_label)s AS selector,
     toStartOfInterval(timestamp, INTERVAL {interval}) AS bucket,
     count() AS event_count,
-    uniq(user_id) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -74,7 +80,7 @@ SELECT
     %(selector_label)s AS selector,
     JSONExtractString(properties, %(property)s) AS property_value,
     count() AS event_count,
-    uniq(user_id) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -195,16 +201,21 @@ WITH
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+    ),
+    cohort_sizes AS (
+        SELECT cohort_date, count(DISTINCT user_id) AS cohort_size
+        FROM cohort
+        GROUP BY cohort_date
     )
 SELECT
     c.cohort_date,
-    count(DISTINCT c.user_id) AS cohort_size,
+    cs.cohort_size,
     dateDiff('day', c.cohort_date, a.activity_date) AS period_offset,
     count(DISTINCT a.user_id) AS active_users
 FROM cohort c
+INNER JOIN cohort_sizes cs ON cs.cohort_date = c.cohort_date
 LEFT JOIN activity a ON c.user_id = a.user_id
-    AND a.activity_date >= c.cohort_date
-GROUP BY c.cohort_date, period_offset
+GROUP BY c.cohort_date, cs.cohort_size, period_offset
 ORDER BY c.cohort_date, period_offset
 """
 
@@ -230,16 +241,21 @@ WITH
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+    ),
+    cohort_sizes AS (
+        SELECT cohort_week, count(DISTINCT user_id) AS cohort_size
+        FROM cohort
+        GROUP BY cohort_week
     )
 SELECT
     c.cohort_week,
-    count(DISTINCT c.user_id) AS cohort_size,
+    cs.cohort_size,
     dateDiff('week', c.cohort_week, a.activity_week) AS period_offset,
     count(DISTINCT a.user_id) AS active_users
 FROM cohort c
+INNER JOIN cohort_sizes cs ON cs.cohort_week = c.cohort_week
 LEFT JOIN activity a ON c.user_id = a.user_id
-    AND a.activity_week >= c.cohort_week
-GROUP BY c.cohort_week, period_offset
+GROUP BY c.cohort_week, cs.cohort_size, period_offset
 ORDER BY c.cohort_week, period_offset
 """
 
@@ -256,7 +272,7 @@ SELECT
     JSONExtractString(properties, %(cohort_property)s) AS cohort_value,
     toStartOfInterval(timestamp, INTERVAL 1 DAY) AS day,
     count() AS event_count,
-    uniq(user_id) AS unique_users
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
 FROM events
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
@@ -264,6 +280,26 @@ WHERE project_id = %(project_id)s
   AND JSONHas(properties, %(cohort_property)s)
 GROUP BY cohort_value, day
 ORDER BY cohort_value, day
+"""
+
+
+# ---------------------------------------------------------------------------
+# Event discovery
+# ---------------------------------------------------------------------------
+
+def build_event_catalog_query(params: dict[str, Any]) -> str:
+    """List distinct event names with volume, most frequent first."""
+    return """
+SELECT
+    event_name,
+    count() AS event_count,
+    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
+FROM events
+WHERE project_id = %(project_id)s
+  AND event_date BETWEEN %(start_date)s AND %(end_date)s
+GROUP BY event_name
+ORDER BY event_count DESC
+LIMIT %(limit)s
 """
 
 

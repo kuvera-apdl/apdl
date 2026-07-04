@@ -49,6 +49,14 @@ When designing an experiment, return a JSON object:
 }
 ```
 
+The flag_config is validated strictly — keep it canonical or the experiment is rejected:
+- flag_config.variants must contain ONLY "key" and an integer "weight". Do NOT add "description" or any \
+other field there; put per-variant descriptions in the top-level "variants".
+- flag_config.rules must be [] unless every rule is canonical: each rule has a "rollout" object \
+{"percentage": 0-100, "bucket_by": "<attribute>"} and never sets "variants" or "default_variant". Put \
+experiment targeting in the top-level "targeting", not in flag rules.
+- flag_config.fallthrough must contain only {"rollout": {"percentage": ..., "bucket_by": ...}}.
+
 Be conservative with experiment scope. Prefer smaller, focused experiments over large multi-factorial designs. \
 Always include guardrail metrics for error rate and latency."""
 

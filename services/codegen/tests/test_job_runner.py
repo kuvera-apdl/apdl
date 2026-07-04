@@ -1,5 +1,7 @@
 """Tests for the changeset job runner (fake editor + fake pool, no network)."""
 
+import asyncio
+
 import pytest
 
 from app.editor.base import EditRequest, EditResult
@@ -18,7 +20,7 @@ _TASK = {
 }
 
 
-async def _mint(installation_id: int) -> str:
+async def _mint(installation_id: int, repo: str) -> str:
     return "ghs_tok"
 
 
@@ -178,3 +180,59 @@ async def test_job_abandoned_when_automation_disabled(monkeypatch):
 
     final = await store.get_changeset(pool, "cs_killed01")
     assert final.status == ChangesetStatus.abandoned
+
+
+class _BlockingEditor:
+    """Blocks in implement() until released, to observe the concurrency slot."""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.first_started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def implement(self, request: EditRequest) -> EditResult:
+        self.started += 1
+        self.first_started.set()
+        await self.release.wait()
+        return EditResult(success=True, branch=request.branch, diff_stat={"files": 1})
+
+
+@pytest.mark.asyncio
+async def test_jobs_serialize_at_concurrency_one(monkeypatch):
+    # Force a fresh slot bound to this loop; default concurrency is 1.
+    import app.jobs.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "_job_semaphore", None)
+
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=1)
+    await _seed(pool, "cs_one")
+    await _seed(pool, "cs_two")
+
+    editor = _BlockingEditor()
+
+    async def open_pr(**kwargs) -> PullRequest:
+        return PullRequest(url="https://github.com/acme/widgets/pull/1", number=1)
+
+    t1 = asyncio.create_task(
+        run_changeset_job(pool, "cs_one", editor=editor, mint_token=_mint, open_pr=open_pr)
+    )
+    t2 = asyncio.create_task(
+        run_changeset_job(pool, "cs_two", editor=editor, mint_token=_mint, open_pr=open_pr)
+    )
+
+    # First job reaches the editor; let the loop spin so the second would too if unbounded.
+    await asyncio.wait_for(editor.first_started.wait(), timeout=1)
+    await asyncio.sleep(0.05)
+
+    # Only one job is in-flight; the other waits at the slot, still queued.
+    assert editor.started == 1
+    assert (await store.get_changeset(pool, "cs_one")).status == ChangesetStatus.editing
+    assert (await store.get_changeset(pool, "cs_two")).status == ChangesetStatus.queued
+
+    editor.release.set()
+    await asyncio.wait_for(asyncio.gather(t1, t2), timeout=2)
+
+    assert editor.started == 2
+    assert (await store.get_changeset(pool, "cs_one")).status == ChangesetStatus.pr_open
+    assert (await store.get_changeset(pool, "cs_two")).status == ChangesetStatus.pr_open

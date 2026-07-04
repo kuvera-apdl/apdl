@@ -10,11 +10,66 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
 from app.routers import approvals, runs, status, triggers
 from app.store.proposals import FEATURE_PROPOSALS_DDL
 
 logger = logging.getLogger(__name__)
+
+
+async def ensure_agent_memory_schema(conn) -> None:
+    """Create agent_memory and reconcile the embedding column dimension.
+
+    The table DDL is ``CREATE TABLE IF NOT EXISTS``, so on a DB that already
+    booted an older build the embedding column keeps its previous dimension while
+    embed() now emits EMBEDDING_DIMENSIONS-dim vectors — every store()/search()
+    would then raise a dimension mismatch, silently swallowed by the supervisor.
+    Detect a stale dimension and migrate in place: drop the ivfflat index, purge
+    the now-incompatible rows (old vectors are from a different model, not just a
+    different width), and ALTER the column to the current dimension. The index is
+    (re)created afterward. Idempotent: a no-op once the column already matches.
+    """
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    await conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS agent_memory (
+            id BIGSERIAL PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            metadata JSONB DEFAULT '{{}}',
+            embedding vector({EMBEDDING_DIMENSIONS}),
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
+        """
+    )
+
+    # pgvector stores the declared dimension in atttypmod (-1 if unspecified).
+    current_dim = await conn.fetchval(
+        "SELECT atttypmod FROM pg_attribute "
+        "WHERE attrelid = 'agent_memory'::regclass AND attname = 'embedding' "
+        "AND NOT attisdropped"
+    )
+    if current_dim is not None and current_dim not in (-1, EMBEDDING_DIMENSIONS):
+        logger.warning(
+            "agent_memory.embedding is vector(%s) but the model now emits %s-dim "
+            "vectors; migrating in place and purging incompatible rows.",
+            current_dim,
+            EMBEDDING_DIMENSIONS,
+        )
+        await conn.execute("DROP INDEX IF EXISTS idx_agent_memory_embedding;")
+        await conn.execute("DELETE FROM agent_memory;")
+        await conn.execute(
+            f"ALTER TABLE agent_memory ALTER COLUMN embedding TYPE vector({EMBEDDING_DIMENSIONS});"
+        )
+
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding
+        ON agent_memory USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100);
+        """
+    )
 
 
 @asynccontextmanager
@@ -27,24 +82,7 @@ async def lifespan(application: FastAPI):
 
     # Ensure required tables exist
     async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE EXTENSION IF NOT EXISTS vector;
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS agent_memory (
-                id BIGSERIAL PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                metadata JSONB DEFAULT '{}',
-                embedding vector(1536),
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-        """)
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding
-            ON agent_memory USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100);
-        """)
+        await ensure_agent_memory_schema(conn)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_runs (
                 run_id TEXT PRIMARY KEY,

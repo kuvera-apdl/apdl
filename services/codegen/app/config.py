@@ -19,6 +19,24 @@ def postgres_url() -> str:
     return os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
 
 
+# Local dev admin-console origins (Vite). Override in prod via CODEGEN_CORS_ORIGINS.
+_DEFAULT_CORS_ORIGINS = ("http://localhost:5174", "http://localhost:5173")
+
+
+def codegen_cors_origins() -> list[str]:
+    """Explicit allow-list of browser origins permitted to call this service.
+
+    This service opens/merges/abandons PRs on customer repos, so it must NOT use
+    wildcard CORS with credentials: Starlette would reflect any Origin and set
+    Access-Control-Allow-Credentials, letting any site a victim visits issue
+    credentialed cross-origin requests. Read a comma-separated CODEGEN_CORS_ORIGINS
+    in prod; default to the local admin-console origins.
+    """
+    raw = os.getenv("CODEGEN_CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or list(_DEFAULT_CORS_ORIGINS)
+
+
 def internal_token() -> str:
     """Shared internal service token (``X-APDL-Internal-Token``).
 
@@ -92,6 +110,30 @@ def codegen_aider_bin() -> str:
     return os.getenv("CODEGEN_AIDER_BIN", "aider")
 
 
+def codegen_cache_prompts() -> bool:
+    """Enable Aider prompt caching (default on).
+
+    Aider's `--cache-prompts` marks the static prefix (system prompt + repo map +
+    read-only files) as cacheable, so the `--auto-test` retry loop re-reads it at
+    ~0.1x instead of full input price on each iteration — a large saving on a
+    context-heavy editor like this. Harmless on models without cache support
+    (Aider only applies it where the provider allows). Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_CACHE_PROMPTS", "true").lower() != "false"
+
+
+def codegen_conventions_enabled() -> bool:
+    """Pass the standing house-rules conventions file to the agent (default on).
+
+    Loads ``app/editor/conventions.py`` as an Aider ``--read`` file so the edit
+    bar is "wired in and exercised" rather than "builds green" (reachability,
+    reuse the repo's SDK/primitives, test the new behavior). It joins the
+    cacheable static prefix, so with ``--cache-prompts`` it costs ~0.1x on each
+    auto-test retry. Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_CONVENTIONS", "true").lower() != "false"
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()
@@ -115,3 +157,50 @@ def codegen_agent_timeout() -> int:
 def codegen_test_timeout() -> int:
     """Repo test-command timeout, seconds."""
     return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
+
+
+def codegen_max_concurrent_jobs() -> int:
+    """Max changeset jobs allowed to run at once (default 1 — serialize).
+
+    Each job runs a coding agent plus the repo's build/test, which is CPU- and
+    memory-heavy; running several at once thrashes a small host. Jobs over the
+    limit wait in ``queued`` until a slot frees. Floor of 1.
+    """
+    return max(1, int(os.getenv("CODEGEN_MAX_CONCURRENT_JOBS", "1")))
+
+
+def codegen_ci_poll_interval() -> int:
+    """Seconds between CI-status polls (default 60). Set ``0`` to disable.
+
+    Polling is the zero-config trigger that advances open changesets without a
+    public webhook endpoint. Disable it only when the GitHub webhook is wired and
+    you want it to be the sole driver. Floor of 0; any positive value is honored.
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))
+
+
+def codegen_ci_sync_max_age_seconds() -> int:
+    """Age cap (default 7 days) for what the CI poller re-sweeps.
+
+    list_syncable_changeset_ids includes ci_failed, which is never abandoned
+    automatically — so without a cap the poller re-mints a token and re-queries
+    CI every interval for every changeset that ever failed, a set that only
+    grows. Skip changesets whose updated_at is older than this; a long-dead PR is
+    not going to flip green. Set ``0`` to disable the cap (sweep everything).
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", str(7 * 24 * 3600))))
+
+
+def codegen_ci_none_grace_seconds() -> int:
+    """Grace window (default 300s) before a ``none`` CI result clears the gate.
+
+    ``get_ci_status`` returns ``none`` for "repo has no CI", but commit-status-only
+    CI (classic Travis/CircleCI) reports neither a check-suite nor an Actions
+    workflow until its first status post — so right after a PR opens it can look
+    identical to a no-CI repo. Acting on ``none`` immediately would advance the
+    changeset to ``ci_passed`` (a state never re-synced) and permanently clear the
+    merge gate before that CI ever reports. Holding ``none`` as pending until the
+    changeset has been awaiting CI this long lets a late-arriving status demote it
+    first. Set ``0`` to act on ``none`` immediately (no grace).
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_NONE_GRACE_SECONDS", "300")))

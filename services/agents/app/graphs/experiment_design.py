@@ -32,6 +32,89 @@ from app.tools.experiments import create_experiment_config, get_active_experimen
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
 
+_CANONICAL_VARIANT_FIELDS = ("key", "weight")
+
+
+def _is_canonical_rule(rule: Any) -> bool:
+    """True for a flag rule the safety validator accepts: a valid rollout and no
+    variant-assignment fields."""
+    if not isinstance(rule, dict):
+        return False
+    if "variants" in rule or "default_variant" in rule:
+        return False
+    rollout = rule.get("rollout")
+    if not isinstance(rollout, dict) or set(rollout) - {"percentage", "bucket_by"}:
+        return False
+    percentage = rollout.get("percentage")
+    return (
+        isinstance(percentage, int | float)
+        and not isinstance(percentage, bool)
+        and 0 <= percentage <= 100
+        and isinstance(rollout.get("bucket_by"), str)
+        and bool(rollout.get("bucket_by"))
+    )
+
+
+def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
+    """Coerce an LLM-authored ``flag_config`` into the canonical shape the safety
+    validator enforces, mutating ``experiment`` in place.
+
+    Variants keep only ``key``/``weight`` (models tend to add a ``description``,
+    which fails the strict variant check); non-canonical rules — typically
+    rollout-less, variant-assignment rules — are dropped, since experiment
+    targeting lives in the top-level ``targeting`` field, not the flag rules.
+    The top-level ``variants`` are left intact (the config service accepts an
+    optional per-variant description on deploy).
+    """
+    flag_config = experiment.get("flag_config")
+    if not isinstance(flag_config, dict):
+        return
+
+    variants = flag_config.get("variants")
+    if isinstance(variants, list):
+        flag_config["variants"] = [
+            {field: variant[field] for field in _CANONICAL_VARIANT_FIELDS if field in variant}
+            for variant in variants
+            if isinstance(variant, dict)
+        ]
+
+    rules = flag_config.get("rules")
+    if isinstance(rules, list):
+        flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
+
+
+async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
+    """Create a running experiment (and its canonical backing flag) from a design.
+
+    Config owns experiment→flag initialization, so this single call also creates
+    the backing flag keyed by ``flag_key``. Shared by the agent (autonomy-permitting
+    deploy) and the approval endpoint (human-approved deploy).
+    """
+    try:
+        flag_config = experiment.get("flag_config", {})
+        experiment_id = experiment.get("experiment_id", "")
+        flag_key = flag_config.get("key") or experiment_id
+        variants = experiment.get("variants") or flag_config.get("variants", [])
+        description = experiment.get("description") or experiment.get("hypothesis", "")
+
+        await create_experiment_config(
+            project_id=project_id,
+            experiment_id=experiment_id or flag_key,
+            hypothesis=description,
+            variants=variants,
+            primary_metric=experiment.get("primary_metric", {}),
+            secondary_metrics=experiment.get("secondary_metrics"),
+            guardrail_metrics=experiment.get("guardrail_metrics"),
+            targeting=experiment.get("targeting"),
+            estimated_duration_days=experiment.get("estimated_duration_days", 14),
+            flag_key=flag_key,
+        )
+        logger.info("Experiment %s deployed successfully", experiment_id)
+        return True
+    except Exception as exc:
+        logger.error("Failed to deploy experiment: %s", exc)
+        return False
+
 
 @register_agent
 class ExperimentDesignAgent(BaseAgent):
@@ -80,6 +163,12 @@ class ExperimentDesignAgent(BaseAgent):
     ) -> dict[str, Any]:
         if not output:
             return {"deployed": False, "experiment_id": ""}
+
+        # LLMs drift from the canonical flag schema (descriptive variant fields,
+        # rollout-less rules), which fails the validator's variant_config check.
+        # Normalize before validating, deploying, and persisting so a sound
+        # design is not halted on shape alone.
+        _canonicalize_flag_config(output)
 
         safety = await self._safety_check(ctx, output, working.get("active_experiments", []))
         decision = gate_action(ctx.autonomy_level, safety)
@@ -152,32 +241,6 @@ class ExperimentDesignAgent(BaseAgent):
         return result
 
     async def _deploy(self, ctx: AgentContext, experiment: dict) -> bool:
-        # Config owns experiment→flag initialization: creating the experiment
-        # config also creates its canonical backing flag. The agent no longer
-        # creates the flag itself, which removes the old drift between the flag
-        # built from ``flag_config.variants`` and the experiment created from
-        # ``experiment.variants``.
-        try:
-            flag_config = experiment.get("flag_config", {})
-            experiment_id = experiment.get("experiment_id", "")
-            flag_key = flag_config.get("key") or experiment_id
-            variants = experiment.get("variants") or flag_config.get("variants", [])
-            description = experiment.get("description") or experiment.get("hypothesis", "")
-
-            await create_experiment_config(
-                project_id=ctx.project_id,
-                experiment_id=experiment_id or flag_key,
-                hypothesis=description,
-                variants=variants,
-                primary_metric=experiment.get("primary_metric", {}),
-                secondary_metrics=experiment.get("secondary_metrics"),
-                guardrail_metrics=experiment.get("guardrail_metrics"),
-                targeting=experiment.get("targeting"),
-                estimated_duration_days=experiment.get("estimated_duration_days", 14),
-                flag_key=flag_key,
-            )
-            logger.info("Experiment %s deployed successfully", experiment_id)
-            return True
-        except Exception as exc:
-            logger.error("Failed to deploy experiment: %s", exc)
-            return False
+        # Config owns experiment→flag initialization. Delegates to the shared
+        # deploy_experiment so the agent and the approval endpoint use one path.
+        return await deploy_experiment(ctx.project_id, experiment)

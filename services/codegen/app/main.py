@@ -10,30 +10,43 @@ service, which calls this one over the internal API.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import codegen_agent_timeout, postgres_url
+from app.config import (
+    codegen_agent_timeout,
+    codegen_ci_poll_interval,
+    codegen_cors_origins,
+    postgres_url,
+)
 from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
-from app.github.app_auth import mint_installation_token
+from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
+from app.jobs.ci_poller import run_ci_poller
 from app.routers import changesets, connections, webhooks
 from app.store import changesets as changeset_store
 
 logger = logging.getLogger(__name__)
 
 
-async def _mint_token(installation_id: int) -> str:
-    """Mint a short-lived installation token (string) for the changeset job."""
-    token = await mint_installation_token(installation_id)
+async def _mint_token(installation_id: int, repo: str) -> str:
+    """Mint a short-lived installation token (string) for the changeset job.
+
+    Delegates to :func:`mint_token_for_repo`, which self-heals a stale (rotated)
+    installation id on a 404 by re-resolving it from the repo.
+    """
+    token = await mint_token_for_repo(installation_id, repo)
     return token.token
 
 
@@ -81,16 +94,33 @@ async def lifespan(application: FastAPI):
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
-    # Dependencies for CI-status sync (driven by the GitHub webhook).
+    # Dependencies for CI-status sync, shared by the poller and the (optional)
+    # GitHub webhook receiver.
     application.state.ci_deps = {
         "get_status": get_ci_status,
         "mint_token": _mint_token,
         "mark_ready": mark_ready_for_review,
     }
 
+    # CI poller: the zero-config trigger that keeps open changesets advancing
+    # without an inbound webhook (the common self-hosted case). Disabled when the
+    # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
+    poller_task: asyncio.Task | None = None
+    poll_interval = codegen_ci_poll_interval()
+    if poll_interval > 0:
+        poller_task = asyncio.create_task(
+            run_ci_poller(pool, interval_seconds=poll_interval, **application.state.ci_deps)
+        )
+    else:
+        logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
+
     logger.info("Codegen service started: PostgreSQL pool and schema initialized")
     yield
 
+    if poller_task is not None:
+        poller_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller_task
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -101,9 +131,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# No CORS middleware: codegen is an internal-only service (the admin console
-# reaches it server-side, never from a browser), so there is no cross-origin
-# request to permit — and "*" origins with credentials is invalid anyway.
+# The admin console calls these endpoints directly from the browser, so CORS
+# must be permitted — but this service opens/merges PRs on customer repos, so it
+# uses an explicit origin allow-list rather than wildcard-with-credentials (which
+# would let any site issue credentialed cross-origin requests). Configure prod
+# origins via CODEGEN_CORS_ORIGINS; defaults to the local admin-console origins.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=codegen_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(connections.router)
 app.include_router(changesets.router)

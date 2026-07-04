@@ -58,10 +58,11 @@ const server = setupServer(
       run_id: 'run-abc-123',
       insights: [{ title: 'Checkout drop-off', severity: 'high' }],
       experiment_designs: [
-        { hypothesis: 'Bigger CTA converts better', flag_key: 'checkout-cta', metric: 'purchase' },
+        { experiment_id: 'exp_cta', hypothesis: 'Bigger CTA converts better', flag_key: 'checkout-cta', metric: 'purchase' },
       ],
       personalizations: [],
       feature_proposals: [],
+      changesets: [],
     }),
   ),
   http.get('http://localhost:8083/v1/agents/:runId/audit', () =>
@@ -91,6 +92,10 @@ const server = setupServer(
     return HttpResponse.json({
       run_id: String(params.runId),
       status: 'approved',
+      approved_count: 1,
+      rejected_count: 0,
+      forked_runs: [],
+      opened_changesets: [],
       message: 'Run approved',
     })
   }),
@@ -184,7 +189,7 @@ describe('TriggerPage', () => {
 })
 
 describe('RunMonitorPage', () => {
-  test('renders the rich approval panel with the gated experiment design, then approves', async () => {
+  test('renders the per-item approval panel and submits batched decisions', async () => {
     renderWithProviders(
       <Routes>
         <Route path="/agents/runs/:runId" element={<RunMonitorPage />} />
@@ -193,18 +198,19 @@ describe('RunMonitorPage', () => {
     )
 
     expect(await screen.findByText(/experiment design awaiting approval/i)).toBeInTheDocument()
-    // Phase 7: the panel shows WHAT is being approved (gap G3). The design
+    // The panel shows WHAT is being approved (gap G3), per item. The design
     // also appears in the Outputs card, hence getAllByText.
     expect(await screen.findByText("What you're approving (1)")).toBeInTheDocument()
     expect(screen.getAllByText('Bigger CTA converts better').length).toBeGreaterThanOrEqual(1)
-    // Reject requires a comment.
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
 
-    await userEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    // Default verdict is approve; one batched submit sends a decision per item.
+    await userEvent.click(screen.getByRole('button', { name: /submit decisions/i }))
     await waitFor(() =>
       expect(requests.some((entry) => entry.path === 'approve')).toBe(true),
     )
-    expect(requests.find((entry) => entry.path === 'approve')?.body).toEqual({ approved: true })
+    expect(requests.find((entry) => entry.path === 'approve')?.body).toEqual({
+      decisions: [{ item_id: 'exp_cta', approved: true }],
+    })
 
     // After approval the panel goes away on the refetch.
     expect(await screen.findByText('approved')).toBeInTheDocument()

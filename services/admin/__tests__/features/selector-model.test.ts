@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import {
   emptySelector,
@@ -6,6 +6,8 @@ import {
   lastDays,
   selectorProblem,
   selectorToWire,
+  todayUtcIso,
+  utcDateRangeForLastHours,
 } from '../../src/features/analytics/selectorModel'
 
 describe('filterToWire', () => {
@@ -58,5 +60,34 @@ describe('lastDays', () => {
     const range = lastDays(7)
     expect(range.start_date <= range.end_date).toBe(true)
     expect(range.start_date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+})
+
+describe('UTC range helpers', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  test('todayUtcIso returns the current UTC date', () => {
+    vi.setSystemTime(new Date('2026-06-22T23:30:00Z'))
+    expect(todayUtcIso()).toBe('2026-06-22')
+  })
+
+  test('utcDateRangeForLastHours spans the UTC dates the window touches', () => {
+    // 00:30 UTC: the current hour is 00:00, so a 24h window reaches back into the
+    // previous UTC date.
+    vi.setSystemTime(new Date('2026-06-22T00:30:00Z'))
+    expect(utcDateRangeForLastHours(24)).toEqual({
+      start_date: '2026-06-21',
+      end_date: '2026-06-22',
+    })
+  })
+
+  test('utcDateRangeForLastHours stays on one date late in the UTC day', () => {
+    // 23:30 UTC: current hour 23:00, window back to 00:00 same date.
+    vi.setSystemTime(new Date('2026-06-22T23:30:00Z'))
+    expect(utcDateRangeForLastHours(24)).toEqual({
+      start_date: '2026-06-22',
+      end_date: '2026-06-22',
+    })
   })
 })

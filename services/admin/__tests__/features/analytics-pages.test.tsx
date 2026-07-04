@@ -19,7 +19,7 @@ const server = setupServer(
     requests.push({ path: 'count', body: await request.json() })
     return HttpResponse.json({
       results: [
-        { selector: '$pageview', event_name: '$pageview', event_count: 120, unique_users: 48 },
+        { selector: 'page', event_name: 'page', event_count: 120, unique_users: 48 },
       ],
       total_events: 120,
       total_users: 48,
@@ -31,8 +31,8 @@ const server = setupServer(
       steps: [
         {
           step: 1,
-          event_name: '$pageview',
-          selector: '$pageview',
+          event_name: 'page',
+          selector: 'page',
           count: 100,
           conversion_rate: 100,
           overall_rate: 100,
@@ -47,6 +47,15 @@ const server = setupServer(
         },
       ],
       overall_conversion: 25,
+    })
+  }),
+  http.post('http://localhost:8082/v1/query/events/names', async () => {
+    return HttpResponse.json({
+      events: [
+        { event_name: 'page', event_count: 76, unique_users: 11 },
+        { event_name: '$click', event_count: 162, unique_users: 7 },
+        { event_name: '$web_vital', event_count: 49, unique_users: 5 },
+      ],
     })
   }),
 )
@@ -83,13 +92,13 @@ describe('EventsExplorerPage', () => {
     expect(screen.getByText(/48 users/)).toBeInTheDocument()
     expect(requests[0]?.body).toMatchObject({
       project_id: 'demo',
-      selectors: [{ event_name: '$pageview', filters: [] }],
+      selectors: [{ event_name: 'page', filters: [] }],
     })
   })
 
   test('refuses to run with an invalid selector', async () => {
     renderPage(<EventsExplorerPage />)
-    await userEvent.clear(screen.getByLabelText('Selector 1 event name'))
+    await userEvent.click(screen.getByRole('button', { name: 'Clear Selector 1 event name' }))
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))
     expect(requests).toHaveLength(0)
   })

@@ -79,3 +79,30 @@ def test_invalid_base64_falls_back_to_empty(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_BASE64", "not%%%base64%%%")
     assert config.github_app_private_key() == ""
+
+
+def test_cors_origins_default_to_local_admin(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CORS_ORIGINS", raising=False)
+    origins = config.codegen_cors_origins()
+    assert "http://localhost:5174" in origins
+    assert "*" not in origins  # never wildcard — this service merges PRs
+
+
+def test_cors_origins_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CORS_ORIGINS", "https://admin.example.com, https://ops.example.com ")
+    assert config.codegen_cors_origins() == [
+        "https://admin.example.com",
+        "https://ops.example.com",
+    ]
+
+
+def test_ci_sync_max_age_defaults_to_seven_days(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", raising=False)
+    assert config.codegen_ci_sync_max_age_seconds() == 7 * 24 * 3600
+
+
+def test_ci_sync_max_age_env_override_and_floor(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "3600")
+    assert config.codegen_ci_sync_max_age_seconds() == 3600
+    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "-5")
+    assert config.codegen_ci_sync_max_age_seconds() == 0

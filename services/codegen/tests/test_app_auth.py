@@ -12,7 +12,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.github.app_auth import build_app_jwt, mint_installation_token
+from app.github.app_auth import (
+    build_app_jwt,
+    mint_installation_token,
+    mint_token_for_repo,
+    resolve_installation_id,
+)
 
 
 def _rsa_pem() -> tuple[str, str]:
@@ -80,3 +85,77 @@ async def test_mint_installation_token_exchanges_jwt():
     assert result.expires_at == datetime(2026, 6, 17, 13, 0, tzinfo=timezone.utc)
     assert "/app/installations/42/access_tokens" in captured["url"]
     assert captured["auth"].startswith("Bearer ")
+
+
+@pytest.mark.asyncio
+async def test_resolve_installation_id_looks_up_repo():
+    private_pem, _ = _rsa_pem()
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"id": 99})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        live = await resolve_installation_id(
+            "acme/widgets", app_id="123456", private_key_pem=private_pem, client=client
+        )
+
+    assert live == 99
+    assert "/repos/acme/widgets/installation" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_mint_token_for_repo_self_heals_on_404():
+    private_pem, _ = _rsa_pem()
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        seen.append(path)
+        # Stale stored id → 404; live-id lookup → 7; mint for the live id → token.
+        if path == "/app/installations/1/access_tokens":
+            return httpx.Response(404, json={"message": "Not Found"})
+        if path == "/repos/acme/widgets/installation":
+            return httpx.Response(200, json={"id": 7})
+        if path == "/app/installations/7/access_tokens":
+            return httpx.Response(
+                201, json={"token": "ghs_live", "expires_at": "2026-06-17T13:00:00Z"}
+            )
+        return httpx.Response(500)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await mint_token_for_repo(
+            1, "acme/widgets", app_id="123456", private_key_pem=private_pem, client=client
+        )
+
+    assert result.token == "ghs_live"
+    assert seen == [
+        "/app/installations/1/access_tokens",
+        "/repos/acme/widgets/installation",
+        "/app/installations/7/access_tokens",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mint_token_for_repo_skips_lookup_on_success():
+    private_pem, _ = _rsa_pem()
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            201, json={"token": "ghs_stored", "expires_at": "2026-06-17T13:00:00Z"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await mint_token_for_repo(
+            5, "acme/widgets", app_id="123456", private_key_pem=private_pem, client=client
+        )
+
+    # Happy path is a single request — no repo lookup.
+    assert result.token == "ghs_stored"
+    assert seen == ["/app/installations/5/access_tokens"]

@@ -6,6 +6,8 @@ import {
   breakdownResponseSchema,
   cohortRequestSchema,
   cohortResponseSchema,
+  eventCatalogRequestSchema,
+  eventCatalogResponseSchema,
   eventCountRequestSchema,
   eventCountResponseSchema,
   funnelRequestSchema,
@@ -20,6 +22,8 @@ import type {
   BreakdownResponse,
   CohortRequest,
   CohortResponse,
+  EventCatalogRequest,
+  EventCatalogResponse,
   EventCountRequest,
   EventCountResponse,
   FunnelRequest,
@@ -35,6 +39,7 @@ export const QUERY_PATHS = {
   count: '/v1/query/events/count',
   timeseries: '/v1/query/events/timeseries',
   breakdown: '/v1/query/events/breakdown',
+  names: '/v1/query/events/names',
   funnel: '/v1/query/funnel',
   retention: '/v1/query/retention',
   cohort: '/v1/query/cohort',
@@ -56,6 +61,17 @@ export function timeseriesEvents(
     method: 'POST',
     body: timeseriesRequestSchema.parse(body),
     schema: timeseriesResponseSchema,
+  })
+}
+
+export function eventNames(
+  conn: ServiceConnection,
+  body: EventCatalogRequest,
+): Promise<EventCatalogResponse> {
+  return request(conn, QUERY_PATHS.names, {
+    method: 'POST',
+    body: eventCatalogRequestSchema.parse(body),
+    schema: eventCatalogResponseSchema,
   })
 }
 

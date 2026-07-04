@@ -31,7 +31,7 @@ export const NUMERIC_FILTER_OPERATORS: ReadonlySet<EventFilterOperator> = new Se
 ])
 
 export const COMMON_EVENTS = [
-  '$pageview',
+  'page',
   '$click',
   '$feature_flag_exposure',
   '$frontend_error',
@@ -105,4 +105,29 @@ export function lastDays(days: number): DateRange {
   const iso = (date: Date) =>
     `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
   return { start_date: iso(start), end_date: iso(end) }
+}
+
+const pad2 = (value: number): string => String(value).padStart(2, '0')
+
+/** Today in UTC as YYYY-MM-DD — the timezone the analytics pipeline buckets in. */
+export function todayUtcIso(): string {
+  const now = new Date()
+  return `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`
+}
+
+/**
+ * The UTC calendar date(s) the last `hours` hours fall on, as an inclusive range.
+ * The query API filters by UTC `event_date`, so this is the window to fetch before
+ * slicing to exact hourly bins client-side (see rollingHourBuckets). Spans two
+ * dates whenever the window crosses UTC midnight.
+ */
+export function utcDateRangeForLastHours(hours: number): DateRange {
+  const now = new Date()
+  const endMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours())
+  const startMs = endMs - (hours - 1) * 3_600_000
+  const isoUtc = (ms: number) => {
+    const date = new Date(ms)
+    return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
+  }
+  return { start_date: isoUtc(startMs), end_date: isoUtc(endMs) }
 }

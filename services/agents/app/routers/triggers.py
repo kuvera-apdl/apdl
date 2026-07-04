@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from enum import Enum
@@ -62,16 +63,18 @@ async def trigger_agent_run(
         await conn.execute(
             """
             INSERT INTO agent_runs (run_id, project_id, trigger_type, autonomy_level, status, phase, config)
-            VALUES ($1, $2, $3, $4, 'started', 'initializing', $5)
+            VALUES ($1, $2, $3, $4, 'started', 'initializing', $5::jsonb)
             """,
             run_id,
             body.project_id,
             body.trigger_type.value,
             body.autonomy_level,
-            {
-                "analysis_types": body.analysis_types,
-                "time_range_days": body.time_range_days,
-            },
+            json.dumps(
+                {
+                    "analysis_types": body.analysis_types,
+                    "time_range_days": body.time_range_days,
+                }
+            ),
         )
 
     logger.info("Agent run %s created for project %s", run_id, body.project_id)

@@ -377,6 +377,21 @@ async def get_experiments(pool, project_id: str) -> list[dict]:
     return [_row_to_experiment(r) for r in rows]
 
 
+async def get_running_experiments_with_end_date(pool) -> list[dict]:
+    """Fetch every running experiment that has a non-empty end_date, all projects.
+
+    The end_date is free-text, so date comparison happens in Python (see
+    app.experiments.expiry); this only narrows the scan to running experiments
+    that could possibly have expired.
+    """
+    sql = (
+        f"SELECT {EXPERIMENT_COLUMNS} FROM experiments "
+        "WHERE status = 'running' AND end_date <> '' ORDER BY project_id, key"
+    )
+    rows = await pool.fetch(sql)
+    return [_row_to_experiment(r) for r in rows]
+
+
 async def get_experiment(pool, project_id: str, key: str) -> dict | None:
     """Fetch a single experiment by project_id and key."""
     sql = f"SELECT {EXPERIMENT_COLUMNS} FROM experiments WHERE project_id = $1 AND key = $2"
