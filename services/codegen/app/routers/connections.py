@@ -14,7 +14,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.auth import require_internal_token
-from app.github.app_auth import mint_token_for_repo
+from app.github.app_auth import mint_token_for_repo, resolve_installation_id
 from app.github.repo_context import fetch_repo_context
 from app.models.connection import Connection, ConnectionCreate
 from app.store import connections as store
@@ -30,8 +30,35 @@ router = APIRouter(
 
 @router.post("", response_model=Connection, status_code=201)
 async def create_connection(body: ConnectionCreate, request: Request) -> Connection:
-    """Register (or update) the repo binding for a project."""
+    """Register (or update) the repo binding for a project.
+
+    ``installation_id`` may be omitted: the service resolves the live id from
+    the repo slug via the App JWT, which doubles as install validation — a repo
+    the App is not installed on fails here with a clear 422 instead of the
+    first changeset dying at token-mint later.
+    """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    if body.installation_id is None:
+        try:
+            live_id = await resolve_installation_id(body.repo)
+        except ValueError as exc:
+            # App ID / private key not configured on this deployment.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"The APDL GitHub App is not installed on '{body.repo}' "
+                        "(or the repo does not exist). Install the App on the "
+                        "repository, then connect it."
+                    ),
+                ) from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"GitHub installation lookup failed: {exc}",
+            ) from exc
+        body = body.model_copy(update={"installation_id": live_id})
     return await store.upsert_connection(pool, body)
 
 
