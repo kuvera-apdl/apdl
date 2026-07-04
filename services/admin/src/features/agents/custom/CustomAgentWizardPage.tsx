@@ -67,7 +67,6 @@ interface FormState {
   max_tool_steps: number
   requires: string[]
   produces: string
-  parse_as: 'object' | 'list'
   memory_query: string
   memory_top_k: number
   pipeline_order: number
@@ -87,7 +86,6 @@ const EMPTY_FORM: FormState = {
   max_tool_steps: 8,
   requires: [],
   produces: '',
-  parse_as: 'list',
   memory_query: '',
   memory_top_k: 5,
   pipeline_order: 100,
@@ -115,7 +113,6 @@ function toSpec(form: FormState): CustomAgentSpec {
     max_tool_steps: form.max_tool_steps,
     requires: form.requires,
     produces: form.produces,
-    parse_as: form.parse_as,
     memory_query: form.memory_query.trim() === '' ? null : form.memory_query,
     memory_top_k: form.memory_top_k,
     pipeline_order: form.pipeline_order,
@@ -199,7 +196,6 @@ export function CustomAgentWizardPage() {
       max_tool_steps: agent.max_tool_steps,
       requires: agent.requires,
       produces: agent.produces,
-      parse_as: agent.parse_as,
       memory_query: agent.memory_query ?? '',
       memory_top_k: agent.memory_top_k,
       pipeline_order: agent.pipeline_order,
@@ -655,29 +651,6 @@ function BehaviorStep({
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label>Output shape</Label>
-            <div className="space-y-1">
-              {(['list', 'object'] as const).map((shape) => (
-                <label key={shape} className="flex cursor-pointer items-center gap-2 text-sm">
-                  <input
-                    type="radio"
-                    name="parse-as"
-                    checked={form.parse_as === shape}
-                    onChange={() => update({ parse_as: shape })}
-                    className="accent-foreground"
-                  />
-                  <span className="font-mono">{shape}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {shape === 'list' ? 'array of findings' : 'single JSON object'}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
             <Label htmlFor="ca-produces">Output key (produces)</Label>
             <Input
               id="ca-produces"
@@ -687,10 +660,13 @@ function BehaviorStep({
               onChange={(event) => update({ produces: event.target.value })}
             />
             <p className="text-xs text-muted-foreground">
-              Where the output lands in run results. Reserved keys (insights, experiment_designs,
-              …) are rejected.
+              Where the agent&rsquo;s findings (always a JSON array) land in run results. Reserved
+              keys (insights, experiment_designs, …) are rejected.
             </p>
           </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="ca-order">Pipeline order</Label>
             <Input

@@ -31,7 +31,6 @@ function makeCustomAgent(overrides: Partial<CustomAgent> = {}): CustomAgent {
     tools: ['discover_events'],
     requires: [],
     produces: 'churn_signals',
-    parse_as: 'list',
     memory_query: null,
     memory_top_k: 5,
     pipeline_order: 60,
@@ -257,7 +256,6 @@ describe('CustomAgentWizardPage', () => {
       max_tool_steps: 8,
       requires: [],
       produces: 'churn_signals',
-      parse_as: 'list',
       memory_query: null,
       pipeline_order: 100,
     })

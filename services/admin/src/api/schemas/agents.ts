@@ -130,7 +130,6 @@ export const runResultsSchema = z
 // ---------- Custom agents (routers/custom_agents.py) ----------
 
 export const modelTierSchema = z.enum(['fast', 'reasoning'])
-export const parseAsSchema = z.enum(['object', 'list'])
 
 // Create/update body (CustomAgentSpec). Server-side validate_definition owns
 // the domain rules; these mirror the shape so bad payloads fail client-side.
@@ -152,7 +151,6 @@ export const customAgentSpecSchema = z
     produces: z
       .string()
       .regex(/^[a-z][a-z0-9_]{2,63}$/, 'lowercase letters, digits, underscores; 3-64 chars'),
-    parse_as: parseAsSchema,
     memory_query: z.string().max(500).nullable(),
     memory_top_k: z.number().int().min(1).max(20),
     pipeline_order: z.number().int().min(0).max(1000),
