@@ -2,13 +2,20 @@
 // API key), passed via the X-APDL-Internal-Token header.
 import { ApiError, request, type ServiceConnection } from './http'
 import {
+  accessibleRepoListSchema,
   changesetListSchema,
   changesetSchema,
   mergeRequestSchema,
   repoConnectionCreateSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
-import type { Changeset, MergeRequest, RepoConnection, RepoConnectionCreate } from './types/codegen'
+import type {
+  AccessibleRepo,
+  Changeset,
+  MergeRequest,
+  RepoConnection,
+  RepoConnectionCreate,
+} from './types/codegen'
 
 function authHeaders(internalToken: string): Record<string, string> | undefined {
   return internalToken ? { 'X-APDL-Internal-Token': internalToken } : undefined
@@ -101,6 +108,19 @@ export function connectRepo(
     body: repoConnectionCreateSchema.parse(body),
     schema: repoConnectionSchema,
     headers: authHeaders(internalToken),
+  })
+}
+
+/** Every repo the APDL GitHub App can reach — the connect form's picker options. */
+export function listAccessibleRepos(
+  conn: ServiceConnection,
+  internalToken: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<AccessibleRepo[]> {
+  return request(conn, '/v1/github/repos', {
+    schema: accessibleRepoListSchema,
+    headers: authHeaders(internalToken),
+    signal: options.signal,
   })
 }
 

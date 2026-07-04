@@ -108,8 +108,24 @@ export const repoConnectionSchema = z
 export const repoConnectionCreateSchema = z
   .object({
     project_id: z.string().min(1),
-    installation_id: z.number().int().min(1),
+    // Omitted → the codegen service resolves the live installation id from the
+    // repo slug (and 422s cleanly if the App is not installed on it).
+    installation_id: z.number().int().min(1).optional(),
     repo: z.string().regex(REPO_SLUG_PATTERN, 'Format: owner/name'),
     default_base_branch: z.string().min(1),
   })
   .strict()
+
+// One repository the APDL GitHub App can reach (codegen GET /v1/github/repos —
+// mirrors AccessibleRepo in services/codegen/app/github/installations.py).
+export const accessibleRepoSchema = z
+  .object({
+    repo: z.string(),
+    installation_id: z.number().int(),
+    account: z.string(),
+    default_branch: z.string(),
+    private: z.boolean(),
+  })
+  .strict()
+
+export const accessibleRepoListSchema = z.array(accessibleRepoSchema)

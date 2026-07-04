@@ -1,7 +1,10 @@
 // GitHub connector: shows whether the active project is bound to a repository
 // (codegen /v1/connections) and lets the operator connect or disconnect one.
-// Connecting assumes the APDL GitHub App is already installed on the repo —
-// the App install happens on github.com; this card only registers the binding.
+// Connecting is a picker over the repos the APDL GitHub App can already reach
+// (codegen /v1/github/repos) — the App install happens on github.com; picking
+// a repo pre-fills its default branch and the service validates the rest. If
+// the listing is unavailable, a manual slug entry remains as the escape hatch
+// (the service resolves + validates the installation server-side).
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink, Github, Loader2 } from 'lucide-react'
@@ -10,7 +13,7 @@ import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
-import { connectRepo, disconnectRepo, getRepoConnection } from '@/api/codegen'
+import { connectRepo, disconnectRepo, getRepoConnection, listAccessibleRepos } from '@/api/codegen'
 import { ApiError } from '@/api/http'
 import { REPO_SLUG_PATTERN } from '@/api/schemas/codegen'
 import { ErrorState } from '@/components/shared/PanelStates'
@@ -28,16 +31,13 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { queryKeys } from '@/core/queryClient'
 import { projectIdFromKey, serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
 
 const connectFormSchema = z.object({
   repo: z.string().regex(REPO_SLUG_PATTERN, 'Format: owner/name'),
-  installationId: z
-    .number({ invalid_type_error: 'Must be a number' })
-    .int('Must be an integer')
-    .min(1, 'Must be a positive integer'),
   baseBranch: z.string().min(1, 'Required'),
 })
 
@@ -57,9 +57,17 @@ export function GitHubConnectionCard() {
     queryFn: () => getRepoConnection(serviceConnection(ws, 'codegen'), ws.internalToken, projectId),
   })
 
+  // The picker's options — only fetched while the connect form is showing.
+  const reposQuery = useQuery({
+    queryKey: active ? queryKeys.accessibleRepos(active.id) : ['none', 'github-repos'],
+    enabled: active !== null && query.isSuccess && query.data === null,
+    queryFn: ({ signal }) =>
+      listAccessibleRepos(serviceConnection(ws, 'codegen'), ws.internalToken, { signal }),
+  })
+
   const form = useForm<ConnectFormValues>({
     resolver: zodResolver(connectFormSchema),
-    defaultValues: { repo: '', installationId: undefined, baseBranch: 'main' },
+    defaultValues: { repo: '', baseBranch: 'main' },
   })
 
   const invalidate = () => {
@@ -71,10 +79,12 @@ export function GitHubConnectionCard() {
     toast.error(error instanceof ApiError ? error.message : fallback)
 
   const connect = useMutation({
+    // When the repo came from the picker its installation id rides along; a
+    // manually-typed slug omits it and the service resolves (and validates) it.
     mutationFn: (values: ConnectFormValues) =>
       connectRepo(serviceConnection(ws, 'codegen'), ws.internalToken, {
         project_id: projectId,
-        installation_id: values.installationId,
+        installation_id: reposQuery.data?.find((r) => r.repo === values.repo)?.installation_id,
         repo: values.repo,
         default_base_branch: values.baseBranch,
       }),
@@ -151,49 +161,75 @@ export function GitHubConnectionCard() {
               Disconnect
             </Button>
           </div>
+        ) : reposQuery.isPending ? (
+          <Skeleton className="h-16 w-full" />
         ) : (
           <form
             onSubmit={form.handleSubmit((values) => connect.mutate(values))}
             className="space-y-4"
             noValidate
           >
-            <p className="text-sm text-muted-foreground">
-              Install the APDL GitHub App on the target repository first, then register the
-              installation here.
-            </p>
-            <div className="grid gap-4 sm:grid-cols-3">
+            {reposQuery.isError ? (
+              <p className="text-sm text-muted-foreground">
+                Couldn't list the App's repositories (
+                {reposQuery.error instanceof ApiError
+                  ? reposQuery.error.message
+                  : 'request failed'}
+                ). Enter the repository manually — the install is validated on connect.
+              </p>
+            ) : reposQuery.data.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                The APDL GitHub App has no repository access yet. Install it on the target
+                repository on github.com, then reload — or enter the repository manually.
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Pick one of the {reposQuery.data.length} repositories the APDL GitHub App can
+                reach. Missing one? Install the App on it on github.com first.
+              </p>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label>Repository</Label>
-                <Input
-                  {...form.register('repo')}
-                  placeholder="owner/name"
-                  className="font-mono"
-                />
+                <Label htmlFor="connect-repo">Repository</Label>
+                {reposQuery.isSuccess && reposQuery.data.length > 0 ? (
+                  <Select
+                    id="connect-repo"
+                    className="font-mono"
+                    {...form.register('repo', {
+                      // Picking a repo pre-fills its default branch.
+                      onChange: (event: React.ChangeEvent<HTMLSelectElement>) => {
+                        const picked = reposQuery.data.find((r) => r.repo === event.target.value)
+                        if (picked) form.setValue('baseBranch', picked.default_branch)
+                      },
+                    })}
+                  >
+                    <option value="">Select a repository…</option>
+                    {reposQuery.data.map((repo) => (
+                      <option key={repo.repo} value={repo.repo}>
+                        {repo.repo}
+                        {repo.private ? ' (private)' : ''}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  <Input
+                    id="connect-repo"
+                    {...form.register('repo')}
+                    placeholder="owner/name"
+                    className="font-mono"
+                  />
+                )}
                 {form.formState.errors.repo ? (
                   <p className="text-xs text-destructive">{form.formState.errors.repo.message}</p>
                 ) : null}
               </div>
               <div className="space-y-1.5">
-                <Label>Installation ID</Label>
+                <Label htmlFor="connect-base-branch">Base branch</Label>
                 <Input
-                  {...form.register('installationId', { valueAsNumber: true })}
-                  type="number"
-                  min={1}
-                  placeholder="12345678"
+                  id="connect-base-branch"
+                  {...form.register('baseBranch')}
+                  placeholder="main"
                 />
-                {form.formState.errors.installationId ? (
-                  <p className="text-xs text-destructive">
-                    {form.formState.errors.installationId.message}
-                  </p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    From the App install URL on github.com.
-                  </p>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <Label>Base branch</Label>
-                <Input {...form.register('baseBranch')} placeholder="main" />
                 {form.formState.errors.baseBranch ? (
                   <p className="text-xs text-destructive">
                     {form.formState.errors.baseBranch.message}
