@@ -1,20 +1,18 @@
-"""CustomAgent: definition hydration, template rendering, gather isolation."""
+"""CustomAgent: definition hydration, template rendering, agentic-tools wiring."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from app.framework import custom as custom_mod
-from app.framework import tool_catalog
 from app.framework.custom import (
     RESERVED_STATE_KEYS,
     CustomAgent,
     render_template,
     validate_definition,
 )
+from app.framework.tool_catalog import TOOL_CATALOG
 
 
 def _definition(**overrides: Any) -> dict[str, Any]:
@@ -23,15 +21,16 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "display_name": "Churn watch",
         "description": "Watches churn signals",
         "system_prompt": "You are a churn analyst.",
-        "user_prompt_template": "Context: {context}\nData: {tool_results}",
+        "user_prompt_template": "Context: {context}\nProject: {project_id}",
         "model_tier": "fast",
-        "tools": [{"tool": "discover_events", "params": {"limit": 50}}],
+        "tools": ["discover_events", "query_events"],
         "requires": [],
         "produces": "churn_signals",
         "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 3,
         "pipeline_order": 60,
+        "max_tool_steps": 6,
     }
     base.update(overrides)
     return base
@@ -52,6 +51,21 @@ def test_instance_attrs_shadow_classvars():
     assert agent.parse_as == "list"
     assert agent.memory_top_k == 3
     assert agent.requires == ()
+    assert agent.agentic_tools == ("discover_events", "query_events")
+    assert agent.max_tool_steps == 6
+
+
+def test_empty_tools_selection_allows_whole_catalog():
+    # The wizard default: no explicit narrowing means every catalog tool.
+    agent = CustomAgent(_definition(tools=[]))
+    assert agent.agentic_tools == tuple(TOOL_CATALOG)
+
+
+def test_legacy_tool_dict_entries_are_ignored_defensively():
+    # Pre-agentic rows stored {"tool": ..., "params": ...}; the store
+    # normalizes them, but hydration must not crash if one slips through.
+    agent = CustomAgent(_definition(tools=[{"tool": "discover_events"}]))
+    assert agent.agentic_tools == tuple(TOOL_CATALOG)
 
 
 def test_requirements_met_honors_instance_requires():
@@ -64,8 +78,8 @@ def test_requirements_met_honors_instance_requires():
 
 
 def test_render_template_leaves_json_braces_intact():
-    template = 'Respond as {"score": 0.5, "why": "..."} given {tool_results}'
-    out = render_template(template, {"tool_results": "[1, 2]"})
+    template = 'Respond as {"score": 0.5, "why": "..."} given {context}'
+    out = render_template(template, {"context": "[1, 2]"})
     assert out == 'Respond as {"score": 0.5, "why": "..."} given [1, 2]'
 
 
@@ -73,38 +87,22 @@ def test_build_prompt_substitutes_base_and_requires_placeholders():
     agent = CustomAgent(
         _definition(
             requires=["insights"],
-            user_prompt_template="P={project_id} D={time_range_days} I={insights} T={tool_results}",
+            user_prompt_template="P={project_id} D={time_range_days} I={insights}",
         )
     )
     state = {"insights": [{"finding": "drop"}]}
-    working = {"context": "", "tool_results": [{"tool": "x", "result": 1}]}
+    working = {"context": ""}
     prompt = agent.build_prompt(_ctx(), state, working)
     assert "P=demo" in prompt
     assert "D=7" in prompt
     assert '"finding": "drop"' in prompt
-    assert '"tool": "x"' in prompt
 
 
-@pytest.mark.asyncio
-async def test_gather_captures_per_tool_errors_without_raising(monkeypatch):
-    async def flaky_run_tool(ctx, name, params):
-        if name == "discover_events":
-            raise RuntimeError("warehouse down")
-        return {"ok": True}
-
-    monkeypatch.setattr(tool_catalog, "run_tool", flaky_run_tool)
-    agent = CustomAgent(
-        _definition(
-            tools=[
-                {"tool": "discover_events", "params": {}},
-                {"tool": "list_flags", "params": {}},
-            ]
-        )
-    )
-    out = await agent.gather(_ctx(), {}, {})
-    results = out["tool_results"]
-    assert results[0]["error"] == "warehouse down"
-    assert results[1]["result"] == {"ok": True}
+def test_build_prompt_blanks_legacy_tool_results_placeholder():
+    # Pre-agentic templates interpolated {tool_results}; data now arrives via
+    # the tool loop, so the placeholder renders empty instead of leaking.
+    agent = CustomAgent(_definition(user_prompt_template="Data: {tool_results}!"))
+    assert agent.build_prompt(_ctx(), {}, {"context": ""}) == "Data: !"
 
 
 def test_parse_enforces_list_shape():
@@ -115,10 +113,12 @@ def test_parse_enforces_list_shape():
 
 
 def test_custom_agent_has_no_side_effect_hooks():
-    # The v1 safety contract: no act/memory_entries overrides means no deploy
-    # paths and no memory writes, so a custom agent can never gate a run.
+    # The safety contract: no act/memory_entries/gather overrides means no
+    # deploy paths and no memory writes, so a custom agent can never gate a
+    # run — its only data access is the read-only catalog via the tool loop.
     assert "act" not in CustomAgent.__dict__
     assert "memory_entries" not in CustomAgent.__dict__
+    assert "gather" not in CustomAgent.__dict__
 
 
 # --- validate_definition ----------------------------------------------------
@@ -141,7 +141,7 @@ def test_slug_rules():
 
 
 def test_produces_must_not_be_reserved():
-    for key in ("insights", "errors", "context", "tool_results", "changesets"):
+    for key in ("insights", "errors", "context", "tool_results", "tool_trace", "changesets"):
         assert key in RESERVED_STATE_KEYS or key in _BUILTIN_PRODUCES
         assert any("reserved" in e for e in _validate(produces=key)), key
 
@@ -155,7 +155,10 @@ def test_prompt_length_limits():
 
 
 def test_tools_validated_against_catalog():
-    errors = _validate(tools=[{"tool": "create_flag", "params": {}}])
+    errors = _validate(tools=["create_flag"])
+    assert any("unknown tool" in e for e in errors)
+    # Legacy dict entries are no longer a valid spec shape.
+    errors = _validate(tools=[{"tool": "discover_events", "params": {}}])
     assert any("unknown tool" in e for e in errors)
 
 
@@ -165,3 +168,5 @@ def test_bounds():
     assert any("model_tier" in e for e in _validate(model_tier="turbo"))
     assert any("parse_as" in e for e in _validate(parse_as="text"))
     assert any("requires" in e for e in _validate(requires=["a", "b", "c", "d", "e", "f"]))
+    assert any("max_tool_steps" in e for e in _validate(max_tool_steps=0))
+    assert any("max_tool_steps" in e for e in _validate(max_tool_steps=99))

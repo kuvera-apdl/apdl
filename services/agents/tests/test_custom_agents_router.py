@@ -18,15 +18,16 @@ def _spec(**overrides: Any) -> dict[str, Any]:
         "display_name": "Churn watch",
         "description": "Watches churn signals",
         "system_prompt": "You are a churn analyst.",
-        "user_prompt_template": "Analyse {tool_results}",
+        "user_prompt_template": "Analyse churn for {project_id}",
         "model_tier": "fast",
-        "tools": [{"tool": "discover_events", "params": {"limit": 50}}],
+        "tools": ["discover_events", "query_events"],
         "requires": [],
         "produces": "churn_signals",
         "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 60,
+        "max_tool_steps": 8,
     }
     base.update(overrides)
     return base
@@ -103,11 +104,8 @@ async def test_create_happy_path(stubbed_store):
         ({"slug": "behavior_analysis"}, "built-in"),
         ({"produces": "insights"}, "reserved"),
         ({"produces": "errors"}, "reserved"),
-        ({"tools": [{"tool": "create_flag", "params": {}}]}, "unknown tool"),
-        (
-            {"tools": [{"tool": "query_funnel", "params": {"steps": [{"event_name": "a"}]}}]},
-            "query_funnel",
-        ),
+        ({"tools": ["create_flag"]}, "unknown tool"),
+        ({"max_tool_steps": 0}, "max_tool_steps"),
         ({"requires": ["no_such_output"]}, "does not match"),
         ({"model_tier": "turbo"}, "model_tier"),
     ],

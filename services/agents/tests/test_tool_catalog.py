@@ -29,44 +29,44 @@ def test_every_entry_has_valid_defaults_or_requires_params():
         assert isinstance(schema, dict), name
 
 
-def test_validate_tool_selection_normalizes_params():
-    out = tool_catalog.validate_tool_selection(
-        [{"tool": "discover_events", "params": {"limit": 10}}, {"tool": "list_flags"}]
-    )
-    assert out == [
-        {"tool": "discover_events", "params": {"limit": 10}},
-        {"tool": "list_flags", "params": {}},
-    ]
+def test_validate_tool_names_normalizes_to_catalog_order():
+    out = tool_catalog.validate_tool_names(["list_flags", "discover_events", "list_flags"])
+    # Deduplicated, and returned in catalog order regardless of author order.
+    assert out == ["discover_events", "list_flags"]
 
 
-def test_validate_tool_selection_rejects_unknown_tool():
+def test_validate_tool_names_rejects_unknown_tool():
+    # The catalog stays the security boundary: mutating tools can never be allowed.
     with pytest.raises(ValueError, match="unknown tool 'create_flag'"):
-        tool_catalog.validate_tool_selection([{"tool": "create_flag", "params": {}}])
+        tool_catalog.validate_tool_names(["create_flag"])
 
 
-def test_validate_tool_selection_aggregates_param_errors():
+def test_validate_tool_names_aggregates_errors():
     with pytest.raises(ValueError) as exc:
-        tool_catalog.validate_tool_selection(
-            [
-                # A funnel needs at least two steps.
-                {"tool": "query_funnel", "params": {"steps": [{"event_name": "a"}]}},
-                # Interval is a strict literal.
-                {
-                    "tool": "query_timeseries",
-                    "params": {"selector": {"event_name": "a"}, "interval": "1 YEAR"},
-                },
-            ]
-        )
+        tool_catalog.validate_tool_names(["nope", {"tool": "discover_events"}])
     message = str(exc.value)
-    assert "tools[0] (query_funnel)" in message
-    assert "tools[1] (query_timeseries)" in message
+    assert "tools[0]" in message
+    assert "tools[1]" in message
 
 
-def test_validate_tool_selection_rejects_extra_params():
-    # extra="forbid": definition-supplied project_id must never sneak through.
-    with pytest.raises(ValueError, match="project_id"):
-        tool_catalog.validate_tool_selection(
-            [{"tool": "discover_events", "params": {"project_id": "other"}}]
+def test_llm_tool_schemas_shape():
+    schemas = tool_catalog.llm_tool_schemas(["query_funnel", "list_flags"])
+    assert [s["name"] for s in schemas] == ["query_funnel", "list_flags"]
+    assert all(s["description"] for s in schemas)
+    assert "steps" in schemas[0]["parameters"]["properties"]
+
+
+def test_llm_tool_schemas_rejects_unknown():
+    with pytest.raises(ValueError, match="Unknown tool"):
+        tool_catalog.llm_tool_schemas(["drop_tables"])
+
+
+@pytest.mark.asyncio
+async def test_run_tool_rejects_definition_supplied_project_id(monkeypatch):
+    # extra="forbid": model-supplied project_id must never sneak through.
+    with pytest.raises(Exception, match="project_id"):
+        await tool_catalog.run_tool(
+            _ctx(), "discover_events", {"project_id": "other"}
         )
 
 

@@ -1,4 +1,4 @@
-"""POST /v1/agents/custom/test — dry-run with zero persistence."""
+"""POST /v1/agents/custom/test — dry-run of the full agentic loop, zero persistence."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.framework import tool_catalog
+from app.framework import tool_catalog, tool_loop
+from app.llm.router import ToolCall, ToolCompletion
 from app.main import app
-from app.routers import custom_agents as router_mod
 
 
 def _spec(**overrides: Any) -> dict[str, Any]:
@@ -18,15 +18,16 @@ def _spec(**overrides: Any) -> dict[str, Any]:
         "display_name": "Churn watch",
         "description": "",
         "system_prompt": "You are a churn analyst.",
-        "user_prompt_template": "Data: {tool_results}",
+        "user_prompt_template": "Analyse churn for {project_id}",
         "model_tier": "fast",
-        "tools": [{"tool": "discover_events", "params": {"limit": 5}}],
+        "tools": ["discover_events"],
         "requires": [],
         "produces": "churn_signals",
         "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 60,
+        "max_tool_steps": 4,
     }
     base.update(overrides)
     return base
@@ -42,6 +43,10 @@ class _FakeConn:
     async def fetchrow(self, query: str, *args: Any):
         self.executed.append((query, args))
         return None
+
+    async def fetchval(self, query: str, *args: Any):
+        self.executed.append((query, args))
+        return 1
 
     async def fetch(self, query: str, *args: Any):
         return []
@@ -73,19 +78,28 @@ def _client(pool: _FakePool) -> AsyncClient:
 
 
 @pytest.mark.asyncio
-async def test_dry_run_returns_intermediates_and_writes_nothing(monkeypatch):
+async def test_dry_run_runs_loop_and_writes_nothing(monkeypatch):
     async def fake_run_tool(ctx, name, params):
         assert ctx.project_id == "demo"
+        assert name == "discover_events"
         return {"events": ["signup", "purchase"]}
 
-    async def fake_chat(model_tier, messages, **kwargs):
+    calls = {"n": 0}
+
+    async def fake_chat_with_tools(model_tier, messages, tools=None, **kwargs):
         assert model_tier == "fast"
-        assert messages[0]["role"] == "system"
-        assert "signup" in messages[1]["content"]
-        return '[{"signal": "activation drop"}]'
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert tools and tools[0]["name"] == "discover_events"
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="c1", name="discover_events", arguments={"limit": 5})]
+            )
+        # The tool result must have re-entered the conversation.
+        assert any(m["role"] == "tool" and "signup" in m["content"] for m in messages)
+        return ToolCompletion(text='[{"signal": "activation drop"}]')
 
     monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
-    monkeypatch.setattr(router_mod, "chat_completion", fake_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat_with_tools)
 
     pool = _FakePool()
     async with _client(pool) as client:
@@ -98,12 +112,15 @@ async def test_dry_run_returns_intermediates_and_writes_nothing(monkeypatch):
     body = resp.json()
     assert body["parsed_output"] == [{"signal": "activation drop"}]
     assert body["raw_response"].startswith("[")
-    assert "signup" in body["prompt"]
-    assert body["tool_results"][0]["result"] == {"events": ["signup", "purchase"]}
-    assert set(body["timings_ms"]) == {"gather", "llm", "total"}
+    assert "demo" in body["prompt"]
+    trace = body["tool_results"]
+    assert trace[0]["tool"] == "discover_events"
+    assert trace[0]["params"] == {"limit": 5}
+    assert "signup" in trace[0]["result"]
+    assert set(body["timings_ms"]) == {"llm", "total"}
 
     # The whole point of the dry run: zero DB writes — no run row, no audit
-    # entries, no memory writes.
+    # entries (log_tool_calls off), no memory writes.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
     assert writes == []
 
@@ -125,14 +142,10 @@ async def test_dry_run_validates_definition(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dry_run_maps_total_llm_failure_to_502(monkeypatch):
-    async def fake_run_tool(ctx, name, params):
-        return {}
-
-    async def failing_chat(**kwargs):
+    async def failing_chat(*args, **kwargs):
         raise RuntimeError("all providers failed")
 
-    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
-    monkeypatch.setattr(router_mod, "chat_completion", failing_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", failing_chat)
 
     pool = _FakePool()
     async with _client(pool) as client:
@@ -150,11 +163,18 @@ async def test_dry_run_truncates_oversized_tool_results(monkeypatch):
     async def fake_run_tool(ctx, name, params):
         return big
 
-    async def fake_chat(**kwargs):
-        return "{}"
+    calls = {"n": 0}
+
+    async def fake_chat_with_tools(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="c1", name="discover_events", arguments={})]
+            )
+        return ToolCompletion(text="[]")
 
     monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
-    monkeypatch.setattr(router_mod, "chat_completion", fake_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat_with_tools)
 
     pool = _FakePool()
     async with _client(pool) as client:
@@ -163,5 +183,5 @@ async def test_dry_run_truncates_oversized_tool_results(monkeypatch):
             json={"project_id": "demo", "definition": _spec()},
         )
     entry = resp.json()["tool_results"][0]
-    assert entry["result"] is None
-    assert len(entry["result_truncated"]) == router_mod._TOOL_RESULT_CAP
+    assert "truncated" in entry["result"]
+    assert len(entry["result"]) < 10_000

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from app.framework.context import AgentContext
 from app.tools import clickhouse
@@ -260,35 +260,6 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         ),
     )
 }
-
-
-def validate_tool_selection(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate a definition's tool selection against the catalog.
-
-    Returns the normalized selection (validated params re-dumped). Raises
-    ``ValueError`` whose message aggregates every per-tool problem so the
-    wizard can show them all at once.
-    """
-    errors: list[str] = []
-    normalized: list[dict[str, Any]] = []
-    for index, entry in enumerate(tools):
-        name = entry.get("tool") if isinstance(entry, dict) else None
-        if not isinstance(name, str) or name not in TOOL_CATALOG:
-            errors.append(f"tools[{index}]: unknown tool {name!r}")
-            continue
-        params = entry.get("params") or {}
-        try:
-            model = TOOL_CATALOG[name].params_model.model_validate(params)
-        except ValidationError as exc:
-            problems = "; ".join(
-                f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()
-            )
-            errors.append(f"tools[{index}] ({name}): {problems}")
-            continue
-        normalized.append({"tool": name, "params": model.model_dump(exclude_none=True)})
-    if errors:
-        raise ValueError("; ".join(errors))
-    return normalized
 
 
 def validate_tool_names(tools: list[Any]) -> list[str]:

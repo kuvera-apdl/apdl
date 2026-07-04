@@ -13,7 +13,6 @@ caller-asserted (query param), and a row whose project doesn't match is a
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
@@ -25,8 +24,8 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from app.framework import AgentContext, CustomAgent, registered_agents, validate_definition
-from app.framework.tool_catalog import catalog_descriptions
-from app.llm.router import chat_completion
+from app.framework.tool_catalog import catalog_descriptions, llm_tool_schemas
+from app.framework.tool_loop import run_tool_loop
 from app.safety.audit import AuditLogger
 from app.store.custom_agents import (
     SlugConflictError,
@@ -40,19 +39,13 @@ from app.store.custom_agents import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["custom-agents"])
 
-#: Cap on each tool result blob echoed back by the test endpoint — the wizard
-#: preview needs a sample, not the full warehouse payload.
-_TOOL_RESULT_CAP = 20_000
-
-
-class ToolSelection(BaseModel):
-    tool: str
-    params: dict[str, Any] = Field(default_factory=dict)
-
-
 class CustomAgentSpec(BaseModel):
     """Create/update body. Domain rules live in ``validate_definition`` so the
-    wizard gets every problem in one aggregated 422, not pydantic's first."""
+    wizard gets every problem in one aggregated 422, not pydantic's first.
+
+    ``tools`` is the ALLOWED-tools selection (catalog names the reasoning
+    model may call in its tool loop); an empty list allows the whole catalog.
+    """
 
     slug: str
     display_name: str
@@ -60,13 +53,14 @@ class CustomAgentSpec(BaseModel):
     system_prompt: str
     user_prompt_template: str
     model_tier: str = "reasoning"
-    tools: list[ToolSelection] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
     requires: list[str] = Field(default_factory=list)
     produces: str
     parse_as: str = "object"
     memory_query: str | None = None
     memory_top_k: int = 5
     pipeline_order: int = 100
+    max_tool_steps: int = 8
 
 
 class CustomAgentOut(CustomAgentSpec):
@@ -229,11 +223,12 @@ async def create_custom(
 
 @router.post("/custom/test", response_model=TestRunResponse)
 async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse:
-    """Dry-run a draft definition: gather + one LLM call, zero persistence.
+    """Dry-run a draft definition: the full agentic loop, zero persistence.
 
     Uniqueness checks are skipped — a draft may legitimately shadow the agent
-    being edited. No ``agent_runs`` row, no audit entries, no memory writes
-    (CustomAgent never writes memory), so testing is free of side effects.
+    being edited. No ``agent_runs`` row, no audit entries (``log_tool_calls``
+    off), no memory writes (CustomAgent never writes memory), so testing is
+    free of side effects beyond read-only warehouse queries.
     """
     errors = _validate_spec(body.definition)
     if errors:
@@ -264,36 +259,43 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
     total_start = time.monotonic()
     working: dict[str, Any] = dict(state)
     working["context"] = await agent.retrieve_context(ctx)
-
-    gather_start = time.monotonic()
-    working.update(await agent.gather(ctx, state, working))
-    gather_ms = int((time.monotonic() - gather_start) * 1000)
-
     prompt = agent.build_prompt(ctx, state, working) or ""
 
     llm_start = time.monotonic()
     try:
-        raw = await chat_completion(
+        loop_result = await run_tool_loop(
+            ctx,
+            agent_name=agent.name,
+            system_prompt=agent.system_prompt,
+            user_prompt=prompt,
+            tool_schemas=llm_tool_schemas(agent.agentic_tools),
             model_tier=agent.model_tier,
-            messages=[
-                {"role": "system", "content": agent.system_prompt},
-                {"role": "user", "content": prompt},
-            ],
+            max_steps=agent.max_tool_steps,
+            log_tool_calls=False,
         )
     except RuntimeError as exc:
         # All providers failed — surface as a gateway error, not a 500 crash.
         raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
     llm_ms = int((time.monotonic() - llm_start) * 1000)
 
-    parsed = agent.parse(raw)
+    parsed = agent.parse(loop_result.text)
     total_ms = int((time.monotonic() - total_start) * 1000)
 
     return TestRunResponse(
         prompt=prompt,
-        raw_response=raw,
+        raw_response=loop_result.text,
         parsed_output=parsed,
-        tool_results=_summarize_tool_results(working.get("tool_results", [])),
-        timings_ms={"gather": gather_ms, "llm": llm_ms, "total": total_ms},
+        tool_results=[
+            {
+                "tool": entry.tool,
+                "params": entry.params,
+                "result": entry.result,
+                "error": entry.error,
+                "elapsed_ms": entry.elapsed_ms,
+            }
+            for entry in loop_result.trace
+        ],
+        timings_ms={"llm": llm_ms, "total": total_ms},
     )
 
 
@@ -343,17 +345,3 @@ async def archive_custom(
         raise HTTPException(status_code=404, detail="Custom agent not found")
     await archive_custom_agent(pool, agent_id)
     return Response(status_code=204)
-
-
-def _summarize_tool_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Cap each tool result blob so the wizard preview payload stays sane."""
-    summarized: list[dict[str, Any]] = []
-    for entry in results:
-        out = dict(entry)
-        if "result" in out:
-            blob = json.dumps(out["result"], default=str)
-            if len(blob) > _TOOL_RESULT_CAP:
-                out["result"] = None
-                out["result_truncated"] = blob[:_TOOL_RESULT_CAP]
-        summarized.append(out)
-    return summarized
