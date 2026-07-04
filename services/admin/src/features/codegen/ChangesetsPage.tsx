@@ -6,8 +6,15 @@ import { ExternalLink } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { abandonChangeset, listChangesets, mergeChangeset, revertChangeset } from '@/api/codegen'
+import {
+  abandonChangeset,
+  listChangesets,
+  mergeChangeset,
+  retryChangeset,
+  revertChangeset,
+} from '@/api/codegen'
 import { ApiError } from '@/api/http'
+import { RETRYABLE_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -72,7 +79,16 @@ export function ChangesetsPage() {
     },
     onError: onError('Revert failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending
+  const retry = useMutation({
+    mutationFn: (id: string) =>
+      retryChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    onSuccess: () => {
+      toast.success('Retry started')
+      invalidate()
+    },
+    onError: onError('Retry failed'),
+  })
+  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
 
   return (
     <div className="space-y-6">
@@ -113,6 +129,7 @@ export function ChangesetsPage() {
                     onMerge={() => merge.mutate(cs.changeset_id)}
                     onAbandon={() => abandon.mutate(cs.changeset_id)}
                     onRevert={() => revert.mutate(cs.changeset_id)}
+                    onRetry={() => retry.mutate(cs.changeset_id)}
                   />
                 ))}
               </TableBody>
@@ -130,14 +147,16 @@ interface RowProps {
   onMerge: () => void
   onAbandon: () => void
   onRevert: () => void
+  onRetry: () => void
 }
 
-function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert }: RowProps) {
+function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowProps) {
   // 'passed' = CI green; 'none' = the repo has no CI configured, so there is no
   // gate to clear and merge is allowed. Anything else (pending/failed) blocks.
   const mergeable =
     (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
     (cs.ci_status === 'passed' || cs.ci_status === 'none')
+  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
 
   return (
     <TableRow>
@@ -177,9 +196,15 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert }: RowProps) {
           </Button>
         ) : (
           <>
-            <Button size="sm" disabled={busy || !mergeable} onClick={onMerge}>
-              Merge
-            </Button>
+            {retryable ? (
+              <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
+                Retry
+              </Button>
+            ) : (
+              <Button size="sm" disabled={busy || !mergeable} onClick={onMerge}>
+                Merge
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"

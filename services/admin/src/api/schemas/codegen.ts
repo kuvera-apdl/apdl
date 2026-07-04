@@ -48,6 +48,17 @@ export const TERMINAL_CHANGESET_STATUSES = new Set<string>([
   'error',
 ])
 
+// Failed outcomes the codegen service will re-run via POST /{id}/retry (mirrors
+// RETRYABLE_STATUSES in services/codegen/app/models/changeset.py). A retry
+// enqueues a fresh changeset carrying the same task; `merged` rolls back with
+// /revert instead, and in-flight statuses are still running.
+export const RETRYABLE_CHANGESET_STATUSES = new Set<string>([
+  'tests_failed',
+  'ci_failed',
+  'error',
+  'abandoned',
+])
+
 export const changesetSchema = z
   .object({
     changeset_id: z.string(),

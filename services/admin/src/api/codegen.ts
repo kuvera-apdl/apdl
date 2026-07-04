@@ -126,3 +126,16 @@ export function revertChangeset(
     headers: authHeaders(internalToken),
   })
 }
+
+/** Re-run a failed changeset; returns the NEW changeset enqueued for the retry. */
+export function retryChangeset(
+  conn: ServiceConnection,
+  internalToken: string,
+  changesetId: string,
+): Promise<Changeset> {
+  return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/retry`, {
+    method: 'POST',
+    schema: changesetSchema,
+    headers: authHeaders(internalToken),
+  })
+}

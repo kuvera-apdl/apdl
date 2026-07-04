@@ -20,6 +20,7 @@ from app.github.app_auth import mint_token_for_repo
 from app.github.pulls import close_pull_request, merge_pull_request
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
+    RETRYABLE_STATUSES,
     Changeset,
     ChangesetCreate,
     ChangesetStatus,
@@ -287,6 +288,49 @@ async def revert_changeset(
         run_id=original.run_id,
         base_branch=base,
         task=revert_task,
+    )
+    _maybe_enqueue(request.app, background_tasks, new_id)
+    return new_changeset
+
+
+@router.post("/{changeset_id}/retry", response_model=Changeset, status_code=202)
+async def retry_changeset(
+    changeset_id: str, request: Request, background_tasks: BackgroundTasks
+) -> Changeset:
+    """Re-run a FAILED changeset as a fresh changeset with the same task.
+
+    A run that ended in ``tests_failed`` / ``ci_failed`` / ``error`` /
+    ``abandoned`` never landed a change, and the lifecycle cannot move a
+    terminal row backwards — so a retry enqueues a NEW changeset carrying the
+    identical task (a new branch + PR). Merged changesets roll back with
+    /revert, not /retry; in-flight changesets are still running.
+    """
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    original = await store.get_changeset(pool, changeset_id)
+    if original is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    if original.status not in RETRYABLE_STATUSES:
+        retryable = ", ".join(sorted(s.value for s in RETRYABLE_STATUSES))
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Only failed changesets can be retried (this one is "
+                f"'{original.status.value}'; retryable: {retryable})."
+            ),
+        )
+
+    new_id = f"cs_{uuid.uuid4().hex[:24]}"
+    # Re-run the identical task; thread a retry_of marker through the task
+    # context so the new changeset's lineage back to the failed run is traceable.
+    task = original.task.model_dump()
+    task["context"] = {**task.get("context", {}), "retry_of": changeset_id}
+    new_changeset = await store.create_changeset(
+        pool,
+        changeset_id=new_id,
+        project_id=original.project_id,
+        run_id=original.run_id,
+        base_branch=original.base_branch,
+        task=task,
     )
     _maybe_enqueue(request.app, background_tasks, new_id)
     return new_changeset
