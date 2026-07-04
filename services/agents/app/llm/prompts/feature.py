@@ -78,7 +78,12 @@ Connected repository (the ONLY place your proposals can be implemented):
 Already proposed or in flight (do NOT re-propose these or rewordings of them):
 {existing_work}
 
+You have read-only analytics tools. Use a few focused queries to verify the premises of each \
+proposal before writing it — that the events an insight cites actually fire, at a magnitude that \
+justifies the work, and that the events named in success_criteria exist so success is measurable. \
+Drop or rescope proposals whose premises do not check out.
+
 Propose features that are supported by the data and implementable as code in the connected \
-repository. Return ONLY a JSON array of feature proposals.
+repository. When done, return ONLY a JSON array of feature proposals.
 Limit to the top 3 most impactful proposals; return fewer (or an empty array) when the data or \
 the already-in-flight list does not support 3 genuinely new, implementable proposals."""
