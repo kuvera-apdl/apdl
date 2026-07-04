@@ -251,9 +251,11 @@ export function ChangesetDetailPage() {
   }
 
   const cs: Changeset = query.data
+  // 'passed' / 'none' / 'no_report' all mean no CI verdict is left to wait on —
+  // mirrors the merge endpoint's gate.
   const mergeable =
     (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
-    (cs.ci_status === 'passed' || cs.ci_status === 'none')
+    (cs.ci_status === 'passed' || cs.ci_status === 'none' || cs.ci_status === 'no_report')
   const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
   const files = statNumber(cs.diff_stat, 'files')
   const additions = statNumber(cs.diff_stat, 'additions')
@@ -364,7 +366,13 @@ export function ChangesetDetailPage() {
               '—'
             )}
           </Fact>
-          <Fact label="CI status">{cs.ci_status === 'none' ? 'no CI configured' : (cs.ci_status ?? '—')}</Fact>
+          <Fact label="CI status">
+            {cs.ci_status === 'none'
+              ? 'no CI configured'
+              : cs.ci_status === 'no_report'
+                ? 'CI never reported (gate released)'
+                : (cs.ci_status ?? '—')}
+          </Fact>
           <Fact label="Merge commit">
             {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
           </Fact>

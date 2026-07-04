@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     task          JSONB NOT NULL DEFAULT '{}',
     diff_stat     JSONB NOT NULL DEFAULT '{}',
     prompts       JSONB NOT NULL DEFAULT '[]',
+    ci_awaiting_since TIMESTAMPTZ,
     error         TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -57,10 +58,20 @@ ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS prompts JSONB NOT NULL DEFAULT '[]';
 """
 
+# When the changeset started awaiting CI (set once at pr_open). The CI sync's
+# grace window and pending deadline anchor on this rather than updated_at,
+# which every status transition refreshes — the sync must not reset its own
+# clock. Nullable: rows that predate the column fall back to updated_at.
+CHANGESETS_CI_AWAITING_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS ci_awaiting_since TIMESTAMPTZ;
+"""
+
 ALL_DDL = (
     CONNECTIONS_DDL,
     CHANGESETS_DDL,
     CHANGESETS_INDEX_DDL,
     CHANGESETS_MERGE_SHA_DDL,
     CHANGESETS_PROMPTS_DDL,
+    CHANGESETS_CI_AWAITING_DDL,
 )

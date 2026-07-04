@@ -160,6 +160,11 @@ class Changeset(BaseModel):
     pr_number: int | None = None
     pr_node_id: str | None = None
     ci_status: str | None = None
+    #: When the changeset started awaiting CI (set once at pr_open). Anchors the
+    #: CI sync's grace window and pending deadline — unlike ``updated_at``, it is
+    #: never refreshed by status transitions. ``None`` for pre-PR changesets and
+    #: rows that predate the column (the sync falls back to ``updated_at``).
+    ci_awaiting_since: datetime | None = None
     #: Merge commit SHA recorded at merge time; the deterministic revert target.
     merge_sha: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)

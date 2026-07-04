@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.github.checks import CIStatus
+from app.jobs import ci as ci_module
 from app.jobs.ci import sync_ci_status
 from app.models.changeset import ChangesetStatus
 from app.store import changesets as store
@@ -151,3 +153,174 @@ async def test_sync_is_noop_in_terminal_state():
 
     result = await sync_ci_status(pool, "cs_c3", get_status=get_status, mint_token=_mint)
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_sync_still_failed_writes_nothing(monkeypatch):
+    # A ci_failed changeset whose CI still reports failed must not be bounced
+    # ci_failed → ci_running → ci_failed: the bounce refreshes updated_at on
+    # every poll, which defeats the poller's age cap
+    # (CODEGEN_CI_SYNC_MAX_AGE_SECONDS) and re-polls a dead PR forever.
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_ff", "demo", status="ci_failed", ci_status="failed", pr_number=5, branch="apdl/x"
+    )
+
+    async def get_status(repo, ref, token):
+        return "failed"
+
+    async def forbidden_set_ci_status(*args, **kwargs):
+        raise AssertionError("still-failed sync must not transition the changeset")
+
+    monkeypatch.setattr(ci_module.store, "set_ci_status", forbidden_set_ci_status)
+    result = await sync_ci_status(pool, "cs_ff", get_status=get_status, mint_token=_mint)
+
+    assert result == "failed"
+    final = await store.get_changeset(pool, "cs_ff")
+    assert final.status == ChangesetStatus.ci_failed
+
+
+@pytest.mark.asyncio
+async def test_sync_releases_inferred_pending_after_deadline(monkeypatch):
+    # Inferred pending (phantom app check-suites / a workflow that never triggers
+    # on PR branches) past the deadline: nothing was ever observed on the ref, so
+    # the gate is released as ci_passed / ci_status="no_report" and the PR is
+    # promoted — instead of holding ci_running forever.
+    monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "600")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs_dead",
+        "demo",
+        status="ci_running",
+        ci_status="pending",
+        ci_awaiting_since=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),  # long ago
+        pr_number=5,
+        pr_node_id="PR_d",
+        branch="apdl/x",
+    )
+    ready: list = []
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=False)
+
+    async def mark_ready(**kwargs):
+        ready.append(kwargs)
+
+    result = await sync_ci_status(
+        pool, "cs_dead", get_status=get_status, mint_token=_mint, mark_ready=mark_ready
+    )
+
+    assert result == "no_report"
+    final = await store.get_changeset(pool, "cs_dead")
+    assert final.status == ChangesetStatus.ci_passed
+    assert final.ci_status == "no_report"
+    assert ready and ready[0]["node_id"] == "PR_d"
+
+
+@pytest.mark.asyncio
+async def test_sync_never_times_out_observed_pending(monkeypatch):
+    # OBSERVED pending — real check runs / statuses executing on the ref — is
+    # never released by the deadline, no matter how long it has been running.
+    monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "600")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs_slow",
+        "demo",
+        status="ci_running",
+        ci_status="pending",
+        ci_awaiting_since=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),  # long ago
+        pr_number=5,
+        branch="apdl/x",
+    )
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=True)
+
+    result = await sync_ci_status(pool, "cs_slow", get_status=get_status, mint_token=_mint)
+
+    assert result == "pending"
+    final = await store.get_changeset(pool, "cs_slow")
+    assert final.status == ChangesetStatus.ci_running  # still waiting
+
+
+@pytest.mark.asyncio
+async def test_sync_holds_inferred_pending_within_deadline(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "600")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs_young",
+        "demo",
+        status="ci_running",
+        ci_status="pending",
+        ci_awaiting_since=datetime.now(timezone.utc),  # just started awaiting
+        pr_number=5,
+        branch="apdl/x",
+    )
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=False)
+
+    result = await sync_ci_status(pool, "cs_young", get_status=get_status, mint_token=_mint)
+
+    assert result == "pending"
+    final = await store.get_changeset(pool, "cs_young")
+    assert final.status == ChangesetStatus.ci_running
+
+
+@pytest.mark.asyncio
+async def test_sync_deadline_disabled_waits_forever(monkeypatch):
+    # CODEGEN_CI_PENDING_TIMEOUT=0 restores the wait-forever behavior.
+    monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "0")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs_wait",
+        "demo",
+        status="ci_running",
+        ci_status="pending",
+        ci_awaiting_since=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+        pr_number=5,
+        branch="apdl/x",
+    )
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=False)
+
+    result = await sync_ci_status(pool, "cs_wait", get_status=get_status, mint_token=_mint)
+
+    assert result == "pending"
+    final = await store.get_changeset(pool, "cs_wait")
+    assert final.status == ChangesetStatus.ci_running
+
+
+@pytest.mark.asyncio
+async def test_sync_deadline_anchors_on_ci_awaiting_since_not_updated_at(monkeypatch):
+    # updated_at is refreshed by every transition (including the sync's own
+    # writes), so it must not be the deadline clock: a changeset with a FRESH
+    # updated_at but an old ci_awaiting_since has genuinely waited too long.
+    monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "600")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs_anchor",
+        "demo",
+        status="ci_running",
+        ci_status="pending",
+        ci_awaiting_since=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),  # long ago
+        pr_number=5,
+        branch="apdl/x",
+    )
+    pool.store["changesets"]["cs_anchor"]["updated_at"] = datetime.now(timezone.utc)
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=False)
+
+    result = await sync_ci_status(pool, "cs_anchor", get_status=get_status, mint_token=_mint)
+
+    assert result == "no_report"
+    final = await store.get_changeset(pool, "cs_anchor")
+    assert final.status == ChangesetStatus.ci_passed
