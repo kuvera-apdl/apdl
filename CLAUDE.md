@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Shared Agent Workflows
 
 - Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the user asks to create a PR, open a pull request, raise a PR, make commits for a PR branch, or ship the current branch or changes.
+- This is the canonical version of that workflow. The standalone service repos split out of this monorepo (`kuvera-edi`, `apdl-database-service`, `apdl-experiments-service`, `apdl-agent-service`) each carry their own adapted copy at the same path (`uv`/`ruff`/`mypy`/`pytest` directly instead of `make lint-<area>`, since they're single-package repos) plus the same `.claude/skills/structured-pr/` wrapper — keep them in sync if this workflow's shape changes.
 
 ## What is APDL?
 
