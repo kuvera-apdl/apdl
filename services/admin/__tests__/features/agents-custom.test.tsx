@@ -29,6 +29,7 @@ function makeCustomAgent(overrides: Partial<CustomAgent> = {}): CustomAgent {
     user_prompt_template: 'Analyse churn for {project_id}',
     model_tier: 'fast',
     tools: ['discover_events'],
+    preset_tools: [],
     requires: [],
     produces: 'churn_signals',
     memory_query: null,
@@ -104,6 +105,15 @@ const server = setupServer(
       prompt: 'Analyse [...]',
       raw_response: '[{"signal": "activation drop"}]',
       parsed_output: [{ signal: 'activation drop' }],
+      preset_results: [
+        {
+          tool: 'query_funnel',
+          params: { steps: [{ event_name: 'signup' }, { event_name: 'purchase' }] },
+          result: '{"steps": 2}',
+          error: null,
+          elapsed_ms: 20,
+        },
+      ],
       tool_results: [
         {
           tool: 'discover_events',
@@ -258,6 +268,54 @@ describe('CustomAgentWizardPage', () => {
       produces: 'churn_signals',
       memory_query: null,
       pipeline_order: 100,
+    })
+  })
+
+  test('configures a preset query and sends it in the spec', async () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/custom" element={<div>list page</div>} />
+        <Route path="/agents/custom/new" element={<CustomAgentWizardPage />} />
+      </Routes>,
+      '/agents/custom/new',
+    )
+
+    // Basics + Prompts.
+    await userEvent.type(await screen.findByLabelText('Name'), 'Churn watch')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.type(
+      await screen.findByLabelText('System prompt'),
+      'You are a churn analyst.',
+    )
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    // Data tools: add a preset query (defaults to the first catalog tool),
+    // switch it to query_funnel, and give it params.
+    await userEvent.click(await screen.findByRole('button', { name: /add preset query/i }))
+    const toolSelect = screen.getByRole('combobox', { name: 'Preset query 1 tool' })
+    await userEvent.selectOptions(toolSelect, 'query_funnel')
+    const paramsBox = screen.getByPlaceholderText(/parameters as JSON/i)
+    // Invalid JSON blocks Next with a per-row problem.
+    await userEvent.type(paramsBox, 'not json')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    expect(
+      await screen.findByText('Preset query 1: params must be a JSON object (or empty).'),
+    ).toBeInTheDocument()
+    await userEvent.clear(paramsBox)
+    // userEvent.type treats { and [ as key descriptors — double to escape.
+    await userEvent.type(paramsBox, '{{"steps": [[]}')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    // Behavior + save.
+    await userEvent.type(await screen.findByLabelText('Output key (produces)'), 'churn_signals')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /create agent/i }))
+    expect(await screen.findByText('list page')).toBeInTheDocument()
+
+    const createCall = requests.find((entry) => entry.path === 'create')
+    expect(createCall?.body).toMatchObject({
+      slug: 'churn_watch',
+      preset_tools: [{ tool: 'query_funnel', params: { steps: [] } }],
     })
   })
 

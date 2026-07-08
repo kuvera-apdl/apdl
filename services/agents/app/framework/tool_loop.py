@@ -100,6 +100,44 @@ async def _execute_call(
         )
 
 
+async def run_preset_tools(
+    ctx: AgentContext,
+    *,
+    agent_name: str,
+    preset_tools: list[dict[str, Any]],
+    log_tool_calls: bool = True,
+) -> list[ToolTraceEntry]:
+    """Execute author-preset tool calls verbatim, before the reasoning step.
+
+    The deterministic counterpart to :func:`run_tool_loop`: the agent's
+    definition fixes both the tool and its parameters, so the same calls run
+    on every invocation and their results are handed to the model up front.
+    Same safety boundary (catalog-only, ctx-scoped ``run_tool``), same
+    failure containment (an error becomes the entry's content — the agent
+    still reasons over whatever succeeded), same audit shape (``round`` 0
+    marks an entry as preset in the trace the console renders).
+    """
+    trace: list[ToolTraceEntry] = []
+    for entry in preset_tools:
+        executed = await _execute_call(ctx, entry["tool"], entry.get("params") or {})
+        trace.append(executed)
+        if log_tool_calls:
+            await ctx.audit.log(
+                ctx.run_id,
+                f"{agent_name}_tool_call",
+                {
+                    "tool": executed.tool,
+                    "params": executed.params,
+                    "error": executed.error,
+                    "result_chars": len(executed.result or ""),
+                    "elapsed_ms": executed.elapsed_ms,
+                    "round": 0,
+                    "preset": True,
+                },
+            )
+    return trace
+
+
 async def run_tool_loop(
     ctx: AgentContext,
     *,

@@ -212,3 +212,74 @@ async def test_log_tool_calls_off_writes_no_audit(monkeypatch):
         tool_schemas=_SCHEMAS, log_tool_calls=False,
     )
     assert ctx.audit.entries == []
+
+
+# --- run_preset_tools (deterministic calls before reasoning) ------------------
+
+
+@pytest.mark.asyncio
+async def test_preset_tools_run_in_order_and_audit_as_round_zero(monkeypatch):
+    ran: list[tuple[str, dict]] = []
+
+    async def fake_run_tool(ctx, name, params):
+        ran.append((name, params))
+        return {"ok": name}
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+
+    ctx = _ctx()
+    trace = await tool_loop.run_preset_tools(
+        ctx,
+        agent_name="probe",
+        preset_tools=[
+            {"tool": "list_flags", "params": {}},
+            {"tool": "discover_events", "params": {"limit": 5}},
+        ],
+    )
+
+    assert ran == [("list_flags", {}), ("discover_events", {"limit": 5})]
+    assert [e.tool for e in trace] == ["list_flags", "discover_events"]
+    assert all(e.error is None for e in trace)
+    # Audited under the same action type as loop calls, marked preset/round 0
+    # so the console trace can tell the two apart.
+    assert [a[1] for a in ctx.audit.entries] == ["probe_tool_call", "probe_tool_call"]
+    assert all(a[2]["preset"] is True and a[2]["round"] == 0 for a in ctx.audit.entries)
+
+
+@pytest.mark.asyncio
+async def test_preset_tool_failure_is_contained_and_later_presets_still_run(monkeypatch):
+    async def fake_run_tool(ctx, name, params):
+        if name == "query_funnel":
+            raise ValueError("funnel exploded")
+        return {"ok": True}
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+
+    trace = await tool_loop.run_preset_tools(
+        _ctx(),
+        agent_name="probe",
+        preset_tools=[
+            {"tool": "query_funnel", "params": {}},
+            {"tool": "list_flags", "params": {}},
+        ],
+    )
+
+    assert trace[0].error == "ValueError: funnel exploded"
+    assert trace[1].error is None and trace[1].result is not None
+
+
+@pytest.mark.asyncio
+async def test_preset_tools_skip_audit_when_logging_off(monkeypatch):
+    async def fake_run_tool(ctx, name, params):
+        return {}
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+
+    ctx = _ctx()
+    await tool_loop.run_preset_tools(
+        ctx,
+        agent_name="probe",
+        preset_tools=[{"tool": "list_flags", "params": {}}],
+        log_tool_calls=False,
+    )
+    assert ctx.audit.entries == []

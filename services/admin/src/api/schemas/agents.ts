@@ -131,11 +131,22 @@ export const runResultsSchema = z
 
 export const modelTierSchema = z.enum(['fast', 'reasoning'])
 
+// One deterministic preset call: a catalog tool with params fixed at
+// authoring time, executed on every run before reasoning. Params are
+// validated against the tool's schema server-side.
+export const presetToolCallSchema = z
+  .object({
+    tool: z.string().min(1),
+    params: z.record(z.unknown()),
+  })
+  .strict()
+
 // Create/update body (CustomAgentSpec). Server-side validate_definition owns
 // the domain rules; these mirror the shape so bad payloads fail client-side.
 // Custom agents are agentic: `tools` is the ALLOWED-tools selection (catalog
 // names the model may call in its tool loop); an empty list allows the whole
-// catalog. `max_tool_steps` bounds the loop's tool rounds.
+// catalog. `max_tool_steps` bounds the loop's tool rounds. `preset_tools`
+// are the deterministic calls run verbatim before the loop.
 export const customAgentSpecSchema = z
   .object({
     slug: z
@@ -147,6 +158,7 @@ export const customAgentSpecSchema = z
     user_prompt_template: z.string().min(1).max(20_000),
     model_tier: modelTierSchema,
     tools: z.array(z.string().min(1)),
+    preset_tools: z.array(presetToolCallSchema).max(10),
     requires: z.array(z.string()).max(5),
     produces: z
       .string()
@@ -212,6 +224,7 @@ export const testRunResponseSchema = z
     prompt: z.string(),
     raw_response: z.string(),
     parsed_output: z.unknown(),
+    preset_results: z.array(z.record(z.unknown())),
     tool_results: z.array(z.record(z.unknown())),
     timings_ms: z.record(z.number()),
   })

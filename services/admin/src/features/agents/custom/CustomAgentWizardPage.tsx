@@ -3,11 +3,13 @@
 // dry-run the draft against real project data (POST /custom/test) before
 // anything is persisted.
 //
-// Custom agents are agentic: the model calls the read-only data tools itself
-// (picking parameters at run time) inside a bounded loop. The Data tools step
-// therefore selects which tools are ALLOWED — default all — not pre-baked
-// queries.
-import { ArrowLeft, ArrowRight, Check, FlaskConical, Save } from 'lucide-react'
+// Custom agents gather data two ways, both configured in the Data tools step:
+// agentic (the model calls the read-only data tools itself, picking parameters
+// at run time inside a bounded loop — the step selects which tools are
+// ALLOWED, default all) and preset (deterministic queries with parameters
+// fixed here, run on every run before reasoning, results handed to the model
+// up front).
+import { ArrowLeft, ArrowRight, Check, FlaskConical, Plus, Save, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -37,6 +39,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { queryKeys } from '@/core/queryClient'
@@ -52,6 +55,28 @@ const SLUG_RE = /^[a-z][a-z0-9_]{2,63}$/
 // per selected `requires` key (documented inline in the Prompts step).
 const BASE_PLACEHOLDERS = ['{context}', '{project_id}', '{time_range_days}']
 
+/** One preset query being edited: params stay JSON text until save/test. */
+interface PresetDraft {
+  tool: string
+  paramsText: string
+}
+
+const MAX_PRESET_TOOLS = 10
+
+/** Parse a params draft; '' means {}. Null = invalid (not a JSON object). */
+function parsePresetParams(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim()
+  if (trimmed === '') return {}
+  try {
+    const value: unknown = JSON.parse(trimmed)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
 interface FormState {
   slug: string
   slugTouched: boolean
@@ -64,6 +89,8 @@ interface FormState {
   limitTools: boolean
   /** Allowed tool names; only meaningful when limitTools is true. */
   tools: string[]
+  /** Deterministic preset queries, run verbatim on every run before reasoning. */
+  preset_tools: PresetDraft[]
   max_tool_steps: number
   requires: string[]
   produces: string
@@ -83,6 +110,7 @@ const EMPTY_FORM: FormState = {
   model_tier: 'reasoning',
   limitTools: false,
   tools: [],
+  preset_tools: [],
   max_tool_steps: 8,
   requires: [],
   produces: '',
@@ -110,6 +138,12 @@ function toSpec(form: FormState): CustomAgentSpec {
     model_tier: form.model_tier,
     // Empty = whole catalog allowed (the server default).
     tools: form.limitTools ? form.tools : [],
+    // Invalid params drafts degrade to {} here so rendering (e.g. the curl
+    // preview) never throws; stepProblems blocks saving/testing until fixed.
+    preset_tools: form.preset_tools.map((draft) => ({
+      tool: draft.tool,
+      params: parsePresetParams(draft.paramsText) ?? {},
+    })),
     max_tool_steps: form.max_tool_steps,
     requires: form.requires,
     produces: form.produces,
@@ -137,6 +171,13 @@ function stepProblems(step: number, form: FormState): string[] {
       problems.push('Select at least one allowed tool, or switch back to allowing all tools.')
     if (form.max_tool_steps < 1 || form.max_tool_steps > 16)
       problems.push('Tool budget must be between 1 and 16 rounds.')
+    if (form.preset_tools.length > MAX_PRESET_TOOLS)
+      problems.push(`At most ${MAX_PRESET_TOOLS} preset queries are allowed.`)
+    form.preset_tools.forEach((draft, index) => {
+      if (draft.tool === '') problems.push(`Preset query ${index + 1}: pick a tool.`)
+      if (parsePresetParams(draft.paramsText) === null)
+        problems.push(`Preset query ${index + 1}: params must be a JSON object (or empty).`)
+    })
   }
   if (step === 3) {
     if (!SLUG_RE.test(form.produces))
@@ -193,6 +234,11 @@ export function CustomAgentWizardPage() {
       model_tier: agent.model_tier,
       limitTools: agent.tools.length > 0,
       tools: agent.tools,
+      preset_tools: agent.preset_tools.map((preset) => ({
+        tool: preset.tool,
+        paramsText:
+          Object.keys(preset.params).length === 0 ? '' : JSON.stringify(preset.params, null, 2),
+      })),
       max_tool_steps: agent.max_tool_steps,
       requires: agent.requires,
       produces: agent.produces,
@@ -442,7 +488,12 @@ function BasicsStep({ form, update }: { form: FormState; update: (p: Partial<For
 }
 
 function PromptsStep({ form, update }: { form: FormState; update: (p: Partial<FormState>) => void }) {
-  const placeholders = [...BASE_PLACEHOLDERS, ...form.requires.map((key) => `{${key}}`)]
+  const hasPresets = form.preset_tools.length > 0
+  const placeholders = [
+    ...BASE_PLACEHOLDERS,
+    ...(hasPresets ? ['{tool_results}'] : []),
+    ...form.requires.map((key) => `{${key}}`),
+  ]
   return (
     <Card>
       <CardHeader>
@@ -473,10 +524,17 @@ function PromptsStep({ form, update }: { form: FormState; update: (p: Partial<Fo
             className="font-mono text-xs"
             onChange={(event) => update({ user_prompt_template: event.target.value })}
           />
-          {form.user_prompt_template.includes('{tool_results}') ? (
+          {form.user_prompt_template.includes('{tool_results}') && !hasPresets ? (
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              {'{tool_results}'} is a legacy placeholder and now renders empty — the agent calls
-              its data tools itself while reasoning, so the template no longer needs it.
+              {'{tool_results}'} renders empty because no preset queries are configured — add
+              some in the Data tools step, or remove the placeholder (the agent calls its data
+              tools itself while reasoning).
+            </p>
+          ) : null}
+          {hasPresets && !form.user_prompt_template.includes('{tool_results}') ? (
+            <p className="text-xs text-muted-foreground">
+              Preset query results will be appended to the end of the prompt. Place{' '}
+              {'{tool_results}'} in the template to control where they appear.
             </p>
           ) : null}
         </div>
@@ -502,6 +560,14 @@ function ToolsStep({
       tools: selected.has(entry.name)
         ? form.tools.filter((name) => name !== entry.name)
         : [...form.tools, entry.name],
+    })
+  }
+
+  const patchPreset = (index: number, patch: Partial<PresetDraft>) => {
+    update({
+      preset_tools: form.preset_tools.map((draft, i) =>
+        i === index ? { ...draft, ...patch } : draft,
+      ),
     })
   }
 
@@ -586,6 +652,93 @@ function ToolsStep({
             Maximum tool-calling rounds before the agent must produce its final answer. More
             rounds mean deeper investigation and higher LLM cost.
           </p>
+        </div>
+
+        <div className="space-y-3 border-t pt-4">
+          <div>
+            <h3 className="text-sm font-medium">Preset queries</h3>
+            <p className="text-xs text-muted-foreground">
+              Deterministic calls with parameters you fix now: they run on every run, before the
+              agent starts reasoning, and their results are handed to it up front (via the{' '}
+              {'{tool_results}'} placeholder, or appended to the prompt if it&rsquo;s absent).
+              Use these for the baseline data the agent should always see; leave discovery to the
+              agentic tools above.
+            </p>
+          </div>
+
+          {form.preset_tools.map((draft, index) => {
+            const entry = catalog.find((tool) => tool.name === draft.tool)
+            const paramsInvalid = parsePresetParams(draft.paramsText) === null
+            return (
+              <div key={index} className="space-y-2 rounded-md border p-3">
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <Select
+                      aria-label={`Preset query ${index + 1} tool`}
+                      value={draft.tool}
+                      onChange={(event) => patchPreset(index, { tool: event.target.value })}
+                    >
+                      {catalog.map((tool) => (
+                        <option key={tool.name} value={tool.name}>
+                          {tool.name}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove preset query ${index + 1}`}
+                    onClick={() =>
+                      update({ preset_tools: form.preset_tools.filter((_, i) => i !== index) })
+                    }
+                  >
+                    <Trash2 />
+                  </Button>
+                </div>
+                {entry ? (
+                  <p className="text-xs text-muted-foreground">{entry.description}</p>
+                ) : null}
+                <Textarea
+                  value={draft.paramsText}
+                  rows={3}
+                  className={cn('font-mono text-xs', paramsInvalid && 'border-destructive')}
+                  placeholder={'{} — parameters as JSON; leave empty for defaults'}
+                  onChange={(event) => patchPreset(index, { paramsText: event.target.value })}
+                />
+                {paramsInvalid ? (
+                  <p className="text-xs text-destructive">Params must be a JSON object.</p>
+                ) : null}
+                {entry ? (
+                  <details>
+                    <summary className="cursor-pointer text-xs text-muted-foreground">
+                      Parameter schema
+                    </summary>
+                    <div className="mt-1">
+                      <JsonView data={entry.params_schema} />
+                    </div>
+                  </details>
+                ) : null}
+              </div>
+            )
+          })}
+
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={catalog.length === 0 || form.preset_tools.length >= MAX_PRESET_TOOLS}
+            onClick={() =>
+              update({
+                preset_tools: [
+                  ...form.preset_tools,
+                  { tool: catalog[0]?.name ?? '', paramsText: '' },
+                ],
+              })
+            }
+          >
+            <Plus />
+            Add preset query
+          </Button>
         </div>
       </CardContent>
     </Card>
@@ -811,10 +964,19 @@ function TestStep({
               </h3>
               <JsonView data={result.parsed_output} />
             </section>
+            {result.preset_results.length > 0 ? (
+              <section className="space-y-1">
+                <h3 className="text-sm font-medium">
+                  Preset queries <Badge variant="secondary">{result.preset_results.length}</Badge>
+                </h3>
+                <JsonView data={result.preset_results} />
+              </section>
+            ) : null}
             {result.tool_results.length > 0 ? (
               <section className="space-y-1">
                 <h3 className="text-sm font-medium">
-                  Tool calls <Badge variant="secondary">{result.tool_results.length}</Badge>
+                  Agentic tool calls{' '}
+                  <Badge variant="secondary">{result.tool_results.length}</Badge>
                 </h3>
                 <JsonView data={result.tool_results} />
               </section>

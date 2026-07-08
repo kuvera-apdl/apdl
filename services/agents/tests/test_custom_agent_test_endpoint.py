@@ -116,12 +116,67 @@ async def test_dry_run_runs_loop_and_writes_nothing(monkeypatch):
     assert trace[0]["tool"] == "discover_events"
     assert trace[0]["params"] == {"limit": 5}
     assert "signup" in trace[0]["result"]
-    assert set(body["timings_ms"]) == {"llm", "total"}
+    assert body["preset_results"] == []
+    assert set(body["timings_ms"]) == {"preset_tools", "llm", "total"}
 
     # The whole point of the dry run: zero DB writes — no run row, no audit
     # entries (log_tool_calls off), no memory writes.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
     assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_executes_presets_before_the_loop(monkeypatch):
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_run_tool(ctx, name, params):
+        ran.append((name, params))
+        return {"flags": ["beta_checkout"]}
+
+    async def fake_chat_with_tools(model_tier, messages, tools=None, **kwargs):
+        # Preset data must already be in the user prompt on the FIRST call.
+        assert "beta_checkout" in messages[1]["content"]
+        return ToolCompletion(text="[]")
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat_with_tools)
+
+    pool = _FakePool()
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/custom/test",
+            json={
+                "project_id": "demo",
+                "definition": _spec(preset_tools=[{"tool": "list_flags", "params": {}}]),
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert ran == [("list_flags", {})]
+    assert body["preset_results"][0]["tool"] == "list_flags"
+    assert "beta_checkout" in body["preset_results"][0]["result"]
+    assert "## Preset data (gathered automatically)" in body["prompt"]
+    # Presets are part of the dry run too: still zero DB writes.
+    writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_dry_run_rejects_invalid_preset_params(monkeypatch):
+    pool = _FakePool()
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/custom/test",
+            json={
+                "project_id": "demo",
+                "definition": _spec(
+                    preset_tools=[{"tool": "discover_events", "params": {"limit": 0}}]
+                ),
+            },
+        )
+    assert resp.status_code == 422
+    assert "preset_tools[0]" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
