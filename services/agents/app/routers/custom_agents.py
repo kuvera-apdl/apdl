@@ -190,6 +190,7 @@ async def list_definitions(
             is_custom=False,
         )
         for name, cls in registered_agents().items()
+        if cls.enabled
     ]
     for row in await list_custom_agents(pool, project_id):
         agents.append(

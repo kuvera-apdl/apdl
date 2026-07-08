@@ -42,12 +42,8 @@ const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
     description: 'Turns insights into experiment designs with flags and variants.',
     isCustom: false,
   },
-  {
-    type: 'personalization',
-    label: 'Personalization',
-    description: 'Proposes UI-config personalizations from insights.',
-    isCustom: false,
-  },
+  // personalization is parked (disabled server-side) until its UI-config
+  // delivery path exists — keep this fallback in sync with /definitions.
   {
     type: 'feature_proposal',
     label: 'Feature proposals',
@@ -148,7 +144,7 @@ export function TriggerPage() {
       <PageHeader
         backTo={{ to: '/agents', label: 'Agent runs' }}
         title="Trigger agent run"
-        description="Launches the supervisor graph in the agents service. Runs invoke the LLM providers configured server-side — reasoning-tier models for analysis, design and proposals; a fast tier for personalization."
+        description="Launches the supervisor graph in the agents service. Runs invoke the LLM providers configured server-side — reasoning-tier models for analysis, design and proposals."
         actions={
           conn && body ? <CurlButton spec={triggerRunCurl(conn, body)} title="Trigger run" /> : null
         }
@@ -158,7 +154,7 @@ export function TriggerPage() {
         <CardHeader>
           <CardTitle>Analysis types</CardTitle>
           <CardDescription>
-            experiment_design, personalization and feature_proposal require behavior_analysis
+            experiment_design and feature_proposal require behavior_analysis
             insights — runs without it will skip them (unmet requirements).
           </CardDescription>
         </CardHeader>

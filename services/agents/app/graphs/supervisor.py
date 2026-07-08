@@ -143,7 +143,15 @@ async def _resolve_agents(
     agents: list[BaseAgent] = []
     for name in names:
         if is_registered(name):
-            agents.append(get_agent(name))
+            agent = get_agent(name)
+            if not getattr(agent, "enabled", True):
+                # Older run configs (schedules, resumes) may still name a
+                # since-disabled agent; skip it visibly instead of running it.
+                msg = f"Agent '{name}' is disabled — skipping."
+                logger.warning("[%s] %s", run_id, msg)
+                errors.append(msg)
+                continue
+            agents.append(agent)
         elif name in custom_defs:
             agents.append(CustomAgent(custom_defs[name]))
         else:

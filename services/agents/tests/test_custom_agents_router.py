@@ -210,3 +210,14 @@ async def test_custom_routes_win_over_run_id_wildcards(stubbed_store):
         assert resp.status_code == 200  # not a 404 from a runs lookup
         resp = await client.get("/v1/agents/definitions?project_id=demo")
         assert resp.status_code == 200
+
+@pytest.mark.asyncio
+async def test_definitions_excludes_disabled_builtins(stubbed_store):
+    """Disabled built-ins (personalization, parked until its delivery path
+    exists) must not appear in the trigger-page listing."""
+    async with _client() as client:
+        resp = await client.get("/v1/agents/definitions?project_id=demo")
+    assert resp.status_code == 200
+    names = [a["name"] for a in resp.json()["agents"]]
+    assert "personalization" not in names
+    assert "behavior_analysis" in names
