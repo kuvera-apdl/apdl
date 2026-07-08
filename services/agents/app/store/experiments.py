@@ -111,6 +111,24 @@ async def link_changeset(
         )
 
 
+async def set_designed_experiment_status(
+    pool: asyncpg.Pool, project_id: str, experiment_id: str, status: str
+) -> None:
+    """Update a ledger row's status (e.g. 'iterate_requested' releases the
+    source insight for a redesign)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE designed_experiments
+            SET status = $3, updated_at = now()
+            WHERE project_id = $1 AND experiment_id = $2
+            """,
+            project_id,
+            experiment_id,
+            status,
+        )
+
+
 async def get_designed_experiment(
     pool: asyncpg.Pool, project_id: str, experiment_id: str
 ) -> dict[str, Any] | None:

@@ -416,7 +416,14 @@ class ExperimentDesignAgent(BaseAgent):
             or str(i.get("recommended_action") or "").lower().startswith("experiment")
         ]
         selected = experiment_insights or insights
-        covered = {d.get("insight_key", "") for d in designed} - {""}
+        # 'iterate_requested' rows are released deliberately: the evaluation
+        # agent concluded the experiment inconclusive-but-promising, so its
+        # insight may be redesigned (with the learning in retrieved memory).
+        covered = {
+            d.get("insight_key", "")
+            for d in designed
+            if d.get("status") != "iterate_requested"
+        } - {""}
         fresh = [i for i in selected if insight_key(i) not in covered]
         return fresh[: self.max_designs]
 

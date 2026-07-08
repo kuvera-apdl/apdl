@@ -45,6 +45,12 @@ const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
   // personalization is parked (disabled server-side) until its UI-config
   // delivery path exists — keep this fallback in sync with /definitions.
   {
+    type: 'experiment_evaluation',
+    label: 'Experiment evaluation',
+    description: 'Evaluates mature running experiments: ship, rollback, iterate, or extend.',
+    isCustom: false,
+  },
+  {
     type: 'feature_proposal',
     label: 'Feature proposals',
     description: 'Drafts prioritized feature proposals — always requires approval.',

@@ -184,6 +184,26 @@ async def update_flag(
     return await _put(f"/v1/admin/flags/{quote(key, safe='')}", payload, params={"project_id": project_id})
 
 
+async def disable_flag(
+    project_id: str,
+    key: str,
+    reason: str = "experiment_rollback",
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Disable a flag through the Config service's canonical rollback path.
+
+    ``source`` is "system": a flag with ``auto_disable`` off makes the config
+    service refuse (409) — the flag owner opted out of automated kill switches,
+    and the evaluation agent must respect that.
+    """
+    payload = {"reason": reason, "source": "system", "evidence": evidence or {}}
+    return await _post(
+        f"/v1/admin/flags/{quote(key, safe='')}/disable",
+        payload,
+        params={"project_id": project_id},
+    )
+
+
 async def evaluate_gate(
     project_id: str,
     key: str,

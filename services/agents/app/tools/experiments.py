@@ -171,6 +171,24 @@ async def create_experiment_config(
         return resp.json()
 
 
+async def update_experiment_status(
+    project_id: str, experiment_id: str, status: str
+) -> dict[str, Any]:
+    """Transition an experiment's lifecycle status via the Config service.
+
+    Allowed transitions are enforced server-side (running → completed|stopped;
+    both terminal). Used by the evaluation agent to conclude experiments.
+    """
+    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+        resp = await client.put(
+            f"/v1/admin/experiments/{quote(experiment_id, safe='')}",
+            json={"status": status},
+            params={"project_id": project_id},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def calculate_sample_size(
     baseline_rate: float,
     minimum_detectable_effect: float,

@@ -172,6 +172,7 @@ async def run_supervisor(
     autonomy_level: int,
     resume: bool = False,
     target_proposal_id: str | None = None,
+    target_experiment_id: str | None = None,
 ) -> None:
     """Execute the supervisor orchestration as a background task.
 
@@ -194,11 +195,13 @@ async def run_supervisor(
         autonomy_level=autonomy_level,
         time_range_days=time_range_days,
         target_proposal_id=target_proposal_id,
+        target_experiment_id=target_experiment_id,
     )
     state: dict[str, Any] = {
         "project_id": project_id,
         "insights": [],
         "experiment_designs": [],
+        "experiment_verdicts": [],
         "personalizations": [],
         "feature_proposals": [],
         "errors": [],

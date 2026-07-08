@@ -32,7 +32,7 @@ class TriggerRequest(BaseModel):
         default_factory=lambda: ["behavior_analysis"],
         min_length=1,
         max_length=16,
-        description="Agent graphs to run: behavior_analysis, experiment_design, personalization, feature_proposal, code_implementation",
+        description="Agent graphs to run: behavior_analysis, experiment_design, experiment_evaluation, feature_proposal, code_implementation",
     )
     time_range_days: int = Field(default=7, ge=1, le=90)
     autonomy_level: int = Field(
@@ -40,6 +40,14 @@ class TriggerRequest(BaseModel):
         ge=1,
         le=4,
         description="L1=suggest only, L2=auto-safe, L3=auto+approve risky, L4=full auto",
+    )
+    target_experiment_id: str | None = Field(
+        default=None,
+        description=(
+            "Scope an experiment_evaluation run to one experiment (a human's "
+            "'evaluate now'); an immature experiment then gets an explicit "
+            "immature verdict instead of being skipped."
+        ),
     )
 
 
@@ -128,6 +136,11 @@ async def trigger_agent_run(
                 {
                     "analysis_types": body.analysis_types,
                     "time_range_days": body.time_range_days,
+                    **(
+                        {"target_experiment_id": body.target_experiment_id}
+                        if body.target_experiment_id
+                        else {}
+                    ),
                 }
             ),
         )
@@ -144,6 +157,7 @@ async def trigger_agent_run(
         analysis_types=body.analysis_types,
         time_range_days=body.time_range_days,
         autonomy_level=body.autonomy_level,
+        target_experiment_id=body.target_experiment_id,
     )
 
     return TriggerResponse(run_id=run_id, status="started")
