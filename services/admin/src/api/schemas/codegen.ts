@@ -72,6 +72,9 @@ export const changesetSchema = z
     pr_number: z.number().int().nullable(),
     pr_node_id: z.string().nullable(),
     ci_status: z.string().nullable(),
+    // Stamped once at pr_open; anchors the CI sync's grace window. Null for
+    // pre-PR changesets and rows predating the column.
+    ci_awaiting_since: z.string().nullable(),
     merge_sha: z.string().nullable(),
     diff_stat: z.record(z.unknown()),
     prompts: z.array(changesetPromptSchema),

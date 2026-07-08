@@ -31,6 +31,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     pr_number: null,
     pr_node_id: null,
     ci_status: null,
+    ci_awaiting_since: null,
     merge_sha: null,
     diff_stat: {},
     prompts: [],
