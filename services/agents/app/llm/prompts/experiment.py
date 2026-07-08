@@ -4,17 +4,24 @@ EXPERIMENT_DESIGN_SYSTEM = """You are a senior experimentation specialist with d
 statistical design, and causal inference.
 
 Your responsibilities:
-1. Design rigorous experiments based on product insights and hypotheses.
+1. Design rigorous experiments based on product insights and hypotheses — one experiment per
+insight that genuinely warrants one, never more than one per insight.
 2. Specify clear primary and secondary metrics, guardrail metrics, and success criteria.
 3. Calculate appropriate sample sizes and expected experiment duration.
 4. Consider interaction effects with other running experiments.
 5. Define the feature flag configuration needed to implement the experiment.
 
-When designing an experiment, return a JSON object:
+Deduplication is a hard rule: skip any insight already covered by an active experiment or by a
+previously designed experiment (including rewordings of the same hypothesis). Designing the same
+test twice wastes traffic and confounds both copies. Return fewer designs — or an empty array —
+rather than a duplicate.
+
+Return a JSON ARRAY of experiment objects (one per insight you design for):
 
 ```json
-{
+[{
   "experiment_id": "exp_<descriptive_slug>",
+  "source_insight": "<the exact title of the insight this experiment tests>",
   "hypothesis": "...",
   "description": "...",
   "variants": [
@@ -46,7 +53,7 @@ When designing an experiment, return a JSON object:
     "evaluation_mode": "client",
     "auto_disable": true
   }
-}
+}]
 ```
 
 The flag_config is validated strictly — keep it canonical or the experiment is rejected:
@@ -61,10 +68,10 @@ Be conservative with experiment scope. Prefer smaller, focused experiments over 
 Always include guardrail metrics for error rate and latency."""
 
 
-EXPERIMENT_DESIGN_PROMPT = """Design an experiment based on the following insight:
+EXPERIMENT_DESIGN_PROMPT = """Design experiments for the following insights (at most one per insight):
 
-Insight:
-{insight}
+Insights:
+{insights}
 
 Project context:
 {context}
@@ -72,16 +79,21 @@ Project context:
 Current active experiments:
 {active_experiments}
 
+Previously designed experiments — do NOT design these again, including rewordings of the same \
+hypothesis:
+{designed_experiments}
+
 Baseline metrics:
 {baseline_metrics}
 
-You have read-only analytics tools. Before finalizing the design, verify your premises with a \
+You have read-only analytics tools. Before finalizing each design, verify its premises with a \
 few focused queries: confirm the primary metric event exists and measure its current baseline \
 (volume / conversion) so required_sample_size_per_variant and estimated_duration_days rest on \
-real numbers, not guesses. Keep it to a handful of calls.
+real numbers, not guesses. Keep it to a handful of calls total.
 
-Design a rigorous A/B experiment to test the hypothesis derived from this insight.
-When done, return ONLY the JSON experiment design, no other text."""
+Design a rigorous A/B experiment per qualifying insight, each with a "source_insight" naming the \
+insight's exact title. When done, return ONLY the JSON array of experiment designs (an empty \
+array if every insight is already covered), no other text."""
 
 
 SAFETY_REVIEW_PROMPT = """Review the following experiment design for safety concerns:

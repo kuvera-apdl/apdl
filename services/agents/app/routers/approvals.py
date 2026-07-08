@@ -22,6 +22,7 @@ from pydantic import BaseModel, model_validator
 from app.graphs.experiment_design import deploy_experiment
 from app.graphs.supervisor import run_supervisor
 from app.safety.audit import AuditLogger
+from app.store.experiments import record_designed_experiment
 from app.store.proposals import enqueue_proposals, get_proposal, mark_failed, mark_implemented
 from app.tools.code import open_changeset
 
@@ -97,6 +98,36 @@ def _changeset_openable(changeset: dict[str, Any]) -> bool:
     if str(changeset.get("decision") or "") != "approve":
         return False
     safety = changeset.get("safety_result")
+    if isinstance(safety, dict) and safety.get("passed") is False:
+        return False
+    return True
+
+
+async def _update_design_ledger(
+    pool: asyncpg.Pool, run_id: str, project_id: str, design: dict[str, Any], status: str
+) -> None:
+    """Best-effort sync of a human decision into the designed_experiments ledger."""
+    try:
+        await record_designed_experiment(pool, project_id, run_id, design, status)
+    except Exception:
+        logger.exception(
+            "[%s] Could not update design ledger for %s", run_id, design.get("experiment_id")
+        )
+
+
+def _experiment_deployable(design: dict[str, Any]) -> bool:
+    """True if an experiment_design gate item is safe to deploy on approval.
+
+    Multi-design gates can mix outcomes: a safety-halted sibling or one the
+    agent already deployed (L3/L4) lands in the same persisted list as the
+    items genuinely awaiting a human. A blanket approve must not deploy those.
+    Legacy single-design items carry no ``decision`` key — the run only gated
+    when that design was awaiting approval, so they stay deployable.
+    """
+    decision = design.get("decision")
+    if decision is not None and str(decision) != "approve":
+        return False
+    safety = design.get("safety_result")
     if isinstance(safety, dict) and safety.get("passed") is False:
         return False
     return True
@@ -276,11 +307,31 @@ async def approve_action(
     opened_changesets: list[str] = []
     if gated_agent == "experiment_design":
         for design in approved_items:
+            if not _experiment_deployable(design):
+                await audit.log(
+                    run_id,
+                    "approval_skipped",
+                    {
+                        "item_id": _item_id(gated_agent, design),
+                        "kind": gated_agent,
+                        "reason": "design did not pass safety / was not awaiting approval",
+                        "decision": design.get("decision"),
+                    },
+                    approval_status="skipped",
+                )
+                logger.warning(
+                    "[%s] Skipped deploying design %s — decision=%r, not deployable",
+                    run_id, _item_id(gated_agent, design), design.get("decision"),
+                )
+                continue
             try:
                 deployed = await deploy_experiment(project_id, design)
             except Exception:
                 deployed = False
                 logger.exception("[%s] Failed to deploy experiment %s", run_id, _item_id(gated_agent, design))
+            await _update_design_ledger(
+                pool, run_id, project_id, design, "deployed" if deployed else "deploy_failed"
+            )
             if deployed:
                 logger.info("[%s] Deployed approved experiment %s", run_id, _item_id(gated_agent, design))
             else:
@@ -294,6 +345,10 @@ async def approve_action(
                     approval_status="approved",
                 )
                 logger.error("[%s] Deploy failed for approved experiment %s", run_id, _item_id(gated_agent, design))
+        for design in rejected_items:
+            # Rejected designs stay in the ledger so the theme is not
+            # re-designed next run; a human said no, not "ask again".
+            await _update_design_ledger(pool, run_id, project_id, design, "rejected")
     elif gated_agent == "code_implementation":
         # Phase 6: the agent gated BEFORE opening the PR (a draft PR is the
         # reversible action a human approves). Approval is what actually opens

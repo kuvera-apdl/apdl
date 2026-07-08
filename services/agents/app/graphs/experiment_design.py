@@ -32,6 +32,11 @@ from app.safety.validator import (
     SafetyValidator,
     _max_rollout_percentage,
 )
+from app.store.experiments import (
+    insight_key,
+    list_designed_experiments,
+    record_designed_experiment,
+)
 from app.tools.experiments import create_experiment_config, get_active_experiments
 
 logger = logging.getLogger(__name__)
@@ -139,12 +144,22 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
         return False
 
 
+def _render_designed(designed: list[dict[str, Any]]) -> str:
+    """One line per prior design for the prompt's do-not-redesign section."""
+    lines = [
+        f"- {d.get('experiment_id', '?')}: {d.get('hypothesis') or d.get('title') or '?'}"
+        f" ({d.get('status', '?')})"
+        for d in designed
+    ]
+    return "\n".join(lines) if lines else "(none)"
+
+
 @register_agent
 class ExperimentDesignAgent(BaseAgent):
     """Designs, validates, and (autonomy permitting) deploys experiments."""
 
     name = "experiment_design"
-    description = "Design an A/B experiment from insights and deploy it safely."
+    description = "Design A/B experiments from insights and deploy them safely."
     order = 20
     system_prompt = EXPERIMENT_DESIGN_SYSTEM
     model_tier = "reasoning"
@@ -152,12 +167,14 @@ class ExperimentDesignAgent(BaseAgent):
     memory_top_k = 5
     requires = ("insights",)
     produces = "experiment_designs"
-    parse_as = "object"
-    # A small verification budget: enough to measure real baselines for the
-    # events the design hinges on (sample-size math was previously guesswork
-    # over "(to be determined)"), not enough to re-run behavior analysis.
+    parse_as = "list"
+    # A verification budget: enough to measure real baselines for the events
+    # each design hinges on (sample-size math was previously guesswork over
+    # "(to be determined)"), not enough to re-run behavior analysis.
     agentic_tools = ("discover_events", "query_events", "query_timeseries", "query_breakdown")
-    max_tool_steps = 4
+    max_tool_steps = 6
+    #: Upper bound on designs per run — one per qualifying insight.
+    max_designs = 3
 
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
@@ -167,21 +184,36 @@ class ExperimentDesignAgent(BaseAgent):
         except Exception as exc:
             logger.warning("Could not fetch active experiments: %s", exc)
             active = []
-        return {"active_experiments": active if isinstance(active, list) else []}
+        # The durable design ledger is the hard dedup layer: insights barely
+        # change between runs, so without it every run redesigns the same
+        # experiments (only softly guarded by active_experiments in the prompt).
+        designed: list[dict[str, Any]] = []
+        if ctx.pool is not None:
+            try:
+                designed = await list_designed_experiments(ctx.pool, ctx.project_id)
+            except Exception as exc:
+                logger.warning("Could not list designed experiments: %s", exc)
+        return {
+            "active_experiments": active if isinstance(active, list) else [],
+            "designed_experiments": designed,
+        }
 
     def build_prompt(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> str | None:
-        insight = self._pick_insight(state.get("insights", []))
-        if insight is None:
+        insights = self._select_insights(
+            state.get("insights", []), working.get("designed_experiments", [])
+        )
+        if not insights:
             return None
         return EXPERIMENT_DESIGN_PROMPT.format(
-            insight=json.dumps(insight, default=str),
+            insights=json.dumps(insights, default=str),
             context=working.get("context", ""),
             active_experiments=json.dumps(working.get("active_experiments", []), default=str),
+            designed_experiments=_render_designed(working.get("designed_experiments", [])),
             baseline_metrics=(
                 "(unknown — use your analytics tools to measure the current "
-                "rate/volume of the primary metric event before sizing the experiment)"
+                "rate/volume of each primary metric event before sizing the experiments)"
             ),
         )
 
@@ -193,53 +225,64 @@ class ExperimentDesignAgent(BaseAgent):
         output: Any,
     ) -> dict[str, Any]:
         if not output:
-            return {"deployed": False, "experiment_id": ""}
+            return {"experiment_id": "", "experiment_ids": [], "deployed_count": 0,
+                    "needs_approval": False}
 
-        # LLMs drift from the canonical flag schema (descriptive variant fields,
-        # rollout-less rules), which fails the validator's variant_config check.
-        # Normalize before validating, deploying, and persisting so a sound
-        # design is not halted on shape alone.
-        _canonicalize_flag_config(output)
+        active = working.get("active_experiments", [])
+        deployed_count = 0
+        for design in output:
+            # LLMs drift from the canonical flag schema (descriptive variant
+            # fields, rollout-less rules), which fails the validator's
+            # variant_config check. Normalize before validating, deploying,
+            # and persisting so a sound design is not halted on shape alone.
+            _canonicalize_flag_config(design)
 
-        safety = await self._safety_check(ctx, output, working.get("active_experiments", []))
-        decision = gate_action(ctx.autonomy_level, safety)
-        meta: dict[str, Any] = {
-            "experiment_id": output.get("experiment_id", ""),
-            "safety_result": safety,
-            "decision": decision.value,
-            "deployed": False,
-            "needs_approval": decision is GateDecision.approve,
+            safety = await self._safety_check(ctx, design, active)
+            decision = gate_action(ctx.autonomy_level, safety)
+            # Stamped onto the persisted item so the approval gate can tell an
+            # approvable design from a halted or already-deployed sibling, and
+            # the console can render per-design outcomes.
+            design["decision"] = decision.value
+            design["safety_result"] = safety
+            design["deployed"] = False
+
+            if decision is GateDecision.deploy:
+                deployed = await self._deploy(ctx, design)
+                design["deployed"] = deployed
+                if deployed:
+                    deployed_count += 1
+                else:
+                    # deploy_experiment swallows HTTP failures into False;
+                    # without this the run would end "completed" while the
+                    # auto-approved experiment silently doesn't exist.
+                    experiment_id = design.get("experiment_id", "")
+                    message = f"experiment deploy failed: {experiment_id or '(no id)'}"
+                    state.setdefault("errors", []).append(message)
+                    await ctx.audit.log(
+                        ctx.run_id,
+                        "deploy_failed",
+                        {"experiment_id": experiment_id, "agent": self.name},
+                    )
+            await self._record(ctx, design, decision)
+
+        ids = [d.get("experiment_id", "") for d in output]
+        return {
+            # Singular kept for audit/console back-compat with single-design runs.
+            "experiment_id": ids[0] if ids else "",
+            "experiment_ids": ids,
+            "deployed_count": deployed_count,
+            "needs_approval": any(d.get("decision") == GateDecision.approve.value for d in output),
         }
-
-        if decision is GateDecision.deploy:
-            deployed = await self._deploy(ctx, output)
-            meta["deployed"] = deployed
-            if not deployed:
-                # deploy_experiment swallows HTTP failures into False; without
-                # this the run would end "completed" while the auto-approved
-                # experiment silently doesn't exist.
-                message = f"experiment deploy failed: {meta['experiment_id'] or '(no id)'}"
-                state.setdefault("errors", []).append(message)
-                await ctx.audit.log(
-                    ctx.run_id,
-                    "deploy_failed",
-                    {"experiment_id": meta["experiment_id"], "agent": self.name},
-                )
-        return meta
-
-    def finalize(self, output: Any, action: dict[str, Any]) -> Any:
-        # Store as a list so the supervisor's experiment count is uniform.
-        return [output] if output else []
 
     # ------------------------------------------------------------------
     # Internal steps
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _pick_insight(insights: list[dict]) -> dict | None:
+    def _select_insights(
+        self, insights: list[dict], designed: list[dict[str, Any]]
+    ) -> list[dict]:
+        """Experiment-worthy insights not already covered by the design ledger."""
         insights = [i for i in insights if isinstance(i, dict)]
-        if not insights:
-            return None
         experiment_insights = [
             i
             for i in insights
@@ -248,7 +291,32 @@ class ExperimentDesignAgent(BaseAgent):
             # crash build_prompt and fail the whole agent.
             or str(i.get("recommended_action") or "").lower().startswith("experiment")
         ]
-        return (experiment_insights or insights)[0]
+        selected = experiment_insights or insights
+        covered = {d.get("insight_key", "") for d in designed} - {""}
+        fresh = [i for i in selected if insight_key(i) not in covered]
+        return fresh[: self.max_designs]
+
+    async def _record(
+        self, ctx: AgentContext, design: dict[str, Any], decision: GateDecision
+    ) -> None:
+        """Best-effort ledger write; a failure must not fail the run."""
+        if ctx.pool is None:
+            return
+        if design.get("deployed"):
+            status = "deployed"
+        elif decision is GateDecision.approve:
+            status = "awaiting_approval"
+        else:
+            status = "halted"
+        try:
+            await record_designed_experiment(
+                ctx.pool, ctx.project_id, ctx.run_id, design, status
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not record designed experiment %s: %s",
+                design.get("experiment_id", "?"), exc,
+            )
 
     async def _safety_check(
         self, ctx: AgentContext, experiment: dict, active_experiments: list[dict]

@@ -484,3 +484,36 @@ async def test_lost_claim_race_is_400(monkeypatch):
 
     assert resp.status_code == 400
     assert _forks(kicked) == []  # nothing forked when the claim is lost
+
+
+@pytest.mark.asyncio
+async def test_experiment_gate_blanket_approve_skips_non_deployable_designs(monkeypatch):
+    """A multi-design gate can hold a safety-halted or already-deployed sibling
+    next to the design genuinely awaiting a human; a blanket approve must
+    deploy only the approvable one and audit the skips."""
+    _, kicked, deployed = _patch(monkeypatch)
+    designs = [
+        {"experiment_id": "exp_ok", "decision": "approve",
+         "safety_result": {"passed": True}},
+        {"experiment_id": "exp_halted", "decision": "halt",
+         "safety_result": {"passed": False}},
+        {"experiment_id": "exp_live", "decision": "deploy", "deployed": True,
+         "safety_result": {"passed": True}},
+    ]
+    store = {
+        "run": _run_row(phase="experiment_design_approval",
+                        analysis_types=("experiment_design",)),
+        "results": [{"output": json.dumps(designs)}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    assert [e[1]["experiment_id"] for e in deployed] == ["exp_ok"]
+    skipped = [
+        a for q, a in app.state.pg_pool.conn.fetchvals
+        if "agent_audit_log" in q and a[1] == "approval_skipped"
+    ]
+    assert {json.loads(s[2])["item_id"] for s in skipped} == {"exp_halted", "exp_live"}
+    assert _resumes(kicked)
