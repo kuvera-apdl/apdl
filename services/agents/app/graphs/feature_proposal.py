@@ -1,14 +1,18 @@
-"""Feature proposal agent.
+"""Feature proposal agent — durable features from winning experiments.
 
-Analyses experiment results and behaviour insights to propose concrete new
-features with implementation specs. Proposals ALWAYS require human approval —
-regardless of autonomy level — because of their product and engineering blast
-radius. Produces ``feature_proposals``.
+Loop-closure phase 4: proposals are no longer invented from insights. The
+agent drains unconsumed ``ship`` verdicts (the evaluation agent's durable
+work queue) and writes one flag-removal work order per validated win — make
+the treatment permanent, delete the control path. No winning experiment, no
+proposal; the LLM is not even called.
+
+Proposals ALWAYS require human approval — regardless of autonomy level —
+because of their product and engineering blast radius. Produces
+``feature_proposals``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -16,8 +20,8 @@ from typing import Any
 from app.framework import AgentContext, BaseAgent, MemoryEntry, register_agent
 from app.llm.prompts.feature import FEATURE_PROPOSAL_PROMPT, FEATURE_PROPOSAL_SYSTEM
 from app.store.proposals import list_recent_proposals
+from app.store.verdicts import list_unconsumed_ship_verdicts, mark_verdicts_consumed
 from app.tools.code import get_repo_context, list_changesets
-from app.tools.experiments import get_active_experiments, get_experiment_results
 
 logger = logging.getLogger(__name__)
 
@@ -79,55 +83,58 @@ def _render_existing_work(
     return "\n".join(lines) if lines else "(none)"
 
 
+def _render_ship_verdicts(verdicts: list[dict[str, Any]]) -> str:
+    """The winning experiments, with the evaluator's numbers and notes."""
+    rendered = [
+        {
+            "experiment_id": v.get("experiment_id", ""),
+            "reasoning": v.get("reasoning", ""),
+            "results": v.get("results", {}),
+            "durable_feature": v.get("durable_feature", ""),
+        }
+        for v in verdicts
+    ]
+    return json.dumps(rendered, default=str)
+
+
 @register_agent
 class FeatureProposalAgent(BaseAgent):
-    """Proposes new features; always routes to human approval."""
+    """Turns winning experiments into durable-feature proposals; always routes
+    to human approval."""
 
     name = "feature_proposal"
-    description = "Propose new features from experiment results and insights."
+    description = "Write durable-feature work orders from winning experiments."
     order = 40
     system_prompt = FEATURE_PROPOSAL_SYSTEM
     model_tier = "reasoning"
-    memory_query = "feature proposals product capabilities experiment results"
+    memory_query = "approved feature proposals experiment wins durable features"
     memory_top_k = 5
-    requires = ("insights",)
+    # No state dependency: the ship-verdict queue is durable, so this agent is
+    # as runnable in a scheduled evaluation pipeline as after a fresh analysis.
+    requires = ()
     produces = "feature_proposals"
     parse_as = "list"
-    # A premise-checking budget: verify the events a proposal's success
-    # criteria depend on actually fire (and at what magnitude) before the
-    # proposal becomes a work order for the coding agent.
-    agentic_tools = ("discover_events", "query_events", "query_funnel", "query_breakdown")
-    max_tool_steps = 4
+    # A small verification budget for instrumentation details (does the win's
+    # metric event still fire) — the win itself needs no re-verification.
+    agentic_tools = ("discover_events", "query_events")
+    max_tool_steps = 2
+    max_wins_per_run = 5
 
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> dict[str, Any]:
-        try:
-            active = await get_active_experiments(project_id=ctx.project_id)
-            active = active if isinstance(active, list) else []
-        except Exception as exc:
-            logger.warning("Could not fetch active experiments: %s", exc)
-            active = []
-
-        async def _fetch_result(exp: dict) -> dict[str, Any] | None:
-            if not isinstance(exp, dict):
-                return None
-            exp_id = exp.get("experiment_id", "")
-            metric = (exp.get("primary_metric") or {}).get("event", "")
-            if not exp_id or not metric:
-                return None
+        # The durable ship-verdict queue is the ONLY proposal source: no
+        # winning experiment, no proposal (the product thesis made structural).
+        ship_verdicts: list[dict[str, Any]] = []
+        if ctx.pool is not None:
             try:
-                return await get_experiment_results(
-                    experiment_id=exp_id,
-                    metric=metric,
-                    project_id=ctx.project_id,
-                    flag_key=exp.get("flag_key") or exp_id,
+                ship_verdicts = await list_unconsumed_ship_verdicts(
+                    ctx.pool, ctx.project_id, self.max_wins_per_run
                 )
             except Exception as exc:
-                logger.debug("Could not fetch results for %s: %s", exp_id, exc)
-                return None
-
-        fetched = await asyncio.gather(*[_fetch_result(e) for e in active])
+                logger.warning("Could not list ship verdicts: %s", exc)
+        if not ship_verdicts:
+            return {"ship_verdicts": []}
 
         # Repo grounding: what the connected repository actually is. Proposals
         # written blind demand infrastructure the repo does not have; the coding
@@ -142,8 +149,6 @@ class FeatureProposalAgent(BaseAgent):
             logger.warning("Could not fetch repo context: %s", exc)
 
         # Dedup grounding: what was already proposed or is already in flight.
-        # Insights barely change between runs, so without this every run
-        # re-proposes the same themes and each becomes a duplicate PR.
         recent_proposals: list[dict[str, Any]] = []
         try:
             recent_proposals = await list_recent_proposals(ctx.pool, ctx.project_id)
@@ -158,8 +163,7 @@ class FeatureProposalAgent(BaseAgent):
             logger.warning("Could not list changesets: %s", exc)
 
         return {
-            "active_experiments": active,
-            "experiment_results": [r for r in fetched if r is not None],
+            "ship_verdicts": ship_verdicts,
             "repo_context": repo_context,
             "recent_proposals": recent_proposals,
             "changesets": changesets,
@@ -168,9 +172,12 @@ class FeatureProposalAgent(BaseAgent):
     def build_prompt(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> str | None:
+        ship_verdicts = working.get("ship_verdicts", [])
+        if not ship_verdicts:
+            # No winning experiments → no proposals, no LLM call.
+            return None
         return FEATURE_PROPOSAL_PROMPT.format(
-            experiment_results=json.dumps(working.get("experiment_results", []), default=str),
-            insights=json.dumps(state.get("insights", []), default=str),
+            ship_verdicts=_render_ship_verdicts(ship_verdicts),
             context=working.get("context", ""),
             capabilities=_render_repo_capabilities(working.get("repo_context") or {}),
             existing_work=_render_existing_work(
@@ -186,6 +193,21 @@ class FeatureProposalAgent(BaseAgent):
         working: dict[str, Any],
         output: Any,
     ) -> dict[str, Any]:
+        # Consume the verdicts this run turned into proposals, so reruns never
+        # propose the same win twice. A win whose proposal the model dropped
+        # (e.g. already in flight) is consumed too — the existing-work list
+        # said it's covered, and re-offering it every run would spam the gate.
+        consumed_ids = [
+            v["id"]
+            for v in working.get("ship_verdicts", [])
+            if isinstance(v.get("id"), int)
+        ]
+        if consumed_ids and ctx.pool is not None:
+            try:
+                await mark_verdicts_consumed(ctx.pool, consumed_ids)
+            except Exception as exc:
+                logger.warning("Could not mark verdicts consumed: %s", exc)
+
         # Feature proposals never auto-deploy; they wait for human approval.
         return {
             "proposals_count": len(output),
