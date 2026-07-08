@@ -17,6 +17,7 @@ import { TriggerPage } from '../../src/features/agents/TriggerPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
 const BASE = 'http://localhost:8083'
+const QUERY_BASE = 'http://localhost:8082'
 
 function makeCustomAgent(overrides: Partial<CustomAgent> = {}): CustomAgent {
   return {
@@ -89,6 +90,15 @@ const requests: { path: string; method: string; body: unknown }[] = []
 let customAgents: CustomAgent[] = []
 
 const server = setupServer(
+  // Event catalog behind the preset-query event pickers (EventCombobox).
+  http.post(`${QUERY_BASE}/v1/query/events/names`, () =>
+    HttpResponse.json({
+      events: [
+        { event_name: 'signup', event_count: 100, unique_users: 80 },
+        { event_name: 'purchase', event_count: 40, unique_users: 30 },
+      ],
+    }),
+  ),
   http.get(`${BASE}/v1/agents/definitions`, () => HttpResponse.json(DEFINITIONS)),
   http.get(`${BASE}/v1/agents/custom`, () => HttpResponse.json(customAgents)),
   http.post(`${BASE}/v1/agents/custom`, async ({ request }) => {
@@ -214,19 +224,23 @@ describe('CustomAgentWizardPage', () => {
     expect(screen.getByLabelText('Slug')).toHaveValue('churn_watch')
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
-    // Step 2: Prompts — template is prefilled; add the system prompt.
+    // Step 2: Preset queries — optional; skip through.
+    expect(await screen.findByText('No preset queries', { exact: false })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    // Step 3: Prompts — template is prefilled; add the system prompt.
     await userEvent.type(
       await screen.findByLabelText('System prompt'),
       'You are a churn analyst.',
     )
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
-    // Step 3: Data tools — default allows the whole catalog; limit to one.
+    // Step 4: Data tools — default allows the whole catalog; limit to one.
     await userEvent.click(await screen.findByRole('radio', { name: /limit tools/i }))
     await userEvent.click(await screen.findByRole('checkbox', { name: /discover_events/ }))
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
-    // Step 4: Behavior — output key.
+    // Step 5: Behavior — output key.
     await userEvent.type(await screen.findByLabelText('Output key (produces)'), 'churn_signals')
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
   }
@@ -271,7 +285,7 @@ describe('CustomAgentWizardPage', () => {
     })
   })
 
-  test('configures a preset query and sends it in the spec', async () => {
+  test('builds a preset funnel query with the structured form and sends it in the spec', async () => {
     renderWithProviders(
       <Routes>
         <Route path="/agents/custom" element={<div>list page</div>} />
@@ -280,33 +294,44 @@ describe('CustomAgentWizardPage', () => {
       '/agents/custom/new',
     )
 
-    // Basics + Prompts.
+    // Basics → Preset queries.
     await userEvent.type(await screen.findByLabelText('Name'), 'Churn watch')
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    // Add a preset (defaults to the first catalog tool) and switch it to a
+    // funnel — the form becomes two ordered steps plus a conversion window.
+    await userEvent.click(await screen.findByRole('button', { name: /add preset query/i }))
+    expect(screen.getByText('Max events')).toBeInTheDocument() // discover_events form
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Preset query 1 tool' }),
+      'query_funnel',
+    )
+
+    // Empty step events block Next with per-step problems.
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    expect(
+      await screen.findByText('Preset query 1: step 1 — pick an event.'),
+    ).toBeInTheDocument()
+
+    // Pick the step events from the discovered catalog.
+    await userEvent.click(screen.getByRole('combobox', { name: 'Step 1 event' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'signup' }))
+    await userEvent.click(screen.getByRole('combobox', { name: 'Step 2 event' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'purchase' }))
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    // Prompts — the preset makes {tool_results} a documented placeholder.
+    expect((await screen.findAllByText(/\{tool_results\}/)).length).toBeGreaterThan(0)
     await userEvent.type(
       await screen.findByLabelText('System prompt'),
       'You are a churn analyst.',
     )
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
-    // Data tools: add a preset query (defaults to the first catalog tool),
-    // switch it to query_funnel, and give it params.
-    await userEvent.click(await screen.findByRole('button', { name: /add preset query/i }))
-    const toolSelect = screen.getByRole('combobox', { name: 'Preset query 1 tool' })
-    await userEvent.selectOptions(toolSelect, 'query_funnel')
-    const paramsBox = screen.getByPlaceholderText(/parameters as JSON/i)
-    // Invalid JSON blocks Next with a per-row problem.
-    await userEvent.type(paramsBox, 'not json')
+    // Data tools → Behavior → save.
+    await userEvent.click(await screen.findByRole('radio', { name: /limit tools/i }))
+    await userEvent.click(await screen.findByRole('checkbox', { name: /discover_events/ }))
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
-    expect(
-      await screen.findByText('Preset query 1: params must be a JSON object (or empty).'),
-    ).toBeInTheDocument()
-    await userEvent.clear(paramsBox)
-    // userEvent.type treats { and [ as key descriptors — double to escape.
-    await userEvent.type(paramsBox, '{{"steps": [[]}')
-    await userEvent.click(screen.getByRole('button', { name: /next/i }))
-
-    // Behavior + save.
     await userEvent.type(await screen.findByLabelText('Output key (produces)'), 'churn_signals')
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
     await userEvent.click(await screen.findByRole('button', { name: /create agent/i }))
@@ -315,7 +340,18 @@ describe('CustomAgentWizardPage', () => {
     const createCall = requests.find((entry) => entry.path === 'create')
     expect(createCall?.body).toMatchObject({
       slug: 'churn_watch',
-      preset_tools: [{ tool: 'query_funnel', params: { steps: [] } }],
+      preset_tools: [
+        {
+          tool: 'query_funnel',
+          params: {
+            steps: [
+              { event_name: 'signup', filters: [] },
+              { event_name: 'purchase', filters: [] },
+            ],
+            window_days: 7,
+          },
+        },
+      ],
     })
   })
 
