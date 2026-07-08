@@ -173,7 +173,8 @@ class ExperimentDesignAgent(BaseAgent):
     # "(to be determined)"), not enough to re-run behavior analysis.
     agentic_tools = ("discover_events", "query_events", "query_timeseries", "query_breakdown")
     max_tool_steps = 6
-    #: Upper bound on designs per run — one per qualifying insight.
+    #: Upper bound on designs per run — at most one per qualifying insight;
+    #: insights that don't warrant an experiment get none.
     max_designs = 3
 
     async def gather(
