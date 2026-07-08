@@ -34,9 +34,11 @@ from app.safety.validator import (
 )
 from app.store.experiments import (
     insight_key,
+    link_changeset,
     list_designed_experiments,
     record_designed_experiment,
 )
+from app.tools.code import open_changeset
 from app.tools.experiments import create_experiment_config, get_active_experiments
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,126 @@ def _designed_traffic_percentage(flag_config: dict[str, Any]) -> float:
     if percentage is None:
         return 100.0
     return float(min(max(percentage, 0.0), 100.0))
+
+
+def _flag_key_of(design: dict[str, Any]) -> str:
+    flag = design.get("flag_config")
+    key = flag.get("key") if isinstance(flag, dict) else ""
+    return str(key or design.get("experiment_id") or "").strip()
+
+
+def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
+    """Build the (title, spec) for the codegen changeset implementing a design's
+    treatment variant, or None when the design declares no code is needed.
+
+    A deployed experiment without treatment code measures noise — both variants
+    render the same product. This spec is what makes the experiment real: the
+    treatment is built behind the already-deployed flag, the control path stays
+    untouched. ``treatment_spec`` is the design's own work order; a missing
+    field (older designs, model omission) degrades to the hypothesis + variant
+    descriptions rather than silently skipping the build. An explicitly empty
+    string is the design saying "config-only experiment" — no changeset.
+    """
+    experiment_id = str(design.get("experiment_id") or "").strip()
+    flag_key = _flag_key_of(design)
+    if not flag_key:
+        return None
+
+    if "treatment_spec" in design:
+        what_to_build = str(design.get("treatment_spec") or "").strip()
+        if not what_to_build:
+            return None
+    else:
+        hypothesis = str(design.get("hypothesis") or "").strip()
+        treatments = [
+            f"- {v.get('key')}: {v.get('description')}"
+            for v in design.get("variants") or []
+            if isinstance(v, dict) and v.get("key") != "control" and v.get("description")
+        ]
+        what_to_build = "\n".join(
+            part for part in (hypothesis, *treatments) if part
+        ).strip()
+        if not what_to_build:
+            return None
+
+    metric_event = str((design.get("primary_metric") or {}).get("event") or "").strip()
+    variants = ", ".join(
+        f"{v.get('key')} (weight {v.get('weight')})"
+        for v in design.get("variants") or []
+        if isinstance(v, dict) and v.get("key")
+    )
+
+    title = f"Implement treatment for experiment {experiment_id or flag_key}"
+    sections = [
+        "## Experiment",
+        f"Hypothesis: {design.get('hypothesis', '')}",
+        f"Backing feature flag: `{flag_key}` (already deployed; variants: {variants or 'control, treatment'})",
+    ]
+    if metric_event:
+        sections.append(f"Primary metric event: `{metric_event}`")
+    sections += [
+        "",
+        "## What to build",
+        what_to_build,
+        "",
+        "## Flag integration requirements",
+        f"- Gate ALL treatment behavior behind the APDL feature flag `{flag_key}` using the "
+        "APDL SDK already integrated in this repository: users assigned \"control\" see the "
+        "current behavior unchanged; users assigned \"treatment\" see the new behavior.",
+        "- Do not remove or modify the control code path.",
+    ]
+    if metric_event:
+        sections.append(
+            f"- Ensure the primary metric event `{metric_event}` fires on the relevant "
+            "action for both variants."
+        )
+    sections += [
+        "",
+        "## Acceptance criteria",
+        "- With flag variant \"control\": behavior identical to today.",
+        "- With flag variant \"treatment\": the change described above is visible and reachable.",
+        "- All existing tests pass.",
+    ]
+    return title, "\n".join(sections)
+
+
+async def open_treatment_changeset(
+    pool: Any, project_id: str, run_id: str, design: dict[str, Any]
+) -> str:
+    """Open the codegen changeset that implements a deployed design's treatment.
+
+    Returns the changeset id ("" when the design needs no code or the open
+    failed — callers surface that, they don't crash the deploy that already
+    succeeded). Shared by the agent (autonomy-permitting deploy) and the
+    approval endpoint (human-approved deploy), like deploy_experiment.
+    """
+    task = treatment_changeset_task(design)
+    if task is None:
+        return ""
+    title, spec = task
+    changeset = await open_changeset(
+        project_id=project_id,
+        title=title,
+        spec=spec,
+        run_id=run_id,
+        constraints=[
+            "All existing tests must pass.",
+            "Do not modify or remove the control code path.",
+        ],
+    )
+    changeset_id = str(changeset.get("changeset_id") or "").strip()
+    if changeset_id and pool is not None:
+        try:
+            await link_changeset(
+                pool, project_id, str(design.get("experiment_id") or _flag_key_of(design)),
+                changeset_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not link changeset %s to experiment %s: %s",
+                changeset_id, design.get("experiment_id"), exc,
+            )
+    return changeset_id
 
 
 async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
@@ -252,6 +374,7 @@ class ExperimentDesignAgent(BaseAgent):
                 design["deployed"] = deployed
                 if deployed:
                     deployed_count += 1
+                    await self._open_treatment(ctx, state, design)
                 else:
                     # deploy_experiment swallows HTTP failures into False;
                     # without this the run would end "completed" while the
@@ -296,6 +419,40 @@ class ExperimentDesignAgent(BaseAgent):
         covered = {d.get("insight_key", "") for d in designed} - {""}
         fresh = [i for i in selected if insight_key(i) not in covered]
         return fresh[: self.max_designs]
+
+    async def _open_treatment(
+        self, ctx: AgentContext, state: dict[str, Any], design: dict[str, Any]
+    ) -> None:
+        """Open the treatment changeset for a just-deployed design.
+
+        A failure is surfaced (state error + audit) but never unwinds the
+        deploy that already succeeded — the experiment exists either way; what
+        failed is making its treatment real, and a human can retry from the
+        console. Without the surfacing, the experiment silently measures noise.
+        """
+        experiment_id = str(design.get("experiment_id") or "")
+        try:
+            changeset_id = await open_treatment_changeset(
+                ctx.pool, ctx.project_id, ctx.run_id, design
+            )
+        except Exception as exc:
+            logger.error("Treatment changeset for %s failed: %s", experiment_id, exc)
+            state.setdefault("errors", []).append(
+                f"treatment changeset failed: {experiment_id or '(no id)'}"
+            )
+            await ctx.audit.log(
+                ctx.run_id,
+                "treatment_changeset_failed",
+                {"experiment_id": experiment_id, "agent": self.name, "error": str(exc)},
+            )
+            return
+        design["treatment_changeset_id"] = changeset_id
+        if changeset_id:
+            await ctx.audit.log(
+                ctx.run_id,
+                "treatment_changeset_opened",
+                {"experiment_id": experiment_id, "changeset_id": changeset_id},
+            )
 
     async def _record(
         self, ctx: AgentContext, design: dict[str, Any], decision: GateDecision

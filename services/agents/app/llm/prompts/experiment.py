@@ -24,6 +24,10 @@ Return a JSON ARRAY of experiment objects (one per insight you design for):
   "source_insight": "<the exact title of the insight this experiment tests>",
   "hypothesis": "...",
   "description": "...",
+  "treatment_spec": "<work order for implementing the treatment variant in the connected repository: \
+what to change and where, gated behind the flag. The treatment does NOT exist in the product until \
+a coding agent builds it from this text — be concrete. Empty string ONLY if the treatment needs no \
+code change (e.g. pure traffic/config change)>",
   "variants": [
     {"key": "control", "weight": 50, "description": "..."},
     {"key": "treatment", "weight": 50, "description": "..."}

@@ -38,6 +38,12 @@ CREATE INDEX IF NOT EXISTS designed_experiments_project_created_idx
     ON designed_experiments (project_id, created_at DESC);
 """
 
+#: Phase 2: the treatment changeset implementing a deployed design, when one
+#: was opened. Idempotent for pre-phase-2 databases.
+DESIGNED_EXPERIMENTS_MIGRATE_DDL = """
+ALTER TABLE designed_experiments ADD COLUMN IF NOT EXISTS changeset_id TEXT;
+"""
+
 
 def insight_key(value: Any) -> str:
     """Fingerprint an insight (or its title) for exact-match dedup.
@@ -86,6 +92,40 @@ async def record_designed_experiment(
             str(design.get("hypothesis") or ""),
             status,
         )
+
+
+async def link_changeset(
+    pool: asyncpg.Pool, project_id: str, experiment_id: str, changeset_id: str
+) -> None:
+    """Attach the treatment changeset to a designed experiment."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE designed_experiments
+            SET changeset_id = $3, updated_at = now()
+            WHERE project_id = $1 AND experiment_id = $2
+            """,
+            project_id,
+            experiment_id,
+            changeset_id,
+        )
+
+
+async def get_designed_experiment(
+    pool: asyncpg.Pool, project_id: str, experiment_id: str
+) -> dict[str, Any] | None:
+    """One ledger row (incl. linked changeset), or None."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT experiment_id, insight_key, title, hypothesis, status, changeset_id
+            FROM designed_experiments
+            WHERE project_id = $1 AND experiment_id = $2
+            """,
+            project_id,
+            experiment_id,
+        )
+    return dict(row) if row else None
 
 
 async def list_designed_experiments(

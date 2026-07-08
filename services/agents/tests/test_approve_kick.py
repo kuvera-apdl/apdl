@@ -111,9 +111,13 @@ def _patch(monkeypatch):
         deployed.append((project_id, experiment))
         return True
 
+    async def fake_treatment(pool, project_id, run_id, design):
+        return ""
+
     monkeypatch.setattr(approvals, "enqueue_proposals", fake_enqueue)
     monkeypatch.setattr(approvals, "run_supervisor", fake_supervisor)
     monkeypatch.setattr(approvals, "deploy_experiment", fake_deploy)
+    monkeypatch.setattr(approvals, "open_treatment_changeset", fake_treatment)
     return enq, kicked, deployed
 
 
@@ -516,4 +520,37 @@ async def test_experiment_gate_blanket_approve_skips_non_deployable_designs(monk
         if "agent_audit_log" in q and a[1] == "approval_skipped"
     ]
     assert {json.loads(s[2])["item_id"] for s in skipped} == {"exp_halted", "exp_live"}
+    assert _resumes(kicked)
+
+
+@pytest.mark.asyncio
+async def test_approved_experiment_opens_treatment_changeset(monkeypatch):
+    """Phase 2: a human-approved experiment gets its treatment built — the
+    approval deploys the experiment AND opens the codegen changeset."""
+    _, kicked, deployed = _patch(monkeypatch)
+    treatments: list = []
+
+    async def fake_treatment(pool, project_id, run_id, design):
+        treatments.append(design.get("experiment_id"))
+        return "cs-treat-1"
+
+    monkeypatch.setattr(approvals, "open_treatment_changeset", fake_treatment)
+    design = {
+        "experiment_id": "exp_demo",
+        "flag_config": {"key": "exp_demo"},
+        "variants": [],
+        "treatment_spec": "Add the sticky CTA.",
+    }
+    store = {
+        "run": _run_row(phase="experiment_design_approval",
+                        analysis_types=("experiment_design",)),
+        "results": [{"output": json.dumps([design])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    assert deployed and treatments == ["exp_demo"]
+    assert resp.json()["opened_changesets"] == ["cs-treat-1"]
     assert _resumes(kicked)

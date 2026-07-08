@@ -22,6 +22,7 @@ from app.store.custom_agents import (
 from app.store.experiments import (
     DESIGNED_EXPERIMENTS_DDL,
     DESIGNED_EXPERIMENTS_INDEX_DDL,
+    DESIGNED_EXPERIMENTS_MIGRATE_DDL,
 )
 from app.store.proposals import FEATURE_PROPOSALS_DDL
 
@@ -132,6 +133,7 @@ async def lifespan(application: FastAPI):
         await conn.execute(FEATURE_PROPOSALS_DDL)
         await conn.execute(DESIGNED_EXPERIMENTS_DDL)
         await conn.execute(DESIGNED_EXPERIMENTS_INDEX_DDL)
+        await conn.execute(DESIGNED_EXPERIMENTS_MIGRATE_DDL)
         await conn.execute(CUSTOM_AGENTS_DDL)
         await conn.execute(CUSTOM_AGENTS_INDEX_DDL)
         await conn.execute(CUSTOM_AGENTS_MIGRATE_DDL)

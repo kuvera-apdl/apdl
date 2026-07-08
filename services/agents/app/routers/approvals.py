@@ -19,7 +19,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, model_validator
 
-from app.graphs.experiment_design import deploy_experiment
+from app.graphs.experiment_design import deploy_experiment, open_treatment_changeset
 from app.graphs.supervisor import run_supervisor
 from app.safety.audit import AuditLogger
 from app.store.experiments import record_designed_experiment
@@ -68,8 +68,9 @@ class ApprovalResponse(BaseModel):
     approved_count: int
     rejected_count: int
     forked_runs: list[str]
-    #: Changeset ids whose draft PR was opened by approving a code_implementation
-    #: gate (Phase 6). Empty for every other gate type.
+    #: Changeset ids opened by this approval: draft PRs from a
+    #: code_implementation gate (Phase 6) or treatment changesets for approved
+    #: experiment designs (loop phase 2).
     opened_changesets: list[str] = []
     message: str
 
@@ -334,6 +335,31 @@ async def approve_action(
             )
             if deployed:
                 logger.info("[%s] Deployed approved experiment %s", run_id, _item_id(gated_agent, design))
+                # Phase 2: an approved experiment gets its treatment built. A
+                # failure is audited, never fatal — the experiment exists; the
+                # missing treatment is what the audit trail must show.
+                try:
+                    changeset_id = await open_treatment_changeset(
+                        pool, project_id, run_id, design
+                    )
+                    if changeset_id:
+                        opened_changesets.append(changeset_id)
+                        await audit.log(
+                            run_id,
+                            "treatment_changeset_opened",
+                            {"experiment_id": _item_id(gated_agent, design),
+                             "changeset_id": changeset_id},
+                        )
+                except Exception:
+                    logger.exception(
+                        "[%s] Treatment changeset failed for %s",
+                        run_id, _item_id(gated_agent, design),
+                    )
+                    await audit.log(
+                        run_id,
+                        "treatment_changeset_failed",
+                        {"experiment_id": _item_id(gated_agent, design)},
+                    )
             else:
                 # deploy_experiment swallows HTTP failures into False — record
                 # it, or the human sees "approved" for an experiment that
