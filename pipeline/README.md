@@ -9,6 +9,7 @@ the ClickHouse schema, and provides the ETL framework for custom event types.
 |-----------|------------|
 | `redis/` | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
 | `clickhouse/` | SQL migrations and reference schemas (tables + materialized views) |
+| `postgres/` | Versioned PostgreSQL migrations, including the credential registry |
 | `etl/` | Standalone custom-events ETL framework (`apdl-etl` package) |
 | `kafka/` | Kafka topic definitions for the Phase 3+ migration |
 | `flink/` | Flink jobs (sessionization, enrichment, aggregations) for Phase 3+ |
@@ -81,6 +82,7 @@ exceeds ~10K events/sec or retention beyond 7 days is needed.
 ```bash
 make dev                 # start Redis, ClickHouse, PostgreSQL (Docker)
 make migrate-clickhouse  # apply clickhouse/migrations/*.sql
+make migrate-postgres    # apply postgres/migrations/*.sql
 make run-pipeline        # start the ClickHouse writer
 ```
 

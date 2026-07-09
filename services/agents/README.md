@@ -20,6 +20,9 @@ dict between them.
 
 ## API
 
+All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
+management, and approval operations use distinct project-scoped roles.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/agents/trigger` | Start an agent run (runs in the background; returns `run_id`) |
@@ -30,6 +33,7 @@ dict between them.
 
 ```bash
 curl -X POST localhost:8083/v1/agents/trigger \
+  -H 'X-API-Key: proj_default_<secret>' \
   -H 'Content-Type: application/json' \
   -d '{
     "project_id": "default",
@@ -106,7 +110,7 @@ at the start of a run, with optional metadata filters.
 Thin async HTTP wrappers the agents call (`app/tools/`):
 
 - `clickhouse.py` — Query Service: event counts, timeseries, funnels, retention
-- `flags.py` — Config Service admin API: list/create/update flags, evaluate gates (uses `APDL_INTERNAL_TOKEN`)
+- `flags.py` — Config Service admin API: list/create/update flags, evaluate gates
 - `experiments.py` — list active experiments, create experiment config + its flag, fetch results
 - `ui_config.py` — create/update server-driven UI configs
 
@@ -123,7 +127,8 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Model overrides |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_INTERNAL_TOKEN` | — | Trusted server-side gate evaluation |
+| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query calls |
+| `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 
 At least one of the four LLM credentials is required.
 

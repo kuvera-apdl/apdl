@@ -66,7 +66,9 @@ make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
 
 ## Using the SDKs
 
-API keys follow `proj_{project_id}_{secret}` (secret: 16+ alphanumeric chars).
+API keys follow `proj_{project_id}_{secret}`. Services verify the full key against a
+hashed PostgreSQL record and derive project/role authority from that record;
+see [authentication and tenant authorization](docs/authentication.md).
 Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identical
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).

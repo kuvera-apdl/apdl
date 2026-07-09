@@ -103,9 +103,10 @@ __tests__/        # vitest + Testing Library + MSW (pattern mirrors sdk/javascri
 
 ## Security posture
 
-The backend currently format-validates API keys without verifying secrets, and
-the query/agents services are unauthenticated — the console is a
-**trusted-network/localhost tool** until plan gap G9 lands. Keys are stored in
-`localStorage`, sent as the `X-API-Key` header everywhere except the
-`EventSource` URL (browser limitation). `x-apdl-actor` is client-asserted
-attribution, not authentication.
+Requests to ingestion, config, query, and agents use database-verified,
+project-scoped API keys. Mutation audit identity comes from the authenticated
+credential, never a caller-chosen header. The console still stores keys and the
+codegen internal token in `localStorage`, and includes the API key in the
+`EventSource` URL because the native browser API cannot set headers. It remains
+a trusted-network/localhost tool until the backend-for-frontend work is
+complete.

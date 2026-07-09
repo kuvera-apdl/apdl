@@ -21,10 +21,11 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
 
 ## API
 
-**Auth:** send `x-api-key: proj_{project_id}_{secret}` (secret: 16+ alphanumeric
-chars) — or `api_key` / raw `project_id` as query params. `POST /v1/evaluate` is
-internal-only and instead requires `x-apdl-internal-token` matching
-`APDL_INTERNAL_TOKEN`.
+**Auth:** send a registered credential as `x-api-key`. PostgreSQL supplies the
+verified project and roles; a `project_id` query/body field can only assert that
+same tenant. Admin routes require `config:write`, SDK reads require
+`config:read`, and `/v1/evaluate` requires `config:evaluate`. See
+[authentication](../../docs/authentication.md).
 
 ### SDK-facing
 
@@ -84,7 +85,6 @@ writes an audit entry.
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Flag/experiment store (schema auto-migrates on startup) |
 | `PG_POOL_SIZE` | `4` | Max asyncpg pool size |
 | `REDIS_URL` | `redis://localhost:6379` | Flag cache + exposure event stream |
-| `APDL_INTERNAL_TOKEN` | _(unset)_ | Shared secret for `POST /v1/evaluate`; endpoint rejects all requests if unset |
 
 ## Running locally
 

@@ -30,8 +30,9 @@ Autonomous Product Development Loop.
 SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams ──XREAD──→ ClickHouse Writer ──→ ClickHouse
 ```
 
-- Ingestion authenticates (`proj_{project_id}_{secret}` API keys), rate-limits
-  per project (token bucket: 1000 capacity, 100/s refill), validates batches
+- Ingestion verifies API keys against the hashed credential registry, derives
+  project/role authority server-side, rate-limits per project (token bucket:
+  1000 capacity, 100/s refill), validates batches
   (1–500 events), and appends to `events:raw:{project_id}` (`MAXLEN ~1M`).
 - The ClickHouse writer consumes via a consumer group and flushes batches of
   1000 events or every 5 s, retrying up to 5 times before dropping a batch.
