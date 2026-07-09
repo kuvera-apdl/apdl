@@ -16,7 +16,6 @@ import { Input } from '@/components/ui/input'
 import { queryKeys } from '@/core/queryClient'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { AUTONOMY_LEVELS, MATRIX_ROWS, type GateOutcome } from '@/features/agents/gatingMatrix'
-import { trackRun } from '@/features/agents/runHistory'
 import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
 
@@ -143,13 +142,6 @@ export function TriggerPage() {
     setSubmitting(true)
     try {
       const response = await triggerRun(conn, body)
-      trackRun(active.id, {
-        run_id: response.run_id,
-        triggered_at: new Date().toISOString(),
-        last_status: response.status,
-        autonomy_level: autonomyLevel,
-        analysis_types: body.analysis_types,
-      })
       toast.success(`Run ${response.run_id.slice(0, 8)}… started`)
       navigate(`/agents/runs/${encodeURIComponent(response.run_id)}`)
     } catch (error) {

@@ -60,6 +60,12 @@ export const runStatusSchema = z
     experiments_count: z.number().int(),
     started_at: z.string(),
     updated_at: z.string(),
+    // The run's trigger inputs, surfaced by the server so the console no longer
+    // caches them in localStorage. Optional so an older backend that omits them
+    // still parses under .strict(); consumers treat absence as "unknown".
+    trigger_type: z.string().optional(),
+    autonomy_level: z.number().int().nullable().optional(),
+    analysis_types: z.array(z.string()).optional(),
   })
   .strict()
 
