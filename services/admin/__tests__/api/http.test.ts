@@ -27,12 +27,11 @@ describe('buildUrl', () => {
 })
 
 describe('request', () => {
-  test('sends X-API-Key on GET and adds x-apdl-actor only on mutations', async () => {
+  test('sends X-API-Key without a caller-asserted audit identity', async () => {
     const seen: Record<string, string | null> = {}
     server.use(
       http.get('http://config.test/v1/get', ({ request: req }) => {
         seen.getKey = req.headers.get('x-api-key')
-        seen.getActor = req.headers.get('x-apdl-actor')
         return HttpResponse.json({})
       }),
       http.post('http://config.test/v1/post', ({ request: req }) => {
@@ -44,8 +43,7 @@ describe('request', () => {
     await request(conn, '/v1/get')
     await request(conn, '/v1/post', { method: 'POST', body: { a: 1 } })
     expect(seen.getKey).toBe(conn.apiKey)
-    expect(seen.getActor).toBeNull()
-    expect(seen.postActor).toBe('tester')
+    expect(seen.postActor).toBeNull()
     expect(seen.postContentType).toContain('application/json')
   })
 

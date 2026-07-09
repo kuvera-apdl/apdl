@@ -224,7 +224,7 @@ export function WorkspaceSettingsPage() {
                 <Field
                   label="Actor name"
                   error={formState.errors.actor?.message}
-                  hint="Sent as x-apdl-actor on every mutation — recorded in audit trails."
+                  hint="Local display name only. Audit trails use the authenticated credential ID."
                 >
                   <Input {...register('actor')} placeholder="your-name" />
                 </Field>

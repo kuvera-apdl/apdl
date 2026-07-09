@@ -172,7 +172,6 @@ export function writeCurl(
 ): CurlSpec {
   const headers: Record<string, string> = {
     'X-API-Key': conn.apiKey,
-    'x-apdl-actor': conn.actor,
   }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   return { method, url: buildUrl(conn.baseUrl, path), headers, ...(body !== undefined ? { body } : {}) }
@@ -205,7 +204,6 @@ export function createFlagExampleCurl(conn: ServiceConnection): CurlSpec {
     url: buildUrl(conn.baseUrl, '/v1/admin/flags'),
     headers: {
       'X-API-Key': conn.apiKey,
-      'x-apdl-actor': conn.actor,
       'Content-Type': 'application/json',
     },
     body: {

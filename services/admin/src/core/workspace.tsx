@@ -1,12 +1,12 @@
 // Workspace model (AD-7): a named connection profile — service base URLs, API
-// key (project_id is derived from it), actor identity. Persisted client-side
+// key (its project hint identifies local project state), actor identity. Persisted client-side
 // only; the console keeps zero server state.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { z } from 'zod'
 
 import type { ServiceConnection } from '@/api/http'
 
-export const API_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$/
+export const API_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$/
 
 export const workspaceSchema = z.object({
   id: z.string().min(1),

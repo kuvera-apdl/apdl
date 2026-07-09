@@ -72,7 +72,6 @@ export function apiCurl(
 ): CurlSpec {
   const headers: Record<string, string> = {}
   if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
-  if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
   return {
     method,
@@ -118,7 +117,6 @@ export async function request<T>(
 
   const headers: Record<string, string> = {}
   if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
-  if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
   Object.assign(headers, options.headers)
 

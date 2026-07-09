@@ -249,26 +249,26 @@ describe('EventQueue', () => {
   });
 
   describe('flushOnUnload()', () => {
-    it('should use sendBeacon', () => {
-      const beaconSpy = vi
-        .spyOn(transport, 'sendBeacon')
-        .mockReturnValue(true);
+    it('should use a keepalive request', async () => {
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue(true);
 
       queue.enqueue(createEvent());
-      queue.flushOnUnload();
+      await queue.flushOnUnload();
 
-      expect(beaconSpy).toHaveBeenCalledTimes(1);
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
       expect(queue.length).toBe(0);
     });
 
-    it('should try offline storage if beacon fails', () => {
-      vi.spyOn(transport, 'sendBeacon').mockReturnValue(false);
+    it('should try offline storage if the keepalive request fails', async () => {
+      vi.spyOn(transport, 'sendKeepalive').mockResolvedValue(false);
       const storeSpy = vi
         .spyOn(storage, 'store')
         .mockResolvedValue(undefined);
 
       queue.enqueue(createEvent());
-      queue.flushOnUnload();
+      await queue.flushOnUnload();
 
       expect(storeSpy).toHaveBeenCalled();
     });

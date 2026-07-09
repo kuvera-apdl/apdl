@@ -134,10 +134,8 @@ export class EventQueue {
     }
   }
 
-  /**
-   * Uses sendBeacon for reliable delivery during page unload.
-   */
-  flushOnUnload(): void {
+  /** Sends a keepalive request for reliable delivery during page unload. */
+  async flushOnUnload(): Promise<void> {
     if (this.queue.length === 0) return;
 
     const batch = this.queue.splice(0);
@@ -145,12 +143,10 @@ export class EventQueue {
       events: batch.map((event) => this.toIngestionEvent(event)),
     };
 
-    const accepted = this.transport.sendBeacon(this.ingestionUrl, payload);
+    const accepted = await this.transport.sendKeepalive(this.ingestionUrl, payload);
 
     if (!accepted) {
-      // sendBeacon failed; try to persist to offline storage synchronously.
-      // IndexedDB is async so we store in memory fallback which is best-effort.
-      void this.storage.store(batch);
+      await this.storage.store(batch);
     }
   }
 
@@ -171,7 +167,7 @@ export class EventQueue {
     if (typeof document !== 'undefined') {
       this.visibilityHandler = () => {
         if (document.visibilityState === 'hidden') {
-          this.flushOnUnload();
+          void this.flushOnUnload();
         }
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
@@ -180,7 +176,7 @@ export class EventQueue {
     // Register beforeunload handler
     if (typeof window !== 'undefined') {
       this.unloadHandler = () => {
-        this.flushOnUnload();
+        void this.flushOnUnload();
       };
       window.addEventListener('beforeunload', this.unloadHandler);
     }
