@@ -23,6 +23,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { ResultCard, ResultList } from '@/features/agents/ResultCards'
+import { AgentsInspectorSection } from '@/features/agents/AgentInspector'
 import { RunAuditSection } from '@/features/agents/RunAuditSection'
 import { loadTrackedRuns, updateTrackedRunStatus } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
@@ -30,11 +31,13 @@ import { useNow } from '@/lib/hooks'
 import { parseServerDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
+// personalization is parked (disabled server-side), so it's not a pipeline
+// step. Historical runs that produced personalizations still show them in the
+// Outputs card below — this only drops the stepper node.
 const PIPELINE = [
   'initializing',
   'behavior_analysis',
   'experiment_design',
-  'personalization',
   'feature_proposal',
   'done',
 ] as const
@@ -380,6 +383,8 @@ export function RunMonitorPage() {
           <PhaseStepper run={run} requested={requested} />
         </CardContent>
       </Card>
+
+      <AgentsInspectorSection runId={runId} run={run} results={results} />
 
       {run.status === 'waiting_approval' ? (
         <ApprovalPanel
