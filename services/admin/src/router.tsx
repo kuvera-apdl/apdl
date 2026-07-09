@@ -12,6 +12,11 @@ import { CustomAgentWizardPage } from '@/features/agents/custom/CustomAgentWizar
 import { RunMonitorPage } from '@/features/agents/RunMonitorPage'
 import { RunsPage } from '@/features/agents/RunsPage'
 import { TriggerPage } from '@/features/agents/TriggerPage'
+import { DecidePage } from '@/features/loop/DecidePage'
+import { LearnPage } from '@/features/loop/LearnPage'
+import { ShipPage } from '@/features/loop/ShipPage'
+import { SteerPage } from '@/features/loop/SteerPage'
+import { WatchPage } from '@/features/loop/WatchPage'
 import { ChangesetDetailPage } from '@/features/codegen/ChangesetDetailPage'
 import { ChangesetsPage } from '@/features/codegen/ChangesetsPage'
 import {
@@ -49,6 +54,11 @@ export function createRouter() {
           element: <RequireWorkspace />,
           children: [
             { path: '/', element: <OverviewPage /> },
+            { path: '/decide', element: <DecidePage /> },
+            { path: '/watch', element: <WatchPage /> },
+            { path: '/learn', element: <LearnPage /> },
+            { path: '/ship', element: <ShipPage /> },
+            { path: '/steer', element: <SteerPage /> },
             { path: '/flags', element: <FlagListPage /> },
             { path: '/flags/new', element: <FlagEditorPage /> },
             { path: '/flags/hygiene', element: <HygienePage /> },
