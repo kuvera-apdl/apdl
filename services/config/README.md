@@ -33,6 +33,7 @@ same tenant. Admin routes require `config:write`, SDK reads require
 |----------|-------------|
 | `GET /v1/flags` | Bootstrap flag config (only `client`/`both` evaluation modes), Redis-cached |
 | `GET /v1/stream` | SSE: initial `config` event, then `flag_update`/`experiment_update`/`heartbeat` |
+| `GET /v1/auth/me` | Return the verified credential ID, project, and sorted roles |
 | `POST /v1/evaluate` | Trusted server-side gate evaluation with optional exposure logging |
 | `GET /health` | Liveness probe (PG, Redis, SSE connection count) |
 

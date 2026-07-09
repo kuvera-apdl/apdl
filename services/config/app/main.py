@@ -10,7 +10,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth import PostgresAuthenticator, authenticate_request
+from app.auth import AuthIdentity, PostgresAuthenticator, Principal, authenticate_request
 from app.experiments import expiry
 from app.routers import admin, evaluate, flags, stream
 from app.sse.broadcaster import SSEBroadcaster
@@ -408,6 +408,18 @@ app.include_router(flags.router, dependencies=auth_dependencies)
 app.include_router(stream.router, dependencies=auth_dependencies)
 app.include_router(evaluate.router, dependencies=auth_dependencies)
 app.include_router(admin.router, dependencies=auth_dependencies)
+
+
+@app.get("/v1/auth/me", response_model=AuthIdentity)
+async def authenticated_identity(
+    principal: Principal = Depends(authenticate_request),
+) -> AuthIdentity:
+    """Return the project and roles attached to the verified API key."""
+    return AuthIdentity(
+        credential_id=principal.credential_id,
+        project_id=principal.project_id,
+        roles=sorted(principal.roles),
+    )
 
 
 @app.get("/health")

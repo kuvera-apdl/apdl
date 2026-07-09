@@ -22,6 +22,12 @@ record's project.
 `GET /v1/stream` temporarily also accepts `api_key` in the query string for the
 existing EventSource clients. No other route accepts query-string credentials.
 
+The Config service exposes `GET /v1/auth/me` for first-party login clients. It
+returns the verified `credential_id`, `project_id`, and sorted `roles`; it never
+echoes the API key. The admin console validates login through this endpoint,
+keeps its login marker in tab-scoped `sessionStorage`, and clears the session
+and cached API data whenever a later request returns 401.
+
 ## Roles
 
 | Role | Authority |

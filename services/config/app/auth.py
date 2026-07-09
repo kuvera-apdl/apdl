@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict
 
 _API_KEY_PATTERN = re.compile(
     r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
@@ -27,6 +28,16 @@ class Principal:
     credential_id: str
     project_id: str
     roles: frozenset[str]
+
+
+class AuthIdentity(BaseModel):
+    """Canonical authenticated identity returned to first-party clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_id: str
+    project_id: str
+    roles: list[str]
 
 
 class PostgresAuthenticator:

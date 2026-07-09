@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from httpx import ASGITransport, AsyncClient
 
 from app.auth import PostgresAuthenticator, authenticate_request
+from app.main import app
 
 
 API_KEY = "proj_verifiedproject_0123456789abcdef0123456789abcdef"
@@ -156,3 +158,33 @@ async def test_stream_accepts_the_legacy_query_credential_only_on_stream_path():
 
     assert exc_info.value.status_code == 401
     assert seen_keys == [API_KEY, ""]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_identity_endpoint_returns_canonical_principal():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/auth/me")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "credential_id": "test-config",
+        "project_id": "apdl",
+        "roles": ["config:evaluate", "config:read", "config:write"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_authenticated_identity_endpoint_requires_api_key():
+    class RejectingAuthenticator:
+        async def authenticate(self, api_key):
+            return None
+
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = RejectingAuthenticator()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/auth/me")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Valid API key required"
