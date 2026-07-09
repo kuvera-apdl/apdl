@@ -1,8 +1,8 @@
-import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom'
+import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router-dom'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { EmptyState } from '@/components/shared/PanelStates'
-import { useWorkspace } from '@/core/workspace'
+import { useAuth } from '@/core/auth'
 import { CohortsPage } from '@/features/analytics/CohortsPage'
 import { EventsExplorerPage } from '@/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '@/features/analytics/FunnelsPage'
@@ -32,11 +32,15 @@ import { HygienePage } from '@/features/flags/HygienePage'
 import { OverviewPage } from '@/features/overview/OverviewPage'
 import { WorkspaceSettingsPage } from '@/features/settings/WorkspaceSettingsPage'
 import { HealthPage } from '@/features/system/HealthPage'
+import { LoginPage } from '@/features/auth/LoginPage'
 
-// First-run gate (plan §5.1): no workspace → settings.
-function RequireWorkspace() {
-  const { active } = useWorkspace()
-  if (!active) return <Navigate to="/settings/workspace" replace />
+export function RequireAuth() {
+  const { authenticated } = useAuth()
+  const location = useLocation()
+  if (!authenticated) {
+    const from = `${location.pathname}${location.search}${location.hash}`
+    return <Navigate to="/login" replace state={{ from }} />
+  }
   return <Outlet />
 }
 
@@ -46,12 +50,12 @@ function NotFoundPage() {
 
 export function createRouter() {
   return createBrowserRouter([
+    { path: '/login', element: <LoginPage /> },
     {
-      element: <AppShell />,
+      element: <RequireAuth />,
       children: [
-        { path: '/settings/workspace', element: <WorkspaceSettingsPage /> },
         {
-          element: <RequireWorkspace />,
+          element: <AppShell />,
           children: [
             { path: '/', element: <OverviewPage /> },
             { path: '/decide', element: <DecidePage /> },
@@ -79,11 +83,12 @@ export function createRouter() {
             { path: '/agents/runs/:runId', element: <RunMonitorPage /> },
             { path: '/codegen', element: <ChangesetsPage /> },
             { path: '/codegen/:id', element: <ChangesetDetailPage /> },
+            { path: '/settings/workspace', element: <WorkspaceSettingsPage /> },
             { path: '/settings/verify', element: <VerificationPage /> },
             { path: '/system/health', element: <HealthPage /> },
+            { path: '*', element: <NotFoundPage /> },
           ],
         },
-        { path: '*', element: <NotFoundPage /> },
       ],
     },
   ])

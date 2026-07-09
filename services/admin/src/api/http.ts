@@ -4,6 +4,7 @@
 import type { ZodType } from 'zod'
 
 import type { CurlSpec } from '@/lib/curl'
+import { AUTH_UNAUTHORIZED_EVENT } from '@/core/auth-events'
 
 export interface ServiceConnection {
   baseUrl: string
@@ -22,6 +23,8 @@ export interface RequestOptions<T> {
   signal?: AbortSignal
   /** Extra headers (e.g. x-apdl-internal-token); win over the canonical set. */
   headers?: Record<string, string>
+  /** Login probes throw 401 locally; normal requests terminate the console session. */
+  redirectOnUnauthorized?: boolean
   /** Canonical response mirror; a mismatch throws ApiError(code: "schema_mismatch"). */
   schema?: ZodType<T>
 }
@@ -152,6 +155,13 @@ export async function request<T>(
 
     if (!response.ok) {
       const apiError = errorFromResponse(response.status, data, response.statusText)
+      if (
+        response.status === 401 &&
+        options.redirectOnUnauthorized !== false &&
+        typeof window !== 'undefined'
+      ) {
+        window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT))
+      }
       if (response.status >= 500 && attempt < maxAttempts - 1) {
         lastError = apiError
         continue

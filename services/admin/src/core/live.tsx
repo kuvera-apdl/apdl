@@ -11,6 +11,7 @@ import { toast } from 'sonner'
 import { flagCollectionSchema, flagUpdatePayloadSchema } from '@/api/schemas/flags'
 import type { ClientFlagConfig } from '@/api/types/flags'
 import { FlagStream, streamUrl, type StreamState } from '@/api/sse'
+import { useAuth } from '@/core/auth'
 import { wasRecentlyWrittenLocally } from '@/core/localWrites'
 import { queryKeys } from '@/core/queryClient'
 import { useWorkspace } from '@/core/workspace'
@@ -27,13 +28,14 @@ const LiveContext = createContext<LiveContextValue>({ state: IDLE_STATE, servedF
 
 export function LiveProvider({ children }: { children: ReactNode }) {
   const { active } = useWorkspace()
+  const { authenticated } = useAuth()
   const queryClient = useQueryClient()
   const [state, setState] = useState<StreamState>(IDLE_STATE)
   const [servedFlags, setServedFlags] = useState<Map<string, ClientFlagConfig> | null>(null)
 
-  const wsId = active?.id ?? null
-  const configUrl = active?.configUrl ?? null
-  const apiKey = active?.apiKey ?? null
+  const wsId = authenticated ? (active?.id ?? null) : null
+  const configUrl = authenticated ? (active?.configUrl ?? null) : null
+  const apiKey = authenticated ? (active?.apiKey ?? null) : null
 
   useEffect(() => {
     setServedFlags(null)

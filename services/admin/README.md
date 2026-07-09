@@ -11,6 +11,10 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
 
 - App shell: sidebar navigation, workspace switcher, SSE liveness indicator,
   dark mode.
+- Login (`/login`): verifies the API key through `GET /v1/auth/me`, creates a
+  tab-scoped console session, protects every application route, and returns to
+  the originally requested page after authentication. Any later API 401 clears
+  cached data and redirects back to login.
 - Workspace settings (`/settings/workspace`): connection profiles, live
   `project_id` derivation from the API key, per-service health test.
 - Overview (`/`): service health strip (10s poll), flag state summary, realtime
@@ -54,8 +58,7 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
 - Every panel and write dialog reproduces its exact API call as **curl**.
 
 Remaining backend-tracked work: G4 (event-name discovery for autocomplete),
-G5 (experiment canonicalization), G6–G8 (guardrail/pipeline observability),
-G9 (auth on query/agents — required before any non-localhost deployment),
+G5 (experiment canonicalization), G6–G8 (guardrail/pipeline observability), and
 G10 (pagination).
 
 ## Stack
@@ -105,8 +108,9 @@ __tests__/        # vitest + Testing Library + MSW (pattern mirrors sdk/javascri
 
 Requests to ingestion, config, query, and agents use database-verified,
 project-scoped API keys. Mutation audit identity comes from the authenticated
-credential, never a caller-chosen header. The console still stores keys and the
-codegen internal token in `localStorage`, and includes the API key in the
-`EventSource` URL because the native browser API cannot set headers. It remains
-a trusted-network/localhost tool until the backend-for-frontend work is
-complete.
+credential, never a caller-chosen header. Login state is stored only in the
+current tab's `sessionStorage`; logout, workspace changes, and 401 responses end
+that session. The console still stores workspace keys and the codegen internal
+token in `localStorage`, and includes the API key in the `EventSource` URL
+because the native browser API cannot set headers. It remains a
+trusted-network/localhost tool until the backend-for-frontend work is complete.

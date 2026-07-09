@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 import { z } from 'zod'
 
 import { ApiError, buildUrl, normalizeBaseUrl, request } from '../../src/api/http'
+import { AUTH_UNAUTHORIZED_EVENT } from '../../src/core/auth-events'
 
 const server = setupServer()
 
@@ -65,6 +66,27 @@ describe('request', () => {
     expect(apiError.code).toBe('version_conflict')
     expect(apiError.message).toContain('version 7')
     expect((apiError.body as { current_version: number }).current_version).toBe(7)
+  })
+
+  test('notifies the auth boundary on 401 unless explicitly suppressed', async () => {
+    let unauthorizedEvents = 0
+    const onUnauthorized = () => {
+      unauthorizedEvents += 1
+    }
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, onUnauthorized)
+    server.use(
+      http.get('http://config.test/v1/protected', () =>
+        HttpResponse.json({ detail: 'Valid API key required' }, { status: 401 }),
+      ),
+    )
+
+    await expect(request(conn, '/v1/protected')).rejects.toMatchObject({ status: 401 })
+    await expect(
+      request(conn, '/v1/protected', { redirectOnUnauthorized: false }),
+    ).rejects.toMatchObject({ status: 401 })
+
+    window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, onUnauthorized)
+    expect(unauthorizedEvents).toBe(1)
   })
 
   test('maps FastAPI 422 validation detail to a field-path message', async () => {

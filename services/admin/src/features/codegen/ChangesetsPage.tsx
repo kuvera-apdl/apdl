@@ -34,7 +34,7 @@ const TERMINAL = new Set(['merged', 'abandoned', 'tests_failed', 'error'])
 export function ChangesetsPage() {
   const { active } = useWorkspace()
   const queryClient = useQueryClient()
-  // This route is behind RequireWorkspace, so `active` is non-null when rendered.
+  // This route is behind RequireAuth, so `active` is non-null when rendered.
   const ws = active as Workspace
   const projectId = active ? (projectIdFromKey(active.apiKey) ?? '') : ''
 

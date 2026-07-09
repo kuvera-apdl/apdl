@@ -179,8 +179,8 @@ export function WorkspaceSettingsPage() {
           <CardHeader>
             <CardTitle>{editingId ? 'Edit workspace' : 'New workspace'}</CardTitle>
             <CardDescription>
-              The API key gates workspace scoping, not security — today's backend validates its
-              format only. Treat this console as a trusted-network tool.
+              Services verify the API key against PostgreSQL and derive its project and roles from
+              the stored credential. Switching workspaces requires signing in again.
             </CardDescription>
           </CardHeader>
           <CardContent>

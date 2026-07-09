@@ -4,6 +4,7 @@ import { RouterProvider } from 'react-router-dom'
 
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { AuthProvider } from '@/core/auth'
 import { LiveProvider } from '@/core/live'
 import { createQueryClient } from '@/core/queryClient'
 import { ThemeProvider } from '@/core/theme'
@@ -18,12 +19,14 @@ export function App() {
     <ThemeProvider>
       <WorkspaceProvider>
         <QueryClientProvider client={queryClient}>
-          <LiveProvider>
-            <TooltipProvider delayDuration={300}>
-              <RouterProvider router={router} future={{ v7_startTransition: true }} />
-            </TooltipProvider>
-            <Toaster />
-          </LiveProvider>
+          <AuthProvider>
+            <LiveProvider>
+              <TooltipProvider delayDuration={300}>
+                <RouterProvider router={router} future={{ v7_startTransition: true }} />
+              </TooltipProvider>
+              <Toaster />
+            </LiveProvider>
+          </AuthProvider>
         </QueryClientProvider>
       </WorkspaceProvider>
     </ThemeProvider>

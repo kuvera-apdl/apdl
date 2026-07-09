@@ -46,7 +46,7 @@ type ConnectFormValues = z.infer<typeof connectFormSchema>
 export function GitHubConnectionCard() {
   const { active } = useWorkspace()
   const queryClient = useQueryClient()
-  // Rendered behind RequireWorkspace, so `active` is non-null.
+  // Rendered behind RequireAuth, so `active` is non-null.
   const ws = active as Workspace
   const projectId = active ? (projectIdFromKey(active.apiKey) ?? '') : ''
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false)

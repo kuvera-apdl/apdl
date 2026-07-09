@@ -14,6 +14,7 @@ import {
   Grid3x3,
   LayoutDashboard,
   Lightbulb,
+  LogOut,
   Monitor,
   Moon,
   Package,
@@ -40,6 +41,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLive } from '@/core/live'
+import { useAuth } from '@/core/auth'
 import { useTheme, type Theme } from '@/core/theme'
 import { useWorkspace } from '@/core/workspace'
 import { useNow } from '@/lib/hooks'
@@ -328,7 +330,8 @@ function ThemeToggle() {
 }
 
 export function AppShell() {
-  const { active, projectId } = useWorkspace()
+  const { projectId } = useWorkspace()
+  const { identity, logout } = useAuth()
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -346,11 +349,14 @@ export function AppShell() {
           <div className="flex items-center gap-3">
             <UtcClock />
             <LiveIndicator />
-            {active ? (
+            {identity ? (
               <span className="hidden text-sm text-muted-foreground md:inline">
-                actor: <span className="text-foreground">{active.actor}</span>
+                credential: <span className="text-foreground">{identity.credential_id}</span>
               </span>
             ) : null}
+            <Button variant="ghost" size="icon" onClick={logout} aria-label="Sign out" title="Sign out">
+              <LogOut />
+            </Button>
             <ThemeToggle />
           </div>
         </header>
