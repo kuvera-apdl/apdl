@@ -6,9 +6,8 @@ wildcard shapes like ``GET /v1/agents/{run_id}/status``, and ``/custom`` /
 ``/custom/test`` is declared before ``/custom/{agent_id}`` for the same
 reason.
 
-Project scoping follows the service's no-auth model: ``project_id`` is
-caller-asserted (query param), and a row whose project doesn't match is a
-404 — consistent with every other endpoint.
+Project scoping comes from a verified credential. Any ``project_id`` query or
+body field is only a tenant assertion and must match that credential.
 """
 
 from __future__ import annotations
@@ -23,7 +22,13 @@ import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
-from app.framework import AgentContext, CustomAgent, registered_agents, validate_definition
+from app.auth import require_project
+from app.framework import (
+    AgentContext,
+    CustomAgent,
+    registered_agents,
+    validate_definition,
+)
 from app.framework.tool_catalog import catalog_descriptions, llm_tool_schemas
 from app.framework.tool_loop import run_preset_tools, run_tool_loop
 from app.safety.audit import AuditLogger
@@ -38,6 +43,7 @@ from app.store.custom_agents import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["custom-agents"])
+
 
 class PresetToolCall(BaseModel):
     """One deterministic preset call: a catalog tool with fixed params.
@@ -177,6 +183,7 @@ async def list_definitions(
 
     Feeds the console's trigger page (checkbox list) and the wizard (upstream
     ``requires`` options + tool catalog)."""
+    require_project(request, project_id, "agents:read")
     pool: asyncpg.Pool = request.app.state.pg_pool
     agents = [
         AgentDefinition(
@@ -216,6 +223,7 @@ async def list_custom(
     project_id: str = Query(min_length=1),
     include_archived: bool = False,
 ) -> list[CustomAgentOut]:
+    require_project(request, project_id, "agents:read")
     pool: asyncpg.Pool = request.app.state.pg_pool
     rows = await list_custom_agents(pool, project_id, include_archived=include_archived)
     return [CustomAgentOut(**row) for row in rows]
@@ -225,6 +233,7 @@ async def list_custom(
 async def create_custom(
     body: CustomAgentSpec, request: Request, project_id: str = Query(min_length=1)
 ) -> CustomAgentOut:
+    require_project(request, project_id, "agents:manage")
     pool: asyncpg.Pool = request.app.state.pg_pool
     errors = _validate_spec(body)
     errors += await _validate_against_project(pool, project_id, body)
@@ -234,7 +243,12 @@ async def create_custom(
         row = await create_custom_agent(pool, project_id, _spec_fields(body))
     except SlugConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    logger.info("Custom agent %s (%s) created for project %s", row["agent_id"], body.slug, project_id)
+    logger.info(
+        "Custom agent %s (%s) created for project %s",
+        row["agent_id"],
+        body.slug,
+        project_id,
+    )
     return CustomAgentOut(**row)
 
 
@@ -247,6 +261,7 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
     off), no memory writes (CustomAgent never writes memory), so testing is
     free of side effects beyond read-only warehouse queries.
     """
+    require_project(request, body.project_id, "agents:manage")
     errors = _validate_spec(body.definition)
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
@@ -341,6 +356,7 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
 async def get_custom(
     agent_id: str, request: Request, project_id: str = Query(min_length=1)
 ) -> CustomAgentOut:
+    require_project(request, project_id, "agents:read")
     pool: asyncpg.Pool = request.app.state.pg_pool
     row = await get_custom_agent(pool, agent_id)
     if row is None or row["project_id"] != project_id:
@@ -355,12 +371,15 @@ async def update_custom(
     request: Request,
     project_id: str = Query(min_length=1),
 ) -> CustomAgentOut:
+    require_project(request, project_id, "agents:manage")
     pool: asyncpg.Pool = request.app.state.pg_pool
     existing = await get_custom_agent(pool, agent_id)
     if existing is None or existing["project_id"] != project_id:
         raise HTTPException(status_code=404, detail="Custom agent not found")
     errors = _validate_spec(body)
-    errors += await _validate_against_project(pool, project_id, body, exclude_agent_id=agent_id)
+    errors += await _validate_against_project(
+        pool, project_id, body, exclude_agent_id=agent_id
+    )
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
     try:
@@ -377,6 +396,7 @@ async def archive_custom(
     agent_id: str, request: Request, project_id: str = Query(min_length=1)
 ) -> Response:
     """Soft-archive: the agent stops resolving in trigger/supervisor at once."""
+    require_project(request, project_id, "agents:manage")
     pool: asyncpg.Pool = request.app.state.pg_pool
     existing = await get_custom_agent(pool, agent_id)
     if existing is None or existing["project_id"] != project_id:

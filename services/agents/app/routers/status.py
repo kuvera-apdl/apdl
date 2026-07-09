@@ -10,6 +10,8 @@ import asyncpg
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.auth import require_role
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
@@ -71,12 +73,15 @@ def row_to_status(row: Any) -> RunStatus:
 @router.get("/{run_id}/status", response_model=RunStatus)
 async def get_run_status(run_id: str, request: Request) -> RunStatus:
     """Retrieve the current state of an agent run."""
+    principal = require_role(request, "agents:read")
     pool: asyncpg.Pool = request.app.state.pg_pool
 
     async with pool.acquire() as conn:
         row: Any = await conn.fetchrow(
-            f"SELECT {RUN_STATUS_COLUMNS} FROM agent_runs WHERE run_id = $1",
+            f"SELECT {RUN_STATUS_COLUMNS} FROM agent_runs "
+            "WHERE run_id = $1 AND project_id = $2",
             run_id,
+            principal.project_id,
         )
 
     if row is None:

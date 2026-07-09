@@ -7,10 +7,11 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
 from app.routers import approvals, custom_agents, runs, status, triggers
@@ -94,6 +95,7 @@ async def lifespan(application: FastAPI):
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=20)
     application.state.pg_pool = pool
+    application.state.authenticator = PostgresAuthenticator(pool)
 
     # Ensure required tables exist
     async with pool.acquire() as conn:
@@ -163,9 +165,13 @@ async def lifespan(application: FastAPI):
             "WHERE status = 'implementing'"
         )
     if not orphaned_runs.endswith(" 0"):
-        logger.warning("Startup reconciliation: %s orphaned run(s) marked failed", orphaned_runs)
+        logger.warning(
+            "Startup reconciliation: %s orphaned run(s) marked failed", orphaned_runs
+        )
     if not reclaimed.endswith(" 0"):
-        logger.warning("Startup reconciliation: %s stale proposal claim(s) re-approved", reclaimed)
+        logger.warning(
+            "Startup reconciliation: %s stale proposal claim(s) re-approved", reclaimed
+        )
 
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store
@@ -196,11 +202,12 @@ app.add_middleware(
 
 # custom_agents first: it owns static shapes (/custom/*, /definitions) that
 # must win over the run routers' /{run_id}/... wildcards.
-app.include_router(custom_agents.router)
-app.include_router(triggers.router)
-app.include_router(status.router)
-app.include_router(approvals.router)
-app.include_router(runs.router)
+auth_dependencies = [Depends(authenticate_request)]
+app.include_router(custom_agents.router, dependencies=auth_dependencies)
+app.include_router(triggers.router, dependencies=auth_dependencies)
+app.include_router(status.router, dependencies=auth_dependencies)
+app.include_router(approvals.router, dependencies=auth_dependencies)
+app.include_router(runs.router, dependencies=auth_dependencies)
 
 
 @app.get("/health")

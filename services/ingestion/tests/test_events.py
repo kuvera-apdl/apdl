@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import Principal, authenticate_request
 from app.main import app
 
 API_KEY = "proj_testproj_abcdefghijklmnop"
@@ -404,21 +406,54 @@ async def test_reject_invalid_properties(client):
 @pytest.mark.asyncio
 async def test_unauthorized_without_api_key(client):
     """Requests without API key should be rejected with 401."""
+    class RejectingAuthenticator:
+        async def authenticate(self, api_key):
+            return None
+
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = RejectingAuthenticator()
     payload = {"events": [{"event": "test", "user_id": "u1"}]}
     resp = await client.post(URL, json=payload)
     assert resp.status_code == 401
     body = resp.json()
-    assert body["error"] == "unauthorized"
+    assert body["detail"] == "Valid API key required"
 
 
 @pytest.mark.asyncio
 async def test_unauthorized_with_bad_api_key(client):
     """Requests with malformed API key should be rejected with 401."""
+    class RejectingAuthenticator:
+        async def authenticate(self, api_key):
+            return None
+
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = RejectingAuthenticator()
     payload = {"events": [{"event": "test", "user_id": "u1"}]}
     resp = await client.post(URL, json=payload, headers={"X-API-Key": "bad_key"})
     assert resp.status_code == 401
     body = resp.json()
-    assert body["error"] == "unauthorized"
+    assert body["detail"] == "Valid API key required"
+
+
+@pytest.mark.asyncio
+async def test_events_require_write_role(client):
+    async def authenticate_without_write_role(request: Request):
+        principal = Principal(
+            credential_id="read-only",
+            project_id="testproj",
+            roles=frozenset({"query:read"}),
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_without_write_role
+    payload = {"events": [{"event": "test", "user_id": "u1"}]}
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Credential requires role: events:write"
+    app.state.redis.xadd.assert_not_awaited()
 
 
 @pytest.mark.asyncio

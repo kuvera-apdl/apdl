@@ -18,7 +18,12 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_VERSION="3.12"
 DEPS_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.deps.yml"
 FULL_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.yml"
-SMOKE_API_KEY="${APDL_SMOKE_API_KEY:-proj_demo_0123456789abcdef}"
+env_file_value() {
+    local key="$1"
+    [ -f "$ROOT_DIR/.env" ] || return 0
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ROOT_DIR/.env"
+}
+SMOKE_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
 
 # Compose wrappers that load the repo-root .env. With `-f` pointing into
 # infra/docker/, Compose's project dir (and its default .env lookup) is that
@@ -157,6 +162,8 @@ cmd_up() {
     wait_healthy "$compose" 3
     CLICKHOUSE_COMPOSE_FILE="$compose" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
+    POSTGRES_COMPOSE_FILE="$compose" "$ROOT_DIR/scripts/init-postgres.sh"
+    ok "PostgreSQL schema initialized"
 }
 
 cmd_up_full() {
@@ -165,6 +172,8 @@ cmd_up_full() {
     wait_healthy "$FULL_COMPOSE" 3
     CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
+    POSTGRES_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-postgres.sh"
+    ok "PostgreSQL schema initialized"
     dc_full up -d --build ingestion config query agents codegen clickhouse-writer
     ok "Application services starting"
     sleep 3
@@ -225,7 +234,8 @@ cmd_status() {
 }
 
 cmd_smoke() {
-    info "Smoke test against http://localhost:{8080,8081,8082} (api key: $SMOKE_API_KEY)"
+    [ -n "$SMOKE_API_KEY" ] || die "APDL_DEV_API_KEY is required for the smoke test"
+    info "Smoke test against http://localhost:{8080,8081,8082}"
     local failures=0 code flag_key
     flag_key="smoke-test-$$"
 

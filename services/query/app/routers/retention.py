@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_retention_query
 from app.clickhouse.selectors import selector_label
@@ -22,13 +23,16 @@ def _get_client(request: Request) -> ClickHouseClient:
 
 
 @router.post("/retention", response_model=RetentionResponse)
-async def retention_analysis(body: RetentionRequest, request: Request) -> RetentionResponse:
+async def retention_analysis(
+    body: RetentionRequest, request: Request
+) -> RetentionResponse:
     """Compute an N-day or N-week retention grid.
 
     For each cohort (defined by the date a user first matched ``cohort_selector``),
     compute the percentage of users who returned to match ``return_selector``
     on each subsequent day or week.
     """
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     date_key = "cohort_week" if body.period == "week" else "cohort_date"

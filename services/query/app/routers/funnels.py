@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_funnel_query
 from app.clickhouse.selectors import selector_label
@@ -28,6 +29,7 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
     determine the deepest step each user reached within the specified
     conversion window.
     """
+    require_project(request, body.project_id, "query:read")
     if len(body.steps) < 2:
         return FunnelResponse(steps=[], overall_conversion=0.0)
 
@@ -75,7 +77,9 @@ async def funnel_analysis(body: FunnelRequest, request: Request) -> FunnelRespon
         )
 
     last_count = step_counts.get(num_steps, 0)
-    overall_conversion = (last_count / step_1_count * 100.0) if step_1_count > 0 else 0.0
+    overall_conversion = (
+        (last_count / step_1_count * 100.0) if step_1_count > 0 else 0.0
+    )
 
     return FunnelResponse(
         steps=funnel_steps,

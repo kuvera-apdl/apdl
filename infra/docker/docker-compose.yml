@@ -55,9 +55,12 @@ services:
       - "8080:8080"
     environment:
       REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       LOG_LEVEL: info
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   config:
@@ -69,7 +72,6 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       LOG_LEVEL: info
     depends_on:
       redis:
@@ -90,13 +92,17 @@ services:
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       CONFIG_SERVICE_URL: http://config:8081
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      APDL_SERVICE_API_KEYS: ${APDL_SERVICE_API_KEYS:-}
+      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       GUARDRAIL_MONITOR_ENABLED: ${GUARDRAIL_MONITOR_ENABLED:-true}
       GUARDRAIL_PROJECT_IDS: ${GUARDRAIL_PROJECT_IDS:-apdl}
       GUARDRAIL_MONITOR_INTERVAL_SECONDS: ${GUARDRAIL_MONITOR_INTERVAL_SECONDS:-60}
     depends_on:
       clickhouse:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   agents:
@@ -113,6 +119,8 @@ services:
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      APDL_SERVICE_API_KEYS: ${APDL_SERVICE_API_KEYS:-}
+      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     depends_on:

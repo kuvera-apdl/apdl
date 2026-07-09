@@ -8,27 +8,51 @@ from urllib.parse import quote
 
 import httpx
 
+from app.service_auth import service_headers
+
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
 
 
-async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
+async def _get(
+    project_id: str, path: str, params: dict[str, Any] | None = None
+) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get(path, params=params)
+        resp = await client.get(path, params=params, headers=service_headers(project_id))
         resp.raise_for_status()
         return resp.json()
 
 
-async def _post(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
+async def _post(
+    project_id: str,
+    path: str,
+    payload: dict[str, Any],
+    params: dict[str, Any] | None = None,
+) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(path, json=payload, params=params)
+        resp = await client.post(
+            path,
+            json=payload,
+            params=params,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()
 
 
-async def _put(path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> Any:
+async def _put(
+    project_id: str,
+    path: str,
+    payload: dict[str, Any],
+    params: dict[str, Any] | None = None,
+) -> Any:
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.put(path, json=payload, params=params)
+        resp = await client.put(
+            path,
+            json=payload,
+            params=params,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -42,7 +66,9 @@ async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of flag configurations.
     """
-    response = await _get("/v1/admin/flags", params={"project_id": project_id})
+    response = await _get(
+        project_id, "/v1/admin/flags", params={"project_id": project_id}
+    )
     return response.get("flags", []) if isinstance(response, dict) else response
 
 
@@ -108,7 +134,12 @@ async def create_flag(
         "auto_disable": auto_disable,
         "guardrails": guardrails or [],
     }
-    return await _post("/v1/admin/flags", payload, params={"project_id": project_id})
+    return await _post(
+        project_id,
+        "/v1/admin/flags",
+        payload,
+        params={"project_id": project_id},
+    )
 
 
 async def update_flag(
@@ -181,7 +212,12 @@ async def update_flag(
         payload["guardrails"] = guardrails
     # Flag keys are LLM-authored: quote the path segment so a key containing
     # '/' or '?' cannot reroute the PUT to a different admin endpoint.
-    return await _put(f"/v1/admin/flags/{quote(key, safe='')}", payload, params={"project_id": project_id})
+    return await _put(
+        project_id,
+        f"/v1/admin/flags/{quote(key, safe='')}",
+        payload,
+        params={"project_id": project_id},
+    )
 
 
 async def disable_flag(
@@ -198,6 +234,7 @@ async def disable_flag(
     """
     payload = {"reason": reason, "source": "system", "evidence": evidence or {}}
     return await _post(
+        project_id,
         f"/v1/admin/flags/{quote(key, safe='')}/disable",
         payload,
         params={"project_id": project_id},
@@ -217,8 +254,6 @@ async def evaluate_gate(
     log_exposure: bool = True,
 ) -> dict[str, Any]:
     """Evaluate a server-side feature flag through the trusted Config API."""
-    internal_token = os.getenv("APDL_INTERNAL_TOKEN", "")
-    headers = {"X-APDL-Internal-Token": internal_token} if internal_token else {}
     payload = {
         "project_id": project_id,
         "key": key,
@@ -235,6 +270,10 @@ async def evaluate_gate(
     }
 
     async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post("/v1/evaluate", json=payload, headers=headers)
+        resp = await client.post(
+            "/v1/evaluate",
+            json=payload,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()

@@ -1,10 +1,11 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin
 
 # ─── Top-Level ───────────────────────────────────────────────
 
 all: build
 
 CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
+POSTGRES_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
 # Full-stack Compose command. `-f infra/docker/docker-compose.yml` makes Compose
 # use that folder as its project dir (and its default `.env` lookup), so the
@@ -186,17 +187,22 @@ new-transform:
 migrate-clickhouse:
 	@CLICKHOUSE_COMPOSE_FILE="$(CLICKHOUSE_COMPOSE_FILE)" scripts/init-clickhouse.sh
 
+migrate-postgres:
+	@POSTGRES_COMPOSE_FILE="$(POSTGRES_COMPOSE_FILE)" scripts/init-postgres.sh
+
 # ─── Docker ──────────────────────────────────────────────────
 
 dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
+	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
 dev-all:
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
+	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
 	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin gateway
 
 dev-down:

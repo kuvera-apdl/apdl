@@ -58,6 +58,13 @@ spec:
                 secretKeyRef:
                   name: postgres-credentials
                   key: password
+            - name: POSTGRES_URL
+              value: postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
+            - name: APDL_SERVICE_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: apdl-service-api-keys
+                  key: keys-json
             - name: REDIS_HOST
               valueFrom:
                 configMapKeyRef:

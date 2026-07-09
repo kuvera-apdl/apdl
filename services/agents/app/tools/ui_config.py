@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from app.service_auth import service_headers
+
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
 
@@ -53,13 +55,20 @@ async def create_ui_config(
     if end_date:
         payload["end_date"] = end_date
 
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post("/v1/admin/ui-configs", json=payload)
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
+    ) as client:
+        resp = await client.post(
+            "/v1/admin/ui-configs",
+            json=payload,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()
 
 
 async def update_ui_config(
+    project_id: str,
     config_id: str,
     targeting: dict[str, Any] | None = None,
     layout: dict[str, Any] | None = None,
@@ -92,8 +101,14 @@ async def update_ui_config(
     if enabled is not None:
         payload["enabled"] = enabled
 
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.put(f"/v1/admin/ui-configs/{config_id}", json=payload)
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
+    ) as client:
+        resp = await client.put(
+            f"/v1/admin/ui-configs/{config_id}",
+            json=payload,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -115,7 +130,13 @@ async def list_ui_configs(
     if component:
         params["component"] = component
 
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get("/v1/admin/ui-configs", params=params)
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
+    ) as client:
+        resp = await client.get(
+            "/v1/admin/ui-configs",
+            params=params,
+            headers=service_headers(project_id),
+        )
         resp.raise_for_status()
         return resp.json()

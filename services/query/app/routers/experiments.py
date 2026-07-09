@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections import defaultdict
 from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import EXPERIMENT_EXPOSURES_QUERY, EXPERIMENT_METRICS_QUERY
 from app.models.schemas import AnalysisMethod, ExperimentResult, VariantResult
@@ -20,8 +20,6 @@ router = APIRouter(prefix="/v1/query", tags=["experiments"])
 
 analyzer = ExperimentAnalyzer()
 
-DEFAULT_PROJECT_ID = os.getenv("DEFAULT_PROJECT_ID", "default")
-
 
 def _get_client(request: Request) -> ClickHouseClient:
     return request.app.state.ch_client
@@ -31,7 +29,9 @@ def _get_client(request: Request) -> ClickHouseClient:
 async def experiment_results(
     experiment_id: str,
     request: Request,
-    metric: str = Query(..., description="The conversion/metric event name to evaluate"),
+    metric: str = Query(
+        ..., description="The conversion/metric event name to evaluate"
+    ),
     flag_key: str = Query(
         ...,
         min_length=1,
@@ -41,10 +41,7 @@ async def experiment_results(
         AnalysisMethod.frequentist,
         description="Statistical method: frequentist, bayesian, or sequential",
     ),
-    project_id: str | None = Query(
-        None,
-        description="Project ID (defaults to env DEFAULT_PROJECT_ID)",
-    ),
+    project_id: str | None = Query(None, description="Optional tenant assertion"),
 ) -> ExperimentResult:
     """Retrieve and statistically analyse experiment results.
 
@@ -58,8 +55,10 @@ async def experiment_results(
     convention this equals the experiment id — see the agents service's
     ``create_experiment_config``). Omitting ``flag_key`` returns ``422``.
     """
+    principal = request.state.principal
+    pid = project_id if project_id is not None else principal.project_id
+    require_project(request, pid, "query:read")
     client = _get_client(request)
-    pid = project_id if project_id is not None else DEFAULT_PROJECT_ID
 
     params: dict[str, Any] = {
         "project_id": pid,
