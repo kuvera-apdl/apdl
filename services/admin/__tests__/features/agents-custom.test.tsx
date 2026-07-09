@@ -396,6 +396,8 @@ describe('TriggerPage with custom agents', () => {
     expect(customLabel).toBeInTheDocument()
     expect(screen.getByText('custom')).toBeInTheDocument()
 
+    // Hand-picking requires custom mode (default runs the built-in loop only).
+    await userEvent.click(screen.getByRole('button', { name: 'Custom' }))
     await userEvent.click(screen.getByRole('checkbox', { name: /churn watch/i }))
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 

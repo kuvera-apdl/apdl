@@ -174,10 +174,17 @@ describe('TriggerPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
+    // Default mode runs the full built-in loop (the definitions endpoint is
+    // unmocked here, so the built-in fallback list is what's selected).
     expect(requests[0]?.body).toEqual({
       project_id: 'demo',
       trigger_type: 'manual',
-      analysis_types: ['behavior_analysis'],
+      analysis_types: [
+        'behavior_analysis',
+        'experiment_design',
+        'experiment_evaluation',
+        'feature_proposal',
+      ],
       time_range_days: 7,
       autonomy_level: 2,
     })

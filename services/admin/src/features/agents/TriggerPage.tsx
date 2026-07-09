@@ -1,7 +1,7 @@
 // Trigger an agent run (plan §5.6.1) — the gating matrix is rendered inline
 // straight from the gate's semantics (gatingMatrix.ts, drift-tested).
 import { Play } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -71,6 +71,8 @@ const OUTCOME_STYLES: Record<GateOutcome, string> = {
 export function TriggerPage() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
+  // 'default' runs the full built-in loop; 'custom' hand-picks agents.
+  const [mode, setMode] = useState<'default' | 'custom'>('default')
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set<string>(['behavior_analysis']),
   )
@@ -98,7 +100,23 @@ export function TriggerPage() {
         }))
     : BUILTIN_ANALYSIS_TYPES
 
+  // The default loop = every built-in (non-custom) agent. Stable string dep so
+  // the sync effect doesn't loop on analysisTypes' fresh array each render.
+  const builtinKey = analysisTypes
+    .filter((entry) => !entry.isCustom)
+    .map((entry) => entry.type)
+    .join(',')
+
+  // In default mode the selection tracks the built-in loop (and re-syncs once
+  // the server definitions load). Custom mode leaves the user's picks alone.
+  useEffect(() => {
+    if (mode === 'default') {
+      setSelected(new Set(builtinKey ? builtinKey.split(',') : []))
+    }
+  }, [mode, builtinKey])
+
   const toggleType = (type: string) => {
+    if (mode !== 'custom') return
     setSelected((previous) => {
       const next = new Set(previous)
       if (next.has(type)) next.delete(type)
@@ -157,23 +175,46 @@ export function TriggerPage() {
       />
 
       <Card>
-        <CardHeader>
-          <CardTitle>Analysis types</CardTitle>
-          <CardDescription>
-            experiment_design and feature_proposal require behavior_analysis
-            insights — runs without it will skip them (unmet requirements).
-          </CardDescription>
+        <CardHeader className="flex-row items-start justify-between space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle>Analysis types</CardTitle>
+            <CardDescription>
+              {mode === 'default'
+                ? 'Runs the full built-in loop. Switch to custom to pick agents.'
+                : 'experiment_design and feature_proposal require behavior_analysis insights — runs without it will skip them (unmet requirements).'}
+            </CardDescription>
+          </div>
+          <div className="flex shrink-0 gap-1" role="group" aria-label="Selection mode">
+            <Button
+              size="sm"
+              variant={mode === 'default' ? 'default' : 'outline'}
+              onClick={() => setMode('default')}
+            >
+              Default
+            </Button>
+            <Button
+              size="sm"
+              variant={mode === 'custom' ? 'default' : 'outline'}
+              onClick={() => setMode('custom')}
+            >
+              Custom
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-2">
           {analysisTypes.map((entry) => (
             <label
               key={entry.type}
-              className="flex cursor-pointer items-start gap-3 rounded-md border p-3 has-[:checked]:border-foreground"
+              className={cn(
+                'flex items-start gap-3 rounded-md border p-3 has-[:checked]:border-foreground',
+                mode === 'custom' ? 'cursor-pointer' : 'cursor-default opacity-70',
+              )}
             >
               <input
                 type="checkbox"
                 checked={selected.has(entry.type)}
                 onChange={() => toggleType(entry.type)}
+                disabled={mode !== 'custom'}
                 className="mt-1 accent-foreground"
               />
               <span>
