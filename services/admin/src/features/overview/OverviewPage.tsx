@@ -16,11 +16,10 @@ import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 
-import { runResults, runStatus } from '@/api/agents'
+import { listRuns, runResults } from '@/api/agents'
 import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
 import { useLive } from '@/core/live'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
-import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { EventCombobox } from '@/features/analytics/EventCombobox'
@@ -386,25 +385,29 @@ function ExperimentsCard() {
 }
 
 function AgentsCard() {
-  const { active } = useWorkspace()
-  const latest = active ? (loadTrackedRuns(active.id)[0] ?? null) : null
+  const { active, projectId } = useWorkspace()
 
-  const statusQuery = useQuery({
-    queryKey: [active?.id ?? 'none', 'agent-run-overview', latest?.run_id ?? 'none'],
-    enabled: active !== null && latest !== null,
-    queryFn: ({ signal }) => runStatus(serviceConnection(active!, 'agents'), latest!.run_id, { signal }),
+  // The latest run is read from the server (GET /v1/agents/runs), the source of
+  // truth for every browser and for runs a scheduler triggers — not from this
+  // browser's local history, so a deleted run simply isn't here.
+  const runsQuery = useQuery({
+    queryKey: [active?.id ?? 'none', 'agent-run-overview', 'latest'],
+    enabled: active !== null && projectId !== null,
+    queryFn: ({ signal }) =>
+      listRuns(serviceConnection(active!, 'agents'), { projectId: projectId!, limit: 1 }, { signal }),
     refetchInterval: (query) => {
-      const status = query.state.data?.status
+      const status = query.state.data?.runs[0]?.status
       return status && TERMINAL_RUN_STATUSES.has(status) ? false : 10_000
     },
   })
 
-  const status = statusQuery.data?.status ?? latest?.last_status ?? null
+  const latest = runsQuery.data?.runs[0] ?? null
+  const status = latest?.status ?? null
   const awaitingApproval = status === 'waiting_approval'
 
   const resultsQuery = useQuery({
     queryKey: [active?.id ?? 'none', 'agent-run-overview', latest?.run_id ?? 'none', 'results'],
-    enabled: active !== null && latest !== null && (statusQuery.data?.insights_count ?? 0) > 0,
+    enabled: active !== null && latest !== null && latest.insights_count > 0,
     staleTime: 60_000,
     queryFn: ({ signal }) =>
       runResults(serviceConnection(active!, 'agents'), latest!.run_id, { signal }),
@@ -423,7 +426,7 @@ function AgentsCard() {
       <CardHeader>
         <CardTitle>Agents</CardTitle>
         <CardDescription>
-          {latest ? 'Latest run triggered from this browser.' : 'The autonomous loop, on demand.'}
+          {latest ? 'Latest agent run for this project.' : 'The autonomous loop, on demand.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">

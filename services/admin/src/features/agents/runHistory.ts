@@ -38,3 +38,14 @@ export function updateTrackedRunStatus(workspaceId: string, runId: string, statu
   runs[index] = { ...runs[index]!, last_status: status }
   localStorage.setItem(storageKey(workspaceId), JSON.stringify(runs))
 }
+
+// Drop a run from the browser-local history — used when the server no longer
+// knows it (a 404), e.g. after the run was deleted, so a stale last_status
+// can't keep a ghost run on the Overview / runs fallback.
+export function removeTrackedRun(workspaceId: string, runId: string): void {
+  const runs = loadTrackedRuns(workspaceId)
+  const next = runs.filter((entry) => entry.run_id !== runId)
+  if (next.length !== runs.length) {
+    localStorage.setItem(storageKey(workspaceId), JSON.stringify(next))
+  }
+}
