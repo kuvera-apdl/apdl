@@ -136,6 +136,8 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `config` | 8081 | Feature flags & experiments, SSE | [README](services/config/README.md) |
 | `query` | 8082 | Analytics queries on ClickHouse | [README](services/query/README.md) |
 | `agents` | 8083 | Autonomous AI agents | [README](services/agents/README.md) |
+| `admin-api` | 8085 (internal) | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `admin` | 5173 | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
 | `redis` | 6379 | Event streams + cache | — |
 | `clickhouse` | 8123 / 9000 | Analytics store (HTTP / native) | — |

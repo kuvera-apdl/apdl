@@ -22,11 +22,41 @@ record's project.
 `GET /v1/stream` temporarily also accepts `api_key` in the query string for the
 existing EventSource clients. No other route accepts query-string credentials.
 
-The Config service exposes `GET /v1/auth/me` for first-party login clients. It
+The Config service exposes `GET /v1/auth/me` for credential introspection. It
 returns the verified `credential_id`, `project_id`, and sorted `roles`; it never
-echoes the API key. The admin console validates login through this endpoint,
-keeps its login marker in tab-scoped `sessionStorage`, and clears the session
-and cached API data whenever a later request returns 401.
+echoes the API key. This endpoint is not a human login system.
+
+## Admin user sessions
+
+The Admin Console uses the separate `admin-api` backend-for-frontend. Human
+users authenticate with email and password; passwords are stored only as
+Argon2id hashes. Project membership and canonical roles live in
+`admin_user_projects`.
+
+A successful login creates a random opaque session and CSRF token. PostgreSQL
+stores only their SHA-256 digests. The browser receives the session in an
+`HttpOnly`, `SameSite=Strict` cookie, so frontend JavaScript cannot read it.
+Unsafe requests also require an exact allowed `Origin` and the session-bound
+CSRF value. Sessions expire after both an absolute lifetime and an idle window.
+
+The browser calls only `/api/projects/{project_id}/{service}/...`. The Admin API
+checks the human user's project and role, strips caller-supplied credentials,
+selects the project's key from server-side `APDL_SERVICE_API_KEYS`, and proxies
+the request. SSE uses the same cookie-authenticated path, so no key appears in
+the EventSource URL. The codegen internal token likewise remains server-side.
+Every authorized mutation is attributed to the human user in
+`admin_proxy_audit`; the audit stores route metadata and status, never request
+bodies or credentials.
+
+Provision users through the operator command; there is no public registration
+endpoint:
+
+```bash
+make create-admin-user ARGS="--email admin@example.com --project-id acme --roles config:read config:write query:read agents:read"
+```
+
+The command prompts for a password. Reprovisioning an existing email rotates
+its password and revokes its active sessions.
 
 ## Roles
 
@@ -68,10 +98,10 @@ SQL
 printf 'API key (shown once): %s\n' "$api_key"
 ```
 
-Operator and service-principal credentials use the same table and receive only
-the roles they need. In production, internal agents and the query guardrail
-monitor read a JSON object from `APDL_SERVICE_API_KEYS`, keyed by project, so
-each automated call uses a tenant-scoped credential:
+Service principals receive only the roles they need. In production, the Admin
+API, internal agents, and the query guardrail monitor read one JSON object from
+`APDL_SERVICE_API_KEYS`, keyed by project, so each automated call uses a
+tenant-scoped credential:
 
 ```text
 APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
@@ -90,5 +120,6 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 `scripts/init-postgres.sh` derives its project from the key, provisions
 its hash with all roles, and the smoke test and internal services reuse it.
 Production deployments must leave it unset, set `APDL_SERVICE_API_KEYS` for
-internal calls, and provision least-privilege credentials through their normal
+internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS
+origin, and provision least-privilege credentials through their normal
 secret-management workflow.

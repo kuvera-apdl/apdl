@@ -124,12 +124,15 @@ cmd_setup() {
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"
     setup_python_package "Query Service"     "$ROOT_DIR/services/query"
     setup_python_package "Agents Service"    "$ROOT_DIR/services/agents"
+    setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
     setup_python_package "ETL Framework"     "$ROOT_DIR/pipeline/etl"
     setup_python_package "Python SDK"        "$ROOT_DIR/sdk/python"
 
     info "Setting up JavaScript SDK"
     (cd "$ROOT_DIR/sdk/javascript" && npm install --silent)
+    info "Setting up Admin Console"
+    (cd "$ROOT_DIR/services/admin" && npm install --silent)
     ok "Installed npm dependencies"
 
     cmd_up
@@ -174,7 +177,7 @@ cmd_up_full() {
     ok "ClickHouse schema initialized"
     POSTGRES_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-postgres.sh"
     ok "PostgreSQL schema initialized"
-    dc_full up -d --build ingestion config query agents codegen clickhouse-writer
+    dc_full up -d --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
     ok "Application services starting"
     sleep 3
     cmd_status
@@ -230,6 +233,7 @@ cmd_status() {
     check_health "Config"    "http://localhost:8081/health" || failures=$((failures+1))
     check_health "Query"     "http://localhost:8082/health" || failures=$((failures+1))
     check_health "Agents"    "http://localhost:8083/health" optional || true
+    check_health "Admin API" "http://localhost:5173/api/health" optional || true
     [ "$failures" -eq 0 ] || warn "$failures service(s) unhealthy — are they running? (scripts/dev.sh up-full)"
 }
 

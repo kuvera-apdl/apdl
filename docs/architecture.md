@@ -20,6 +20,8 @@ Autonomous Product Development Loop.
 | Config Service | FastAPI, asyncpg, SSE | 8081 | [README](../services/config/README.md) |
 | Query Service | FastAPI, ClickHouse, SciPy | 8082 | [README](../services/query/README.md) |
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | [README](../services/agents/README.md) |
+| Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | [README](../services/admin-api/README.md) |
+| Admin Console | React, Vite, nginx | 5173 | [README](../services/admin/README.md) |
 | Pipeline (writer, ETL) | Python, clickhouse-driver | — | [README](../pipeline/README.md) |
 
 ## The three flows
@@ -44,7 +46,8 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 ### 2. Flags & experiments (config path)
 
 ```
-Admin / Agents ──CRUD──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache) ──SSE / poll──→ SDKs
+Admin Browser ──HttpOnly session──→ Admin API ──service key──→ Config / Query / Agents / Codegen
+Agents ──service key──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache) ──SSE / poll──→ SDKs
 ```
 
 - PostgreSQL stores canonical flag configs: targeting rules, rollouts,
