@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -241,7 +242,7 @@ function WorkspaceSwitcher() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
+        <DropdownMenuLabel>Authorized projects</DropdownMenuLabel>
         {workspaces.map((workspace) => (
           <DropdownMenuItem key={workspace.id} onSelect={() => setActive(workspace.id)}>
             <Check className={cn('opacity-0', workspace.id === active?.id && 'opacity-100')} />
@@ -250,7 +251,7 @@ function WorkspaceSwitcher() {
         ))}
         {workspaces.length > 0 ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => navigate('/settings/workspace')}>
-          Manage workspaces…
+          View access…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -351,10 +352,16 @@ export function AppShell() {
             <LiveIndicator />
             {identity ? (
               <span className="hidden text-sm text-muted-foreground md:inline">
-                credential: <span className="text-foreground">{identity.credential_id}</span>
+                <span className="text-foreground">{identity.email}</span>
               </span>
             ) : null}
-            <Button variant="ghost" size="icon" onClick={logout} aria-label="Sign out" title="Sign out">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void logout().catch(() => toast.error('Unable to revoke the session'))}
+              aria-label="Sign out"
+              title="Sign out"
+            >
               <LogOut />
             </Button>
             <ThemeToggle />

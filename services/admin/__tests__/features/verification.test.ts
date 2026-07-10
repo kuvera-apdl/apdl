@@ -19,21 +19,21 @@ let ingestCalls = 0
 const okHealth = (service: string) => HttpResponse.json({ status: 'ok', service })
 
 const server = setupServer(
-  http.get('http://localhost:8080/health', () =>
+  http.get('*/api/projects/demo/ingestion/health', () =>
     healthOk ? okHealth('ingestion') : HttpResponse.json({ status: 'degraded', service: 'ingestion' }, { status: 503 }),
   ),
-  http.get('http://localhost:8081/health', () =>
+  http.get('*/api/projects/demo/config/health', () =>
     HttpResponse.json({ status: 'ok', service: 'apdl-config', postgres: 'ok', redis: 'ok', sse_connections: 1 }),
   ),
-  http.get('http://localhost:8082/health', () => okHealth('apdl-query')),
-  http.get('http://localhost:8082/ready', () => HttpResponse.json({ status: 'ready' })),
-  http.get('http://localhost:8083/health', () => okHealth('apdl-agents')),
-  http.get('http://localhost:8083/ready', () => HttpResponse.json({ status: 'ready' })),
-  http.post('http://localhost:8080/v1/events', () => {
+  http.get('*/api/projects/demo/query/health', () => okHealth('apdl-query')),
+  http.get('*/api/projects/demo/query/ready', () => HttpResponse.json({ status: 'ready' })),
+  http.get('*/api/projects/demo/agents/health', () => okHealth('apdl-agents')),
+  http.get('*/api/projects/demo/agents/ready', () => HttpResponse.json({ status: 'ready' })),
+  http.post('*/api/projects/demo/ingestion/v1/events', () => {
     ingestCalls += 1
     return HttpResponse.json({ accepted: 1 }, { status: 202 })
   }),
-  http.post('http://localhost:8082/v1/query/events/count', () => {
+  http.post('*/api/projects/demo/query/v1/query/events/count', () => {
     countCalls += 1
     const found = countCalls >= pipelineFindsAtAttempt
     return HttpResponse.json({
@@ -51,7 +51,7 @@ const server = setupServer(
       total_users: found ? 1 : 0,
     })
   }),
-  http.get('http://localhost:8081/v1/flags', () =>
+  http.get('*/api/projects/demo/config/v1/flags', () =>
     HttpResponse.json(
       { schema_version: 2, project_id: 'demo', flags: [] },
       { headers: { 'X-Cache': 'HIT' } },

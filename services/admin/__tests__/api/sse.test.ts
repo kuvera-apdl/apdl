@@ -33,7 +33,7 @@ class FakeEventSource {
 
 function createStream(events: { name: string; data: unknown }[], states: StreamState[]) {
   return new FlagStream(
-    'http://config.test/v1/stream?api_key=k',
+    '/api/projects/demo/config/v1/stream',
     {
       onEvent: (name, data) => events.push({ name, data }),
       onState: (state) => states.push(state),
@@ -43,9 +43,9 @@ function createStream(events: { name: string; data: unknown }[], states: StreamS
 }
 
 describe('streamUrl', () => {
-  test('builds the query-param auth URL (EventSource cannot set headers)', () => {
-    expect(streamUrl('http://localhost:8081/', 'proj_demo_0123456789abcdef')).toBe(
-      'http://localhost:8081/v1/stream?api_key=proj_demo_0123456789abcdef',
+  test('builds a credential-free same-origin stream URL', () => {
+    expect(streamUrl('/api/projects/demo/config/')).toBe(
+      '/api/projects/demo/config/v1/stream',
     )
   })
 })
@@ -81,6 +81,17 @@ describe('FlagStream', () => {
 
     source.emit('flag_update', { action: 'flag_removed', key: 'x' })
     expect(events).toEqual([{ name: 'flag_update', data: { action: 'flag_removed', key: 'x' } }])
+    stream.stop()
+  })
+
+  test('delivers server-side session expiry events', () => {
+    const events: { name: string; data: unknown }[] = []
+    const stream = createStream(events, [])
+    stream.start()
+
+    FakeEventSource.instances[0]!.emit('auth_expired', {})
+
+    expect(events).toEqual([{ name: 'auth_expired', data: {} }])
     stream.stop()
   })
 

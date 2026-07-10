@@ -12,7 +12,7 @@ import { FlagListPage } from '../../src/features/flags/FlagListPage'
 import { makeFlag, seedWorkspace } from '../helpers/fixtures'
 
 const server = setupServer(
-  http.get('http://localhost:8081/v1/admin/flags', () =>
+  http.get('*/api/projects/demo/config/v1/admin/flags', () =>
     HttpResponse.json({
       flags: [
         makeFlag(),
@@ -41,7 +41,7 @@ beforeEach(() => {
 function renderFlagList() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={['/flags']}>

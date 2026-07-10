@@ -1,5 +1,5 @@
 // The shared gate→decision transform behind the Decide surface.
-import { describe, expect, test } from 'vitest'
+import { expect, test } from 'vitest'
 
 import type { RunResults, RunStatus } from '../../src/api/types/agents'
 import { decisionsForRun } from '../../src/lib/gates'

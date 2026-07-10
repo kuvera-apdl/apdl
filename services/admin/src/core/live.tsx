@@ -11,10 +11,12 @@ import { toast } from 'sonner'
 import { flagCollectionSchema, flagUpdatePayloadSchema } from '@/api/schemas/flags'
 import type { ClientFlagConfig } from '@/api/types/flags'
 import { FlagStream, streamUrl, type StreamState } from '@/api/sse'
+import { AUTH_UNAUTHORIZED_EVENT } from '@/core/auth-events'
 import { useAuth } from '@/core/auth'
 import { wasRecentlyWrittenLocally } from '@/core/localWrites'
 import { queryKeys } from '@/core/queryClient'
 import { useWorkspace } from '@/core/workspace'
+import { serviceBaseUrl } from '@/core/workspace'
 
 const IDLE_STATE: StreamState = { status: 'idle', lastEventAt: null, reconnects: 0 }
 
@@ -34,18 +36,21 @@ export function LiveProvider({ children }: { children: ReactNode }) {
   const [servedFlags, setServedFlags] = useState<Map<string, ClientFlagConfig> | null>(null)
 
   const wsId = authenticated ? (active?.id ?? null) : null
-  const configUrl = authenticated ? (active?.configUrl ?? null) : null
-  const apiKey = authenticated ? (active?.apiKey ?? null) : null
+  const configUrl = authenticated && active ? serviceBaseUrl(active, 'config') : null
 
   useEffect(() => {
     setServedFlags(null)
-    if (!wsId || !configUrl || !apiKey || typeof EventSource === 'undefined') {
+    if (!wsId || !configUrl || typeof EventSource === 'undefined') {
       setState(IDLE_STATE)
       return
     }
-    const stream = new FlagStream(streamUrl(configUrl, apiKey), {
+    const stream = new FlagStream(streamUrl(configUrl), {
       onState: setState,
       onEvent: (name, data) => {
+        if (name === 'auth_expired') {
+          window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT))
+          return
+        }
         if (name === 'config') {
           const collection = flagCollectionSchema.safeParse(data)
           if (collection.success) {
@@ -84,7 +89,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     })
     stream.start()
     return () => stream.stop()
-  }, [wsId, configUrl, apiKey, queryClient])
+  }, [wsId, configUrl, queryClient])
 
   const value = useMemo(() => ({ state, servedFlags }), [state, servedFlags])
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>

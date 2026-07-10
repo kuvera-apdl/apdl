@@ -12,10 +12,10 @@ import { FlagDetailPage } from '../../src/features/flags/FlagDetailPage'
 import { makeAuditEntry, makeFlag, seedWorkspace } from '../helpers/fixtures'
 
 const server = setupServer(
-  http.get('http://localhost:8081/v1/admin/flags', () =>
+  http.get('*/api/projects/demo/config/v1/admin/flags', () =>
     HttpResponse.json({ flags: [makeFlag()], count: 1 }),
   ),
-  http.get('http://localhost:8081/v1/admin/flags/:key/audit', () =>
+  http.get('*/api/projects/demo/config/v1/admin/flags/:key/audit', () =>
     HttpResponse.json({
       flag_key: 'checkout-cta',
       audit: [
@@ -47,7 +47,7 @@ beforeEach(() => {
 function renderDetail(path: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[path]}>

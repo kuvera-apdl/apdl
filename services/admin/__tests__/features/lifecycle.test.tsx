@@ -13,7 +13,7 @@ import { makeFlag, seedWorkspace } from '../helpers/fixtures'
 const requests: { method: string; path: string; body: unknown }[] = []
 
 const server = setupServer(
-  http.put('http://localhost:8081/v1/admin/flags/:key', async ({ request, params }) => {
+  http.put('*/api/projects/demo/config/v1/admin/flags/:key', async ({ request, params }) => {
     requests.push({
       method: 'PUT',
       path: String(params.key),
@@ -21,7 +21,7 @@ const server = setupServer(
     })
     return HttpResponse.json({ updated: true, flag: makeFlag({ version: 4 }) })
   }),
-  http.post('http://localhost:8081/v1/admin/flags/:key/disable', async ({ request, params }) => {
+  http.post('*/api/projects/demo/config/v1/admin/flags/:key/disable', async ({ request, params }) => {
     requests.push({
       method: 'POST',
       path: `${String(params.key)}/disable`,
@@ -32,7 +32,7 @@ const server = setupServer(
       flag: makeFlag({ state: 'disabled', enabled: false, disabled_reason: 'guardrail_failed' }),
     })
   }),
-  http.delete('http://localhost:8081/v1/admin/flags/:key', ({ params }) => {
+  http.delete('*/api/projects/demo/config/v1/admin/flags/:key', ({ params }) => {
     requests.push({
       method: 'DELETE',
       path: String(params.key),
@@ -58,7 +58,7 @@ beforeEach(() => {
 function renderDialog(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>{ui}</TooltipProvider>
       </QueryClientProvider>

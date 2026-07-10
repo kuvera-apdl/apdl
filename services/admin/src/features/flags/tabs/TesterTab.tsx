@@ -216,7 +216,7 @@ export function TesterTab({ flag }: { flag: FlagConfig }) {
   )
   const { result } = evaluation
 
-  const canVerify = Boolean(active?.internalToken) && flag.evaluation_mode !== 'client'
+  const canVerify = active !== null && flag.evaluation_mode !== 'client'
 
   const verifyOnServer = async () => {
     if (!active || !projectId) return
@@ -224,7 +224,7 @@ export function TesterTab({ flag }: { flag: FlagConfig }) {
     setServerError(null)
     setServerResult(null)
     try {
-      const response = await evaluateFlagOnServer(serviceConnection(active, 'config'), active.internalToken, {
+      const response = await evaluateFlagOnServer(serviceConnection(active, 'config'), {
         project_id: projectId,
         key: flag.key,
         context: { user_id: userId, anonymous_id: anonymousId, attributes },

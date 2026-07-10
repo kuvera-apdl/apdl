@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { z } from 'zod'
 
 import { ApiError, buildUrl, normalizeBaseUrl, request } from '../../src/api/http'
@@ -14,9 +14,12 @@ afterAll(() => server.close())
 
 const conn = {
   baseUrl: 'http://config.test',
-  apiKey: 'proj_demo_0123456789abcdef',
   actor: 'tester',
 }
+
+beforeEach(() => {
+  document.cookie = 'apdl_admin_csrf=test-csrf; Path=/'
+})
 
 describe('buildUrl', () => {
   test('normalizes trailing slashes and skips undefined params', () => {
@@ -28,7 +31,7 @@ describe('buildUrl', () => {
 })
 
 describe('request', () => {
-  test('sends X-API-Key without a caller-asserted audit identity', async () => {
+  test('uses the browser session and CSRF token without exposing a service key', async () => {
     const seen: Record<string, string | null> = {}
     server.use(
       http.get('http://config.test/v1/get', ({ request: req }) => {
@@ -38,14 +41,18 @@ describe('request', () => {
       http.post('http://config.test/v1/post', ({ request: req }) => {
         seen.postActor = req.headers.get('x-apdl-actor')
         seen.postContentType = req.headers.get('content-type')
+        seen.postCsrf = req.headers.get('x-csrf-token')
+        seen.credentials = req.credentials
         return HttpResponse.json({})
       }),
     )
     await request(conn, '/v1/get')
     await request(conn, '/v1/post', { method: 'POST', body: { a: 1 } })
-    expect(seen.getKey).toBe(conn.apiKey)
+    expect(seen.getKey).toBeNull()
     expect(seen.postActor).toBeNull()
     expect(seen.postContentType).toContain('application/json')
+    expect(seen.postCsrf).toBe('test-csrf')
+    expect(seen.credentials).toBe('same-origin')
   })
 
   test('normalizes the {error, message} envelope into ApiError', async () => {

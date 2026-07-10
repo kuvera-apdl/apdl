@@ -1,22 +1,21 @@
 # APDL Admin Console
 
-Single-page admin console for the APDL platform — a pure API client of the four
-services (ingestion :8080, config :8081, query :8082, agents :8083). It adds no
-backend of its own and persists nothing server-side; all configuration
-(connection URLs, API key, actor) lives in browser `localStorage` as
-"workspaces".
+Single-page admin console for the APDL platform. The browser talks only to the
+same-origin [Admin API](../admin-api/README.md), which authenticates human
+users, enforces project roles, and injects service credentials server-side.
+Service API keys and the codegen internal token never enter frontend JavaScript.
 
 Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan.md`
 (vault). This package implements **all plan phases (0–7)**:
 
 - App shell: sidebar navigation, workspace switcher, SSE liveness indicator,
   dark mode.
-- Login (`/login`): verifies the API key through `GET /v1/auth/me`, creates a
-  tab-scoped console session, protects every application route, and returns to
-  the originally requested page after authentication. Any later API 401 clears
-  cached data and redirects back to login.
-- Workspace settings (`/settings/workspace`): connection profiles, live
-  `project_id` derivation from the API key, per-service health test.
+- Login (`/login`): authenticates an administrator email/password through the
+  Admin API. The opaque session is held in an `HttpOnly`, `SameSite=Strict`
+  cookie; any later API 401 clears cached data and redirects back to login.
+- Project access (`/settings/workspace`): lists only the projects and roles
+  assigned to the authenticated user and switches the active project without
+  storing credentials locally.
 - Overview (`/`): service health strip (10s poll), flag state summary, realtime
   stream status.
 - Feature flags, full lifecycle: list with search/state/archived filters
@@ -30,7 +29,7 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
 - Evaluation tester (Tester tab): local FNV-1a evaluator **parity-tested
   against `fixtures/gates/parity.json`** (the same golden values the SDKs and
   config service pin), rule-by-rule trace with bucket bars, optional
-  server-side verification via `POST /v1/evaluate` (internal token), 10k-user
+  server-side verification via `POST /v1/evaluate` (proxied server-side), 10k-user
   population simulator (also available pre-save in the editor), and a
   served-config panel showing the exact SSE payload SDKs receive.
 - Analytics (`/analytics/*`): events explorer (counts / timeseries /
@@ -52,7 +51,8 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   with safety-check verdicts, and persisted run outputs. (The backing
   endpoints — runs list, run results, run audit — were added to the agents
   service as plan gaps G1–G3.)
-- Live updates: one `EventSource` on `GET /v1/stream` per workspace; SSE events
+- Live updates: one credential-free, same-origin `EventSource` per project; the
+  Admin API supplies the service key upstream. SSE events
   invalidate TanStack Query caches (admin views re-fetch rather than trusting
   the client payload). Toasts announce changes made outside this console.
 - Every panel and write dialog reproduces its exact API call as **curl**.
@@ -83,10 +83,19 @@ npm run lint       # tsc --noEmit for src + tests          (make lint-admin)
 npm run build      # typecheck + production bundle to dist/ (make build-admin)
 ```
 
-Point a workspace at a running stack (`scripts/dev.sh up-full` or
-`make dev` + individual services). Defaults assume localhost ports; build-time
-`VITE_INGESTION_URL` / `VITE_CONFIG_URL` / `VITE_QUERY_URL` / `VITE_AGENTS_URL`
-seed different defaults.
+For local development, migrate PostgreSQL, provision a human user, then run the
+backend and SPA:
+
+```bash
+make migrate-postgres
+make create-admin-user ARGS="--email admin@example.com --project-id apdl --roles config:read config:write query:read agents:read"
+make run-admin-api   # :8085, Vite proxies /api here
+make run-admin       # :5173
+```
+
+`scripts/dev.sh up-full` runs the backend and SPA together in Docker. The Vite
+bundle has no environment-specific service URLs; nginx proxies `/api` over the
+private container network.
 
 ## Layout
 
@@ -106,11 +115,11 @@ __tests__/        # vitest + Testing Library + MSW (pattern mirrors sdk/javascri
 
 ## Security posture
 
-Requests to ingestion, config, query, and agents use database-verified,
-project-scoped API keys. Mutation audit identity comes from the authenticated
-credential, never a caller-chosen header. Login state is stored only in the
-current tab's `sessionStorage`; logout, workspace changes, and 401 responses end
-that session. The console still stores workspace keys and the codegen internal
-token in `localStorage`, and includes the API key in the `EventSource` URL
-because the native browser API cannot set headers. It remains a
-trusted-network/localhost tool until the backend-for-frontend work is complete.
+The browser stores only non-secret preferences and the active project ID.
+Passwords are Argon2id hashes; opaque session and CSRF tokens are stored as
+SHA-256 digests in PostgreSQL. Unsafe requests require both an allowed `Origin`
+and a session-bound double-submit CSRF token. The Admin API selects the
+project-scoped service key from server environment configuration, strips
+caller-supplied credentials, checks the user's project role, and then proxies
+the request. Production deployments must use HTTPS, secure cookies, and a
+least-privilege `APDL_SERVICE_API_KEYS` map.

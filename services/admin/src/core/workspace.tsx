@@ -1,81 +1,18 @@
-// Workspace model (AD-7): a named connection profile — service base URLs, API
-// key (its project hint identifies local project state), actor identity. Persisted client-side
-// only; the console keeps zero server state.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { z } from 'zod'
 
 import type { ServiceConnection } from '@/api/http'
-
-export const API_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$/
-
-export const workspaceSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  ingestionUrl: z.string().url(),
-  configUrl: z.string().url(),
-  queryUrl: z.string().url(),
-  agentsUrl: z.string().url(),
-  codegenUrl: z.string().url().optional(),
-  apiKey: z.string().regex(API_KEY_PATTERN, 'API key must match proj_{project_id}_{secret}'),
-  actor: z.string().min(1).max(64),
-  internalToken: z.string(),
-})
-
-export type Workspace = z.infer<typeof workspaceSchema>
+import { useOptionalAuth } from '@/core/auth'
 
 export type ServiceName = 'ingestion' | 'config' | 'query' | 'agents' | 'codegen'
 
-const WORKSPACES_KEY = 'apdl-admin:workspaces'
-const ACTIVE_KEY = 'apdl-admin:active-workspace'
-
-const env = import.meta.env
-
-export const WORKSPACE_URL_DEFAULTS: Record<`${ServiceName}Url`, string> = {
-  ingestionUrl: env.VITE_INGESTION_URL ?? 'http://localhost:8080',
-  configUrl: env.VITE_CONFIG_URL ?? 'http://localhost:8081',
-  queryUrl: env.VITE_QUERY_URL ?? 'http://localhost:8082',
-  agentsUrl: env.VITE_AGENTS_URL ?? 'http://localhost:8083',
-  codegenUrl: env.VITE_CODEGEN_URL ?? 'http://localhost:8084',
+export interface Workspace {
+  id: string
+  name: string
+  projectId: string
+  actor: string
 }
 
-export function projectIdFromKey(apiKey: string): string | null {
-  const match = API_KEY_PATTERN.exec(apiKey)
-  return match ? match[1] : null
-}
-
-export function serviceBaseUrl(workspace: Workspace, service: ServiceName): string {
-  switch (service) {
-    case 'ingestion':
-      return workspace.ingestionUrl
-    case 'config':
-      return workspace.configUrl
-    case 'query':
-      return workspace.queryUrl
-    case 'agents':
-      return workspace.agentsUrl
-    case 'codegen':
-      return workspace.codegenUrl ?? WORKSPACE_URL_DEFAULTS.codegenUrl
-  }
-}
-
-export function serviceConnection(workspace: Workspace, service: ServiceName): ServiceConnection {
-  return {
-    baseUrl: serviceBaseUrl(workspace, service),
-    apiKey: workspace.apiKey,
-    actor: workspace.actor,
-  }
-}
-
-function loadWorkspaces(): Workspace[] {
-  try {
-    const raw = localStorage.getItem(WORKSPACES_KEY)
-    if (!raw) return []
-    const parsed = z.array(workspaceSchema).safeParse(JSON.parse(raw))
-    return parsed.success ? parsed.data : []
-  } catch {
-    return []
-  }
-}
+const ACTIVE_KEY = 'apdl-admin:active-project'
 
 function loadActiveId(): string | null {
   try {
@@ -85,57 +22,73 @@ function loadActiveId(): string | null {
   }
 }
 
+export function serviceBaseUrl(workspace: Workspace, service: ServiceName): string {
+  return `/api/projects/${encodeURIComponent(workspace.projectId)}/${service}`
+}
+
+export function serviceConnection(workspace: Workspace, service: ServiceName): ServiceConnection {
+  return {
+    baseUrl: serviceBaseUrl(workspace, service),
+    actor: workspace.actor,
+  }
+}
+
 interface WorkspaceContextValue {
   workspaces: Workspace[]
   active: Workspace | null
   projectId: string | null
-  /** Insert or update a workspace and make it active. */
-  saveWorkspace: (workspace: Workspace) => void
-  deleteWorkspace: (id: string) => void
   setActive: (id: string) => void
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null)
 
-export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>(loadWorkspaces)
+export function WorkspaceProvider({
+  children,
+  initialWorkspaces,
+}: {
+  children: ReactNode
+  /** Explicit dependency-injection seam for isolated component tests. */
+  initialWorkspaces?: Workspace[]
+}) {
+  const auth = useOptionalAuth()
+  if (auth === null && initialWorkspaces === undefined) {
+    throw new Error('WorkspaceProvider requires AuthProvider')
+  }
+  const identity = auth?.identity ?? null
   const [activeId, setActiveId] = useState<string | null>(loadActiveId)
+  const workspaces = useMemo<Workspace[]>(
+    () =>
+      initialWorkspaces ?? identity?.projects.map(({ project_id }) => ({
+        id: project_id,
+        name: project_id,
+        projectId: project_id,
+        actor: identity.email,
+      })) ?? [],
+    [identity, initialWorkspaces],
+  )
+  const active = workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null
 
   useEffect(() => {
-    localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces))
-  }, [workspaces])
+    try {
+      if (active === null) localStorage.removeItem(ACTIVE_KEY)
+      else localStorage.setItem(ACTIVE_KEY, active.id)
+    } catch {
+      // The active project remains usable in memory when storage is unavailable.
+    }
+    if (active?.id !== activeId) setActiveId(active?.id ?? null)
+  }, [active, activeId])
 
-  useEffect(() => {
-    if (activeId === null) localStorage.removeItem(ACTIVE_KEY)
-    else localStorage.setItem(ACTIVE_KEY, activeId)
-  }, [activeId])
-
-  const value = useMemo<WorkspaceContextValue>(() => {
-    const active = workspaces.find((workspace) => workspace.id === activeId) ?? null
-    return {
+  const value = useMemo<WorkspaceContextValue>(
+    () => ({
       workspaces,
       active,
-      projectId: active ? projectIdFromKey(active.apiKey) : null,
-      saveWorkspace: (workspace) => {
-        setWorkspaces((previous) => {
-          const index = previous.findIndex((entry) => entry.id === workspace.id)
-          if (index === -1) return [...previous, workspace]
-          const next = [...previous]
-          next[index] = workspace
-          return next
-        })
-        setActiveId(workspace.id)
+      projectId: active?.projectId ?? null,
+      setActive: (id) => {
+        if (workspaces.some((workspace) => workspace.id === id)) setActiveId(id)
       },
-      deleteWorkspace: (id) => {
-        setWorkspaces((previous) => {
-          const next = previous.filter((entry) => entry.id !== id)
-          setActiveId((current) => (current === id ? (next[0]?.id ?? null) : current))
-          return next
-        })
-      },
-      setActive: setActiveId,
-    }
-  }, [workspaces, activeId])
+    }),
+    [active, workspaces],
+  )
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>
 }

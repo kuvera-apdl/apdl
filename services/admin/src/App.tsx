@@ -17,18 +17,18 @@ export function App() {
 
   return (
     <ThemeProvider>
-      <WorkspaceProvider>
-        <QueryClientProvider client={queryClient}>
-          <AuthProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <WorkspaceProvider>
             <LiveProvider>
               <TooltipProvider delayDuration={300}>
                 <RouterProvider router={router} future={{ v7_startTransition: true }} />
               </TooltipProvider>
               <Toaster />
             </LiveProvider>
-          </AuthProvider>
-        </QueryClientProvider>
-      </WorkspaceProvider>
+          </WorkspaceProvider>
+        </AuthProvider>
+      </QueryClientProvider>
     </ThemeProvider>
   )
 }

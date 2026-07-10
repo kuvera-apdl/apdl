@@ -17,10 +17,10 @@ const putBodies: Record<string, unknown>[] = []
 const postBodies: Record<string, unknown>[] = []
 
 const server = setupServer(
-  http.get('http://localhost:8081/v1/admin/flags', () =>
+  http.get('*/api/projects/demo/config/v1/admin/flags', () =>
     HttpResponse.json({ flags: currentFlags, count: currentFlags.length }),
   ),
-  http.post('http://localhost:8081/v1/admin/flags', async ({ request }) => {
+  http.post('*/api/projects/demo/config/v1/admin/flags', async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>
     postBodies.push(body)
     if (currentFlags.some((flag) => flag.key === body.key)) {
@@ -34,7 +34,7 @@ const server = setupServer(
       { status: 201 },
     )
   }),
-  http.put('http://localhost:8081/v1/admin/flags/:key', async ({ request }) => {
+  http.put('*/api/projects/demo/config/v1/admin/flags/:key', async ({ request }) => {
     const body = (await request.json()) as Record<string, unknown>
     putBodies.push(body)
     const current = currentFlags[0]!
@@ -79,7 +79,7 @@ function renderEditor(initialPath: string) {
     { initialEntries: [initialPath] },
   )
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <RouterProvider router={router} />

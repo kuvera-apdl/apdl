@@ -42,7 +42,7 @@ const EXPERIMENT = {
 }
 
 const server = setupServer(
-  http.get('http://localhost:8081/v1/admin/experiments', () =>
+  http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
     HttpResponse.json({ experiments: [EXPERIMENT], count: 1 }),
   ),
 )
@@ -171,7 +171,7 @@ describe('ExperimentListPage', () => {
   test('renders experiments with status pills', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
-      <WorkspaceProvider>
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
             <MemoryRouter initialEntries={['/experiments']}>

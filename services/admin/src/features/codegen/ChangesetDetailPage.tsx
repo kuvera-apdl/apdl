@@ -187,7 +187,7 @@ export function ChangesetDetailPage() {
     enabled: active !== null && id !== '',
     refetchInterval: (q) =>
       q.state.data && TERMINAL_CHANGESET_STATUSES.has(q.state.data.status) ? false : REFETCH_MS,
-    queryFn: ({ signal }) => getChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id, { signal }),
+    queryFn: ({ signal }) => getChangeset(serviceConnection(ws, 'codegen'), id, { signal }),
   })
 
   const invalidate = () => {
@@ -200,7 +200,7 @@ export function ChangesetDetailPage() {
     toast.error(error instanceof ApiError ? error.message : fallback)
 
   const merge = useMutation({
-    mutationFn: () => mergeChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    mutationFn: () => mergeChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Merge requested')
       invalidate()
@@ -208,7 +208,7 @@ export function ChangesetDetailPage() {
     onError: onError('Merge failed'),
   })
   const abandon = useMutation({
-    mutationFn: () => abandonChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    mutationFn: () => abandonChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Changeset abandoned')
       invalidate()
@@ -216,7 +216,7 @@ export function ChangesetDetailPage() {
     onError: onError('Abandon failed'),
   })
   const revert = useMutation({
-    mutationFn: () => revertChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    mutationFn: () => revertChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Revert PR requested')
       invalidate()
@@ -224,7 +224,7 @@ export function ChangesetDetailPage() {
     onError: onError('Revert failed'),
   })
   const retry = useMutation({
-    mutationFn: () => retryChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    mutationFn: () => retryChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Retry started')
       invalidate()

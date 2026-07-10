@@ -35,8 +35,9 @@ import { HealthPage } from '@/features/system/HealthPage'
 import { LoginPage } from '@/features/auth/LoginPage'
 
 export function RequireAuth() {
-  const { authenticated } = useAuth()
+  const { authenticated, initializing } = useAuth()
   const location = useLocation()
+  if (initializing) return null
   if (!authenticated) {
     const from = `${location.pathname}${location.search}${location.hash}`
     return <Navigate to="/login" replace state={{ from }} />
