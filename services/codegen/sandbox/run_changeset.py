@@ -37,6 +37,7 @@ def _request_from_env() -> EditRequest:
     """Build the EditRequest from the env the orchestrator passed via ``docker -e``."""
     request = EditRequest(
         repo=os.environ["CS_REPO"],
+        project_scope=os.environ.get("CS_PROJECT_SCOPE", os.environ["CS_REPO"]),
         base_branch=os.environ["CS_BASE"],
         branch=os.environ["CS_BRANCH"],
         token=os.environ.get("GH_TOKEN", ""),
@@ -64,7 +65,10 @@ def main() -> int:
 
     result: EditResult = asyncio.run(AiderEditor().implement(request))
     # The result is data, not a status — a clean "tests failed" is still exit 0.
-    print(json.dumps(dataclasses.asdict(result)))
+    payload = dataclasses.asdict(result)
+    if result.contract_bundle is not None:
+        payload["contract_bundle"] = result.contract_bundle.model_dump(mode="json")
+    print(json.dumps(payload))
     return 0
 
 

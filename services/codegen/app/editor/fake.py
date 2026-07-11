@@ -27,5 +27,6 @@ class FakeEditor:
                 diff_text=result.diff_text,
                 prompts=result.prompts,
                 head_sha=result.head_sha,
+                contract_bundle=result.contract_bundle,
             )
         return result

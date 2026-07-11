@@ -31,13 +31,25 @@ import asyncio
 import base64
 import logging
 import os
+import platform
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app import config
+from app.contracts.cache import FilesystemContractCache
+from app.contracts.installer import (
+    SandboxedCheckRunner,
+    SandboxedInstallRunner,
+    detect_contract_input_drift,
+)
+from app.contracts.models import ContractBundle, RuntimeFingerprint
+from app.contracts.render import render_contract_bundle
+from app.contracts.resolver import resolve_contracts
+from app.contracts.selection import select_contract_requests
 from app.editor.base import EditRequest, EditResult
 from app.editor.brief import (
     BRIEF_SYSTEM,
@@ -314,6 +326,30 @@ def _model_settings_yaml(model: str) -> str:
     return f'- name: "{model}"\n  use_temperature: false\n'
 
 
+def _contract_runtime() -> RuntimeFingerprint:
+    versions = [f"python={platform.python_version()}"]
+    for executable in ("node", "npm", "uv"):
+        try:
+            result = subprocess.run(
+                [executable, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env={"PATH": os.environ.get("PATH", os.defpath)},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            versions.append(f"{executable}={result.stdout.strip()}")
+    return RuntimeFingerprint(
+        runtime_name="apdl-codegen-worker-toolchains",
+        runtime_version=";".join(versions),
+        operating_system=platform.system().lower() or "unknown",
+        architecture=platform.machine().lower() or "unknown",
+    )
+
+
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
@@ -336,6 +372,7 @@ class AiderEditor:
         self._cache_prompts = config.codegen_cache_prompts()
         self._conventions = config.codegen_conventions_enabled()
         self._sdk_reference = config.codegen_sdk_reference_enabled()
+        self._contracts_enabled = config.codegen_contracts_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
@@ -363,10 +400,15 @@ class AiderEditor:
         # Prompt transcript for the operator UI (see EditResult.prompts). Every
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
+        contract_bundle: ContractBundle | None = None
 
         def fail(error: str) -> EditResult:
             return EditResult(
-                success=False, branch=request.branch, error=error, prompts=prompts
+                success=False,
+                branch=request.branch,
+                error=error,
+                prompts=prompts,
+                contract_bundle=contract_bundle,
             )
 
         try:
@@ -406,6 +448,53 @@ class AiderEditor:
             #    policy first, then detect) and the agent-facing testing reality.
             probe = _probe_repo(repo_dir, request.test_cmd)
 
+            # 2b. Resolve every explicitly named direct dependency from an
+            # isolated frozen install before the model sees an API claim. The
+            # in-process API editor deliberately has no install authority, so
+            # such work blocks unless it runs in the credential-minimal worker.
+            if self._contracts_enabled:
+                contract_text = "\n".join(
+                    [request.title, request.spec, *request.constraints]
+                )
+                contract_requests = select_contract_requests(
+                    probe.profile or profile_repository(repo_dir), contract_text
+                )
+                contract_bundle = await asyncio.to_thread(
+                    resolve_contracts,
+                    repo_dir,
+                    project_scope=request.project_scope or request.repo,
+                    repository=request.repo,
+                    requests=contract_requests,
+                    runtime=_contract_runtime(),
+                    install_runner=SandboxedInstallRunner(
+                        sandboxed=config.codegen_isolated_worker(),
+                        timeout_seconds=config.codegen_contract_install_timeout(),
+                        workdir_base=work,
+                    ),
+                    check_runner=SandboxedCheckRunner(
+                        sandboxed=config.codegen_isolated_worker(),
+                        workdir_base=work,
+                    ),
+                    cache=FilesystemContractCache(
+                        Path(config.codegen_contract_cache_dir())
+                    ),
+                )
+                blocked = [
+                    resolution
+                    for resolution in contract_bundle.resolutions
+                    if resolution.disposition == "blocked"
+                ]
+                if blocked:
+                    details = "; ".join(
+                        f"{resolution.request.package_name}: "
+                        + ", ".join(item.message for item in resolution.blockers)
+                        for resolution in blocked
+                    )
+                    return fail(
+                        "Exact dependency contract resolution blocked the change: "
+                        + details
+                    )
+
             # 3. Compile the spec into a repo-grounded engineering brief
             #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
             #    spec runs, which is what would have happened anyway). The brief
@@ -431,6 +520,8 @@ class AiderEditor:
             brief_used = False
             if need_brief and complete is not None:
                 repo_digest = build_repo_digest(repo_dir, probe.profile)
+                if contract_bundle and contract_bundle.resolutions:
+                    repo_digest += "\n\n" + render_contract_bundle(contract_bundle)
                 brief_prompt = {
                     "stage": "brief",
                     "label": "Brief compilation (spec → engineering brief)",
@@ -488,6 +579,12 @@ class AiderEditor:
                 conventions_file = work / "CONVENTIONS.md"
                 conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
                 argv += ["--read", str(conventions_file)]
+            if contract_bundle and contract_bundle.resolutions:
+                contracts_file = work / "CONTRACTS.md"
+                contracts_file.write_text(
+                    render_contract_bundle(contract_bundle), encoding="utf-8"
+                )
+                argv += ["--read", str(contracts_file)]
             if self._sdk_reference:
                 # Language-scoped SDK call-path reference(s) for whichever APDL
                 # SDK the repo depends on. Written outside repo_dir so they never
@@ -636,6 +733,26 @@ class AiderEditor:
             )
             diff_stat = _parse_numstat(numstat)
 
+            # Contract evidence is valid only for the exact manifest/lockfile
+            # hashes it was compiled from. A dependency edit must be resolved in
+            # a fresh attempt; stale API evidence is never pushed.
+            if contract_bundle is not None:
+                drift = [
+                    item
+                    for resolution in contract_bundle.resolutions
+                    if (item := detect_contract_input_drift(repo_dir, resolution))
+                    is not None
+                ]
+                if drift:
+                    rendered = "; ".join(
+                        f"{item.package_name}: {', '.join(item.changed_paths)}"
+                        for item in drift
+                    )
+                    return fail(
+                        "Dependency manifest/lockfile changed after contract "
+                        f"resolution; evidence invalidated: {rendered}"
+                    )
+
             # Deterministic pre-push gates on the FULL diff, before anything
             # reaches the remote: a secret-bearing or protected-path change must
             # never land on GitHub, not merely be denied a PR. (The job runner
@@ -672,6 +789,7 @@ class AiderEditor:
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
                 prompts=prompts,
                 head_sha=head_sha.strip(),
+                contract_bundle=contract_bundle,
             )
         finally:
             if not keep:

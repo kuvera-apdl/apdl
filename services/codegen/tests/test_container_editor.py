@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 
@@ -36,6 +37,7 @@ def test_docker_argv_has_hardening_and_image_last():
 def test_docker_argv_passes_nonsecret_inputs_as_values():
     argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
     assert "CS_REPO=acme/widgets" in argv
+    assert "CS_PROJECT_SCOPE=acme/widgets" in argv
     assert "CS_BRANCH=apdl/x" in argv
     assert "CS_TEST_CMD=python -m pytest -q" in argv
     assert 'CS_CONSTRAINTS=["keep tests green"]' in argv
@@ -111,11 +113,15 @@ def test_parse_result_maps_success_json():
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
         "changed_paths": ["a.py", "b.py"], "diff_text": "diff…", "error": None,
+        "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
+        "contract_bundle": ContractBundle().model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
     assert res.diff_stat["files"] == 2
     assert res.changed_paths == ["a.py", "b.py"]
+    assert res.prompts[0]["stage"] == "edit"
+    assert res.contract_bundle == ContractBundle()
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():

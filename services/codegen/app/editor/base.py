@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.contracts.models import ContractBundle
+
 
 @dataclass
 class EditRequest:
@@ -22,6 +24,9 @@ class EditRequest:
     token: str  # short-lived installation token, scoped to this repo
     title: str
     spec: str
+    #: Tenant boundary for private dependency-contract caches. Legacy/custom
+    #: callers may omit it; the editor then scopes evidence to ``repo``.
+    project_scope: str = ""
     constraints: list[str] = field(default_factory=list)
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
@@ -53,6 +58,9 @@ class EditResult:
     error: str | None = None
     logs_uri: str | None = None
     head_sha: str | None = None
+    #: Exact installed dependency evidence used by this attempt. This is model
+    #: grounding, never an APDL-local CI result.
+    contract_bundle: ContractBundle | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
     #: each pre-push diff review. Entries are

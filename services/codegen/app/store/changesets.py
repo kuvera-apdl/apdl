@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from app.config import codegen_ci_sync_max_age_seconds
+from app.contracts.models import ContractBundle
 from app.models.changeset import (
     CIRemediationStatus,
     CI_SYNCABLE_STATUSES,
@@ -59,6 +60,15 @@ def _optional_column(row: asyncpg.Record, key: str) -> Any:
         return None
 
 
+def _contract_bundle_from_row(row: asyncpg.Record) -> ContractBundle | None:
+    value = _optional_column(row, "contract_bundle")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value)
+    return ContractBundle.model_validate(value)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -82,6 +92,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
         prompts=_prompts_from_row(row),
+        contract_bundle=_contract_bundle_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -328,6 +339,24 @@ async def set_prompts(
             """,
             changeset_id,
             json.dumps(prompts),
+        )
+
+
+async def set_contract_bundle(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    bundle: ContractBundle,
+) -> None:
+    """Persist exact dependency evidence without changing lifecycle or CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET contract_bundle = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(bundle.model_dump(mode="json")),
         )
 
 

@@ -35,6 +35,7 @@ import logging
 import os
 
 from app.config import codegen_job_budget
+from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,8 @@ _CONFIG_ENV_FORWARD: tuple[str, ...] = (
     "CODEGEN_REQUIRE_VERIFY",
     "CODEGEN_CACHE_PROMPTS",
     "CODEGEN_CONVENTIONS",
+    "CODEGEN_CONTRACTS",
+    "CODEGEN_CONTRACT_INSTALL_TIMEOUT",
     "CODEGEN_TIMEOUT",
     "CODEGEN_GIT_TIMEOUT",
     "CODEGEN_LLM_TIMEOUT",
@@ -133,6 +136,7 @@ class ContainerAiderEditor:
         # Non-secret task inputs — safe to pass as values.
         argv += [
             "-e", f"CS_REPO={request.repo}",
+            "-e", f"CS_PROJECT_SCOPE={request.project_scope or request.repo}",
             "-e", f"CS_BASE={request.base_branch}",
             "-e", f"CS_BRANCH={request.branch}",
             "-e", f"CS_TITLE={request.title}",
@@ -184,6 +188,12 @@ class ContainerAiderEditor:
                 error=data.get("error"),
                 logs_uri=data.get("logs_uri"),
                 head_sha=data.get("head_sha"),
+                prompts=data.get("prompts") or [],
+                contract_bundle=(
+                    ContractBundle.model_validate(data["contract_bundle"])
+                    if data.get("contract_bundle") is not None
+                    else None
+                ),
             )
         tail = (stderr or stdout or "").strip()[-_ERR_TAIL:]
         return EditResult(

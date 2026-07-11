@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
 from app.github.pulls import PullRequest
@@ -314,3 +315,27 @@ async def test_job_persists_prompt_transcript_on_success_and_failure():
     ko = await store.get_changeset(pool, "cs_prompt_ko")
     assert ko.status == ChangesetStatus.tests_failed
     assert ko.prompts == transcript
+
+
+@pytest.mark.asyncio
+async def test_job_persists_contract_evidence_without_changing_ci_status():
+    async def open_pr(**kwargs) -> PullRequest:
+        return PullRequest(url="https://github.com/acme/widgets/pull/10", number=10)
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_contracts")
+    bundle = ContractBundle()
+
+    await run_changeset_job(
+        pool,
+        "cs_contracts",
+        editor=FakeEditor(EditResult(success=True, contract_bundle=bundle)),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_contracts")
+    assert stored.contract_bundle == bundle
+    assert stored.status is ChangesetStatus.pr_open
+    assert stored.ci_status is None

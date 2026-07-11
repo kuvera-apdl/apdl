@@ -25,6 +25,7 @@ from app.editor.aider_editor import (
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
+from app.profiling.models import Dependency, PackageBoundary, PackageManager, RepoProfile
 
 
 def test_tail_returns_full_text_when_under_limit():
@@ -817,3 +818,79 @@ async def test_prompt_transcript_lists_attached_context_files(monkeypatch, tmp_p
     edit = next(p for p in result.prompts if p["stage"] == "edit")
     assert "CONVENTIONS.md" in edit["notes"]
     assert "APDL_SDK_JS.md" not in edit["notes"]
+
+
+@pytest.mark.asyncio
+async def test_named_dependency_blocks_when_install_is_not_isolated(monkeypatch, tmp_path):
+    """Exact package claims cannot fall back to model knowledge on the API host."""
+    profile = RepoProfile(
+        packages=[
+            PackageBoundary(
+                path=".", ecosystem="node", name="demo", manifest_path="package.json"
+            )
+        ],
+        package_managers=[
+            PackageManager(
+                name="npm",
+                manifest_path="package.json",
+                lockfile_path="package-lock.json",
+            )
+        ],
+        lockfiles=["package-lock.json"],
+        dependencies=[
+            Dependency(
+                name="exact-sdk",
+                ecosystem="node",
+                package_path=".",
+                declared_constraint="^1.0.0",
+                resolved_version="1.2.3",
+                source_path="package-lock.json",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd=None,
+            has_test_runner=False,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+
+    async def fake_git(_cwd, args, **_kwargs):
+        if args and args[0] == "clone":
+            repo = Path(args[-1])
+            repo.mkdir(parents=True)
+            (repo / "package.json").write_text(
+                '{"name":"demo","dependencies":{"exact-sdk":"^1.0.0"}}'
+            )
+            (repo / "package-lock.json").write_text('{"lockfileVersion":3}')
+        if args[:2] == ["rev-parse", "HEAD"]:
+            return 0, "base-sha"
+        return 0, ""
+
+    async def unexpected_exec(*_args, **_kwargs):
+        raise AssertionError("the editing model must not run without exact contracts")
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", unexpected_exec)
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/demo",
+            project_scope="project-1",
+            base_branch="main",
+            branch="apdl/exact",
+            token="token",
+            title="Use exact-sdk",
+            spec="Call exact-sdk from the existing handler.",
+        )
+    )
+
+    assert result.success is False
+    assert "refused outside an explicit sandbox" in (result.error or "")
+    assert result.contract_bundle is not None
+    assert result.contract_bundle.resolutions[0].disposition == "blocked"

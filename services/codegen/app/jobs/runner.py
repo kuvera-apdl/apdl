@@ -140,6 +140,7 @@ async def _execute_changeset_job(
         result = await editor.implement(
             EditRequest(
                 repo=connection.repo,
+                project_scope=changeset.project_id,
                 base_branch=base_branch,
                 branch=branch,
                 token=token,
@@ -152,6 +153,9 @@ async def _execute_changeset_job(
                 risk_level=str(changeset.task.context.get("risk_level") or "low").lower(),
             )
         )
+
+        if result.contract_bundle is not None:
+            await store.set_contract_bundle(pool, changeset_id, result.contract_bundle)
 
         # Persist the prompt transcript regardless of outcome — a failed run is
         # exactly when an operator wants to see what the model was told.

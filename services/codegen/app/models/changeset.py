@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.contracts.models import ContractBundle
+
 
 class ChangesetStatus(str, Enum):
     """The single source of truth for where a changeset is in its lifecycle."""
@@ -227,6 +229,7 @@ class Changeset(BaseModel):
     #: :class:`app.editor.base.EditResult`. Empty for runs that predate prompt
     #: recording or that never reached the editing stage.
     prompts: list[dict[str, Any]] = Field(default_factory=list)
+    contract_bundle: ContractBundle | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

@@ -147,6 +147,28 @@ def codegen_sdk_reference_enabled() -> bool:
     return False
 
 
+def codegen_contracts_enabled() -> bool:
+    """Resolve exact installed dependency contracts before editing (default on)."""
+    return os.getenv("CODEGEN_CONTRACTS", "true").lower() != "false"
+
+
+def codegen_contract_cache_dir() -> str:
+    """Project-scoped content-addressed contract cache directory."""
+    return os.getenv("CODEGEN_CONTRACT_CACHE_DIR") or os.path.join(
+        tempfile.gettempdir(), "apdl-contract-cache"
+    )
+
+
+def codegen_contract_install_timeout() -> int:
+    """Wall-clock limit for one frozen dependency installation."""
+    return max(1, int(os.getenv("CODEGEN_CONTRACT_INSTALL_TIMEOUT", "600")))
+
+
+def codegen_isolated_worker() -> bool:
+    """Whether this process is the credential-minimal per-change worker."""
+    return os.getenv("APDL_CODEGEN_ISOLATED_WORKER") == "true"
+
+
 def codegen_helper_model() -> str:
     """LiteLLM model id for the auxiliary calls (brief compile + diff review).
 
