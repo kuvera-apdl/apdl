@@ -17,6 +17,7 @@ from app.auth import require_internal_token
 from app.github.app_auth import mint_token_for_repo, resolve_installation_id
 from app.github.repo_context import fetch_repo_context
 from app.models.connection import Connection, ConnectionCreate
+from app.profiling import RepoProfile
 from app.store import connections as store
 
 logger = logging.getLogger(__name__)
@@ -89,9 +90,9 @@ async def delete_connection(project_id: str, request: Request) -> None:
         )
 
 
-@router.get("/{project_id}/repo-context")
-async def get_repo_context(project_id: str, request: Request) -> dict:
-    """Compact repo facts (stack, layout, scripts, README) for planning agents.
+@router.get("/{project_id}/repo-context", response_model=RepoProfile)
+async def get_repo_context(project_id: str, request: Request) -> RepoProfile:
+    """Canonical repository profile for planning and code generation.
 
     Called by the agents service before proposing features, so proposals are
     grounded in what the connected repository actually is — see

@@ -168,7 +168,9 @@ async def test_repo_context_endpoint_serves_document(monkeypatch):
 
     async def fake_fetch(*, repo, branch, token):
         assert (repo, branch, token) == ("acme/widgets", "main", "ghs_tok")
-        return {"repo": repo, "branch": branch, "framework": "Next.js (App Router)"}
+        from app.profiling.models import RepoProfile
+
+        return RepoProfile(repo=repo, branch=branch, frameworks=["Next.js"])
 
     monkeypatch.setattr(connections_router, "mint_token_for_repo", fake_mint)
     monkeypatch.setattr(connections_router, "fetch_repo_context", fake_fetch)
@@ -182,7 +184,8 @@ async def test_repo_context_endpoint_serves_document(monkeypatch):
         resp = await client.get("/v1/connections/demo/repo-context")
 
     assert resp.status_code == 200
-    assert resp.json()["framework"] == "Next.js (App Router)"
+    assert resp.json()["schema_version"] == "repo_profile@1"
+    assert resp.json()["frameworks"] == ["Next.js"]
 
 
 @pytest.mark.asyncio

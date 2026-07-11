@@ -18,11 +18,11 @@ contract the post-edit review judges against.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 from app.editor.llm import CompleteFn
+from app.profiling import RepoProfile, profile_repository, render_profile
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,20 @@ logger = logging.getLogger(__name__)
 _DIGEST_MAX_PATHS = 400
 #: Directory names that never help the brief (dependencies, build output, VCS).
 _DIGEST_EXCLUDE_DIRS = frozenset(
-    {".git", "node_modules", "dist", "build", ".next", ".venv", "venv",
-     "__pycache__", "vendor", "target", ".turbo", "coverage"}
+    {
+        ".git",
+        "node_modules",
+        "dist",
+        "build",
+        ".next",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "vendor",
+        "target",
+        ".turbo",
+        "coverage",
+    }
 )
 #: A brief shorter than this cannot be a real work order; fall back to the spec.
 _MIN_BRIEF_CHARS = 200
@@ -78,47 +90,12 @@ Rules:
 """
 
 
-def build_repo_digest(repo_dir: Path) -> str:
-    """A compact, bounded description of the cloned repo for the brief prompt.
-
-    File paths (noise dirs excluded, capped), the package manifest's scripts and
-    dependency names when present, and the README head — enough grounding to
-    name real files without shipping the whole tree.
-    """
-    paths: list[str] = []
-    truncated = False
-    for path in sorted(repo_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(repo_dir)
-        if any(part in _DIGEST_EXCLUDE_DIRS for part in rel.parts):
-            continue
-        if len(paths) >= _DIGEST_MAX_PATHS:
-            truncated = True
-            break
-        paths.append(str(rel))
-
-    sections = ["### Files", "\n".join(paths) or "(empty repository)"]
-    if truncated:
-        sections.append(f"(file list truncated at {_DIGEST_MAX_PATHS} paths)")
-
-    package_json = repo_dir / "package.json"
-    if package_json.is_file():
-        try:
-            manifest = json.loads(
-                package_json.read_text(encoding="utf-8", errors="ignore")
-            )
-        except ValueError:
-            manifest = {}
-        scripts = manifest.get("scripts") or {}
-        deps = sorted(
-            {**(manifest.get("dependencies") or {}),
-             **(manifest.get("devDependencies") or {})}
-        )
-        if scripts:
-            sections.append("### package.json scripts\n" + json.dumps(scripts, indent=2))
-        if deps:
-            sections.append("### Installed packages\n" + ", ".join(deps))
+def build_repo_digest(repo_dir: Path, profile: RepoProfile | None = None) -> str:
+    """Canonical repository profile plus a bounded README excerpt."""
+    sections = [
+        "### Canonical repository profile\n"
+        + render_profile(profile or profile_repository(repo_dir))
+    ]
 
     for readme_name in ("README.md", "README.rst", "README"):
         readme = repo_dir / readme_name

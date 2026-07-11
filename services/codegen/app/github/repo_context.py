@@ -1,90 +1,111 @@
-"""Compact repository context for grounding upstream planning agents.
-
-The agents service's feature-proposal step writes the specs codegen later
-implements. Written blind, those specs demand infrastructure the connected repo
-does not have; this module gives the "brain" a bounded, factual picture of the
-repo — its stack, layout, scripts, and README — fetched through the GitHub API
-(no clone), so proposals can name real files and stay inside the repo's actual
-capabilities. Served by ``GET /v1/connections/{project_id}/repo-context``.
-"""
+"""GitHub-backed materialization of the canonical RepoProfile schema."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
-import json
 import logging
+import tempfile
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import httpx
 
 from app.config import github_api_url
 from app.github.client import gh_client, gh_headers
+from app.profiling import RepoProfile, profile_repository
+from app.profiling.models import (
+    BranchProtection,
+    BranchProtectionStatus,
+    Uncertainty,
+    UncertaintyCode,
+)
 
 logger = logging.getLogger(__name__)
 
-#: Path cap: enough for a real app's full shape without shipping a monorepo.
-_MAX_PATHS = 400
-#: Directory prefixes that never inform a proposal (build output, vendored deps).
+_MAX_PATHS = 5000
+_MAX_CONTENT_FILES = 250
 _EXCLUDE_SEGMENTS = frozenset(
-    {".git", "node_modules", "dist", "build", ".next", "vendor",
-     "__pycache__", ".venv", "venv", "target", "coverage"}
+    {
+        ".git",
+        "node_modules",
+        "dist",
+        "build",
+        ".next",
+        "vendor",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "target",
+        "coverage",
+    }
 )
-_README_EXCERPT_CHARS = 2000
+_CONTENT_NAMES = frozenset(
+    {
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+        "pyproject.toml",
+        "uv.lock",
+        "poetry.lock",
+        "pdm.lock",
+        "requirements.txt",
+        "Pipfile",
+        "Pipfile.lock",
+        "go.mod",
+        "go.sum",
+        "Cargo.toml",
+        "Cargo.lock",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "gradle.lockfile",
+        "packages.lock.json",
+        "Makefile",
+        "makefile",
+        "AGENTS.md",
+    }
+)
 
 
-def _detect_framework(dependencies: set[str], paths: list[str]) -> str:
-    """Human-readable stack label from manifest dependencies + layout."""
-    if "next" in dependencies:
-        router = "App Router" if any(p.startswith("app/") for p in paths) else "Pages Router"
-        return f"Next.js ({router})"
-    for dep, label in (
-        ("react", "React"), ("vue", "Vue"), ("svelte", "Svelte"), ("angular", "Angular"),
-    ):
-        if dep in dependencies:
-            return label
-    if dependencies:
-        return "JavaScript/Node"
-    if any(p == "manage.py" for p in paths):
-        return "Django"
-    if any(p in ("pyproject.toml", "requirements.txt", "setup.py") for p in paths):
-        return "Python"
-    if "go.mod" in paths:
-        return "Go"
-    if "Cargo.toml" in paths:
-        return "Rust"
-    return "unknown"
-
-
-def _filtered_paths(tree: list[dict]) -> list[str]:
-    """ALL file paths from a git tree response, noise excluded (not capped).
-
-    The cap is applied only to the paths returned in the document; detection
-    (manifests, framework markers) must see the full list — trees list
-    alphabetically, so a root ``package.json`` sorts after a large ``app/``
-    subtree and would fall outside any prefix cap.
-    """
+def _safe_paths(tree: list[dict]) -> list[str]:
     paths: list[str] = []
     for entry in tree:
         if entry.get("type") != "blob":
             continue
-        path = str(entry.get("path") or "")
-        if not path or any(seg in _EXCLUDE_SEGMENTS for seg in path.split("/")):
+        raw = str(entry.get("path") or "")
+        path = PurePosixPath(raw)
+        if (
+            not raw
+            or path.is_absolute()
+            or ".." in path.parts
+            or any(segment in _EXCLUDE_SEGMENTS for segment in path.parts)
+        ):
             continue
-        paths.append(path)
-    return paths
+        paths.append(path.as_posix())
+    return sorted(set(paths))
 
 
-async def _fetch_json(c: httpx.AsyncClient, url: str, token: str, **params) -> dict | None:
-    """GET a GitHub JSON resource; ``None`` on 404 (missing file is not an error)."""
-    resp = await c.get(url, headers=gh_headers(token), params=params or None)
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, dict) else None
+def _needs_content(path: str) -> bool:
+    name = PurePosixPath(path).name
+    return (
+        name in _CONTENT_NAMES
+        or name.startswith("requirements")
+        and name.endswith(".txt")
+        or path.startswith(".github/workflows/")
+        or path.endswith(".go")
+        and name == "main.go"
+        or path.endswith((".csproj", ".fsproj"))
+    )
 
 
 def _decode_content(payload: dict | None) -> str:
-    """Decode a contents-API payload's base64 body (empty string on any miss)."""
     if not payload or payload.get("encoding") != "base64":
         return ""
     try:
@@ -93,64 +114,115 @@ def _decode_content(payload: dict | None) -> str:
         return ""
 
 
+async def _fetch_content(
+    client: httpx.AsyncClient,
+    *,
+    api: str,
+    repo: str,
+    branch: str,
+    token: str,
+    path: str,
+) -> tuple[str, str]:
+    response = await client.get(
+        f"{api}/repos/{repo}/contents/{quote(path, safe='/')}",
+        headers=gh_headers(token),
+        params={"ref": branch},
+    )
+    if response.status_code == 404:
+        return path, ""
+    response.raise_for_status()
+    payload = response.json()
+    return path, _decode_content(payload if isinstance(payload, dict) else None)
+
+
+async def _branch_protection(
+    client: httpx.AsyncClient, *, api: str, repo: str, branch: str, token: str
+) -> BranchProtection:
+    response = await client.get(
+        f"{api}/repos/{repo}/branches/{quote(branch, safe='')}",
+        headers=gh_headers(token),
+    )
+    if response.status_code in {403, 404}:
+        return BranchProtection()
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("protected"), bool):
+        return BranchProtection()
+    return BranchProtection(
+        status=(
+            BranchProtectionStatus.protected
+            if payload["protected"]
+            else BranchProtectionStatus.unprotected
+        ),
+        source="github_branch_metadata",
+    )
+
+
 async def fetch_repo_context(
     *,
     repo: str,
     branch: str,
     token: str,
     client: httpx.AsyncClient | None = None,
-) -> dict:
-    """Build the repo-context document for ``repo`` at ``branch``.
-
-    One tree listing plus two content fetches (manifest, README) — cheap enough
-    to serve per proposal run without caching.
-    """
+) -> RepoProfile:
+    """Build the canonical profile from a bounded GitHub repository snapshot."""
     api = github_api_url()
-    async with gh_client(client) as c:
-        tree_resp = await c.get(
-            f"{api}/repos/{repo}/git/trees/{branch}",
+    async with gh_client(client) as github:
+        tree_response = await github.get(
+            f"{api}/repos/{repo}/git/trees/{quote(branch, safe='')}",
             headers=gh_headers(token),
             params={"recursive": "1"},
         )
-        tree_resp.raise_for_status()
-        tree_json = tree_resp.json()
-        all_paths = _filtered_paths(tree_json.get("tree", []))
-        paths = all_paths[:_MAX_PATHS]
-        # Truncated if we capped it — or if GitHub itself truncated the tree
-        # listing (huge repos), in which case even all_paths is incomplete.
-        truncated = len(all_paths) > _MAX_PATHS or bool(tree_json.get("truncated"))
-
-        scripts: dict = {}
-        dependencies: set[str] = set()
-        if "package.json" in all_paths:
-            manifest_raw = _decode_content(
-                await _fetch_json(
-                    c, f"{api}/repos/{repo}/contents/package.json", token, ref=branch
+        tree_response.raise_for_status()
+        tree_payload = tree_response.json()
+        all_paths = _safe_paths(tree_payload.get("tree", []))
+        tree_truncated = (
+            bool(tree_payload.get("truncated")) or len(all_paths) > _MAX_PATHS
+        )
+        snapshot_paths = all_paths[:_MAX_PATHS]
+        content_candidates = [path for path in snapshot_paths if _needs_content(path)]
+        content_truncated = len(content_candidates) > _MAX_CONTENT_FILES
+        content_candidates = content_candidates[:_MAX_CONTENT_FILES]
+        protection, contents = await asyncio.gather(
+            _branch_protection(github, api=api, repo=repo, branch=branch, token=token),
+            asyncio.gather(
+                *(
+                    _fetch_content(
+                        github,
+                        api=api,
+                        repo=repo,
+                        branch=branch,
+                        token=token,
+                        path=path,
+                    )
+                    for path in content_candidates
                 )
-            )
-            try:
-                manifest = json.loads(manifest_raw) if manifest_raw else {}
-            except ValueError:
-                manifest = {}
-            if isinstance(manifest.get("scripts"), dict):
-                scripts = manifest["scripts"]
-            for key in ("dependencies", "devDependencies"):
-                section = manifest.get(key)
-                if isinstance(section, dict):
-                    dependencies.update(section)
-
-        readme = _decode_content(
-            await _fetch_json(c, f"{api}/repos/{repo}/readme", token, ref=branch)
+            ),
         )
 
-    return {
-        "repo": repo,
-        "branch": branch,
-        "framework": _detect_framework(dependencies, all_paths),
-        "scripts": scripts,
-        "dependencies": sorted(dependencies),
-        "paths": paths,
-        "paths_truncated": truncated,
-        "has_test_script": bool(scripts.get("test")),
-        "readme_excerpt": readme[:_README_EXCERPT_CHARS],
-    }
+    with tempfile.TemporaryDirectory(prefix="apdl-profile-") as temp:
+        root = Path(temp)
+        content_by_path = dict(contents)
+        for path in snapshot_paths:
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content_by_path.get(path, ""), encoding="utf-8")
+        profile = profile_repository(
+            root,
+            repo=repo,
+            branch=branch,
+            branch_protection=protection,
+            paths_truncated=tree_truncated,
+        )
+    if content_truncated:
+        profile.uncertainties.append(
+            Uncertainty(
+                code=UncertaintyCode.incomplete_remote_snapshot,
+                message=(
+                    "Relevant file contents exceeded the remote snapshot budget; "
+                    "some manifest or instruction evidence may be incomplete."
+                ),
+                paths=[],
+            )
+        )
+    return profile
