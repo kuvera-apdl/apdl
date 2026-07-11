@@ -7,6 +7,10 @@ import {
   externalCIStatusSchema,
   githubPRStatusSchema,
 } from './codegen-observations'
+import {
+  runtimeAcceptancePlanSchema,
+  runtimeEvidenceAssessmentSchema,
+} from './codegen-runtime'
 
 // One LLM prompt the run actually sent (brief compilation, an edit instruction
 // handed to the coding agent, or a pre-push diff review). `system` is null for
@@ -490,6 +494,7 @@ export const verificationCoverageSchema = z
     disposition_reason: z.string().min(1),
     changed_test_paths: z.array(z.string()),
     changed_workflow_paths: z.array(z.string()),
+    policy_authorized_workflow_paths: z.array(z.string()),
     changed_protected_workflow_paths: z.array(z.string()),
     relaxed_workflow_paths: z.array(z.string()),
     items: z.array(verificationCoverageItemSchema),
@@ -499,6 +504,7 @@ export const verificationCoverageSchema = z
     const pathFields = [
       'changed_test_paths',
       'changed_workflow_paths',
+      'policy_authorized_workflow_paths',
       'changed_protected_workflow_paths',
       'relaxed_workflow_paths',
     ] as const
@@ -516,6 +522,26 @@ export const verificationCoverageSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'changed protected workflows must be changed workflows',
+      })
+    }
+    if (
+      coverage.policy_authorized_workflow_paths.some(
+        (path) => !coverage.changed_workflow_paths.includes(path),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'policy-authorized workflows must be changed workflows',
+      })
+    }
+    if (
+      coverage.policy_authorized_workflow_paths.some(
+        (path) => coverage.relaxed_workflow_paths.includes(path),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'a workflow cannot be both authorized and relaxed',
       })
     }
   })
@@ -739,6 +765,8 @@ export const changesetSchema = z
     dependency_slice: dependencySliceSchema.nullable(),
     verification_plan: verificationPlanSchema.nullable(),
     verification_coverage: verificationCoverageSchema.nullable(),
+    runtime_acceptance_plan: runtimeAcceptancePlanSchema.nullable(),
+    runtime_evidence_assessment: runtimeEvidenceAssessmentSchema.nullable(),
     review_verdict: reviewVerdictSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),

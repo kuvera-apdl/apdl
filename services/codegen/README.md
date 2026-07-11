@@ -48,20 +48,27 @@ All `/v1` endpoints require the `X-APDL-Internal-Token` header when
 | POST | `/v1/changesets` | Enqueue a changeset for a connected project |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
 | GET | `/v1/changesets/{id}` | Fetch one changeset |
+| GET | `/v1/changesets/{id}/observations` | Read append-only GitHub PR/CI and repair observations |
+| GET | `/v1/changesets/{id}/runtime-observations` | Read exact-head GitHub Actions logs/artifact evidence |
 | POST | `/v1/changesets/{id}/abandon` | Abandon an un-merged changeset |
-| POST | `/webhooks/github` | HMAC-verified CI ingestion (`check_run`/`pull_request`) |
+| POST | `/webhooks/github` | HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
 ## Changeset lifecycle
 
-```
-queued → cloning → editing → testing ──▶ tests_failed (generation/safety failure)
-                                  └─▶ pushing → pr_open → ci_running ──▶ ci_passed
-                                                              ├─▶ ci_failed → bounded repair → ci_running
-                                                              └─▶ unverified_external_ci
+```text
+changeset_status: queued → cloning → editing → pushing → pr_open
+                                                        ├─GitHub merge──→ merged
+                                                        └─GitHub close──→ abandoned
 
-GitHub pull-request events move an open changeset to `merged` or `abandoned`.
+external_ci_status: pending | passed | failed | unverified_external_ci
+ci_remediation_status: idle | diagnosing | repairing | awaiting_ci | resolved | exhausted
+github_pr_status: draft | open | merged | closed
 ```
+
+CI is not a changeset lifecycle state. A repository with no configured CI stays
+an observable open PR and settles as `unverified_external_ci`; it is never
+reported as passed and never remains in an indefinite `ci_running` state.
 
 Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 `InvalidTransition` (HTTP 409).
@@ -99,6 +106,23 @@ before opening the PR. Orphan recovery: queued changesets are re-enqueued at
 startup (the queued → cloning transition is the dedup claim); active-state
 orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
 (default 300s) once older than twice the job budget.
+
+Runtime workflow generation is opt-in per repository. The only policy shape is:
+
+```json
+{
+  "runtime_acceptance": {
+    "schema_version": "runtime_acceptance_policy@1",
+    "workflow_changes_authorized": true,
+    "generated_workflow_path": ".github/workflows/apdl-runtime-acceptance.yml"
+  }
+}
+```
+
+When authorized, only that exact workflow path is exempted from the general
+protected-path gate. Other workflow edits remain protected. GitHub executes the
+generated job and owns its result; absent runs, logs, or required artifacts are
+stored as unverified evidence, never as successful CI.
 
 Two auxiliary LLM passes bracket the edit. Low-risk work may skip them when the
 model is unavailable; medium/high-risk work fails closed. `CODEGEN_BRIEF` compiles the
@@ -160,7 +184,12 @@ read-only rootfs. Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
 The autonomous loop runs once these external pieces are set up:
 
 1. **Register a GitHub App** (org-level) with minimal permissions — `contents:
-   write`, `pull_requests: write`, `checks: read`, `metadata: read`. Set
+   write`, `pull_requests: write`, `checks: read`, `actions: read`, `metadata:
+   read`. `actions: read` is required only to collect exact-head workflow jobs,
+   bounded failure logs, and runtime artifacts; it does not let APDL approve CI
+   or merge. Existing installations must approve the added permission before
+   runtime evidence can be collected; until then it remains explicitly
+   unverified. Set
    `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`. Customers install it on their
    repos; record each installation via `POST /v1/connections`.
 2. **Provision the coding agent.** Make `aider` available where the editor runs
@@ -170,13 +199,15 @@ The autonomous loop runs once these external pieces are set up:
    `ANTHROPIC_API_KEY`). Optionally set each repo's test command via the
    connection `policy.test_cmd` (otherwise it is auto-detected).
 3. **Add a repo webhook** → `POST /webhooks/github`, secret
-   `GITHUB_WEBHOOK_SECRET`, events `check_run` + `pull_request`.
+   `GITHUB_WEBHOOK_SECRET`, events `pull_request`, `check_run`, `check_suite`,
+   and `status`. Polling remains the recovery path for missed deliveries.
 4. **Enable GitHub branch protection/rulesets** on the default branch (require PR,
    reviews, and green checks). GitHub is the enforcement and merge authority.
 
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
 service) → `POST /v1/changesets` → the job mints a repo token, runs the Aider
 editor in a sandboxed clone, runs deterministic pre-push gates,
-pushes a branch, and opens a **draft PR** → the repo's CI runs →
-the webhook records `ci_passed` or feeds failure annotations into a bounded
-same-branch repair → GitHub reviews/rulesets decide readiness and merge.
+pushes a branch, and opens a PR (draft when policy or evidence requires it) →
+the repo's CI runs → the webhook or poller records GitHub's exact-head external
+CI status and feeds bounded logs/artifacts into same-branch repair → GitHub
+reviews/rulesets decide readiness and merge.

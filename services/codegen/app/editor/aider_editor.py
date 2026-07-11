@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 import platform
@@ -77,6 +78,13 @@ from app.requirements import (
     render_requirement_ledger,
 )
 from app.requirements.models import ImplementationStatus, RequirementLedger
+from app.runtime.github_actions import render_github_actions_workflow
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
+from app.runtime.planner import build_runtime_acceptance_plan
+from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
 from app.semantic_review import (
     ModelResponseStatus,
@@ -107,6 +115,28 @@ _ERR_TAIL = 800  # how much subprocess output to surface on a generic failure
 # reads to fix the change, so they get a much larger budget: a build/test log's
 # real error (failing file, import, assertion, stack) needs room to survive.
 _VERIFY_ERR_TAIL = 6000
+
+_PROFILE_INPUT_NAMES = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "uv.lock",
+    "go.mod",
+    "Cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
+    "pom.xml",
+    "global.json",
+}
+
+
+def _profile_inputs_changed(paths: list[str]) -> bool:
+    return any(
+        path.startswith(".github/workflows/")
+        or path.rsplit("/", 1)[-1] in _PROFILE_INPUT_NAMES
+        or path.endswith((".csproj", ".fsproj", ".sln"))
+        for path in paths
+    )
 
 
 def _tail(text: str, limit: int = _ERR_TAIL) -> str:
@@ -550,7 +580,12 @@ class AiderEditor:
         verification_coverage: VerificationCoverage | None = (
             request.verification_coverage
         )
+        runtime_acceptance_plan: RuntimeAcceptancePlan | None = (
+            request.runtime_acceptance_plan
+        )
+        generated_runtime_workflow: GeneratedRuntimeWorkflowAttestation | None = None
         review_verdict: ReviewVerdict | None = None
+        gates_policy = dict(request.gates_policy or {})
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -564,8 +599,54 @@ class AiderEditor:
                 dependency_slice=dependency_slice,
                 verification_plan=verification_plan,
                 verification_coverage=verification_coverage,
+                runtime_acceptance_plan=runtime_acceptance_plan,
+                generated_runtime_workflow=generated_runtime_workflow,
                 review_verdict=review_verdict,
             )
+
+        async def synchronize_runtime_workflow(
+            profile: RepoProfile,
+            plan: RuntimeAcceptancePlan,
+        ) -> tuple[bool, str | None]:
+            """Write only the policy-authorized generated workflow when needed."""
+            if (
+                not request.runtime_acceptance_policy.workflow_changes_authorized
+                or not plan.checks
+            ):
+                return False, None
+            workflow_relative = (
+                request.runtime_acceptance_policy.generated_workflow_path
+            )
+            workflow_path = repo_dir / workflow_relative
+            desired = render_github_actions_workflow(
+                plan,
+                profile,
+                policy=request.runtime_acceptance_policy,
+            )
+            if workflow_path.exists() and workflow_path.read_text(
+                encoding="utf-8"
+            ) == desired:
+                return False, None
+            workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            workflow_path.write_text(desired, encoding="utf-8")
+            rc, out = await self._git(repo_dir, ["add", "--", workflow_relative])
+            if rc != 0:
+                return (
+                    False,
+                    "could not stage the authorized runtime workflow: "
+                    + _tail(out),
+                )
+            rc, out = await self._git(
+                repo_dir,
+                ["commit", "-m", "chore(ci): add runtime acceptance evidence"],
+            )
+            if rc != 0:
+                return (
+                    False,
+                    "could not commit the authorized runtime workflow: "
+                    + _tail(out),
+                )
+            return True, None
 
         try:
             # 1. Clone with one-shot auth. Repairs clone the existing PR branch;
@@ -608,7 +689,9 @@ class AiderEditor:
             # 2. Probe the repo: resolve the verification command (connection
             #    policy first, then detect) and the agent-facing testing reality.
             probe = _probe_repo(repo_dir, request.test_cmd)
-            repo_profile = probe.profile or profile_repository(repo_dir)
+            repo_profile = (probe.profile or profile_repository(repo_dir)).model_copy(
+                update={"repo": request.repo, "branch": request.branch}
+            )
 
             # 2b. Compile one strict, stable ledger before any model call. A
             # same-PR repair reuses the original ledger and IDs verbatim.
@@ -638,6 +721,30 @@ class AiderEditor:
             verification_plan = build_verification_plan(
                 requirement_ledger, repo_profile
             )
+            runtime_acceptance_plan = build_runtime_acceptance_plan(
+                repo_profile,
+                verification_plan,
+                policy=request.runtime_acceptance_policy,
+            )
+            workflow_changed, workflow_error = await synchronize_runtime_workflow(
+                repo_profile, runtime_acceptance_plan
+            )
+            if workflow_error:
+                return fail(workflow_error)
+            if workflow_changed:
+                # The generated file is now a repository fact. Rebind both plans
+                # to the profile that GitHub will actually receive.
+                repo_profile = profile_repository(repo_dir).model_copy(
+                    update={"repo": request.repo, "branch": request.branch}
+                )
+                verification_plan = build_verification_plan(
+                    requirement_ledger, repo_profile
+                )
+                runtime_acceptance_plan = build_runtime_acceptance_plan(
+                    repo_profile,
+                    verification_plan,
+                    policy=request.runtime_acceptance_policy,
+                )
 
             # 2c. Resolve every explicitly named direct dependency from an
             # isolated frozen install before the model sees an API claim. The
@@ -752,7 +859,8 @@ class AiderEditor:
             task_text = (
                 f"{task_text.rstrip()}\n\n"
                 f"{render_requirement_ledger(requirement_ledger)}\n\n"
-                f"{render_verification_plan(verification_plan)}"
+                f"{render_verification_plan(verification_plan)}\n\n"
+                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.workflow_changes_authorized)}"
             )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
@@ -790,6 +898,18 @@ class AiderEditor:
                     render_verification_plan(verification_plan), encoding="utf-8"
                 )
                 argv += ["--read", str(verification_file)]
+            if runtime_acceptance_plan is not None:
+                runtime_file = work / "RUNTIME_ACCEPTANCE_PLAN.md"
+                runtime_file.write_text(
+                    render_runtime_acceptance_plan(
+                        runtime_acceptance_plan,
+                        workflow_changes_authorized=(
+                            request.runtime_acceptance_policy.workflow_changes_authorized
+                        ),
+                    ),
+                    encoding="utf-8",
+                )
+                argv += ["--read", str(runtime_file)]
             if contract_bundle and contract_bundle.resolutions:
                 contracts_file = work / "CONTRACTS.md"
                 contracts_file.write_text(
@@ -890,8 +1010,64 @@ class AiderEditor:
                     )
                 _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
                 dependency_slice = build_dependency_slice(repo_dir, changed_paths)
+                if _profile_inputs_changed(changed_paths):
+                    repo_profile = profile_repository(repo_dir).model_copy(
+                        update={"repo": request.repo, "branch": request.branch}
+                    )
+                    verification_plan = build_verification_plan(
+                        requirement_ledger, repo_profile
+                    )
+                    runtime_acceptance_plan = build_runtime_acceptance_plan(
+                        repo_profile,
+                        verification_plan,
+                        policy=request.runtime_acceptance_policy,
+                    )
+                    workflow_changed, workflow_error = (
+                        await synchronize_runtime_workflow(
+                            repo_profile, runtime_acceptance_plan
+                        )
+                    )
+                    if workflow_error:
+                        return fail(workflow_error)
+                    if workflow_changed:
+                        # A manifest/workflow edit can change the exact runtime
+                        # command or artifact plan. Commit the regenerated file,
+                        # then recompute every diff-derived evidence artifact.
+                        repo_profile = profile_repository(repo_dir).model_copy(
+                            update={"repo": request.repo, "branch": request.branch}
+                        )
+                        verification_plan = build_verification_plan(
+                            requirement_ledger, repo_profile
+                        )
+                        runtime_acceptance_plan = build_runtime_acceptance_plan(
+                            repo_profile,
+                            verification_plan,
+                            policy=request.runtime_acceptance_policy,
+                        )
+                        rc, names = await self._git(
+                            repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                        )
+                        if rc != 0:
+                            return fail("could not inspect regenerated workflow diff")
+                        changed_paths = [
+                            path for path in names.splitlines() if path.strip()
+                        ]
+                        _, diff_text = await self._git(
+                            repo_dir, ["diff", f"{base}..HEAD"]
+                        )
+                        dependency_slice = build_dependency_slice(
+                            repo_dir, changed_paths
+                        )
                 verification_coverage = evaluate_verification_coverage(
-                    verification_plan, changed_paths=changed_paths
+                    verification_plan,
+                    changed_paths=changed_paths,
+                    policy_authorized_workflow_paths=(
+                        [request.runtime_acceptance_policy.generated_workflow_path]
+                        if request.runtime_acceptance_policy.workflow_changes_authorized
+                        and request.runtime_acceptance_policy.generated_workflow_path
+                        in changed_paths
+                        else []
+                    ),
                 )
                 evidence_context = (
                     render_dependency_slice(dependency_slice)
@@ -1036,8 +1212,21 @@ class AiderEditor:
                             )
                 break
 
+            generated_path = (
+                request.runtime_acceptance_policy.generated_workflow_path
+                if request.runtime_acceptance_policy.workflow_changes_authorized
+                else None
+            )
+            material_changed_paths = [
+                path for path in changed_paths if path != generated_path
+            ]
+            if request.revert_sha is None and not material_changed_paths:
+                return fail(
+                    "The agent produced no material implementation change; the "
+                    "generated runtime workflow alone cannot satisfy the task."
+                )
             requirement_ledger = map_implementation_evidence(
-                requirement_ledger, changed_paths
+                requirement_ledger, material_changed_paths or changed_paths
             )
             if not requirement_ledger.ready_for_pull_request():
                 return fail(
@@ -1070,6 +1259,42 @@ class AiderEditor:
                         f"resolution; evidence invalidated: {rendered}"
                     )
 
+            if (
+                request.runtime_acceptance_policy.workflow_changes_authorized
+                and runtime_acceptance_plan is not None
+                and runtime_acceptance_plan.checks
+            ):
+                workflow_path = (
+                    repo_dir
+                    / request.runtime_acceptance_policy.generated_workflow_path
+                )
+                expected_workflow = render_github_actions_workflow(
+                    runtime_acceptance_plan,
+                    repo_profile,
+                    policy=request.runtime_acceptance_policy,
+                )
+                if (
+                    not workflow_path.is_file()
+                    or workflow_path.read_text(encoding="utf-8")
+                    != expected_workflow
+                ):
+                    return fail(
+                        "The policy-authorized runtime workflow does not match "
+                        "the deterministic renderer; branch NOT pushed."
+                    )
+                generated_runtime_workflow = GeneratedRuntimeWorkflowAttestation(
+                    path=request.runtime_acceptance_policy.generated_workflow_path,
+                    content_sha256=hashlib.sha256(
+                        expected_workflow.encode("utf-8")
+                    ).hexdigest(),
+                    runtime_acceptance_plan_sha256=(
+                        runtime_acceptance_plan.evidence_hash()
+                    ),
+                )
+                allowed = set(gates_policy.get("allowed_protected_paths") or [])
+                allowed.add(generated_runtime_workflow.path)
+                gates_policy["allowed_protected_paths"] = sorted(allowed)
+
             # Deterministic pre-push gates on the FULL diff, before anything
             # reaches the remote: a secret-bearing or protected-path change must
             # never land on GitHub, not merely be denied a PR. (The job runner
@@ -1078,7 +1303,7 @@ class AiderEditor:
                 diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text,
-                policy=request.gates_policy,
+                policy=gates_policy,
             )
             if not gate.passed:
                 return fail(
@@ -1119,6 +1344,8 @@ class AiderEditor:
                 dependency_slice=dependency_slice,
                 verification_plan=verification_plan,
                 verification_coverage=verification_coverage,
+                runtime_acceptance_plan=runtime_acceptance_plan,
+                generated_runtime_workflow=generated_runtime_workflow,
                 review_verdict=review_verdict,
             )
         finally:

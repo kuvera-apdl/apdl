@@ -108,6 +108,21 @@ describe('codegen observation history', () => {
     expect(changesetObservationHistorySchema.safeParse(bad).success).toBe(false)
   })
 
+  test('requires runtime evidence provenance as an observation ID and hash pair', () => {
+    const fixture = makeChangesetObservationHistory()
+    const bad = {
+      ...fixture,
+      remediation_attempts: [
+        {
+          ...fixture.remediation_attempts[0],
+          runtime_evidence_observation_id: `runtime_obs_${'a'.repeat(32)}`,
+        },
+      ],
+    }
+
+    expect(changesetObservationHistorySchema.safeParse(bad).success).toBe(false)
+  })
+
   test('rejects unknown nested observation fields', () => {
     const fixture = makeChangesetObservationHistory()
     const bad = {

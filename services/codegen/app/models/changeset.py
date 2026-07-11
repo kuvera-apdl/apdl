@@ -21,6 +21,7 @@ from app.models.observations import (
     GitHubPRStatus,
 )
 from app.requirements.models import RequirementLedger
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
@@ -159,6 +160,8 @@ class Changeset(BaseModel):
     dependency_slice: DependencySlice | None = None
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
+    runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
+    runtime_evidence_assessment: RuntimeEvidenceAssessment | None = None
     review_verdict: ReviewVerdict | None = None
     error: str | None = None
     created_at: datetime

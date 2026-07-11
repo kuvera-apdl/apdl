@@ -6,6 +6,8 @@ import {
 } from '@/api/schemas/codegen'
 import {
   makeReviewVerdict,
+  makeRuntimeAcceptancePlan,
+  makeRuntimeEvidenceAssessment,
   makeVerificationCoverage,
   makeVerificationPlan,
 } from '../helpers/fixtures'
@@ -45,6 +47,8 @@ const sample = {
   dependency_slice: null,
   verification_plan: null,
   verification_coverage: null,
+  runtime_acceptance_plan: null,
+  runtime_evidence_assessment: null,
   review_verdict: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
@@ -110,6 +114,30 @@ describe('codegen schemas', () => {
       verification_plan: {
         ...makeVerificationPlan(),
         extra: true,
+      },
+    }
+
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('parses strict runtime evidence without replacing the GitHub-owned CI projection', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      runtime_acceptance_plan: makeRuntimeAcceptancePlan(),
+      runtime_evidence_assessment: makeRuntimeEvidenceAssessment(),
+    })
+
+    expect(parsed.runtime_acceptance_plan?.checks[0].surface).toBe('api')
+    expect(parsed.runtime_evidence_assessment?.external_ci_status).toBe('pending')
+    expect(parsed.external_ci_status).toBe('passed')
+  })
+
+  it('rejects unknown runtime acceptance fields (strict)', () => {
+    const bad = {
+      ...sample,
+      runtime_acceptance_plan: {
+        ...makeRuntimeAcceptancePlan(),
+        declares_ci_passed: true,
       },
     }
 

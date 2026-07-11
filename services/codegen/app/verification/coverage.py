@@ -56,14 +56,18 @@ def evaluate_verification_coverage(
     *,
     changed_paths: Sequence[str],
     relaxed_workflow_paths: Sequence[str] = (),
+    policy_authorized_workflow_paths: Sequence[str] = (),
 ) -> VerificationCoverage:
     """Enforce coverage presence without claiming that any test has passed."""
     changed = _normalized_paths(changed_paths)
     relaxed = _normalized_paths(relaxed_workflow_paths)
+    authorized = _normalized_paths(policy_authorized_workflow_paths)
     tests = sorted(path for path in changed if is_test_path(path))
     workflows = sorted(path for path in changed if is_github_workflow_path(path))
+    if not set(authorized).issubset(workflows):
+        raise ValueError("Policy-authorized workflow paths must be changed workflows")
     changed_protected = sorted(
-        set(workflows).intersection(plan.protected_workflow_paths)
+        set(workflows).intersection(plan.protected_workflow_paths).difference(authorized)
     )
 
     if relaxed:
@@ -127,6 +131,7 @@ def evaluate_verification_coverage(
         disposition_reason=reason,
         changed_test_paths=tests,
         changed_workflow_paths=workflows,
+        policy_authorized_workflow_paths=authorized,
         changed_protected_workflow_paths=changed_protected,
         relaxed_workflow_paths=relaxed,
         items=items,

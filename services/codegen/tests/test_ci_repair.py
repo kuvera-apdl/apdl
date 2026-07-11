@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import app.jobs.repair as repair_module
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
 from app.jobs.repair import repair_failed_ci
@@ -21,17 +23,73 @@ from app.models.observations import (
     PullRequestObservation,
     RemediationDisposition,
 )
+from app.runtime.models import (
+    ArtifactFileEvidence,
+    GeneratedRuntimeWorkflowAttestation,
+    GeneratedRuntimeWorkflowExpectation,
+    RequirementRuntimeEvidence,
+    RuntimeAcceptancePlan,
+    RuntimeArtifactObservation,
+    RuntimeArtifactExpectation,
+    RuntimeCheck,
+    RuntimeCommand,
+    RuntimeEvidenceAssessment,
+    RuntimeEvidenceObservation,
+    RuntimeEvidenceStatus,
+    RuntimeEvidenceKind,
+    RuntimeJobLogEvidence,
+    RuntimeSurface,
+)
 from app.store import changesets as changeset_store
 from app.store.observations import (
     apply_ci_verification_observation,
     apply_pull_request_observation,
     list_ci_remediation_attempts,
 )
+from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 
 
 async def _mint(_installation_id: int, _repo: str) -> str:
     return "ghs_tok"
+
+
+def _repair_plan() -> RuntimeAcceptancePlan:
+    return RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+    )
+
+
+def _workflow_bound_repair_plan() -> RuntimeAcceptancePlan:
+    return RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+        checks=[
+            RuntimeCheck(
+                check_id="runtime_0123456789abcdef",
+                surface=RuntimeSurface.runtime,
+                requirement_ids=["REQ-001"],
+                command=RuntimeCommand(
+                    command="pytest -q", cwd=".", source_path="pyproject.toml"
+                ),
+                expected_artifacts=[
+                    RuntimeArtifactExpectation(
+                        artifact_name="apdl-runtime-evidence",
+                        evidence_kind=RuntimeEvidenceKind.structured_runtime,
+                        paths=["apdl-runtime-evidence.json"],
+                        requirement_ids=["REQ-001"],
+                    )
+                ],
+            )
+        ],
+        generated_workflow=GeneratedRuntimeWorkflowExpectation(
+            path=".github/workflows/apdl-runtime-acceptance.yml",
+            content_sha256="d" * 64,
+        ),
+    )
 
 
 def _failed_observation(
@@ -84,6 +142,9 @@ async def _seed_failed(
         github_pr_status="open",
         external_ci_status="pending",
     )
+    pool.store["changesets"]["cs-repair"]["runtime_acceptance_plan"] = (
+        _repair_plan().model_dump(mode="json")
+    )
     now = datetime.now(timezone.utc)
     pr_result = await apply_pull_request_observation(
         pool,
@@ -114,6 +175,78 @@ class _CountingEditor:
     async def implement(self, request: EditRequest) -> EditResult:
         self.requests.append(request)
         return self.result
+
+
+def _runtime_observation(
+    *,
+    head_sha: str,
+    observed_at: datetime,
+    identity: str,
+    marker: str,
+    ci_observation: CIVerificationObservation,
+) -> RuntimeEvidenceObservation:
+    artifact_text = f"{marker}: response payload did not contain the expected value"
+    log_text = f"{marker}: assertion failed in browser acceptance test"
+    return RuntimeEvidenceObservation(
+        observation_id=f"runtime_obs_{identity * 32}",
+        changeset_id="cs-repair",
+        repository="acme/widgets",
+        pr_number=7,
+        head_sha=head_sha,
+        ci_observation_id=ci_observation.observation_id,
+        ci_evidence_hash=ci_observation.evidence_hash(),
+        runtime_acceptance_plan_sha256=_repair_plan().evidence_hash(),
+        observed_at=observed_at,
+        artifacts=[
+            RuntimeArtifactObservation(
+                artifact_name="runtime_REQ-001_browser_report",
+                artifact_id=41,
+                workflow_run_id=31,
+                head_sha=head_sha,
+                status=RuntimeEvidenceStatus.observed,
+                requirement_ids=["REQ-001"],
+                files=[
+                    ArtifactFileEvidence(
+                        path="artifacts/browser-report.txt",
+                        content_sha256=hashlib.sha256(
+                            artifact_text.encode("utf-8")
+                        ).hexdigest(),
+                        byte_count=len(artifact_text.encode("utf-8")),
+                        text_excerpt=artifact_text,
+                    )
+                ],
+                github_url="https://github.com/acme/widgets/actions/runs/31",
+            )
+        ],
+        job_logs=[
+            RuntimeJobLogEvidence(
+                workflow_run_id=31,
+                job_id=32,
+                job_name="runtime acceptance",
+                head_sha=head_sha,
+                text_excerpt=log_text,
+                excerpt_byte_count=len(log_text.encode("utf-8")),
+                source_byte_count=len(log_text.encode("utf-8")),
+                truncated=False,
+                redacted=True,
+                github_url="https://github.com/acme/widgets/actions/runs/31/job/32",
+            )
+        ],
+        assessment=RuntimeEvidenceAssessment(
+            head_sha=head_sha,
+            external_ci_status=ExternalCIStatus.failed,
+            requirements=[
+                RequirementRuntimeEvidence(
+                    requirement_id="REQ-001",
+                    status=RuntimeEvidenceStatus.observed,
+                    artifact_names=["runtime_REQ-001_browser_report"],
+                )
+            ],
+        ),
+        collection_errors=[
+            f"job_log:actions_read_failed:31:32: {marker}: bounded collection diagnostic"
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -170,6 +303,158 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
 
 
 @pytest.mark.asyncio
+async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
+    monkeypatch,
+):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    workflow = ".github/workflows/apdl-runtime-acceptance.yml"
+    pool.store["connections"]["demo"]["policy"] = (
+        '{"runtime_acceptance":{"workflow_changes_authorized":true,'
+        '"generated_workflow_path":".github/workflows/'
+        'apdl-runtime-acceptance.yml"}}'
+    )
+    plan = _workflow_bound_repair_plan()
+    pool.store["changesets"]["cs-repair"]["runtime_acceptance_plan"] = (
+        plan.model_dump(mode="json")
+    )
+    editor = _CountingEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1},
+            changed_paths=[workflow],
+            diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
+            head_sha="head-forged",
+            runtime_acceptance_plan=plan,
+            generated_runtime_workflow=GeneratedRuntimeWorkflowAttestation(
+                path=workflow,
+                content_sha256="e" * 64,
+                runtime_acceptance_plan_sha256=plan.evidence_hash(),
+            ),
+        )
+    )
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    assert final is not None
+    assert final.head_sha == "head-failed"
+    assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    attempts = await list_ci_remediation_attempts(pool, "cs-repair")
+    assert any(
+        "protected path" in (attempt.error or "") for attempt in attempts
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_uses_latest_exact_head_runtime_evidence_with_event_provenance(
+    monkeypatch,
+):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed(
+        observation=_failed_observation(
+            name="quality gate",
+            summary="command failed without a GitHub annotation",
+        )
+    )
+    older = _runtime_observation(
+        head_sha=failed.head_sha,
+        observed_at=failed.observed_at + timedelta(seconds=1),
+        identity="a",
+        marker="OLDER_RUNTIME_EVIDENCE",
+        ci_observation=failed,
+    )
+    latest = _runtime_observation(
+        head_sha=failed.head_sha,
+        observed_at=failed.observed_at + timedelta(seconds=2),
+        identity="b",
+        marker="LATEST_RUNTIME_EVIDENCE",
+        ci_observation=failed,
+    )
+    assert (await apply_runtime_evidence_observation(pool, older)).inserted is True
+    assert (await apply_runtime_evidence_observation(pool, latest)).inserted is True
+    editor = _CountingEditor(EditResult(success=False, error="still failing"))
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    assert len(editor.requests) == 1
+    repair_spec = editor.requests[0].spec
+    assert latest.observation_id in repair_spec
+    assert latest.evidence_hash() in repair_spec
+    assert "LATEST_RUNTIME_EVIDENCE: assertion failed" in repair_spec
+    assert "LATEST_RUNTIME_EVIDENCE: response payload" in repair_spec
+    assert "LATEST_RUNTIME_EVIDENCE: bounded collection diagnostic" in repair_spec
+    assert "OLDER_RUNTIME_EVIDENCE" not in repair_spec
+    assert len(repair_spec.encode("utf-8")) < 24_000
+
+    events = await list_ci_remediation_attempts(
+        pool, "cs-repair", failed_head_sha=failed.head_sha
+    )
+    assert {event.runtime_evidence_observation_id for event in events} == {
+        latest.observation_id
+    }
+    assert {event.runtime_evidence_hash for event in events} == {
+        latest.evidence_hash()
+    }
+
+
+@pytest.mark.asyncio
+async def test_repair_excludes_runtime_evidence_from_a_stale_head(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    stale = _runtime_observation(
+        head_sha="head-stale",
+        observed_at=failed.observed_at + timedelta(seconds=1),
+        identity="c",
+        marker="STALE_RUNTIME_EVIDENCE",
+        ci_observation=failed,
+    )
+    stale_result = await apply_runtime_evidence_observation(pool, stale)
+    assert stale_result.inserted is True
+    assert stale_result.projected is False
+    editor = _CountingEditor(EditResult(success=False, error="still failing"))
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    assert len(editor.requests) == 1
+    repair_spec = editor.requests[0].spec
+    assert "No exact-head GitHub runtime evidence" in repair_spec
+    assert "STALE_RUNTIME_EVIDENCE" not in repair_spec
+    events = await list_ci_remediation_attempts(
+        pool, "cs-repair", failed_head_sha=failed.head_sha
+    )
+    assert all(event.runtime_evidence_observation_id is None for event in events)
+    assert all(event.runtime_evidence_hash is None for event in events)
+
+
+@pytest.mark.asyncio
+async def test_runtime_evidence_read_failure_cannot_wedge_a_claim(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+
+    async def broken_lookup(*_args, **_kwargs):
+        raise RuntimeError("runtime journal unavailable")
+
+    monkeypatch.setattr(
+        repair_module, "latest_runtime_evidence_observation", broken_lookup
+    )
+    editor = _CountingEditor(EditResult(success=False, error="still failing"))
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    assert len(editor.requests) == 1
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    assert final is not None
+    assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    events = await list_ci_remediation_attempts(pool, "cs-repair")
+    assert {event.event_sequence for event in events} == {1, 2}
+
+
+@pytest.mark.asyncio
 async def test_repeated_delivery_of_same_failure_cannot_launch_duplicate_repair(
     monkeypatch,
 ):
@@ -177,7 +462,15 @@ async def test_repeated_delivery_of_same_failure_cannot_launch_duplicate_repair(
     monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
     pool, failed = await _seed_failed()
     editor = _CountingEditor(
-        EditResult(success=False, error="agent could not repair")
+        EditResult(
+            success=False,
+            error="agent could not repair",
+            runtime_acceptance_plan=RuntimeAcceptancePlan(
+                source_ledger_sha256="d" * 64,
+                repo_profile_sha256="e" * 64,
+                verification_plan_sha256="f" * 64,
+            ),
+        )
     )
 
     await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
@@ -190,6 +483,7 @@ async def test_repeated_delivery_of_same_failure_cannot_launch_duplicate_repair(
     assert final.head_sha == "head-failed"
     assert final.ci_retry_count == 1
     assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    assert final.runtime_acceptance_plan == _repair_plan()
     assert len(events) == 2
     assert {event.disposition for event in events} == {
         RemediationDisposition.diagnosing,

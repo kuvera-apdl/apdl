@@ -26,6 +26,8 @@ from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.models.observations import ExternalCIStatus, PullRequestObservation
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
+from app.runtime.github_actions import workflow_attestation_is_valid
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
@@ -67,6 +69,7 @@ def _pr_body(
     ledger: RequirementLedger,
     plan: VerificationPlan | None,
     coverage: VerificationCoverage | None,
+    runtime_plan: RuntimeAcceptancePlan | None,
     review: ReviewVerdict | None,
 ) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
@@ -101,6 +104,15 @@ def _pr_body(
     verification_text += (
         "- These are expected-coverage facts only; GitHub CI is authoritative."
     )
+    if runtime_plan is None:
+        runtime_text = "- Runtime acceptance plan unavailable."
+    else:
+        runtime_text = (
+            f"- Planned runtime checks: {len(runtime_plan.checks)}\n"
+            f"- Explicit runtime blockers: {len(runtime_plan.blockers)}\n"
+            "- Runtime evidence is produced and judged by GitHub Actions; missing "
+            "artifacts remain unverified."
+        )
     review_text = (
         f"- Decision: `{review.overall_decision.value}`\n"
         f"- Reviewed diff SHA-256: `{review.reviewed_diff_sha256}`\n"
@@ -112,6 +124,7 @@ def _pr_body(
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
         f"## Verification coverage\n\n{verification_text}\n\n"
+        f"## Runtime acceptance\n\n{runtime_text}\n\n"
         f"## Semantic review\n\n{review_text}\n\n"
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
@@ -189,6 +202,10 @@ async def _execute_changeset_job(
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
         policy = connection.policy if isinstance(connection.policy, dict) else {}
+        runtime_policy = RuntimeAcceptancePolicy.model_validate(
+            policy.get("runtime_acceptance") or {}
+        )
+        gates_policy = dict(policy.get("gates") or {})
         revert_sha = changeset.task.context.get("revert_sha")
         result = await editor.implement(
             EditRequest(
@@ -201,7 +218,8 @@ async def _execute_changeset_job(
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
                 test_cmd=policy.get("test_cmd"),
-                gates_policy=policy.get("gates"),
+                gates_policy=gates_policy,
+                runtime_acceptance_policy=runtime_policy,
                 revert_sha=revert_sha if isinstance(revert_sha, str) else None,
                 risk_level=str(changeset.task.context.get("risk_level") or "low").lower(),
             )
@@ -242,6 +260,10 @@ async def _execute_changeset_job(
                 changeset_id,
                 plan=result.verification_plan,
                 coverage=result.verification_coverage,
+            )
+        if result.runtime_acceptance_plan is not None:
+            await store.set_runtime_acceptance_plan(
+                pool, changeset_id, result.runtime_acceptance_plan
             )
         if result.review_verdict is not None:
             await store.set_review_verdict(pool, changeset_id, result.review_verdict)
@@ -297,11 +319,20 @@ async def _execute_changeset_job(
         # Backstop only: the editor already ran these gates on the FULL diff
         # before pushing. This re-check (on the possibly capped diff_text)
         # guards editors that don't gate themselves (e.g. a fake/custom Editor).
+        backstop_policy = dict(gates_policy)
+        if workflow_attestation_is_valid(
+            result.generated_runtime_workflow,
+            plan=result.runtime_acceptance_plan,
+            policy=runtime_policy,
+        ):
+            allowed = set(backstop_policy.get("allowed_protected_paths") or [])
+            allowed.add(result.generated_runtime_workflow.path)
+            backstop_policy["allowed_protected_paths"] = sorted(allowed)
         gate = evaluate_pre_push(
             diff_stat=result.diff_stat,
             changed_paths=result.changed_paths,
             diff_text=result.diff_text,
-            policy=policy.get("gates"),
+            policy=backstop_policy,
         )
         if not gate.passed:
             await store.transition_changeset(
@@ -332,7 +363,16 @@ async def _execute_changeset_job(
             result.review_verdict is not None
             and result.review_verdict.overall_decision.value == "unverified"
         )
-        draft = risk != "low" or lacks_external_ci or semantic_unverified
+        runtime_unverified = bool(
+            result.runtime_acceptance_plan
+            and result.runtime_acceptance_plan.blockers
+        )
+        draft = (
+            risk != "low"
+            or lacks_external_ci
+            or semantic_unverified
+            or runtime_unverified
+        )
         pr = await open_pr(
             repo=connection.repo,
             head=result.branch or branch,
@@ -343,6 +383,7 @@ async def _execute_changeset_job(
                 result.requirement_ledger,
                 result.verification_plan,
                 result.verification_coverage,
+                result.runtime_acceptance_plan,
                 result.review_verdict,
             ),
             token=token,

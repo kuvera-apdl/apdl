@@ -15,6 +15,10 @@ from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.profiling import RepoProfile
 from app.requirements import compile_requirement_ledger
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
 from app.semantic_review import assemble_review_verdict
 from app.verification import build_verification_plan, evaluate_verification_coverage
 
@@ -126,6 +130,16 @@ def test_parse_result_maps_success_json():
         diff_text="diff --git a/a.py b/a.py\n+changed",
         model_response_text=None,
     )
+    runtime_plan = RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+    )
+    workflow = GeneratedRuntimeWorkflowAttestation(
+        path=".github/workflows/apdl-runtime-acceptance.yml",
+        content_sha256="d" * 64,
+        runtime_acceptance_plan_sha256=runtime_plan.evidence_hash(),
+    )
     out = json.dumps({
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
@@ -137,6 +151,8 @@ def test_parse_result_maps_success_json():
         "dependency_slice": DependencySlice().model_dump(mode="json"),
         "verification_plan": plan.model_dump(mode="json"),
         "verification_coverage": coverage.model_dump(mode="json"),
+        "runtime_acceptance_plan": runtime_plan.model_dump(mode="json"),
+        "generated_runtime_workflow": workflow.model_dump(mode="json"),
         "review_verdict": review.model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
@@ -150,6 +166,8 @@ def test_parse_result_maps_success_json():
     assert res.dependency_slice == DependencySlice()
     assert res.verification_plan == plan
     assert res.verification_coverage == coverage
+    assert res.runtime_acceptance_plan == runtime_plan
+    assert res.generated_runtime_workflow == workflow
     assert res.review_verdict == review
 
 

@@ -209,6 +209,7 @@ class VerificationCoverage(StrictModel):
     disposition_reason: str = Field(min_length=1)
     changed_test_paths: list[str] = Field(default_factory=list)
     changed_workflow_paths: list[str] = Field(default_factory=list)
+    policy_authorized_workflow_paths: list[str] = Field(default_factory=list)
     changed_protected_workflow_paths: list[str] = Field(default_factory=list)
     relaxed_workflow_paths: list[str] = Field(default_factory=list)
     items: list[VerificationCoverageItem] = Field(default_factory=list)
@@ -218,6 +219,7 @@ class VerificationCoverage(StrictModel):
         for field_name in (
             "changed_test_paths",
             "changed_workflow_paths",
+            "policy_authorized_workflow_paths",
             "changed_protected_workflow_paths",
             "relaxed_workflow_paths",
         ):
@@ -228,4 +230,12 @@ class VerificationCoverage(StrictModel):
             self.changed_workflow_paths
         ):
             raise ValueError("changed protected workflows must be changed workflows")
+        if not set(self.policy_authorized_workflow_paths).issubset(
+            self.changed_workflow_paths
+        ):
+            raise ValueError("policy-authorized workflows must be changed workflows")
+        if set(self.policy_authorized_workflow_paths).intersection(
+            self.relaxed_workflow_paths
+        ):
+            raise ValueError("a workflow cannot be both authorized and relaxed")
         return self

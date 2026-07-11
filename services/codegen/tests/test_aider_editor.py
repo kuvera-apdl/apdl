@@ -37,6 +37,7 @@ from app.profiling.models import (
     RepoProfile,
     TestFacility as ProfileTestFacility,
 )
+from app.runtime.models import RuntimeAcceptancePolicy
 from app.verification import CoverageDisposition, PlanDisposition
 
 
@@ -394,6 +395,8 @@ class _Pipeline:
         test_results=None,
         diff_text=None,
         changed_paths: list[str] | None = None,
+        repo_files: dict[str, str] | None = None,
+        edit_files: dict[str, str] | None = None,
     ):
         self.aider_messages: list[str] = []
         self.pushed = False
@@ -401,11 +404,19 @@ class _Pipeline:
         self._test_results = list(test_results or [])
         self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
         self._changed_paths = list(changed_paths or ["app/x.ts\n"])
+        repo_path: Path | None = None
 
         async def fake_git(cwd, args, **_kwargs):
+            nonlocal repo_path
             self.git_calls.append(list(args))
             if args[0] == "clone":
-                Path(args[-1]).mkdir(parents=True)
+                repo = Path(args[-1])
+                repo_path = repo
+                repo.mkdir(parents=True)
+                for relative, content in (repo_files or {}).items():
+                    target = repo / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content)
             if args[0] == "diff" and "--name-only" in args:
                 value = self._changed_paths[0]
                 if len(self._changed_paths) > 1:
@@ -423,6 +434,11 @@ class _Pipeline:
 
         async def fake_exec(argv, **_kwargs):
             self.aider_messages.append(argv[argv.index("--message") + 1])
+            assert repo_path is not None
+            for relative, content in (edit_files or {}).items():
+                target = repo_path / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
             return 0, "aider ok"
 
         monkeypatch.setattr(editor, "_git", fake_git)
@@ -542,6 +558,7 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
     assert "# Canonical requirement ledger" in pipeline.aider_messages[0]
     assert '"original_source_text": "Build a bot filter."' in pipeline.aider_messages[0]
     assert "# GitHub CI verification plan" in pipeline.aider_messages[0]
+    assert "# GitHub CI Runtime Acceptance Plan" in pipeline.aider_messages[0]
     assert result.verification_plan is not None
     assert result.verification_plan.disposition is PlanDisposition.unverified_external_ci
     assert result.verification_coverage is not None
@@ -549,6 +566,168 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
         result.verification_coverage.disposition
         is CoverageDisposition.unverified_external_ci
     )
+    assert result.runtime_acceptance_plan is not None
+
+
+@pytest.mark.asyncio
+async def test_authorized_runtime_workflow_is_generated_and_remains_policy_scoped(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    profile = RepoProfile(
+        package_managers=[
+            PackageManager(
+                name="npm",
+                manifest_path="package.json",
+                lockfile_path="package-lock.json",
+            )
+        ],
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm run test:old",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd="npm run test:old",
+            has_test_runner=True,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=_routing_complete(),
+    )
+    workflow = ".github/workflows/apdl-runtime-acceptance.yml"
+    pipeline = _Pipeline(
+        editor,
+        monkeypatch,
+        changed_paths=[f"app/x.ts\ntests/x.test.ts\n{workflow}\n"],
+        repo_files={
+            "package.json": json.dumps(
+                {
+                    "name": "runtime-demo",
+                    "scripts": {"test:old": "vitest run"},
+                    "devDependencies": {"vitest": "1.0.0"},
+                }
+            ),
+            "package-lock.json": json.dumps(
+                {"name": "runtime-demo", "lockfileVersion": 3, "packages": {}}
+            ),
+        },
+        edit_files={
+            "package.json": json.dumps(
+                {
+                    "name": "runtime-demo",
+                    "scripts": {"test:new": "vitest run"},
+                    "devDependencies": {"vitest": "1.0.0"},
+                }
+            )
+        },
+    )
+    request = _request(test_cmd="npm run test:old")
+    request.runtime_acceptance_policy = RuntimeAcceptancePolicy(
+        workflow_changes_authorized=True
+    )
+
+    result = await editor.implement(request)
+
+    assert result.success is True
+    assert result.runtime_acceptance_plan is not None
+    assert result.runtime_acceptance_plan.checks
+    assert result.generated_runtime_workflow is not None
+    assert result.runtime_acceptance_plan.generated_workflow is not None
+    assert result.generated_runtime_workflow.path == workflow
+    assert (
+        result.generated_runtime_workflow.content_sha256
+        == result.runtime_acceptance_plan.generated_workflow.content_sha256
+    )
+    assert (
+        result.generated_runtime_workflow.runtime_acceptance_plan_sha256
+        == result.runtime_acceptance_plan.evidence_hash()
+    )
+    assert {
+        check.command.command for check in result.runtime_acceptance_plan.checks
+    } == {"npm run test:new"}
+    assert result.verification_coverage is not None
+    assert result.verification_coverage.policy_authorized_workflow_paths == [workflow]
+    assert result.verification_coverage.changed_protected_workflow_paths == []
+    assert ["add", "--", workflow] in pipeline.git_calls
+    assert pipeline.git_calls.count(
+        ["commit", "-m", "chore(ci): add runtime acceptance evidence"]
+    ) == 2
+
+
+@pytest.mark.asyncio
+async def test_generated_workflow_cannot_mask_an_agent_no_op(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    profile = RepoProfile(
+        package_managers=[
+            PackageManager(
+                name="npm",
+                manifest_path="package.json",
+                lockfile_path="package-lock.json",
+            )
+        ],
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm test",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd="npm test",
+            has_test_runner=True,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    workflow = ".github/workflows/apdl-runtime-acceptance.yml"
+    pipeline = _Pipeline(
+        editor,
+        monkeypatch,
+        changed_paths=[f"{workflow}\n"],
+        repo_files={
+            "package.json": '{"scripts":{"test":"vitest run"}}',
+            "package-lock.json": '{"lockfileVersion":3,"packages":{}}',
+        },
+    )
+    request = _request(test_cmd="npm test")
+    request.runtime_acceptance_policy = RuntimeAcceptancePolicy(
+        workflow_changes_authorized=True
+    )
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert "no material implementation change" in (result.error or "")
+    assert pipeline.pushed is False
 
 
 @pytest.mark.asyncio

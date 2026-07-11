@@ -39,6 +39,10 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
@@ -165,6 +169,17 @@ class ContainerAiderEditor:
                 "CS_REQUIREMENT_LEDGER="
                 + json.dumps(request.requirement_ledger.model_dump(mode="json")),
             ]
+        if request.runtime_acceptance_plan is not None:
+            argv += [
+                "-e",
+                "CS_RUNTIME_ACCEPTANCE_PLAN="
+                + json.dumps(request.runtime_acceptance_plan.model_dump(mode="json")),
+            ]
+        argv += [
+            "-e",
+            "CS_RUNTIME_ACCEPTANCE_POLICY="
+            + json.dumps(request.runtime_acceptance_policy.model_dump(mode="json")),
+        ]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
@@ -235,6 +250,20 @@ class ContainerAiderEditor:
                         json.dumps(data["verification_coverage"])
                     )
                     if data.get("verification_coverage") is not None
+                    else None
+                ),
+                runtime_acceptance_plan=(
+                    RuntimeAcceptancePlan.model_validate_json(
+                        json.dumps(data["runtime_acceptance_plan"])
+                    )
+                    if data.get("runtime_acceptance_plan") is not None
+                    else None
+                ),
+                generated_runtime_workflow=(
+                    GeneratedRuntimeWorkflowAttestation.model_validate_json(
+                        json.dumps(data["generated_runtime_workflow"])
+                    )
+                    if data.get("generated_runtime_workflow") is not None
                     else None
                 ),
                 review_verdict=(

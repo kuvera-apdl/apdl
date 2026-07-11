@@ -4,10 +4,130 @@ import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
 import type {
   ChangesetObservationHistory,
   ReviewVerdict,
+  RuntimeAcceptancePlan,
+  RuntimeEvidenceAssessment,
+  RuntimeEvidenceObservation,
   VerificationCoverage,
   VerificationPlan,
 } from '../../src/api/types/codegen'
 import type { Workspace } from '../../src/core/workspace'
+
+export function makeRuntimeAcceptancePlan(
+  overrides: Partial<RuntimeAcceptancePlan> = {},
+): RuntimeAcceptancePlan {
+  return {
+    schema_version: 'runtime_acceptance_plan@1',
+    source_ledger_sha256: 'a'.repeat(64),
+    repo_profile_sha256: 'b'.repeat(64),
+    verification_plan_sha256: 'c'.repeat(64),
+    repo: 'acme/widgets',
+    branch: 'apdl/strict-schema',
+    generated_workflow: null,
+    checks: [
+      {
+        check_id: 'runtime_0123456789abcdef',
+        surface: 'api',
+        requirement_ids: ['REQ-001'],
+        command: {
+          command: 'npm run test:runtime',
+          cwd: '.',
+          source_path: 'package.json',
+        },
+        service_container_paths: [],
+        expected_artifacts: [
+          {
+            schema_version: 'runtime_artifact_expectation@1',
+            artifact_name: 'apdl-runtime-REQ-001',
+            evidence_kind: 'request_trace',
+            paths: ['artifacts/REQ-001/request.json'],
+            requirement_ids: ['REQ-001'],
+            required: true,
+          },
+        ],
+      },
+    ],
+    blockers: [],
+    ...overrides,
+  }
+}
+
+export function makeRuntimeEvidenceAssessment(
+  overrides: Partial<RuntimeEvidenceAssessment> = {},
+): RuntimeEvidenceAssessment {
+  return {
+    schema_version: 'runtime_evidence_assessment@1',
+    head_sha: 'c'.repeat(40),
+    external_ci_status: 'pending',
+    requirements: [
+      {
+        requirement_id: 'REQ-001',
+        status: 'observed',
+        artifact_names: ['apdl-runtime-REQ-001'],
+        reason: null,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+export function makeRuntimeEvidenceObservation(
+  overrides: Partial<RuntimeEvidenceObservation> = {},
+): RuntimeEvidenceObservation {
+  return {
+    schema_version: 'runtime_evidence_observation@1',
+    observation_id: `runtime_obs_${'d'.repeat(32)}`,
+    changeset_id: 'cs_abc123',
+    repository: 'acme/widgets',
+    pr_number: 17,
+    head_sha: 'c'.repeat(40),
+    ci_observation_id: `ciobs_${'a'.repeat(32)}`,
+    ci_evidence_hash: 'b'.repeat(64),
+    runtime_acceptance_plan_sha256: 'f'.repeat(64),
+    observed_at: '2026-07-11T14:02:00+00:00',
+    artifacts: [
+      {
+        schema_version: 'runtime_artifact_observation@1',
+        artifact_name: 'apdl-runtime-REQ-001',
+        artifact_id: 501,
+        workflow_run_id: 401,
+        head_sha: 'c'.repeat(40),
+        status: 'observed',
+        requirement_ids: ['REQ-001'],
+        files: [
+          {
+            schema_version: 'runtime_artifact_file@1',
+            path: 'artifacts/REQ-001/request.json',
+            content_sha256: 'e'.repeat(64),
+            byte_count: 18,
+            text_excerpt: '{"status":"ready"}',
+            redacted: false,
+            binary: false,
+          },
+        ],
+        github_url: 'https://github.com/acme/widgets/actions/runs/401/artifacts/501',
+        unverified_reason: null,
+      },
+    ],
+    job_logs: [
+      {
+        schema_version: 'runtime_job_log_evidence@1',
+        workflow_run_id: 401,
+        job_id: 402,
+        job_name: 'runtime acceptance',
+        head_sha: 'c'.repeat(40),
+        text_excerpt: 'runtime check passed',
+        excerpt_byte_count: 20,
+        source_byte_count: 20,
+        truncated: false,
+        redacted: false,
+        github_url: 'https://github.com/acme/widgets/actions/runs/401/job/402',
+      },
+    ],
+    assessment: makeRuntimeEvidenceAssessment(),
+    collection_errors: [],
+    ...overrides,
+  }
+}
 
 export function makeVerificationPlan(
   overrides: Partial<VerificationPlan> = {},
@@ -63,6 +183,7 @@ export function makeVerificationCoverage(
     disposition_reason: 'The diff includes the required regression test path for GitHub CI.',
     changed_test_paths: ['src/api/__tests__/schema.test.ts'],
     changed_workflow_paths: [],
+    policy_authorized_workflow_paths: [],
     changed_protected_workflow_paths: [],
     relaxed_workflow_paths: [],
     items: [
@@ -192,6 +313,8 @@ export function makeChangesetObservationHistory(
         attempt_number: 1,
         classification: 'actionable_code',
         confidence: 0.95,
+        runtime_evidence_observation_id: null,
+        runtime_evidence_hash: null,
         prompt_evidence_ids: ['prompt:111111111111111111111111'],
         prompt_evidence: [
           {

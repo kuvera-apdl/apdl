@@ -38,6 +38,8 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     dependency_slice: null,
     verification_plan: null,
     verification_coverage: null,
+    runtime_acceptance_plan: null,
+    runtime_evidence_assessment: null,
     review_verdict: null,
     error: null,
     created_at: '2026-07-11T13:00:00+00:00',

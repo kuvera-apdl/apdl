@@ -9,11 +9,21 @@ from app.github.observations import StaleCIHeadError
 from app.jobs.ci import sync_github_state
 from app.models.changeset import ChangesetStatus
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
+from app.runtime.collector import RuntimeEvidenceCollection
+from app.runtime.models import (
+    RuntimeAcceptancePlan,
+    RuntimeArtifactExpectation,
+    RuntimeCheck,
+    RuntimeCommand,
+    RuntimeEvidenceKind,
+    RuntimeSurface,
+)
 from app.store import changesets as store
 from app.store.observations import (
     list_ci_verification_observations,
     list_pull_request_observations,
 )
+from app.store.runtime_evidence import list_runtime_evidence_observations
 from tests.fakes import FakePool
 
 
@@ -88,6 +98,34 @@ def _pool() -> FakePool:
         external_ci_status="pending",
     )
     return pool
+
+
+def _runtime_plan() -> RuntimeAcceptancePlan:
+    return RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+        repo="acme/widgets",
+        branch="apdl/x",
+        checks=[
+            RuntimeCheck(
+                check_id="runtime_aaaaaaaaaaaaaaaa",
+                surface=RuntimeSurface.runtime,
+                requirement_ids=["REQ-001"],
+                command=RuntimeCommand(
+                    command="npm test", cwd=".", source_path="package.json"
+                ),
+                expected_artifacts=[
+                    RuntimeArtifactExpectation(
+                        artifact_name="apdl-runtime-evidence",
+                        evidence_kind=RuntimeEvidenceKind.structured_runtime,
+                        paths=["apdl-runtime-evidence.json"],
+                        requirement_ids=["REQ-001"],
+                    )
+                ],
+            )
+        ],
+    )
 
 
 @pytest.mark.asyncio
@@ -171,6 +209,87 @@ async def test_failed_exact_head_projects_failure_and_schedules_one_observation(
             pool, "cs-open", head_sha="head-a"
         )
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_evidence_is_journaled_for_exact_head_before_repair():
+    pool = _pool()
+    plan = _runtime_plan()
+    pool.store["changesets"]["cs-open"]["runtime_acceptance_plan"] = (
+        plan.model_dump(mode="json")
+    )
+    order: list[str] = []
+
+    async def get_pr(_repo, _number, _token):
+        return _live_pr()
+
+    async def get_ci(_repo, head_sha, _token):
+        return _evidence(head_sha, check_conclusion="failure")
+
+    async def collect(repo, head_sha, token, runtime_plan):
+        assert (repo, head_sha, token) == ("acme/widgets", "head-a", "ghs_tok")
+        assert runtime_plan == plan
+        order.append("collect")
+        return RuntimeEvidenceCollection(head_sha=head_sha)
+
+    async def repair(observation):
+        evidence = await list_runtime_evidence_observations(
+            pool, observation.changeset_id, head_sha=observation.head_sha
+        )
+        assert len(evidence) == 1
+        assert evidence[0].assessment.external_ci_status is ExternalCIStatus.failed
+        order.append("repair")
+
+    await sync_github_state(
+        pool,
+        "cs-open",
+        get_pull_request=get_pr,
+        get_ci_evidence=get_ci,
+        mint_token=_mint,
+        repair_failure=repair,
+        collect_runtime=collect,
+    )
+
+    assert order == ["collect", "repair"]
+    final = await store.get_changeset(pool, "cs-open")
+    assert final is not None
+    assert final.external_ci_status is ExternalCIStatus.failed
+    assert final.runtime_evidence_assessment is not None
+    assert final.runtime_evidence_assessment.external_ci_status is ExternalCIStatus.failed
+
+
+@pytest.mark.asyncio
+async def test_repeated_ci_observation_collects_runtime_evidence_once():
+    pool = _pool()
+    plan = _runtime_plan()
+    pool.store["changesets"]["cs-open"]["runtime_acceptance_plan"] = (
+        plan.model_dump(mode="json")
+    )
+    collections = 0
+
+    async def get_pr(_repo, _number, _token):
+        return _live_pr()
+
+    async def get_ci(_repo, head_sha, _token):
+        return _evidence(head_sha, state="success")
+
+    async def collect(_repo, head_sha, _token, _plan):
+        nonlocal collections
+        collections += 1
+        return RuntimeEvidenceCollection(head_sha=head_sha)
+
+    for _ in range(2):
+        await sync_github_state(
+            pool,
+            "cs-open",
+            get_pull_request=get_pr,
+            get_ci_evidence=get_ci,
+            mint_token=_mint,
+            collect_runtime=collect,
+        )
+
+    assert collections == 1
+    assert len(await list_runtime_evidence_observations(pool, "cs-open")) == 1
 
 
 @pytest.mark.asyncio

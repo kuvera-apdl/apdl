@@ -28,6 +28,7 @@ from app.models.observations import (
     PullRequestObservation,
 )
 from app.requirements.models import RequirementLedger
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
 from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
 from app.verification.models import VerificationCoverage, VerificationPlan
@@ -127,6 +128,26 @@ def _review_verdict_from_row(row: asyncpg.Record) -> ReviewVerdict | None:
     return ReviewVerdict.model_validate_json(raw)
 
 
+def _runtime_acceptance_plan_from_row(
+    row: asyncpg.Record,
+) -> RuntimeAcceptancePlan | None:
+    value = _optional_column(row, "runtime_acceptance_plan")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return RuntimeAcceptancePlan.model_validate_json(raw)
+
+
+def _runtime_evidence_assessment_from_row(
+    row: asyncpg.Record,
+) -> RuntimeEvidenceAssessment | None:
+    value = _optional_column(row, "runtime_evidence_assessment")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return RuntimeEvidenceAssessment.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -159,6 +180,8 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         dependency_slice=_dependency_slice_from_row(row),
         verification_plan=_verification_plan_from_row(row),
         verification_coverage=_verification_coverage_from_row(row),
+        runtime_acceptance_plan=_runtime_acceptance_plan_from_row(row),
+        runtime_evidence_assessment=_runtime_evidence_assessment_from_row(row),
         review_verdict=_review_verdict_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
@@ -532,6 +555,24 @@ async def set_review_verdict(
             """,
             changeset_id,
             json.dumps(verdict.model_dump(mode="json")),
+        )
+
+
+async def set_runtime_acceptance_plan(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    plan: RuntimeAcceptancePlan,
+) -> None:
+    """Persist planned GitHub runtime evidence without claiming a result."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET runtime_acceptance_plan = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(plan.model_dump(mode="json")),
         )
 
 

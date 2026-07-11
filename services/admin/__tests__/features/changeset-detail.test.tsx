@@ -11,6 +11,9 @@ import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailP
 import {
   makeChangesetObservationHistory,
   makeReviewVerdict,
+  makeRuntimeAcceptancePlan,
+  makeRuntimeEvidenceAssessment,
+  makeRuntimeEvidenceObservation,
   makeVerificationCoverage,
   makeVerificationPlan,
   seedWorkspace,
@@ -52,6 +55,8 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     dependency_slice: null,
     verification_plan: null,
     verification_coverage: null,
+    runtime_acceptance_plan: null,
+    runtime_evidence_assessment: null,
     review_verdict: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
@@ -205,6 +210,43 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getByText('b'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/This is not a GitHub CI result/)).toBeInTheDocument()
     expect(screen.queryByText('CI passed')).not.toBeInTheDocument()
+  })
+
+  test('shows runtime plans and exact-head evidence without promoting external CI', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'pr_open',
+            error: null,
+            pr_url: 'https://github.com/acme/widgets/pull/17',
+            pr_number: 17,
+            head_sha: 'c'.repeat(40),
+            github_pr_status: 'open',
+            external_ci_status: 'pending',
+            runtime_acceptance_plan: makeRuntimeAcceptancePlan(),
+            runtime_evidence_assessment: makeRuntimeEvidenceAssessment(),
+          }),
+        ),
+      ),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id/observations', () =>
+        HttpResponse.json(makeChangesetObservationHistory()),
+      ),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id/runtime-observations', () =>
+        HttpResponse.json([makeRuntimeEvidenceObservation()]),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('Runtime acceptance plan')).toBeInTheDocument()
+    expect(screen.getByText('npm run test:runtime')).toBeInTheDocument()
+    expect(await screen.findByText('Runtime acceptance evidence')).toBeInTheDocument()
+    expect(screen.getByText('Current GitHub-owned external CI:')).toBeInTheDocument()
+    expect(screen.getAllByText('pending').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('apdl-runtime-REQ-001').length).toBeGreaterThan(0)
+    expect(screen.getByText('Bounded job-log excerpts')).toBeInTheDocument()
+    expect(screen.getByText(/Runtime evidence never promotes or replaces/)).toBeInTheDocument()
+    expect(screen.queryByText('Runtime passed')).not.toBeInTheDocument()
   })
 
   test('renders append-only PR, exact-head CI, and remediation observations', async () => {

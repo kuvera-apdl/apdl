@@ -26,6 +26,7 @@ from app.models.observations import (
     PullRequestObservation,
     RemediationDisposition,
 )
+from app.runtime.models import RuntimeAcceptancePlan
 
 _MAX_LIMIT = 200
 _ObservationT = TypeVar("_ObservationT", bound=BaseModel)
@@ -311,6 +312,8 @@ async def apply_pull_request_observation(
                     ci_failure_key = CASE WHEN $6 THEN NULL ELSE ci_failure_key END,
                     ci_failure_summary = CASE
                         WHEN $6 THEN NULL ELSE ci_failure_summary END,
+                    runtime_evidence_assessment = CASE
+                        WHEN $6 THEN NULL ELSE runtime_evidence_assessment END,
                     updated_at = now()
                 WHERE changeset_id = $1 RETURNING changeset_id
                 """,
@@ -446,6 +449,7 @@ async def apply_ci_verification_observation(
                 UPDATE codegen_changesets
                 SET external_ci_status = $2, ci_remediation_status = $3,
                     ci_failure_key = $4, ci_failure_summary = $5,
+                    runtime_evidence_assessment = NULL,
                     updated_at = now()
                 WHERE changeset_id = $1 AND head_sha = $6
                 RETURNING changeset_id
@@ -712,6 +716,7 @@ async def project_repair_result(
     resulting_head_sha: str | None,
     exhausted: bool,
     error: str | None,
+    runtime_acceptance_plan: RuntimeAcceptancePlan | None = None,
 ) -> bool:
     """CAS a repair result so an old-head edit cannot overwrite newer GitHub state."""
     async with pool.acquire() as conn:
@@ -735,11 +740,18 @@ async def project_repair_result(
                         external_ci_awaiting_since = now(),
                         ci_remediation_status = 'awaiting_ci',
                         ci_failure_key = NULL, ci_failure_summary = NULL,
+                        runtime_evidence_assessment = NULL,
+                        runtime_acceptance_plan = COALESCE($3::jsonb, runtime_acceptance_plan),
                         error = NULL, updated_at = now()
                     WHERE changeset_id = $1 RETURNING changeset_id
                     """,
                     changeset_id,
                     _required(resulting_head_sha, "resulting_head_sha"),
+                    (
+                        runtime_acceptance_plan.model_dump_json()
+                        if runtime_acceptance_plan is not None
+                        else None
+                    ),
                 )
             else:
                 await conn.fetchrow(

@@ -19,6 +19,8 @@ from app.models.observations import (
     RemediationPromptEvidence,
     RemediationDisposition,
 )
+from app.runtime.github_actions import workflow_attestation_is_valid
+from app.runtime.models import RuntimeAcceptancePolicy, RuntimeEvidenceObservation
 from app.safety.gates import evaluate_pre_push
 from app.store import changesets as changeset_store
 from app.store import connections as connections_store
@@ -28,13 +30,123 @@ from app.store.observations import (
     project_repair_result,
     set_remediation_in_progress,
 )
+from app.store.runtime_evidence import latest_runtime_evidence_observation
 
 logger = logging.getLogger(__name__)
 TokenMinter = Callable[[int, str], Awaitable[str]]
 
+_RUNTIME_JOB_LOG_LIMIT = 3
+_RUNTIME_JOB_LOG_BYTES = 2_000
+_RUNTIME_ARTIFACT_LIMIT = 4
+_RUNTIME_ARTIFACT_FILE_LIMIT = 2
+_RUNTIME_ARTIFACT_EXCERPT_BYTES = 1_000
+_RUNTIME_DIAGNOSTIC_LIMIT = 5
+_RUNTIME_DIAGNOSTIC_BYTES = 800
+
+
+def _bounded_utf8(value: str, limit: int) -> str:
+    """Retain at most ``limit`` UTF-8 bytes without splitting a character."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    suffix = "\n...[bounded by APDL]"
+    available = max(0, limit - len(suffix.encode("utf-8")))
+    prefix = encoded[:available].decode("utf-8", errors="ignore")
+    return prefix + suffix
+
+
+def _render_runtime_evidence(
+    observation: RuntimeEvidenceObservation | None,
+) -> str:
+    """Render bounded, immutable GitHub runtime evidence for one repair prompt."""
+    if observation is None:
+        return "No exact-head GitHub runtime evidence observation was available."
+
+    values = [
+        f"Runtime evidence observation `{observation.observation_id}` ",
+        f"(SHA-256 `{observation.evidence_hash()}`) for exact head ",
+        f"`{observation.head_sha}`.",
+    ]
+    logs = observation.job_logs[:_RUNTIME_JOB_LOG_LIMIT]
+    values.append("\n\nGitHub Actions job-log excerpts:")
+    if not logs:
+        values.append("\n- None collected.")
+    for log in logs:
+        values.extend(
+            (
+                f"\n- Run {log.workflow_run_id}, job {log.job_id} ",
+                f"`{log.job_name}` ({log.github_url}); ",
+                f"source_bytes={log.source_byte_count}, ",
+                f"collector_truncated={str(log.truncated).lower()}, ",
+                f"collector_redacted={str(log.redacted).lower()}:\n",
+                _bounded_utf8(log.text_excerpt, _RUNTIME_JOB_LOG_BYTES),
+            )
+        )
+    if len(observation.job_logs) > len(logs):
+        values.append(
+            f"\n- {len(observation.job_logs) - len(logs)} additional job log(s) "
+            "omitted by the repair prompt bound."
+        )
+
+    artifacts = observation.artifacts[:_RUNTIME_ARTIFACT_LIMIT]
+    values.append("\n\nGitHub Actions artifact excerpts:")
+    if not artifacts:
+        values.append("\n- None collected.")
+    for artifact in artifacts:
+        values.append(
+            f"\n- Run {artifact.workflow_run_id}, artifact "
+            f"`{artifact.artifact_name}`; status={artifact.status.value}; "
+            f"requirements={','.join(artifact.requirement_ids)}."
+        )
+        if artifact.unverified_reason:
+            values.append(
+                " Reason: "
+                + _bounded_utf8(
+                    artifact.unverified_reason, _RUNTIME_ARTIFACT_EXCERPT_BYTES
+                )
+            )
+        files = artifact.files[:_RUNTIME_ARTIFACT_FILE_LIMIT]
+        for file in files:
+            values.append(
+                f"\n  - `{file.path}` sha256={file.content_sha256} "
+                f"bytes={file.byte_count}:\n"
+            )
+            values.append(
+                _bounded_utf8(
+                    file.text_excerpt or "(binary artifact; no text excerpt)",
+                    _RUNTIME_ARTIFACT_EXCERPT_BYTES,
+                )
+            )
+        if len(artifact.files) > len(files):
+            values.append(
+                f"\n  - {len(artifact.files) - len(files)} additional file(s) "
+                "omitted by the repair prompt bound."
+            )
+    if len(observation.artifacts) > len(artifacts):
+        values.append(
+            f"\n- {len(observation.artifacts) - len(artifacts)} additional artifact(s) "
+            "omitted by the repair prompt bound."
+        )
+
+    diagnostics = observation.collection_errors[:_RUNTIME_DIAGNOSTIC_LIMIT]
+    values.append("\n\nRuntime evidence collection diagnostics:")
+    if not diagnostics:
+        values.append("\n- None.")
+    for diagnostic in diagnostics:
+        values.append(
+            "\n- " + _bounded_utf8(diagnostic, _RUNTIME_DIAGNOSTIC_BYTES)
+        )
+    if len(observation.collection_errors) > len(diagnostics):
+        values.append(
+            f"\n- {len(observation.collection_errors) - len(diagnostics)} additional "
+            "diagnostic(s) omitted by the repair prompt bound."
+        )
+    return "".join(values)
+
 
 def _classify_failure(
     observation: CIVerificationObservation,
+    runtime_evidence: RuntimeEvidenceObservation | None = None,
 ) -> tuple[FailureClassification, float]:
     text = " ".join(
         [
@@ -58,15 +170,15 @@ def _classify_failure(
         return FailureClassification.infrastructure, 0.85
     if any(term in text for term in ("flaky", "intermittent", "retryable timeout")):
         return FailureClassification.flaky, 0.8
-    if any(
-        signal.annotations
-        or any(
-            term in f"{signal.name} {signal.summary or ''}".lower()
-            for term in ("test", "assert", "lint", "typecheck", "build", "compile")
-        )
-        for signal in observation.signals
+    if any(signal.annotations for signal in observation.signals) or any(
+        term in text
+        for term in ("test", "assert", "lint", "typecheck", "build", "compile")
     ):
         return FailureClassification.actionable_code, 0.85
+    if runtime_evidence is not None and runtime_evidence.job_logs:
+        # The collector retains logs only for structurally failed Actions jobs.
+        # Arbitrary log text is repair context, never keyword-classifier input.
+        return FailureClassification.actionable_code, 0.65
     return FailureClassification.unknown, 0.4
 
 
@@ -75,6 +187,7 @@ def _repair_spec(
     observation: CIVerificationObservation,
     attempt: int,
     maximum: int,
+    runtime_evidence: RuntimeEvidenceObservation | None = None,
 ) -> str:
     return (
         f"{original_spec}\n\n"
@@ -83,7 +196,8 @@ def _repair_spec(
         "the existing pull-request branch. Preserve the original intent and do "
         "not suppress, skip, or weaken checks.\n\n"
         f"GitHub CI observation `{observation.observation_id}`:\n"
-        f"{observation.failure_summary or 'GitHub CI failed.'}"
+        f"{observation.failure_summary or 'GitHub CI failed.'}\n\n"
+        f"{_render_runtime_evidence(runtime_evidence)}"
     )
 
 
@@ -118,6 +232,7 @@ def _attempt_event(
     finished_at: datetime | None = None,
     result: EditResult | None = None,
     error: str | None = None,
+    runtime_evidence: RuntimeEvidenceObservation | None = None,
 ) -> CIRemediationAttempt:
     prompt_evidence = _prompt_evidence(result) if result else []
     return CIRemediationAttempt(
@@ -132,6 +247,12 @@ def _attempt_event(
         attempt_number=attempt_number,
         classification=classification,
         confidence=confidence,
+        runtime_evidence_observation_id=(
+            runtime_evidence.observation_id if runtime_evidence else None
+        ),
+        runtime_evidence_hash=(
+            runtime_evidence.evidence_hash() if runtime_evidence else None
+        ),
         prompt_evidence_ids=[item.evidence_id for item in prompt_evidence],
         prompt_evidence=prompt_evidence,
         changed_files=sorted(set(result.changed_paths)) if result else [],
@@ -189,6 +310,7 @@ async def _finish_without_repair(
     error: str,
     exhausted: bool,
     disposition: RemediationDisposition | None = None,
+    runtime_evidence: RuntimeEvidenceObservation | None = None,
 ) -> None:
     """Close a claimed attempt without ever leaving a mutable status wedged."""
     projected = await project_repair_result(
@@ -221,6 +343,7 @@ async def _finish_without_repair(
             recorded_at=finished_at,
             finished_at=finished_at,
             error=error,
+            runtime_evidence=runtime_evidence,
         ),
     )
 
@@ -248,7 +371,50 @@ async def repair_failed_ci(
         return
 
     started_at = datetime.now(timezone.utc)
-    classification, confidence = _classify_failure(observation)
+    try:
+        runtime_evidence = await latest_runtime_evidence_observation(
+            pool,
+            observation.changeset_id,
+            head_sha=observation.head_sha,
+            ci_observation_id=observation.observation_id,
+        )
+    except Exception:
+        logger.warning(
+            "Could not read optional runtime evidence for CI observation %s",
+            observation.observation_id,
+            exc_info=True,
+        )
+        runtime_evidence = None
+    try:
+        changeset = await changeset_store.get_changeset(
+            pool, observation.changeset_id
+        )
+    except Exception:
+        logger.warning(
+            "Could not read changeset while preparing CI repair %s",
+            observation.observation_id,
+            exc_info=True,
+        )
+        changeset = None
+    if runtime_evidence is not None and (
+        runtime_evidence.repository != observation.repository
+        or runtime_evidence.pr_number != observation.pr_number
+        or runtime_evidence.head_sha != observation.head_sha
+        or runtime_evidence.ci_observation_id != observation.observation_id
+        or runtime_evidence.ci_evidence_hash != observation.evidence_hash()
+        or runtime_evidence.assessment.external_ci_status is not observation.status
+        or changeset is None
+        or changeset.runtime_acceptance_plan is None
+        or runtime_evidence.runtime_acceptance_plan_sha256
+        != changeset.runtime_acceptance_plan.evidence_hash()
+    ):
+        logger.warning(
+            "Ignoring mismatched runtime evidence %s for CI observation %s",
+            runtime_evidence.observation_id,
+            observation.observation_id,
+        )
+        runtime_evidence = None
+    classification, confidence = _classify_failure(observation, runtime_evidence)
     attempt_id = (
         f"repair:{observation.changeset_id}:{observation.head_sha}:"
         f"{claim.attempt_number}"
@@ -265,6 +431,7 @@ async def repair_failed_ci(
             disposition=RemediationDisposition.diagnosing,
             started_at=started_at,
             recorded_at=started_at,
+            runtime_evidence=runtime_evidence,
         ),
     )
 
@@ -283,6 +450,7 @@ async def repair_failed_ci(
             ),
             exhausted=False,
             disposition=RemediationDisposition.not_actionable,
+            runtime_evidence=runtime_evidence,
         )
         return
 
@@ -292,7 +460,6 @@ async def repair_failed_ci(
         failed_head_sha=observation.head_sha,
         status=CIRemediationStatus.repairing,
     )
-    changeset = await changeset_store.get_changeset(pool, observation.changeset_id)
     if changeset is None or not changeset.branch:
         await _finish_without_repair(
             pool,
@@ -304,6 +471,7 @@ async def repair_failed_ci(
             started_at=started_at,
             error="Cannot repair CI because the changeset branch is unavailable.",
             exhausted=True,
+            runtime_evidence=runtime_evidence,
         )
         return
     connection = await connections_store.get_connection(pool, changeset.project_id)
@@ -318,10 +486,15 @@ async def repair_failed_ci(
             started_at=started_at,
             error="Cannot repair CI because the repository connection is unavailable.",
             exhausted=True,
+            runtime_evidence=runtime_evidence,
         )
         return
     policy = connection.policy if isinstance(connection.policy, dict) else {}
     try:
+        runtime_policy = RuntimeAcceptancePolicy.model_validate(
+            policy.get("runtime_acceptance") or {}
+        )
+        gates_policy = dict(policy.get("gates") or {})
         token = await mint_token(connection.installation_id, connection.repo)
         result = await editor.implement(
             EditRequest(
@@ -332,6 +505,8 @@ async def repair_failed_ci(
                 dependency_slice=changeset.dependency_slice,
                 verification_plan=changeset.verification_plan,
                 verification_coverage=changeset.verification_coverage,
+                runtime_acceptance_plan=changeset.runtime_acceptance_plan,
+                runtime_acceptance_policy=runtime_policy,
                 base_branch=changeset.base_branch or connection.default_base_branch,
                 branch=changeset.branch,
                 token=token,
@@ -341,10 +516,11 @@ async def repair_failed_ci(
                     observation,
                     claim.attempt_number,
                     maximum,
+                    runtime_evidence,
                 ),
                 constraints=changeset.task.constraints,
                 test_cmd=policy.get("test_cmd"),
-                gates_policy=policy.get("gates"),
+                gates_policy=gates_policy,
                 existing_branch=True,
                 expected_head_sha=observation.head_sha,
                 risk_level=str(
@@ -368,6 +544,7 @@ async def repair_failed_ci(
             started_at=started_at,
             error=f"CI repair editor failed: {exc}",
             exhausted=True,
+            runtime_evidence=runtime_evidence,
         )
         return
     if result.requirement_ledger is None:
@@ -375,11 +552,20 @@ async def repair_failed_ci(
     await _persist_result_evidence(
         pool, observation.changeset_id, result, changeset.prompts
     )
+    backstop_policy = dict(gates_policy)
+    if workflow_attestation_is_valid(
+        result.generated_runtime_workflow,
+        plan=result.runtime_acceptance_plan,
+        policy=runtime_policy,
+    ):
+        allowed = set(backstop_policy.get("allowed_protected_paths") or [])
+        allowed.add(result.generated_runtime_workflow.path)
+        backstop_policy["allowed_protected_paths"] = sorted(allowed)
     gate = evaluate_pre_push(
         diff_stat=result.diff_stat,
         changed_paths=result.changed_paths,
         diff_text=result.diff_text,
-        policy=policy.get("gates"),
+        policy=backstop_policy,
     )
     success = result.success and gate.passed and bool(result.head_sha)
     error = result.error
@@ -394,6 +580,9 @@ async def repair_failed_ci(
         resulting_head_sha=result.head_sha if success else None,
         exhausted=not success,
         error=error,
+        runtime_acceptance_plan=(
+            result.runtime_acceptance_plan if success else None
+        ),
     )
     finished_at = datetime.now(timezone.utc)
     disposition = (
@@ -420,6 +609,7 @@ async def repair_failed_ci(
             ),
             result=result,
             error=error,
+            runtime_evidence=runtime_evidence,
         ),
     )
     logger.info(

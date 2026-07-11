@@ -32,6 +32,7 @@ import sys
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import EditRequest, EditResult
 from app.requirements.models import RequirementLedger
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 
 
 def _request_from_env() -> EditRequest:
@@ -55,6 +56,16 @@ def _request_from_env() -> EditRequest:
             RequirementLedger.model_validate_json(os.environ["CS_REQUIREMENT_LEDGER"])
             if os.environ.get("CS_REQUIREMENT_LEDGER")
             else None
+        ),
+        runtime_acceptance_plan=(
+            RuntimeAcceptancePlan.model_validate_json(
+                os.environ["CS_RUNTIME_ACCEPTANCE_PLAN"]
+            )
+            if os.environ.get("CS_RUNTIME_ACCEPTANCE_PLAN")
+            else None
+        ),
+        runtime_acceptance_policy=RuntimeAcceptancePolicy.model_validate_json(
+            os.environ.get("CS_RUNTIME_ACCEPTANCE_POLICY", "{}")
         ),
     )
     # The token now lives only in `request`; keep it out of every child's view.
@@ -86,6 +97,14 @@ def main() -> int:
     if result.verification_coverage is not None:
         payload["verification_coverage"] = result.verification_coverage.model_dump(
             mode="json"
+        )
+    if result.runtime_acceptance_plan is not None:
+        payload["runtime_acceptance_plan"] = (
+            result.runtime_acceptance_plan.model_dump(mode="json")
+        )
+    if result.generated_runtime_workflow is not None:
+        payload["generated_runtime_workflow"] = (
+            result.generated_runtime_workflow.model_dump(mode="json")
         )
     if result.review_verdict is not None:
         payload["review_verdict"] = result.review_verdict.model_dump(mode="json")

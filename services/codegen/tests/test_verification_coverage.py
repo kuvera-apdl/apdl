@@ -165,6 +165,32 @@ def test_existing_protected_workflow_change_requires_review_not_auto_acceptance(
     )
 
 
+def test_explicit_policy_authorizes_only_the_named_changed_workflow():
+    coverage = evaluate_verification_coverage(
+        _plan(protected=True),
+        changed_paths=[
+            "tests/settings.test.ts",
+            ".github/workflows/ci.yml",
+        ],
+        policy_authorized_workflow_paths=[".github/workflows/ci.yml"],
+    )
+
+    assert coverage.disposition is CoverageDisposition.ready_for_github_ci
+    assert coverage.policy_authorized_workflow_paths == [
+        ".github/workflows/ci.yml"
+    ]
+    assert coverage.changed_protected_workflow_paths == []
+
+
+def test_policy_cannot_authorize_a_workflow_absent_from_the_diff():
+    with pytest.raises(ValueError, match="must be changed workflows"):
+        evaluate_verification_coverage(
+            _plan(protected=True),
+            changed_paths=["tests/settings.test.ts"],
+            policy_authorized_workflow_paths=[".github/workflows/ci.yml"],
+        )
+
+
 def test_declared_workflow_gate_relaxation_is_always_rejected():
     coverage = evaluate_verification_coverage(
         _plan(),

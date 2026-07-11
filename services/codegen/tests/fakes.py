@@ -99,6 +99,30 @@ class FakeConn:
         }
         return observation_id
 
+    def _insert_runtime_observation(self, args: tuple[Any, ...]) -> str | None:
+        rows = self._rows("runtime_evidence_observations")
+        observation_id = args[0]
+        duplicate_evidence = any(
+            row["changeset_id"] == args[1]
+            and row["head_sha"] == args[4]
+            and row["evidence_hash"] == args[6]
+            for row in rows.values()
+        )
+        if observation_id in rows or duplicate_evidence:
+            return None
+        rows[observation_id] = {
+            "observation_id": observation_id,
+            "changeset_id": args[1],
+            "repository": args[2],
+            "pr_number": args[3],
+            "head_sha": args[4],
+            "ci_observation_id": args[5],
+            "evidence_hash": args[6],
+            "observed_at": args[7],
+            "payload": args[8],
+        }
+        return observation_id
+
     def _insert_remediation_attempt(self, args: tuple[Any, ...]) -> str | None:
         rows = self._rows("ci_remediation_attempts")
         event_id = args[0]
@@ -153,6 +177,11 @@ class FakeConn:
         )
 
     async def execute(self, query: str, *args: Any) -> None:
+        if "DELETE FROM codegen_runtime_collection_claims" in query:
+            self._rows("runtime_collection_claims").pop(
+                (args[0], args[1], args[2]), None
+            )
+            return None
         row = self._rows("changesets").get(args[0]) if args else None
         if row is None:
             return None
@@ -174,6 +203,8 @@ class FakeConn:
                 row["verification_coverage"] = args[2]
         elif "SET review_verdict" in query:
             row["review_verdict"] = args[1]
+        elif "SET runtime_acceptance_plan" in query:
+            row["runtime_acceptance_plan"] = args[1]
         row["updated_at"] = _T0
         return None
 
@@ -211,6 +242,30 @@ class FakeConn:
             values = [
                 row
                 for row in self._rows("ci_verification_observations").values()
+                if row["changeset_id"] == args[0] and row["head_sha"] == args[1]
+            ]
+            latest = _latest(values, "observed_at", "observation_id")
+            return latest["observation_id"] if latest else None
+        if "INSERT INTO codegen_runtime_evidence_observations" in query:
+            return self._insert_runtime_observation(args)
+        if "INSERT INTO codegen_runtime_collection_claims" in query:
+            key = (args[0], args[1], args[2])
+            if any(
+                row["changeset_id"] == args[0]
+                and row["head_sha"] == args[1]
+                and row["ci_observation_id"] == args[2]
+                for row in self._rows("runtime_evidence_observations").values()
+            ):
+                return None
+            claims = self._rows("runtime_collection_claims")
+            if key in claims:
+                return None
+            claims[key] = {"claimed_at": datetime.now(timezone.utc)}
+            return args[2]
+        if "SELECT observation_id FROM codegen_runtime_evidence_observations" in query:
+            values = [
+                row
+                for row in self._rows("runtime_evidence_observations").values()
                 if row["changeset_id"] == args[0] and row["head_sha"] == args[1]
             ]
             latest = _latest(values, "observed_at", "observation_id")
@@ -284,6 +339,8 @@ class FakeConn:
                 "verification_plan": None,
                 "verification_coverage": None,
                 "review_verdict": None,
+                "runtime_acceptance_plan": None,
+                "runtime_evidence_assessment": None,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -366,6 +423,7 @@ class FakeConn:
                     row["ci_remediation_status"] = "idle"
                     row["ci_failure_key"] = None
                     row["ci_failure_summary"] = None
+                    row["runtime_evidence_assessment"] = None
             elif "SET external_ci_status = $2, ci_remediation_status = $3" in query:
                 if row.get("head_sha") != args[5]:
                     return None
@@ -373,6 +431,11 @@ class FakeConn:
                 row["ci_remediation_status"] = args[2]
                 row["ci_failure_key"] = args[3]
                 row["ci_failure_summary"] = args[4]
+                row["runtime_evidence_assessment"] = None
+            elif "SET runtime_evidence_assessment = $2::jsonb" in query:
+                if row.get("head_sha") != args[2]:
+                    return None
+                row["runtime_evidence_assessment"] = args[1]
             elif "SET ci_retry_count = $2, ci_remediation_status = 'diagnosing'" in query:
                 row["ci_retry_count"] = args[1]
                 row["ci_remediation_status"] = "diagnosing"
@@ -382,11 +445,14 @@ class FakeConn:
                 row["ci_remediation_status"] = "exhausted"
             elif "SET head_sha = $2, external_ci_status = 'pending'" in query:
                 row["head_sha"] = args[1]
+                if len(args) > 2 and args[2] is not None:
+                    row["runtime_acceptance_plan"] = args[2]
                 row["external_ci_status"] = "pending"
                 row["external_ci_awaiting_since"] = datetime.now(timezone.utc)
                 row["ci_remediation_status"] = "awaiting_ci"
                 row["ci_failure_key"] = None
                 row["ci_failure_summary"] = None
+                row["runtime_evidence_assessment"] = None
                 row["error"] = None
             elif "SET ci_remediation_status = $3" in query:
                 if (
@@ -436,6 +502,23 @@ class FakeConn:
                 for row in self._rows("ci_verification_observations").values()
                 if row["changeset_id"] == changeset_id
                 and (head_sha is None or row["head_sha"] == head_sha)
+            ]
+            rows.sort(
+                key=lambda row: (row["observed_at"], row["observation_id"]),
+                reverse=True,
+            )
+            return [{"payload": row["payload"]} for row in rows[:limit]]
+        if "FROM codegen_runtime_evidence_observations" in query:
+            changeset_id, head_sha, ci_observation_id, limit = args
+            rows = [
+                row
+                for row in self._rows("runtime_evidence_observations").values()
+                if row["changeset_id"] == changeset_id
+                and (head_sha is None or row["head_sha"] == head_sha)
+                and (
+                    ci_observation_id is None
+                    or row["ci_observation_id"] == ci_observation_id
+                )
             ]
             rows.sort(
                 key=lambda row: (row["observed_at"], row["observation_id"]),
@@ -513,6 +596,8 @@ class FakePool:
             "changesets",
             "pull_request_observations",
             "ci_verification_observations",
+            "runtime_evidence_observations",
+            "runtime_collection_claims",
             "ci_remediation_attempts",
             "ci_remediation_claims",
         ):
@@ -595,6 +680,8 @@ class FakePool:
             "verification_plan": None,
             "verification_coverage": None,
             "review_verdict": None,
+            "runtime_acceptance_plan": None,
+            "runtime_evidence_assessment": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

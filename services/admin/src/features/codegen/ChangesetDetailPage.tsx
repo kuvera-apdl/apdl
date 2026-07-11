@@ -12,6 +12,7 @@ import {
   abandonChangeset,
   getChangeset,
   getChangesetObservations,
+  getRuntimeEvidenceObservations,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
@@ -28,6 +29,10 @@ import { queryKeys } from '@/core/queryClient'
 import { cn } from '@/lib/utils'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
 import { ChangesetObservationHistory } from '@/features/codegen/ChangesetObservationHistory'
+import {
+  RuntimeAcceptancePlanCard,
+  RuntimeEvidenceHistory,
+} from '@/features/codegen/RuntimeAcceptanceEvidence'
 import {
   ChangesetStatusPill,
   ExternalCIStatusPill,
@@ -208,6 +213,18 @@ export function ChangesetDetailPage() {
     refetchInterval: query.data?.status === 'merged' ? false : REFETCH_MS,
     queryFn: ({ signal }) =>
       getChangesetObservations(serviceConnection(ws, 'codegen'), id, { signal }),
+  })
+
+  const runtimeObservations = useQuery({
+    queryKey: queryKeys.changesetRuntimeObservations(active?.id ?? 'none', id),
+    enabled:
+      active !== null &&
+      id !== '' &&
+      query.data?.pr_number != null &&
+      query.data?.runtime_acceptance_plan != null,
+    refetchInterval: query.data?.status === 'merged' ? false : REFETCH_MS,
+    queryFn: ({ signal }) =>
+      getRuntimeEvidenceObservations(serviceConnection(ws, 'codegen'), id, { signal }),
   })
 
   const invalidate = () => {
@@ -548,6 +565,10 @@ export function ChangesetDetailPage() {
         </Card>
       ) : null}
 
+      {cs.runtime_acceptance_plan ? (
+        <RuntimeAcceptancePlanCard plan={cs.runtime_acceptance_plan} />
+      ) : null}
+
       {cs.review_verdict ? (
         <Card>
           <CardHeader>
@@ -793,6 +814,23 @@ export function ChangesetDetailPage() {
           <ErrorState error={observations.error} onRetry={() => void observations.refetch()} />
         ) : (
           <ChangesetObservationHistory history={observations.data} />
+        )
+      ) : null}
+
+      {cs.runtime_acceptance_plan && cs.pr_number !== null ? (
+        runtimeObservations.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : runtimeObservations.isError ? (
+          <ErrorState
+            error={runtimeObservations.error}
+            onRetry={() => void runtimeObservations.refetch()}
+          />
+        ) : (
+          <RuntimeEvidenceHistory
+            observations={runtimeObservations.data}
+            currentAssessment={cs.runtime_evidence_assessment}
+            externalCIStatus={cs.external_ci_status}
+          />
         )
       ) : null}
 

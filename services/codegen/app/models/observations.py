@@ -334,6 +334,12 @@ class CIRemediationAttempt(StrictModel):
     attempt_number: int = Field(ge=1)
     classification: FailureClassification
     confidence: float = Field(ge=0, le=1)
+    runtime_evidence_observation_id: str | None = Field(
+        default=None, pattern=r"^runtime_obs_[0-9a-f]{32}$"
+    )
+    runtime_evidence_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     prompt_evidence_ids: list[str] = Field(default_factory=list)
     prompt_evidence: list[RemediationPromptEvidence] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
@@ -383,6 +389,12 @@ class CIRemediationAttempt(StrictModel):
             raise ValueError("a CI rerun must not claim code changes or a commit")
         if len(self.prompt_evidence_ids) != len(set(self.prompt_evidence_ids)):
             raise ValueError("prompt evidence IDs must be unique")
+        if (self.runtime_evidence_observation_id is None) != (
+            self.runtime_evidence_hash is None
+        ):
+            raise ValueError(
+                "runtime evidence observation ID and hash must be recorded together"
+            )
         embedded_ids = [item.evidence_id for item in self.prompt_evidence]
         if embedded_ids != self.prompt_evidence_ids:
             raise ValueError(

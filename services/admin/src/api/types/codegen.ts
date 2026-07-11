@@ -21,6 +21,11 @@ import type {
   ciVerificationObservationSchema,
   pullRequestObservationSchema,
 } from '../schemas/codegen-observations'
+import type {
+  runtimeAcceptancePlanSchema,
+  runtimeEvidenceAssessmentSchema,
+  runtimeEvidenceObservationSchema,
+} from '../schemas/codegen-runtime'
 
 export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type ChangesetPrompt = z.infer<typeof changesetPromptSchema>
@@ -31,6 +36,9 @@ export type InspectionSnapshot = z.infer<typeof inspectionSnapshotSchema>
 export type DependencySlice = z.infer<typeof dependencySliceSchema>
 export type VerificationPlan = z.infer<typeof verificationPlanSchema>
 export type VerificationCoverage = z.infer<typeof verificationCoverageSchema>
+export type RuntimeAcceptancePlan = z.infer<typeof runtimeAcceptancePlanSchema>
+export type RuntimeEvidenceAssessment = z.infer<typeof runtimeEvidenceAssessmentSchema>
+export type RuntimeEvidenceObservation = z.infer<typeof runtimeEvidenceObservationSchema>
 export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>
 export type PullRequestObservation = z.infer<typeof pullRequestObservationSchema>
 export type CIVerificationObservation = z.infer<typeof ciVerificationObservationSchema>

@@ -21,6 +21,16 @@ from app.profiling.models import (
     TestFacility as ProfileTestFacility,
 )
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    GeneratedRuntimeWorkflowExpectation,
+    RuntimeAcceptancePlan,
+    RuntimeArtifactExpectation,
+    RuntimeCheck,
+    RuntimeCommand,
+    RuntimeEvidenceKind,
+    RuntimeSurface,
+)
 from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.verification import build_verification_plan, evaluate_verification_coverage
@@ -93,6 +103,36 @@ def _profile_with_github_ci() -> RepoProfile:
         ci_workflows=[
             CIWorkflow(provider="github_actions", path=".github/workflows/ci.yml")
         ],
+    )
+
+
+def _workflow_bound_plan() -> RuntimeAcceptancePlan:
+    return RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+        checks=[
+            RuntimeCheck(
+                check_id="runtime_0123456789abcdef",
+                surface=RuntimeSurface.runtime,
+                requirement_ids=["REQ-001"],
+                command=RuntimeCommand(
+                    command="npm test", cwd=".", source_path="package.json"
+                ),
+                expected_artifacts=[
+                    RuntimeArtifactExpectation(
+                        artifact_name="apdl-runtime-evidence",
+                        evidence_kind=RuntimeEvidenceKind.structured_runtime,
+                        paths=["apdl-runtime-evidence.json"],
+                        requirement_ids=["REQ-001"],
+                    )
+                ],
+            )
+        ],
+        generated_workflow=GeneratedRuntimeWorkflowExpectation(
+            path=".github/workflows/apdl-runtime-acceptance.yml",
+            content_sha256="d" * 64,
+        ),
     )
 
 
@@ -240,6 +280,98 @@ async def test_job_blocks_on_pre_push_gate_violation():
     final = await store.get_changeset(pool, "cs_secret01")
     assert final.status == ChangesetStatus.error
     assert "gate" in (final.error or "").lower()
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_policy_alone_cannot_bypass_workflow_gate_without_attestation():
+    pool = FakePool()
+    pool.add_connection(
+        "demo",
+        policy=(
+            '{"runtime_acceptance":{"workflow_changes_authorized":true,'
+            '"generated_workflow_path":".github/workflows/'
+            'apdl-runtime-acceptance.yml"}}'
+        ),
+    )
+    await _seed(pool, "cs_workflow_guard")
+    workflow = ".github/workflows/apdl-runtime-acceptance.yml"
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 5},
+            changed_paths=[workflow],
+            diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
+        )
+    )
+    opened: list = []
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.append(kwargs)
+        return _pr(1)
+
+    await run_changeset_job(
+        pool,
+        "cs_workflow_guard",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_workflow_guard")
+    assert final is not None
+    assert final.status is ChangesetStatus.error
+    assert "protected path" in (final.error or "")
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_forged_workflow_content_attestation_cannot_bypass_runner_gate():
+    pool = FakePool()
+    pool.add_connection(
+        "demo",
+        policy=(
+            '{"runtime_acceptance":{"workflow_changes_authorized":true,'
+            '"generated_workflow_path":".github/workflows/'
+            'apdl-runtime-acceptance.yml"}}'
+        ),
+    )
+    await _seed(pool, "cs_workflow_forgery")
+    workflow = ".github/workflows/apdl-runtime-acceptance.yml"
+    plan = _workflow_bound_plan()
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1},
+            changed_paths=[workflow],
+            diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
+            requirement_ledger=_implemented_ledger([workflow]),
+            runtime_acceptance_plan=plan,
+            generated_runtime_workflow=GeneratedRuntimeWorkflowAttestation(
+                path=workflow,
+                content_sha256="e" * 64,
+                runtime_acceptance_plan_sha256=plan.evidence_hash(),
+            ),
+        )
+    )
+    opened: list = []
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.append(kwargs)
+        return _pr(1)
+
+    await run_changeset_job(
+        pool,
+        "cs_workflow_forgery",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_workflow_forgery")
+    assert final is not None
+    assert final.status is ChangesetStatus.error
+    assert "protected path" in (final.error or "")
     assert opened == []
 
 

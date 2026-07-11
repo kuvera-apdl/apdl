@@ -38,8 +38,9 @@ from app.github.pulls import get_pull_request, open_pull_request
 from app.jobs.ci_poller import run_github_poller
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
-from app.routers import changesets, connections, github, webhooks
 from app.models.observations import CIVerificationObservation
+from app.routers import changesets, connections, github, webhooks
+from app.runtime.collector import collect_runtime_evidence
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -157,6 +158,7 @@ async def lifespan(application: FastAPI):
         "get_ci_evidence": get_ci_evidence,
         "mint_token": _mint_token,
         "repair_failure": _schedule_ci_repair,
+        "collect_runtime": collect_runtime_evidence,
     }
 
     # CI poller: the zero-config trigger that keeps open changesets advancing

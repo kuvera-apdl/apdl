@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -16,11 +17,19 @@ from app.github.observations import (
 )
 from app.models.changeset import ChangesetStatus
 from app.models.observations import CIVerificationObservation, GitHubPRStatus
+from app.runtime.collector import RuntimeEvidenceCollection
+from app.runtime.evidence import build_runtime_evidence_observation
+from app.runtime.models import RuntimeAcceptancePlan
 from app.store import changesets as changeset_store
 from app.store import connections as connections_store
 from app.store.observations import (
     apply_ci_verification_observation,
     apply_pull_request_observation,
+)
+from app.store.runtime_evidence import (
+    apply_runtime_evidence_observation,
+    claim_runtime_evidence_collection,
+    release_runtime_evidence_collection,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,6 +38,17 @@ PullRequestReader = Callable[[str, int, str], Awaitable[dict[str, Any]]]
 CIEvidenceReader = Callable[[str, str, str], Awaitable[GitHubCIEvidence]]
 TokenMinter = Callable[[int, str], Awaitable[str]]
 CIFailureHandler = Callable[[CIVerificationObservation], Awaitable[None]]
+RuntimeEvidenceCollector = Callable[
+    [str, str, str, RuntimeAcceptancePlan], Awaitable[RuntimeEvidenceCollection]
+]
+_runtime_collection_semaphore: asyncio.Semaphore | None = None
+
+
+def _runtime_collection_slot() -> asyncio.Semaphore:
+    global _runtime_collection_semaphore
+    if _runtime_collection_semaphore is None:
+        _runtime_collection_semaphore = asyncio.Semaphore(2)
+    return _runtime_collection_semaphore
 
 
 async def sync_github_state(
@@ -39,6 +59,7 @@ async def sync_github_state(
     get_ci_evidence: CIEvidenceReader,
     mint_token: TokenMinter,
     repair_failure: CIFailureHandler | None = None,
+    collect_runtime: RuntimeEvidenceCollector | None = None,
     pr_action: str = "polled",
     delivery_id: str | None = None,
 ) -> CIVerificationObservation | None:
@@ -114,10 +135,67 @@ async def sync_github_state(
         observed_at=datetime.now(timezone.utc),
         ledger=projected.requirement_ledger,
     )
-    applied = await apply_ci_verification_observation(pool, observation)
+    await apply_ci_verification_observation(pool, observation)
+    runtime_claimed = False
     if (
-        applied.projected
-        and observation.status.value == "failed"
+        collect_runtime is not None
+        and projected.runtime_acceptance_plan is not None
+        and projected.runtime_acceptance_plan.checks
+    ):
+        try:
+            runtime_claimed = await claim_runtime_evidence_collection(
+                pool,
+                changeset_id=changeset_id,
+                head_sha=projected.head_sha,
+                ci_observation_id=observation.observation_id,
+            )
+            if runtime_claimed:
+                async with _runtime_collection_slot():
+                    collection = await collect_runtime(
+                        connection.repo,
+                        projected.head_sha,
+                        token,
+                        projected.runtime_acceptance_plan,
+                    )
+                    runtime_observation = build_runtime_evidence_observation(
+                        changeset_id=changeset_id,
+                        repository=connection.repo,
+                        pr_number=projected.pr_number,
+                        head_sha=projected.head_sha,
+                        ci_observation=observation,
+                        plan=projected.runtime_acceptance_plan,
+                        collection=collection,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                    await apply_runtime_evidence_observation(
+                        pool, runtime_observation
+                    )
+        except Exception:
+            # External Actions/artifact availability cannot prevent CI projection
+            # or wedge the repair loop. Known 403/missing cases are returned as
+            # explicit collector diagnostics; this is a last-resort isolation.
+            logger.warning(
+                "Runtime evidence collection failed for changeset %s head %s",
+                changeset_id,
+                projected.head_sha,
+                exc_info=True,
+            )
+            if runtime_claimed:
+                try:
+                    await release_runtime_evidence_collection(
+                        pool,
+                        changeset_id=changeset_id,
+                        head_sha=projected.head_sha,
+                        ci_observation_id=observation.observation_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Could not release runtime collection lease for %s",
+                        observation.observation_id,
+                        exc_info=True,
+                    )
+    if (
+        observation.status.value == "failed"
         and repair_failure is not None
     ):
         await repair_failure(observation)

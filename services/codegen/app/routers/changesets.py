@@ -23,9 +23,11 @@ from app.models.changeset import (
     InvalidTransition,
 )
 from app.models.observations import ChangesetObservationHistory
+from app.runtime.models import RuntimeEvidenceObservation
 from app.store import changesets as store
 from app.store import connections as connections_store
 from app.store import observations as observation_store
+from app.store import runtime_evidence as runtime_evidence_store
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,25 @@ async def get_changeset_observations(
         remediation_attempts=await observation_store.list_ci_remediation_attempts(
             pool, changeset_id, limit=200
         ),
+    )
+
+
+@router.get(
+    "/{changeset_id}/runtime-observations",
+    response_model=list[RuntimeEvidenceObservation],
+)
+async def get_runtime_observations(
+    changeset_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+) -> list[RuntimeEvidenceObservation]:
+    """Return append-only GitHub Actions runtime evidence for every PR head."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    changeset = await store.get_changeset(pool, changeset_id)
+    if changeset is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    return await runtime_evidence_store.list_runtime_evidence_observations(
+        pool, changeset_id, limit=limit
     )
 
 

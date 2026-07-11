@@ -14,6 +14,11 @@ from typing import Any, Protocol
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+    RuntimeAcceptancePolicy,
+)
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
@@ -38,6 +43,10 @@ class EditRequest:
     dependency_slice: DependencySlice | None = None
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
+    runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
+    runtime_acceptance_policy: RuntimeAcceptancePolicy = field(
+        default_factory=RuntimeAcceptancePolicy
+    )
     constraints: list[str] = field(default_factory=list)
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
@@ -80,6 +89,8 @@ class EditResult:
     dependency_slice: DependencySlice | None = None
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
+    runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
+    generated_runtime_workflow: GeneratedRuntimeWorkflowAttestation | None = None
     review_verdict: ReviewVerdict | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
@@ -93,6 +104,12 @@ class EditResult:
 
 class Editor(Protocol):
     """Implements a change and pushes a branch.
+
+    Editor implementations are trusted, push-capable service code: they receive
+    a repository-scoped write token and must enforce the canonical gates before
+    pushing. Model output is untrusted input to that implementation. A plugin
+    that cannot satisfy this trust boundary must return a patch to a trusted
+    editor adapter instead of implementing this protocol directly.
 
     Implementations MUST NOT raise for an ordinary failed attempt (editing or
     safety budget exhausted) — return ``EditResult(success=False, error=...)``

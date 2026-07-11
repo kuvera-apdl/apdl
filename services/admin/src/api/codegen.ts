@@ -7,10 +7,12 @@ import {
   repoConnectionSchema,
 } from './schemas/codegen'
 import { changesetObservationHistorySchema } from './schemas/codegen-observations'
+import { runtimeEvidenceObservationListSchema } from './schemas/codegen-runtime'
 import type {
   Changeset,
   ChangesetObservationHistory,
   RepoConnection,
+  RuntimeEvidenceObservation,
 } from './types/codegen'
 
 export interface ListChangesetsParams {
@@ -51,6 +53,22 @@ export function getChangesetObservations(
     `/v1/changesets/${encodeURIComponent(changesetId)}/observations`,
     {
       schema: changesetObservationHistorySchema,
+      signal: options.signal,
+    },
+  )
+}
+
+export function getRuntimeEvidenceObservations(
+  conn: ServiceConnection,
+  changesetId: string,
+  options: { signal?: AbortSignal; limit?: number } = {},
+): Promise<RuntimeEvidenceObservation[]> {
+  return request(
+    conn,
+    `/v1/changesets/${encodeURIComponent(changesetId)}/runtime-observations`,
+    {
+      query: { limit: options.limit ?? 50 },
+      schema: runtimeEvidenceObservationListSchema,
       signal: options.signal,
     },
   )

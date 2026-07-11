@@ -11,6 +11,7 @@ from app.jobs.ci import (
     CIEvidenceReader,
     CIFailureHandler,
     PullRequestReader,
+    RuntimeEvidenceCollector,
     TokenMinter,
     sync_github_state,
 )
@@ -26,6 +27,7 @@ async def poll_github_once(
     get_ci_evidence: CIEvidenceReader,
     mint_token: TokenMinter,
     repair_failure: CIFailureHandler | None = None,
+    collect_runtime: RuntimeEvidenceCollector | None = None,
 ) -> int:
     """Recover every open PR regardless of its current CI projection or age."""
     ids = await store.list_syncable_changeset_ids(pool)
@@ -38,6 +40,7 @@ async def poll_github_once(
                 get_ci_evidence=get_ci_evidence,
                 mint_token=mint_token,
                 repair_failure=repair_failure,
+                collect_runtime=collect_runtime,
             )
         except Exception:
             logger.warning(
@@ -56,6 +59,7 @@ async def run_github_poller(
     get_ci_evidence: CIEvidenceReader,
     mint_token: TokenMinter,
     repair_failure: CIFailureHandler | None = None,
+    collect_runtime: RuntimeEvidenceCollector | None = None,
 ) -> None:
     """Continuously recover GitHub state until service shutdown."""
     logger.info("GitHub recovery poller started (interval=%ss)", interval_seconds)
@@ -68,6 +72,7 @@ async def run_github_poller(
                     get_ci_evidence=get_ci_evidence,
                     mint_token=mint_token,
                     repair_failure=repair_failure,
+                    collect_runtime=collect_runtime,
                 )
             except Exception:
                 logger.warning(

@@ -1,9 +1,16 @@
 """Endpoint tests for the changeset lifecycle."""
 
+from datetime import UTC, datetime
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.models.observations import CIVerificationObservation, ExternalCIStatus
+from app.runtime.collector import RuntimeEvidenceCollection
+from app.runtime.evidence import build_runtime_evidence_observation
+from app.runtime.models import RuntimeAcceptancePlan
+from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 
 
@@ -56,6 +63,58 @@ async def test_get_unknown_changeset_404():
     async with _client(FakePool()) as client:
         resp = await client.get("/v1/changesets/cs_nope")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_runtime_observations_endpoint_returns_exact_head_journal():
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs-runtime",
+        "demo",
+        status="pr_open",
+        pr_number=7,
+        branch="apdl/x",
+        head_sha="head-a",
+        github_pr_status="open",
+        external_ci_status="unverified_external_ci",
+    )
+    plan = RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+        repo="acme/widgets",
+        branch="apdl/x",
+    )
+    observation = build_runtime_evidence_observation(
+        changeset_id="cs-runtime",
+        repository="acme/widgets",
+        pr_number=7,
+        head_sha="head-a",
+        ci_observation=CIVerificationObservation(
+            observation_id="ciobs_" + "d" * 32,
+            changeset_id="cs-runtime",
+            repository="acme/widgets",
+            pr_number=7,
+            head_sha="head-a",
+            status=ExternalCIStatus.unverified_external_ci,
+            observed_at=datetime(2026, 7, 11, tzinfo=UTC),
+        ),
+        plan=plan,
+        collection=RuntimeEvidenceCollection(head_sha="head-a"),
+        observed_at=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+    await apply_runtime_evidence_observation(pool, observation)
+
+    async with _client(pool) as client:
+        response = await client.get(
+            "/v1/changesets/cs-runtime/runtime-observations"
+        )
+
+    assert response.status_code == 200
+    assert [item["observation_id"] for item in response.json()] == [
+        observation.observation_id
+    ]
 
 
 @pytest.mark.asyncio

@@ -52,3 +52,22 @@ def test_evaluate_pre_push_passes_clean_diff_and_respects_policy():
         diff_stat={"files": 5}, changed_paths=[], policy={"max_files": 3}
     )
     assert tight.passed is False
+
+
+def test_explicit_policy_allows_only_the_named_generated_workflow():
+    result = evaluate_pre_push(
+        diff_stat={"files": 2},
+        changed_paths=[
+            ".github/workflows/apdl-runtime-acceptance.yml",
+            ".github/workflows/existing-ci.yml",
+        ],
+        policy={
+            "allowed_protected_paths": [
+                ".github/workflows/apdl-runtime-acceptance.yml"
+            ]
+        },
+    )
+
+    assert result.passed is False
+    assert len(result.violations) == 1
+    assert "existing-ci.yml" in result.violations[0]

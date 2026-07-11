@@ -242,6 +242,8 @@ export const ciRemediationAttemptSchema = z
     attempt_number: z.number().int().min(1),
     classification: z.enum(['actionable_code', 'flaky', 'infrastructure', 'policy', 'unknown']),
     confidence: z.number().min(0).max(1),
+    runtime_evidence_observation_id: z.string().regex(/^runtime_obs_[0-9a-f]{32}$/).nullable(),
+    runtime_evidence_hash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     prompt_evidence_ids: z.array(z.string()),
     prompt_evidence: z.array(remediationPromptEvidenceSchema),
     changed_files: z.array(z.string()),
@@ -295,6 +297,15 @@ export const ciRemediationAttemptSchema = z
     }
     if (new Set(attempt.prompt_evidence_ids).size !== attempt.prompt_evidence_ids.length) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'prompt evidence IDs must be unique' })
+    }
+    if (
+      (attempt.runtime_evidence_observation_id === null) !==
+      (attempt.runtime_evidence_hash === null)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'runtime evidence observation ID and hash must be recorded together',
+      })
     }
     const embeddedEvidenceIds = attempt.prompt_evidence.map((evidence) => evidence.evidence_id)
     if (JSON.stringify(embeddedEvidenceIds) !== JSON.stringify(attempt.prompt_evidence_ids)) {

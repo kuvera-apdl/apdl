@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     dependency_slice JSONB,
     verification_plan JSONB,
     verification_coverage JSONB,
+    runtime_acceptance_plan JSONB,
+    runtime_evidence_assessment JSONB,
     review_verdict JSONB,
     external_ci_awaiting_since TIMESTAMPTZ,
     ci_retry_count INTEGER NOT NULL DEFAULT 0,
@@ -97,6 +99,13 @@ ADD COLUMN IF NOT EXISTS verification_coverage JSONB;
 CHANGESETS_REVIEW_VERDICT_DDL = """
 ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS review_verdict JSONB;
+"""
+
+CHANGESETS_RUNTIME_ACCEPTANCE_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS runtime_acceptance_plan JSONB;
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS runtime_evidence_assessment JSONB;
 """
 
 CHANGESETS_GITHUB_STATE_DDL = """
@@ -244,6 +253,30 @@ CREATE INDEX IF NOT EXISTS idx_codegen_ci_observation_head
 ON codegen_ci_verification_observations
    (changeset_id, head_sha, observed_at DESC);
 
+CREATE TABLE IF NOT EXISTS codegen_runtime_evidence_observations (
+    observation_id TEXT PRIMARY KEY,
+    changeset_id TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    ci_observation_id TEXT NOT NULL,
+    evidence_hash TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    payload JSONB NOT NULL,
+    UNIQUE (changeset_id, head_sha, evidence_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_codegen_runtime_evidence_head
+ON codegen_runtime_evidence_observations
+   (changeset_id, head_sha, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS codegen_runtime_collection_claims (
+    changeset_id TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    ci_observation_id TEXT NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (changeset_id, head_sha, ci_observation_id)
+);
+
 CREATE TABLE IF NOT EXISTS codegen_ci_remediation_attempts (
     event_id TEXT PRIMARY KEY,
     attempt_id TEXT NOT NULL,
@@ -273,6 +306,14 @@ CREATE TABLE IF NOT EXISTS codegen_ci_remediation_claims (
 );
 """
 
+RUNTIME_EVIDENCE_BINDING_DDL = """
+ALTER TABLE codegen_runtime_evidence_observations
+ADD COLUMN IF NOT EXISTS ci_observation_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_codegen_runtime_evidence_ci_observation
+ON codegen_runtime_evidence_observations
+   (changeset_id, head_sha, ci_observation_id, observed_at DESC);
+"""
+
 ALL_DDL = (
     CONNECTIONS_DDL,
     CHANGESETS_DDL,
@@ -284,6 +325,8 @@ ALL_DDL = (
     CHANGESETS_INSPECTION_DDL,
     CHANGESETS_VERIFICATION_PLAN_DDL,
     CHANGESETS_REVIEW_VERDICT_DDL,
+    CHANGESETS_RUNTIME_ACCEPTANCE_DDL,
     CHANGESETS_GITHUB_STATE_DDL,
     OBSERVATIONS_DDL,
+    RUNTIME_EVIDENCE_BINDING_DDL,
 )

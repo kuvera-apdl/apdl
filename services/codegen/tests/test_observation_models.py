@@ -202,6 +202,45 @@ def test_rerun_attempt_cannot_claim_code_changes():
         )
 
 
+def test_remediation_runtime_evidence_id_and_hash_are_strictly_paired():
+    payload = {
+        "attempt_id": "attempt-1",
+        "event_sequence": 1,
+        "event_id": "attempt-1:1",
+        "changeset_id": "cs-1",
+        "repository": "acme/repo",
+        "pr_number": 1,
+        "failed_head_sha": "abc",
+        "failure_observation_id": "obs-1",
+        "attempt_number": 1,
+        "classification": FailureClassification.actionable_code,
+        "confidence": 0.9,
+        "disposition": RemediationDisposition.diagnosing,
+        "started_at": NOW,
+        "recorded_at": NOW,
+    }
+    with pytest.raises(ValidationError, match="recorded together"):
+        CIRemediationAttempt.model_validate(
+            {
+                **payload,
+                "runtime_evidence_observation_id": "runtime_obs_" + "a" * 32,
+            }
+        )
+    with pytest.raises(ValidationError, match="recorded together"):
+        CIRemediationAttempt.model_validate(
+            {**payload, "runtime_evidence_hash": "b" * 64}
+        )
+
+    attempt = CIRemediationAttempt.model_validate(
+        {
+            **payload,
+            "runtime_evidence_observation_id": "runtime_obs_" + "a" * 32,
+            "runtime_evidence_hash": "b" * 64,
+        }
+    )
+    assert attempt.runtime_evidence_hash == "b" * 64
+
+
 def test_remediation_outcomes_are_new_immutable_events():
     awaiting = CIRemediationAttempt(
         attempt_id="attempt-1",
