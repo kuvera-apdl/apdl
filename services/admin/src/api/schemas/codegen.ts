@@ -24,6 +24,246 @@ export const taskSpecSchema = z
   })
   .strict()
 
+const runtimeFingerprintSchema = z
+  .object({
+    schema_version: z.literal('runtime_fingerprint@1'),
+    runtime_name: z.string(),
+    runtime_version: z.string(),
+    operating_system: z.string(),
+    architecture: z.string(),
+  })
+  .strict()
+
+const contractRequestSchema = z
+  .object({
+    schema_version: z.literal('contract_request@1'),
+    requirement_ids: z.array(z.string()),
+    ecosystem: z.string(),
+    package_path: z.string(),
+    package_name: z.string(),
+    exact_version: z.string().nullable(),
+    manifest_path: z.string(),
+    lockfile_path: z.string().nullable(),
+    symbols: z.array(z.string()),
+  })
+  .strict()
+
+const contractCacheIdentitySchema = z
+  .object({
+    schema_version: z.literal('contract_cache_identity@1'),
+    project_scope: z.string(),
+    repository: z.string(),
+    ecosystem: z.string(),
+    package_path: z.string(),
+    manifest_path: z.string(),
+    manifest_sha256: z.string(),
+    lockfile_path: z.string(),
+    lockfile_sha256: z.string(),
+    runtime: runtimeFingerprintSchema,
+    extractor_version: z.string(),
+    selection_sha256: z.string(),
+    cache_key: z.string(),
+  })
+  .strict()
+
+const sourceProvenanceSchema = z
+  .object({
+    schema_version: z.literal('contract_provenance@1'),
+    manifest_path: z.string(),
+    manifest_sha256: z.string(),
+    lockfile_path: z.string(),
+    lockfile_sha256: z.string(),
+    installed_root: z.string(),
+    runtime: runtimeFingerprintSchema,
+  })
+  .strict()
+
+const contractSourceSchema = z
+  .object({
+    schema_version: z.literal('contract_source@1'),
+    source_id: z.string(),
+    kind: z.enum([
+      'installed_metadata',
+      'installed_types',
+      'installed_exports',
+      'bundled_documentation',
+      'installed_implementation',
+    ]),
+    relative_path: z.string(),
+    sha256: z.string(),
+    provenance: sourceProvenanceSchema,
+  })
+  .strict()
+
+const contractSymbolSchema = z
+  .object({
+    schema_version: z.literal('contract_symbol@1'),
+    qualified_name: z.string(),
+    kind: z.enum([
+      'function',
+      'async_function',
+      'class',
+      'interface',
+      'type_alias',
+      'constant',
+      'module_export',
+      'method',
+    ]),
+    signature: z.string(),
+    source_ids: z.array(z.string()),
+  })
+  .strict()
+
+const lifecycleFactSchema = z
+  .object({
+    schema_version: z.literal('lifecycle_fact@1'),
+    kind: z.enum(['initialization', 'readiness', 'asynchronous', 'singleton', 'cleanup', 'error']),
+    statement: z.string(),
+    source_ids: z.array(z.string()),
+  })
+  .strict()
+
+const compileCheckedExampleSchema = z
+  .object({
+    schema_version: z.literal('compile_checked_example@1'),
+    language: z.string(),
+    snippet: z.string(),
+    command: z.string(),
+    tool_version: z.string(),
+    output_sha256: z.string(),
+    source_ids: z.array(z.string()),
+    check_result: z.literal('passed'),
+  })
+  .strict()
+
+const contractEvidenceSchema = z
+  .object({
+    schema_version: z.literal('contract_evidence@1'),
+    contract_id: z.string(),
+    ecosystem: z.string(),
+    package_path: z.string(),
+    package_name: z.string(),
+    exact_version: z.string(),
+    sources: z.array(contractSourceSchema),
+    symbols: z.array(contractSymbolSchema),
+    lifecycle_facts: z.array(lifecycleFactSchema),
+    examples: z.array(compileCheckedExampleSchema),
+  })
+  .strict()
+
+const contractBlockerSchema = z
+  .object({
+    schema_version: z.literal('contract_blocker@1'),
+    code: z.enum([
+      'missing_manifest',
+      'missing_lockfile',
+      'conflicting_lockfiles',
+      'unresolved_version',
+      'version_mismatch',
+      'unsupported_ecosystem',
+      'unsupported_toolchain',
+      'install_failed',
+      'package_not_found',
+      'inspection_failed',
+      'compile_check_unavailable',
+      'example_check_failed',
+      'budget_exceeded',
+    ]),
+    severity: z.enum(['warning', 'blocking']),
+    package_name: z.string(),
+    message: z.string(),
+    paths: z.array(z.string()),
+  })
+  .strict()
+
+export const contractBundleSchema = z
+  .object({
+    schema_version: z.literal('contract_bundle@1'),
+    resolutions: z.array(
+      z
+        .object({
+          schema_version: z.literal('contract_resolution@1'),
+          request: contractRequestSchema,
+          cache_identity: contractCacheIdentitySchema.nullable(),
+          disposition: z.enum(['ready', 'blocked']),
+          evidence: contractEvidenceSchema.nullable(),
+          blockers: z.array(contractBlockerSchema),
+        })
+        .strict(),
+    ),
+  })
+  .strict()
+
+const expectedCiEvidenceSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('github_check'),
+      evidence_id: z.string(),
+      check_name: z.string(),
+      assertion: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('repository_command'),
+      evidence_id: z.string(),
+      command: z.string(),
+      cwd: z.string(),
+      assertion: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('observable_assertion'),
+      evidence_id: z.string(),
+      assertion: z.string(),
+    })
+    .strict(),
+])
+
+const requirementSchema = z
+  .object({
+    requirement_id: z.string(),
+    source_kind: z.enum(['task_spec', 'acceptance_criterion', 'constraint']),
+    original_source_text: z.string(),
+    observable_behavior: z.string(),
+    implementable_scope: z.string(),
+    likely_targets: z.array(
+      z.object({ path: z.string(), symbol: z.string().nullable() }).strict(),
+    ),
+    required_contract_evidence_ids: z.array(z.string()),
+    expected_ci_evidence: z.array(expectedCiEvidenceSchema),
+    risk: z.enum(['low', 'medium', 'high']),
+    implementation_status: z.enum([
+      'planned',
+      'implemented',
+      'confirmed_existing',
+      'blocked',
+      'descoped',
+    ]),
+    implementation_evidence: z.array(
+      z
+        .object({
+          kind: z.enum(['changed', 'existing']),
+          path: z.string(),
+          symbol: z.string().nullable(),
+          description: z.string(),
+        })
+        .strict(),
+    ),
+    decision_reason: z.string().nullable(),
+  })
+  .strict()
+
+export const requirementLedgerSchema = z
+  .object({
+    schema_version: z.literal('requirement_ledger@1'),
+    title: z.string(),
+    source_sha256: z.string(),
+    requirements: z.array(requirementSchema),
+  })
+  .strict()
+
 export const KNOWN_CHANGESET_STATUSES = [
   'queued',
   'cloning',
@@ -85,6 +325,8 @@ export const changesetSchema = z
     merge_sha: z.string().nullable(),
     diff_stat: z.record(z.unknown()),
     prompts: z.array(changesetPromptSchema),
+    contract_bundle: contractBundleSchema.nullable(),
+    requirement_ledger: requirementLedgerSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

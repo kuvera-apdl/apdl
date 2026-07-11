@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.contracts.models import ContractBundle
+from app.requirements.models import RequirementLedger
 
 
 @dataclass
@@ -27,6 +28,9 @@ class EditRequest:
     #: Tenant boundary for private dependency-contract caches. Legacy/custom
     #: callers may omit it; the editor then scopes evidence to ``repo``.
     project_scope: str = ""
+    #: Stable requirement contract reused for same-PR CI repairs. Initial runs
+    #: omit it and compile one deterministically from the task source.
+    requirement_ledger: RequirementLedger | None = None
     constraints: list[str] = field(default_factory=list)
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
@@ -61,6 +65,7 @@ class EditResult:
     #: Exact installed dependency evidence used by this attempt. This is model
     #: grounding, never an APDL-local CI result.
     contract_bundle: ContractBundle | None = None
+    requirement_ledger: RequirementLedger | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
     #: each pre-push diff review. Entries are

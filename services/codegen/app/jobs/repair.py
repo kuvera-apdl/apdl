@@ -78,6 +78,7 @@ async def repair_failed_ci(
             EditRequest(
                 repo=connection.repo,
                 project_scope=claimed.project_id,
+                requirement_ledger=claimed.requirement_ledger,
                 base_branch=claimed.base_branch or connection.default_base_branch,
                 branch=claimed.branch,
                 token=token,
@@ -95,8 +96,14 @@ async def repair_failed_ci(
                 risk_level=str(claimed.task.context.get("risk_level") or "low").lower(),
             )
         )
+        if result.requirement_ledger is None:
+            result.requirement_ledger = claimed.requirement_ledger
         if result.contract_bundle is not None:
             await store.set_contract_bundle(pool, changeset_id, result.contract_bundle)
+        if result.requirement_ledger is not None:
+            await store.set_requirement_ledger(
+                pool, changeset_id, result.requirement_ledger
+            )
         if result.prompts:
             await store.set_prompts(pool, changeset_id, [*claimed.prompts, *result.prompts])
         if not result.success:

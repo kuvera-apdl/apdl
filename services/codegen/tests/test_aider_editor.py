@@ -467,7 +467,10 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
     assert pipeline.pushed is True
     assert len(pipeline.aider_messages) == 1
     assert "Ship the bot filter." in pipeline.aider_messages[0]
-    assert "Build a bot filter." not in pipeline.aider_messages[0]
+    # The prose work order replaces the raw spec as implementation guidance,
+    # while the canonical ledger deliberately preserves the original source.
+    assert "# Canonical requirement ledger" in pipeline.aider_messages[0]
+    assert '"original_source_text": "Build a bot filter."' in pipeline.aider_messages[0]
 
 
 @pytest.mark.asyncio

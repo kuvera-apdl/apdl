@@ -57,6 +57,8 @@ async def test_job_opens_draft_pr_on_success():
     assert final.pr_number == 9
     assert final.branch.startswith("apdl/add-dark-mode-")
     assert final.diff_stat == {"files": 3}
+    assert final.requirement_ledger is not None
+    assert final.requirement_ledger.ready_for_pull_request()
     # The editor saw the resolved repo/branch + the minted token.
     assert isinstance(editor.last_request, EditRequest)
     assert editor.last_request.repo == "acme/widgets"
@@ -67,6 +69,8 @@ async def test_job_opens_draft_pr_on_success():
     assert calls["repo"] == "acme/widgets"
     assert calls["base"] == "main"
     assert calls["token"] == "ghs_tok"
+    assert "## Requirement ledger" in calls["body"]
+    assert "`REQ-001`" in calls["body"]
 
 
 @pytest.mark.asyncio

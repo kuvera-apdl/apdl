@@ -39,6 +39,11 @@ class FakeConn:
             if row is not None:
                 row["contract_bundle"] = args[1]
                 row["updated_at"] = _T0
+        elif "SET requirement_ledger" in query:
+            row = self.store["changesets"].get(args[0])
+            if row is not None:
+                row["requirement_ledger"] = args[1]
+                row["updated_at"] = _T0
         return None
 
     async def fetchval(self, query: str, *args: Any):
@@ -87,6 +92,7 @@ class FakeConn:
                 "task": args[5],
                 "diff_stat": "{}",
                 "contract_bundle": None,
+                "requirement_ledger": None,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -274,6 +280,7 @@ class FakePool:
             "task": '{"title": "t", "spec": "spec spec spec"}',
             "diff_stat": "{}",
             "contract_bundle": None,
+            "requirement_ledger": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

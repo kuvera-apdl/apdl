@@ -22,6 +22,7 @@ from app.models.changeset import (
     TaskSpec,
     assert_transition,
 )
+from app.requirements.models import RequirementLedger
 from app.store.jsonb import loads_jsonb
 
 #: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
@@ -69,6 +70,15 @@ def _contract_bundle_from_row(row: asyncpg.Record) -> ContractBundle | None:
     return ContractBundle.model_validate(value)
 
 
+def _requirement_ledger_from_row(row: asyncpg.Record) -> RequirementLedger | None:
+    value = _optional_column(row, "requirement_ledger")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return RequirementLedger.model_validate_json(value)
+    return RequirementLedger.model_validate_json(json.dumps(value))
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -93,6 +103,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         diff_stat=loads_jsonb(row["diff_stat"]),
         prompts=_prompts_from_row(row),
         contract_bundle=_contract_bundle_from_row(row),
+        requirement_ledger=_requirement_ledger_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -357,6 +368,24 @@ async def set_contract_bundle(
             """,
             changeset_id,
             json.dumps(bundle.model_dump(mode="json")),
+        )
+
+
+async def set_requirement_ledger(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    ledger: RequirementLedger,
+) -> None:
+    """Persist the stable requirement/evidence mapping without changing CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET requirement_ledger = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(ledger.model_dump(mode="json")),
         )
 
 

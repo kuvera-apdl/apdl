@@ -339,6 +339,48 @@ export function ChangesetDetailPage() {
         </CardContent>
       </Card>
 
+      {cs.requirement_ledger ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Requirement ledger</CardTitle>
+            <CardDescription>
+              Stable implementation mappings and the GitHub CI evidence expected for each criterion.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {cs.requirement_ledger.requirements.map((requirement) => (
+              <div key={requirement.requirement_id} className="rounded-md border p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <code className="font-mono text-xs">{requirement.requirement_id}</code>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                    {requirement.implementation_status}
+                  </span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                    {requirement.risk} risk
+                  </span>
+                </div>
+                <p className="mt-2">{requirement.observable_behavior}</p>
+                {requirement.implementation_evidence.length > 0 ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Code: {requirement.implementation_evidence.map((item) => item.path).join(', ')}
+                  </p>
+                ) : null}
+                {requirement.expected_ci_evidence.length > 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Expected GitHub evidence:{' '}
+                    {requirement.expected_ci_evidence.map((item) => item.evidence_id).join(', ')}
+                  </p>
+                ) : requirement.decision_reason ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Decision: {requirement.decision_reason}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
           <Fact label="Base branch">

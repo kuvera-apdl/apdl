@@ -20,6 +20,8 @@ import asyncpg
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
+from app.requirements import compile_requirement_ledger, map_implementation_evidence
+from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
 from app.store import changesets as store
@@ -54,12 +56,29 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "change"
 
 
-def _pr_body(task: TaskSpec) -> str:
+def _pr_body(task: TaskSpec, ledger: RequirementLedger) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
     if not checks:
         checks = "- [ ] Implements the described change with passing tests"
+    requirement_lines = []
+    for requirement in ledger.requirements:
+        expected = ", ".join(
+            item.evidence_id for item in requirement.expected_ci_evidence
+        ) or "explicitly blocked/descoped"
+        marker = (
+            "x"
+            if requirement.implementation_status
+            in {ImplementationStatus.implemented, ImplementationStatus.confirmed_existing}
+            else " "
+        )
+        requirement_lines.append(
+            f"- [{marker}] `{requirement.requirement_id}` "
+            f"{requirement.observable_behavior} (expected: {expected})"
+        )
+    ledger_text = "\n".join(requirement_lines)
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
+        f"## Requirement ledger\n\n{ledger_text}\n\n"
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
         "- Opened automatically by APDL codegen from an approved feature proposal. "
@@ -154,8 +173,28 @@ async def _execute_changeset_job(
             )
         )
 
+        # Protocol backstop for custom editors: the service, not an editor
+        # implementation, owns the canonical ledger boundary.
+        if result.requirement_ledger is None:
+            compiled = compile_requirement_ledger(
+                title=changeset.task.title,
+                spec=changeset.task.spec,
+                constraints=changeset.task.constraints,
+                risk=str(changeset.task.context.get("risk_level") or "low").lower(),
+                verification_command=policy.get("test_cmd"),
+            )
+            if result.success:
+                compiled = map_implementation_evidence(
+                    compiled, result.changed_paths or ["generated-change"]
+                )
+            result.requirement_ledger = compiled
+
         if result.contract_bundle is not None:
             await store.set_contract_bundle(pool, changeset_id, result.contract_bundle)
+        if result.requirement_ledger is not None:
+            await store.set_requirement_ledger(
+                pool, changeset_id, result.requirement_ledger
+            )
 
         # Persist the prompt transcript regardless of outcome — a failed run is
         # exactly when an operator wants to see what the model was told.
@@ -175,6 +214,20 @@ async def _execute_changeset_job(
             await store.transition_changeset(
                 pool, changeset_id, ChangesetStatus.tests_failed,
                 error=result.error or "The edit attempt did not pass tests.",
+            )
+            return
+        if (
+            result.requirement_ledger is None
+            or not result.requirement_ledger.ready_for_pull_request()
+        ):
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.tests_failed,
+                error=(
+                    "Editor returned no complete RequirementLedger; no pull request "
+                    "was created."
+                ),
             )
             return
 
@@ -202,7 +255,7 @@ async def _execute_changeset_job(
             head=result.branch or branch,
             base=base_branch,
             title=changeset.task.title,
-            body=_pr_body(changeset.task),
+            body=_pr_body(changeset.task, result.requirement_ledger),
             token=token,
             draft=True,
         )

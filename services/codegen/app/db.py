@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     diff_stat     JSONB NOT NULL DEFAULT '{}',
     prompts       JSONB NOT NULL DEFAULT '[]',
     contract_bundle JSONB,
+    requirement_ledger JSONB,
     ci_awaiting_since TIMESTAMPTZ,
     ci_retry_count INTEGER NOT NULL DEFAULT 0,
     ci_remediation_status TEXT NOT NULL DEFAULT 'idle',
@@ -66,6 +67,11 @@ ADD COLUMN IF NOT EXISTS prompts JSONB NOT NULL DEFAULT '[]';
 CHANGESETS_CONTRACT_BUNDLE_DDL = """
 ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS contract_bundle JSONB;
+"""
+
+CHANGESETS_REQUIREMENT_LEDGER_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS requirement_ledger JSONB;
 """
 
 # When the changeset started awaiting CI (set once at pr_open). The CI sync's
@@ -103,6 +109,7 @@ ALL_DDL = (
     CHANGESETS_MERGE_SHA_DDL,
     CHANGESETS_PROMPTS_DDL,
     CHANGESETS_CONTRACT_BUNDLE_DDL,
+    CHANGESETS_REQUIREMENT_LEDGER_DDL,
     CHANGESETS_CI_AWAITING_DDL,
     CHANGESETS_CI_REMEDIATION_DDL,
 )

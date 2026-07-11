@@ -37,6 +37,7 @@ import os
 from app.config import codegen_job_budget
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
+from app.requirements.models import RequirementLedger
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,12 @@ class ContainerAiderEditor:
             argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
         if request.existing_branch:
             argv += ["-e", "CS_EXISTING_BRANCH=true"]
+        if request.requirement_ledger is not None:
+            argv += [
+                "-e",
+                "CS_REQUIREMENT_LEDGER="
+                + json.dumps(request.requirement_ledger.model_dump(mode="json")),
+            ]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
@@ -192,6 +199,13 @@ class ContainerAiderEditor:
                 contract_bundle=(
                     ContractBundle.model_validate(data["contract_bundle"])
                     if data.get("contract_bundle") is not None
+                    else None
+                ),
+                requirement_ledger=(
+                    RequirementLedger.model_validate_json(
+                        json.dumps(data["requirement_ledger"])
+                    )
+                    if data.get("requirement_ledger") is not None
                     else None
                 ),
             )

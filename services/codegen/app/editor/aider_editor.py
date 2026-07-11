@@ -46,7 +46,7 @@ from app.contracts.installer import (
     SandboxedInstallRunner,
     detect_contract_input_drift,
 )
-from app.contracts.models import ContractBundle, RuntimeFingerprint
+from app.contracts.models import ContractBundle, ContractRequest, RuntimeFingerprint
 from app.contracts.render import render_contract_bundle
 from app.contracts.resolver import resolve_contracts
 from app.contracts.selection import select_contract_requests
@@ -67,6 +67,13 @@ from app.editor.review import (
 )
 from app.profiling import profile_repository
 from app.profiling.models import CommandKind, RepoProfile
+from app.requirements import (
+    bind_contract_evidence,
+    compile_requirement_ledger,
+    map_implementation_evidence,
+    render_requirement_ledger,
+)
+from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
 
 logger = logging.getLogger(__name__)
@@ -350,6 +357,45 @@ def _contract_runtime() -> RuntimeFingerprint:
     )
 
 
+def _contract_requests_for_ledger(
+    profile: RepoProfile, ledger: RequirementLedger
+) -> list[ContractRequest]:
+    """Select exact package names per stable requirement, merging duplicates."""
+    selected: dict[tuple[str, str, str, str | None], ContractRequest] = {}
+    for requirement in ledger.requirements:
+        if requirement.implementation_status in {
+            ImplementationStatus.blocked,
+            ImplementationStatus.descoped,
+        }:
+            continue
+        text = "\n".join(
+            [
+                requirement.original_source_text,
+                requirement.observable_behavior,
+                requirement.implementable_scope,
+            ]
+        )
+        for request in select_contract_requests(
+            profile, text, requirement_ids=[requirement.requirement_id]
+        ):
+            key = (
+                request.ecosystem,
+                request.package_path,
+                request.package_name,
+                request.exact_version,
+            )
+            previous = selected.get(key)
+            if previous is None:
+                selected[key] = request
+                continue
+            payload = previous.model_dump(mode="json")
+            payload["requirement_ids"] = sorted(
+                {*previous.requirement_ids, *request.requirement_ids}
+            )
+            selected[key] = ContractRequest.model_validate(payload)
+    return [selected[key] for key in sorted(selected)]
+
+
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
@@ -401,6 +447,7 @@ class AiderEditor:
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
         contract_bundle: ContractBundle | None = None
+        requirement_ledger: RequirementLedger | None = request.requirement_ledger
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -409,6 +456,7 @@ class AiderEditor:
                 error=error,
                 prompts=prompts,
                 contract_bundle=contract_bundle,
+                requirement_ledger=requirement_ledger,
             )
 
         try:
@@ -448,16 +496,35 @@ class AiderEditor:
             #    policy first, then detect) and the agent-facing testing reality.
             probe = _probe_repo(repo_dir, request.test_cmd)
 
-            # 2b. Resolve every explicitly named direct dependency from an
+            # 2b. Compile one strict, stable ledger before any model call. A
+            # same-PR repair reuses the original ledger and IDs verbatim.
+            if requirement_ledger is None:
+                requirement_ledger = compile_requirement_ledger(
+                    title=request.title,
+                    spec=request.spec,
+                    constraints=request.constraints,
+                    risk=request.risk_level,
+                    verification_command=probe.verify_cmd,
+                )
+            active_requirements = [
+                item
+                for item in requirement_ledger.requirements
+                if item.implementation_status
+                not in {ImplementationStatus.blocked, ImplementationStatus.descoped}
+            ]
+            if not active_requirements:
+                return fail(
+                    "Every requirement is explicitly blocked or descoped; no pull "
+                    "request can be created."
+                )
+
+            # 2c. Resolve every explicitly named direct dependency from an
             # isolated frozen install before the model sees an API claim. The
             # in-process API editor deliberately has no install authority, so
             # such work blocks unless it runs in the credential-minimal worker.
             if self._contracts_enabled:
-                contract_text = "\n".join(
-                    [request.title, request.spec, *request.constraints]
-                )
-                contract_requests = select_contract_requests(
-                    probe.profile or profile_repository(repo_dir), contract_text
+                contract_requests = _contract_requests_for_ledger(
+                    probe.profile or profile_repository(repo_dir), requirement_ledger
                 )
                 contract_bundle = await asyncio.to_thread(
                     resolve_contracts,
@@ -494,6 +561,9 @@ class AiderEditor:
                         "Exact dependency contract resolution blocked the change: "
                         + details
                     )
+                requirement_ledger = bind_contract_evidence(
+                    requirement_ledger, contract_bundle
+                )
 
             # 3. Compile the spec into a repo-grounded engineering brief
             #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
@@ -555,6 +625,12 @@ class AiderEditor:
                             f"{request.risk_level}-risk change requires a parseable "
                             "repository-grounded brief."
                         )
+
+            # The optional prose brief may refine implementation detail, but it
+            # cannot replace or weaken the canonical requirement contract.
+            task_text = (
+                f"{task_text.rstrip()}\n\n{render_requirement_ledger(requirement_ledger)}"
+            )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
@@ -728,6 +804,15 @@ class AiderEditor:
                         return fail(f"quality review rejected the change: {problems}")
                 break
 
+            requirement_ledger = map_implementation_evidence(
+                requirement_ledger, changed_paths
+            )
+            if not requirement_ledger.ready_for_pull_request():
+                return fail(
+                    "Requirement ledger is incomplete; every active criterion must "
+                    "map to changed or confirmed-existing code before PR creation."
+                )
+
             _, numstat = await self._git(
                 repo_dir, ["diff", "--numstat", f"{base}..HEAD"]
             )
@@ -790,6 +875,7 @@ class AiderEditor:
                 prompts=prompts,
                 head_sha=head_sha.strip(),
                 contract_bundle=contract_bundle,
+                requirement_ledger=requirement_ledger,
             )
         finally:
             if not keep:

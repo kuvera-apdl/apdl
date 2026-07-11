@@ -12,6 +12,7 @@ import pytest
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
+from app.requirements import compile_requirement_ledger
 
 
 def _req(**over) -> EditRequest:
@@ -109,12 +110,14 @@ def test_last_json_finds_result_among_noise():
 
 def test_parse_result_maps_success_json():
     editor = ContainerAiderEditor()
+    ledger = compile_requirement_ledger(title="Add thing", spec="Do the thing.")
     out = json.dumps({
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
         "changed_paths": ["a.py", "b.py"], "diff_text": "diff…", "error": None,
         "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
         "contract_bundle": ContractBundle().model_dump(mode="json"),
+        "requirement_ledger": ledger.model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
@@ -122,6 +125,7 @@ def test_parse_result_maps_success_json():
     assert res.changed_paths == ["a.py", "b.py"]
     assert res.prompts[0]["stage"] == "edit"
     assert res.contract_bundle == ContractBundle()
+    assert res.requirement_ledger == ledger
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():

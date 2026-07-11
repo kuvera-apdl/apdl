@@ -39,6 +39,8 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     merge_sha: null,
     diff_stat: {},
     prompts: [],
+    contract_bundle: null,
+    requirement_ledger: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
     updated_at: '2026-07-01T03:21:35.000000Z',

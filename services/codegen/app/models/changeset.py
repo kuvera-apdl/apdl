@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.models import ContractBundle
+from app.requirements.models import RequirementLedger
 
 
 class ChangesetStatus(str, Enum):
@@ -230,6 +231,7 @@ class Changeset(BaseModel):
     #: recording or that never reached the editing stage.
     prompts: list[dict[str, Any]] = Field(default_factory=list)
     contract_bundle: ContractBundle | None = None
+    requirement_ledger: RequirementLedger | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

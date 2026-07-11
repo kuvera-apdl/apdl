@@ -33,6 +33,8 @@ const sample = {
       notes: "The system prompt for this step is Aider's built-in editing prompt (not authored by APDL).",
     },
   ],
+  contract_bundle: null,
+  requirement_ledger: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',

@@ -31,6 +31,7 @@ import sys
 
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import EditRequest, EditResult
+from app.requirements.models import RequirementLedger
 
 
 def _request_from_env() -> EditRequest:
@@ -49,6 +50,11 @@ def _request_from_env() -> EditRequest:
         revert_sha=(os.environ.get("CS_REVERT_SHA") or None),
         existing_branch=os.environ.get("CS_EXISTING_BRANCH") == "true",
         risk_level=os.environ.get("CS_RISK_LEVEL", "low"),
+        requirement_ledger=(
+            RequirementLedger.model_validate_json(os.environ["CS_REQUIREMENT_LEDGER"])
+            if os.environ.get("CS_REQUIREMENT_LEDGER")
+            else None
+        ),
     )
     # The token now lives only in `request`; keep it out of every child's view.
     os.environ.pop("GH_TOKEN", None)
@@ -68,6 +74,8 @@ def main() -> int:
     payload = dataclasses.asdict(result)
     if result.contract_bundle is not None:
         payload["contract_bundle"] = result.contract_bundle.model_dump(mode="json")
+    if result.requirement_ledger is not None:
+        payload["requirement_ledger"] = result.requirement_ledger.model_dump(mode="json")
     print(json.dumps(payload))
     return 0
 
