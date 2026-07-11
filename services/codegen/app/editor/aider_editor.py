@@ -84,6 +84,15 @@ from app.requirements import (
 )
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
+from app.verification import (
+    CoverageDisposition,
+    VerificationCoverage,
+    VerificationPlan,
+    build_verification_plan,
+    evaluate_verification_coverage,
+    render_verification_coverage,
+    render_verification_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +465,16 @@ def _inspection_for_ledger(
     )
 
 
+def _coverage_retry_message(coverage: VerificationCoverage) -> str:
+    return (
+        "The deterministic risk policy rejected the current diff because required "
+        "verification coverage is missing. Add tests using the repository's "
+        "existing test framework for every medium/high-risk requirement. Do not "
+        "skip or weaken existing checks. GitHub CI will execute the tests.\n\n"
+        + render_verification_coverage(coverage)
+    )
+
+
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
@@ -510,6 +529,10 @@ class AiderEditor:
         requirement_ledger: RequirementLedger | None = request.requirement_ledger
         inspection_snapshot: InspectionSnapshot | None = request.inspection_snapshot
         dependency_slice: DependencySlice | None = request.dependency_slice
+        verification_plan: VerificationPlan | None = request.verification_plan
+        verification_coverage: VerificationCoverage | None = (
+            request.verification_coverage
+        )
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -521,6 +544,8 @@ class AiderEditor:
                 requirement_ledger=requirement_ledger,
                 inspection_snapshot=inspection_snapshot,
                 dependency_slice=dependency_slice,
+                verification_plan=verification_plan,
+                verification_coverage=verification_coverage,
             )
 
         try:
@@ -559,6 +584,7 @@ class AiderEditor:
             # 2. Probe the repo: resolve the verification command (connection
             #    policy first, then detect) and the agent-facing testing reality.
             probe = _probe_repo(repo_dir, request.test_cmd)
+            repo_profile = probe.profile or profile_repository(repo_dir)
 
             # 2b. Compile one strict, stable ledger before any model call. A
             # same-PR repair reuses the original ledger and IDs verbatim.
@@ -585,6 +611,9 @@ class AiderEditor:
             inspection_snapshot = _inspection_for_ledger(
                 repo_dir, requirement_ledger
             )
+            verification_plan = build_verification_plan(
+                requirement_ledger, repo_profile
+            )
 
             # 2c. Resolve every explicitly named direct dependency from an
             # isolated frozen install before the model sees an API claim. The
@@ -592,7 +621,7 @@ class AiderEditor:
             # such work blocks unless it runs in the credential-minimal worker.
             if self._contracts_enabled:
                 contract_requests = _contract_requests_for_ledger(
-                    probe.profile or profile_repository(repo_dir), requirement_ledger
+                    repo_profile, requirement_ledger
                 )
                 contract_bundle = await asyncio.to_thread(
                     resolve_contracts,
@@ -697,7 +726,9 @@ class AiderEditor:
             # The optional prose brief may refine implementation detail, but it
             # cannot replace or weaken the canonical requirement contract.
             task_text = (
-                f"{task_text.rstrip()}\n\n{render_requirement_ledger(requirement_ledger)}"
+                f"{task_text.rstrip()}\n\n"
+                f"{render_requirement_ledger(requirement_ledger)}\n\n"
+                f"{render_verification_plan(verification_plan)}"
             )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
@@ -729,6 +760,12 @@ class AiderEditor:
                     render_inspection_snapshot(inspection_snapshot), encoding="utf-8"
                 )
                 argv += ["--read", str(inspection_file)]
+            if verification_plan is not None:
+                verification_file = work / "VERIFICATION_PLAN.md"
+                verification_file.write_text(
+                    render_verification_plan(verification_plan), encoding="utf-8"
+                )
+                argv += ["--read", str(verification_file)]
             if contract_bundle and contract_bundle.resolutions:
                 contracts_file = work / "CONTRACTS.md"
                 contracts_file.write_text(
@@ -829,7 +866,35 @@ class AiderEditor:
                     )
                 _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
                 dependency_slice = build_dependency_slice(repo_dir, changed_paths)
-                dependency_context = render_dependency_slice(dependency_slice)
+                verification_coverage = evaluate_verification_coverage(
+                    verification_plan, changed_paths=changed_paths
+                )
+                evidence_context = (
+                    render_dependency_slice(dependency_slice)
+                    + "\n\n"
+                    + render_verification_coverage(verification_coverage)
+                )
+                if verification_coverage.disposition in {
+                    CoverageDisposition.rejected_workflow_gate_relaxation,
+                    CoverageDisposition.requires_protected_workflow_review,
+                }:
+                    return fail(verification_coverage.disposition_reason)
+                if (
+                    verification_coverage.disposition
+                    is CoverageDisposition.missing_required_coverage
+                ):
+                    if retries_left > 0:
+                        retries_left -= 1
+                        message = _with_feedback(
+                            initial_message,
+                            _coverage_retry_message(verification_coverage),
+                        )
+                        logger.info(
+                            "Risk policy requires additional tests for %s; retrying.",
+                            request.repo,
+                        )
+                        continue
+                    return fail(verification_coverage.disposition_reason)
 
                 # Review the diff against the ORIGINAL spec before pushing: green
                 # builds happily ship a token diff that implements none of the
@@ -847,7 +912,7 @@ class AiderEditor:
                                 spec=request.spec,
                                 diff_text=diff_text,
                                 changed_paths=changed_paths,
-                                evidence_context=dependency_context,
+                                evidence_context=evidence_context,
                             ),
                             "notes": None,
                         }
@@ -856,7 +921,7 @@ class AiderEditor:
                         spec=request.spec,
                         diff_text=diff_text,
                         changed_paths=changed_paths,
-                        evidence_context=dependency_context,
+                        evidence_context=evidence_context,
                         complete=complete,
                     )
                     if verdict.skipped and fail_closed_auxiliary:
@@ -868,7 +933,7 @@ class AiderEditor:
                         if retries_left > 0:
                             retries_left -= 1
                             message = _with_feedback(
-                                initial_message + "\n\n" + dependency_context,
+                                initial_message + "\n\n" + evidence_context,
                                 _review_retry_message(verdict),
                             )
                             logger.info(
@@ -957,6 +1022,8 @@ class AiderEditor:
                 requirement_ledger=requirement_ledger,
                 inspection_snapshot=inspection_snapshot,
                 dependency_slice=dependency_slice,
+                verification_plan=verification_plan,
+                verification_coverage=verification_coverage,
             )
         finally:
             if not keep:

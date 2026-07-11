@@ -39,6 +39,7 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,20 @@ class ContainerAiderEditor:
                 dependency_slice=(
                     DependencySlice.model_validate(data["dependency_slice"])
                     if data.get("dependency_slice") is not None
+                    else None
+                ),
+                verification_plan=(
+                    VerificationPlan.model_validate_json(
+                        json.dumps(data["verification_plan"])
+                    )
+                    if data.get("verification_plan") is not None
+                    else None
+                ),
+                verification_coverage=(
+                    VerificationCoverage.model_validate_json(
+                        json.dumps(data["verification_coverage"])
+                    )
+                    if data.get("verification_coverage") is not None
                     else None
                 ),
             )

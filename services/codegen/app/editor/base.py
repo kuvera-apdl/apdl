@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 
 @dataclass
@@ -34,6 +35,8 @@ class EditRequest:
     requirement_ledger: RequirementLedger | None = None
     inspection_snapshot: InspectionSnapshot | None = None
     dependency_slice: DependencySlice | None = None
+    verification_plan: VerificationPlan | None = None
+    verification_coverage: VerificationCoverage | None = None
     constraints: list[str] = field(default_factory=list)
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
@@ -71,6 +74,8 @@ class EditResult:
     requirement_ledger: RequirementLedger | None = None
     inspection_snapshot: InspectionSnapshot | None = None
     dependency_slice: DependencySlice | None = None
+    verification_plan: VerificationPlan | None = None
+    verification_coverage: VerificationCoverage | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
     #: each pre-push diff review. Entries are

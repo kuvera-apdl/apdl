@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 
 class ChangesetStatus(str, Enum):
@@ -235,6 +236,8 @@ class Changeset(BaseModel):
     requirement_ledger: RequirementLedger | None = None
     inspection_snapshot: InspectionSnapshot | None = None
     dependency_slice: DependencySlice | None = None
+    verification_plan: VerificationPlan | None = None
+    verification_coverage: VerificationCoverage | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

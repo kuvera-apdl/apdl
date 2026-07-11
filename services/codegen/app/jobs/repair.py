@@ -81,6 +81,8 @@ async def repair_failed_ci(
                 requirement_ledger=claimed.requirement_ledger,
                 inspection_snapshot=claimed.inspection_snapshot,
                 dependency_slice=claimed.dependency_slice,
+                verification_plan=claimed.verification_plan,
+                verification_coverage=claimed.verification_coverage,
                 base_branch=claimed.base_branch or connection.default_base_branch,
                 branch=claimed.branch,
                 token=token,
@@ -112,6 +114,13 @@ async def repair_failed_ci(
                 changeset_id,
                 snapshot=result.inspection_snapshot,
                 dependency_slice=result.dependency_slice,
+            )
+        if result.verification_plan is not None or result.verification_coverage is not None:
+            await store.set_verification_evidence(
+                pool,
+                changeset_id,
+                plan=result.verification_plan,
+                coverage=result.verification_coverage,
             )
         if result.prompts:
             await store.set_prompts(pool, changeset_id, [*claimed.prompts, *result.prompts])

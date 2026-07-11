@@ -11,7 +11,16 @@ from app.github.pulls import PullRequest
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import ChangesetStatus
+from app.profiling import RepoProfile
+from app.profiling.models import (
+    CIWorkflow,
+    CommandKind,
+    RepoCommand,
+    TestFacility as ProfileTestFacility,
+)
+from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.store import changesets as store
+from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
 
 _TASK = {
@@ -374,3 +383,70 @@ async def test_job_persists_repository_inspection_evidence():
     stored = await store.get_changeset(pool, "cs_inspection")
     assert stored.inspection_snapshot == snapshot
     assert stored.dependency_slice == dependency_slice
+
+
+@pytest.mark.asyncio
+async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected():
+    calls: dict = {}
+
+    async def open_pr(**kwargs) -> PullRequest:
+        calls.update(kwargs)
+        return PullRequest(url="https://github.com/acme/widgets/pull/12", number=12)
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_verification")
+    ledger = map_implementation_evidence(
+        compile_requirement_ledger(
+            title=_TASK["title"],
+            spec=_TASK["spec"],
+            constraints=_TASK["constraints"],
+        ),
+        ["src/theme.ts", "tests/theme.test.ts"],
+    )
+    profile = RepoProfile(
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm test",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+        ci_workflows=[
+            CIWorkflow(provider="github_actions", path=".github/workflows/ci.yml")
+        ],
+    )
+    plan = build_verification_plan(ledger, profile)
+    coverage = evaluate_verification_coverage(
+        plan, changed_paths=["src/theme.ts", "tests/theme.test.ts"]
+    )
+
+    await run_changeset_job(
+        pool,
+        "cs_verification",
+        editor=FakeEditor(
+            EditResult(
+                success=True,
+                changed_paths=["src/theme.ts", "tests/theme.test.ts"],
+                requirement_ledger=ledger,
+                verification_plan=plan,
+                verification_coverage=coverage,
+            )
+        ),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_verification")
+    assert stored.verification_plan == plan
+    assert stored.verification_coverage == coverage
+    assert stored.ci_status is None
+    assert "## Verification coverage" in calls["body"]
+    assert "GitHub CI is authoritative" in calls["body"]
+    assert "passed" not in calls["body"].lower()

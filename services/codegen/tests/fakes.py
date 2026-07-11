@@ -52,6 +52,14 @@ class FakeConn:
                 if args[2] is not None:
                     row["dependency_slice"] = args[2]
                 row["updated_at"] = _T0
+        elif "SET verification_plan" in query:
+            row = self.store["changesets"].get(args[0])
+            if row is not None:
+                if args[1] is not None:
+                    row["verification_plan"] = args[1]
+                if args[2] is not None:
+                    row["verification_coverage"] = args[2]
+                row["updated_at"] = _T0
         return None
 
     async def fetchval(self, query: str, *args: Any):
@@ -103,6 +111,8 @@ class FakeConn:
                 "requirement_ledger": None,
                 "inspection_snapshot": None,
                 "dependency_slice": None,
+                "verification_plan": None,
+                "verification_coverage": None,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -293,6 +303,8 @@ class FakePool:
             "requirement_ledger": None,
             "inspection_snapshot": None,
             "dependency_slice": None,
+            "verification_plan": None,
+            "verification_coverage": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

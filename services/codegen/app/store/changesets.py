@@ -25,6 +25,7 @@ from app.models.changeset import (
 )
 from app.requirements.models import RequirementLedger
 from app.store.jsonb import loads_jsonb
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 #: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
 #: a queued row hasn't started, so a restart re-enqueues it rather than failing
@@ -96,6 +97,24 @@ def _dependency_slice_from_row(row: asyncpg.Record) -> DependencySlice | None:
     return DependencySlice.model_validate_json(raw)
 
 
+def _verification_plan_from_row(row: asyncpg.Record) -> VerificationPlan | None:
+    value = _optional_column(row, "verification_plan")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return VerificationPlan.model_validate_json(raw)
+
+
+def _verification_coverage_from_row(
+    row: asyncpg.Record,
+) -> VerificationCoverage | None:
+    value = _optional_column(row, "verification_coverage")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return VerificationCoverage.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -123,6 +142,8 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         requirement_ledger=_requirement_ledger_from_row(row),
         inspection_snapshot=_inspection_snapshot_from_row(row),
         dependency_slice=_dependency_slice_from_row(row),
+        verification_plan=_verification_plan_from_row(row),
+        verification_coverage=_verification_coverage_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -434,6 +455,33 @@ async def set_inspection_evidence(
             (
                 json.dumps(dependency_slice.model_dump(mode="json"))
                 if dependency_slice is not None
+                else None
+            ),
+        )
+
+
+async def set_verification_evidence(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    plan: VerificationPlan | None,
+    coverage: VerificationCoverage | None,
+) -> None:
+    """Persist expected GitHub coverage facts, never a CI result."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET verification_plan = COALESCE($2::jsonb, verification_plan),
+                verification_coverage = COALESCE($3::jsonb, verification_coverage),
+                updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(plan.model_dump(mode="json")) if plan is not None else None,
+            (
+                json.dumps(coverage.model_dump(mode="json"))
+                if coverage is not None
                 else None
             ),
         )

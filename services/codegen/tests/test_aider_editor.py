@@ -25,7 +25,17 @@ from app.editor.aider_editor import (
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
-from app.profiling.models import Dependency, PackageBoundary, PackageManager, RepoProfile
+from app.profiling.models import (
+    CIWorkflow,
+    CommandKind,
+    Dependency,
+    PackageBoundary,
+    PackageManager,
+    RepoCommand,
+    RepoProfile,
+    TestFacility as ProfileTestFacility,
+)
+from app.verification import CoverageDisposition, PlanDisposition
 
 
 def test_tail_returns_full_text_when_under_limit():
@@ -374,19 +384,31 @@ def _request(test_cmd: str | None = "make test") -> EditRequest:
 class _Pipeline:
     """Scripted git/aider/test doubles that drive implement() end-to-end."""
 
-    def __init__(self, editor, monkeypatch, *, test_results=None, diff_text=None):
+    def __init__(
+        self,
+        editor,
+        monkeypatch,
+        *,
+        test_results=None,
+        diff_text=None,
+        changed_paths: list[str] | None = None,
+    ):
         self.aider_messages: list[str] = []
         self.pushed = False
         self.git_calls: list[list[str]] = []
         self._test_results = list(test_results or [])
         self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
+        self._changed_paths = list(changed_paths or ["app/x.ts\n"])
 
         async def fake_git(cwd, args, **_kwargs):
             self.git_calls.append(list(args))
             if args[0] == "clone":
                 Path(args[-1]).mkdir(parents=True)
             if args[0] == "diff" and "--name-only" in args:
-                return 0, "app/x.ts\n"
+                value = self._changed_paths[0]
+                if len(self._changed_paths) > 1:
+                    self._changed_paths.pop(0)
+                return 0, value
             if args[0] == "diff" and "--numstat" in args:
                 return 0, "5\t1\tapp/x.ts\n"
             if args[0] == "diff":
@@ -484,6 +506,72 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
     # while the canonical ledger deliberately preserves the original source.
     assert "# Canonical requirement ledger" in pipeline.aider_messages[0]
     assert '"original_source_text": "Build a bot filter."' in pipeline.aider_messages[0]
+    assert "# GitHub CI verification plan" in pipeline.aider_messages[0]
+    assert result.verification_plan is not None
+    assert result.verification_plan.disposition is PlanDisposition.unverified_external_ci
+    assert result.verification_coverage is not None
+    assert (
+        result.verification_coverage.disposition
+        is CoverageDisposition.unverified_external_ci
+    )
+
+
+@pytest.mark.asyncio
+async def test_medium_risk_missing_test_coverage_retries_before_push(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    profile = RepoProfile(
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="pytest -q",
+                cwd=".",
+                source_path="pyproject.toml",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="pytest", package_path=".", source_path="pyproject.toml"
+            )
+        ],
+        ci_workflows=[
+            CIWorkflow(provider="github_actions", path=".github/workflows/ci.yml")
+        ],
+        protected_paths=[".github/workflows/ci.yml"],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd="pytest -q",
+            has_test_runner=True,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor,
+        monkeypatch,
+        changed_paths=["app/x.py\n", "app/x.py\ntests/test_x.py\n"],
+    )
+    request = _request(test_cmd="pytest -q")
+    request.risk_level = "medium"
+
+    result = await editor.implement(request)
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert len(pipeline.aider_messages) == 2
+    assert "required verification coverage is missing" in pipeline.aider_messages[1]
+    assert result.verification_coverage is not None
+    assert (
+        result.verification_coverage.disposition
+        is CoverageDisposition.ready_for_github_ci
+    )
 
 
 @pytest.mark.asyncio

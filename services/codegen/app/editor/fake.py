@@ -47,5 +47,7 @@ class FakeEditor:
                 requirement_ledger=_ledger(request, result),
                 inspection_snapshot=result.inspection_snapshot,
                 dependency_slice=result.dependency_slice,
+                verification_plan=result.verification_plan,
+                verification_coverage=result.verification_coverage,
             )
         return result

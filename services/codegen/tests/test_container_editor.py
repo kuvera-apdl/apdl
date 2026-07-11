@@ -13,7 +13,9 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.profiling import RepoProfile
 from app.requirements import compile_requirement_ledger
+from app.verification import build_verification_plan, evaluate_verification_coverage
 
 
 def _req(**over) -> EditRequest:
@@ -112,6 +114,8 @@ def test_last_json_finds_result_among_noise():
 def test_parse_result_maps_success_json():
     editor = ContainerAiderEditor()
     ledger = compile_requirement_ledger(title="Add thing", spec="Do the thing.")
+    plan = build_verification_plan(ledger, RepoProfile())
+    coverage = evaluate_verification_coverage(plan, changed_paths=["a.py", "b.py"])
     out = json.dumps({
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
@@ -121,6 +125,8 @@ def test_parse_result_maps_success_json():
         "requirement_ledger": ledger.model_dump(mode="json"),
         "inspection_snapshot": InspectionSnapshot().model_dump(mode="json"),
         "dependency_slice": DependencySlice().model_dump(mode="json"),
+        "verification_plan": plan.model_dump(mode="json"),
+        "verification_coverage": coverage.model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
@@ -131,6 +137,8 @@ def test_parse_result_maps_success_json():
     assert res.requirement_ledger == ledger
     assert res.inspection_snapshot == InspectionSnapshot()
     assert res.dependency_slice == DependencySlice()
+    assert res.verification_plan == plan
+    assert res.verification_coverage == coverage
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():

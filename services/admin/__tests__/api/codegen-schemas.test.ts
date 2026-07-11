@@ -4,6 +4,10 @@ import {
   changesetListSchema,
   changesetSchema,
 } from '@/api/schemas/codegen'
+import {
+  makeVerificationCoverage,
+  makeVerificationPlan,
+} from '../helpers/fixtures'
 
 const sample = {
   changeset_id: 'cs_1',
@@ -37,6 +41,8 @@ const sample = {
   requirement_ledger: null,
   inspection_snapshot: null,
   dependency_slice: null,
+  verification_plan: null,
+  verification_coverage: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',
@@ -64,6 +70,41 @@ describe('codegen schemas', () => {
 
   it('rejects unknown prompt fields (strict)', () => {
     const bad = { ...sample, prompts: [{ ...sample.prompts[0], extra: true }] }
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('parses strict verification planning and coverage evidence', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      verification_plan: makeVerificationPlan(),
+      verification_coverage: makeVerificationCoverage(),
+    })
+
+    expect(parsed.verification_plan?.authority).toBe('github_ci')
+    expect(parsed.verification_coverage?.disposition).toBe('ready_for_github_ci')
+  })
+
+  it('rejects verification evidence that claims APDL was authoritative', () => {
+    const bad = {
+      ...sample,
+      verification_coverage: {
+        ...makeVerificationCoverage(),
+        apdl_declared_verified: true,
+      },
+    }
+
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('rejects unknown verification plan fields (strict)', () => {
+    const bad = {
+      ...sample,
+      verification_plan: {
+        ...makeVerificationPlan(),
+        extra: true,
+      },
+    }
+
     expect(changesetSchema.safeParse(bad).success).toBe(false)
   })
 })

@@ -1,7 +1,78 @@
 // Canonical fixtures matching serialize_flag() / the audit store exactly —
 // these are what the live API returns (Strict Schema Rule test material).
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
+import type {
+  VerificationCoverage,
+  VerificationPlan,
+} from '../../src/api/types/codegen'
 import type { Workspace } from '../../src/core/workspace'
+
+export function makeVerificationPlan(
+  overrides: Partial<VerificationPlan> = {},
+): VerificationPlan {
+  return {
+    schema_version: 'verification_plan@1',
+    source_ledger_sha256: 'a'.repeat(64),
+    repo_profile_schema_version: 'repo_profile@1',
+    risk: 'high',
+    authority: 'github_ci',
+    apdl_local_execution_authoritative: false,
+    workflow_gate_policy: 'preserve_or_strengthen',
+    test_runner_configured: true,
+    test_commands: [
+      {
+        command: 'npm test',
+        cwd: '.',
+        source_path: 'package.json',
+      },
+    ],
+    github_workflow_paths: ['.github/workflows/ci.yml'],
+    protected_workflow_paths: ['.github/workflows/ci.yml'],
+    disposition: 'github_ci_planned',
+    disposition_reason: 'Repository tests are configured in the protected GitHub CI workflow.',
+    items: [
+      {
+        plan_item_id: 'VP-001',
+        requirement_id: 'REQ-001',
+        surface: 'api',
+        policy_check: 'strict_request_response_schema',
+        requirement_risk: 'high',
+        expected_assertion: 'Reject payloads with unknown fields.',
+        expected_ci_evidence_ids: ['CI-001'],
+        requires_changed_test_for_pr: true,
+        disposition: 'required_in_github_ci',
+      },
+    ],
+    ...overrides,
+  }
+}
+
+export function makeVerificationCoverage(
+  overrides: Partial<VerificationCoverage> = {},
+): VerificationCoverage {
+  return {
+    schema_version: 'verification_coverage@1',
+    source_ledger_sha256: 'a'.repeat(64),
+    authority: 'github_ci',
+    github_has_not_reported: true,
+    apdl_declared_verified: false,
+    workflow_gate_policy: 'preserve_or_strengthen',
+    disposition: 'ready_for_github_ci',
+    disposition_reason: 'The diff includes the required regression test path for GitHub CI.',
+    changed_test_paths: ['src/api/__tests__/schema.test.ts'],
+    changed_workflow_paths: [],
+    changed_protected_workflow_paths: [],
+    relaxed_workflow_paths: [],
+    items: [
+      {
+        plan_item_id: 'VP-001',
+        status: 'coverage_path_present',
+        coverage_paths: ['src/api/__tests__/schema.test.ts'],
+      },
+    ],
+    ...overrides,
+  }
+}
 
 export function makeFlag(overrides: Partial<FlagConfig> = {}): FlagConfig {
   return {

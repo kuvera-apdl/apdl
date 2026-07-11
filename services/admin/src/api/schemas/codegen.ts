@@ -319,6 +319,201 @@ export const dependencySliceSchema = z
   })
   .strict()
 
+const verificationSurfaceSchema = z.enum([
+  'general',
+  'ui',
+  'api',
+  'sdk',
+  'analytics',
+  'database',
+  'security',
+  'billing',
+  'concurrency',
+])
+
+const verificationCheckSchema = z.enum([
+  'regression',
+  'render',
+  'interaction',
+  'accessibility_smoke',
+  'responsive_browser',
+  'route_existence',
+  'strict_request_response_schema',
+  'error_cases',
+  'exact_version_contract',
+  'lifecycle',
+  'readiness',
+  'cleanup',
+  'canonical_event',
+  'real_sink',
+  'identity_consistency',
+  'exposure_and_metric',
+  'migration_execution',
+  'rollback_or_forward_compatibility',
+  'real_database_integration',
+  'unauthorized_path',
+  'authorized_path',
+  'secret_and_permission_checks',
+  'decimal_and_rounding',
+  'idempotency',
+  'retry_behavior',
+  'race_behavior',
+  'uniqueness',
+  'transactionality',
+])
+
+const requirementRiskSchema = z.enum(['low', 'medium', 'high'])
+const planItemDispositionSchema = z.enum([
+  'required_in_github_ci',
+  'unverified_external_ci',
+])
+
+const testCommandSchema = z
+  .object({
+    command: z.string().min(1),
+    cwd: z.string().min(1),
+    source_path: z.string().min(1),
+  })
+  .strict()
+
+const verificationPlanItemSchema = z
+  .object({
+    plan_item_id: z.string().regex(/^VP-[0-9]{3}$/),
+    requirement_id: z.string().regex(/^REQ-[0-9]{3}$/),
+    surface: verificationSurfaceSchema,
+    policy_check: verificationCheckSchema,
+    requirement_risk: requirementRiskSchema,
+    expected_assertion: z.string().min(1),
+    expected_ci_evidence_ids: z.array(z.string()).min(1),
+    requires_changed_test_for_pr: z.boolean(),
+    disposition: planItemDispositionSchema,
+  })
+  .strict()
+  .refine(
+    (item) => new Set(item.expected_ci_evidence_ids).size === item.expected_ci_evidence_ids.length,
+    { message: 'plan-item CI evidence IDs must be unique' },
+  )
+
+export const verificationPlanSchema = z
+  .object({
+    schema_version: z.literal('verification_plan@1'),
+    source_ledger_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    repo_profile_schema_version: z.string().min(1),
+    risk: requirementRiskSchema,
+    authority: z.literal('github_ci'),
+    apdl_local_execution_authoritative: z.literal(false),
+    workflow_gate_policy: z.literal('preserve_or_strengthen'),
+    test_runner_configured: z.boolean(),
+    test_commands: z.array(testCommandSchema),
+    github_workflow_paths: z.array(z.string()),
+    protected_workflow_paths: z.array(z.string()),
+    disposition: z.enum([
+      'github_ci_planned',
+      'unverified_external_ci',
+      'no_implementable_requirements',
+    ]),
+    disposition_reason: z.string().min(1),
+    items: z.array(verificationPlanItemSchema),
+  })
+  .strict()
+  .superRefine((plan, ctx) => {
+    const expectedItemIds = plan.items.map((_, index) => `VP-${String(index + 1).padStart(3, '0')}`)
+    if (plan.items.some((item, index) => item.plan_item_id !== expectedItemIds[index])) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'plan item IDs must be contiguous and ordered from VP-001' })
+    }
+
+    const sortedWorkflows = [...new Set(plan.github_workflow_paths)].sort()
+    if (JSON.stringify(plan.github_workflow_paths) !== JSON.stringify(sortedWorkflows)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'GitHub workflow paths must be sorted and unique' })
+    }
+    const sortedProtected = [...new Set(plan.protected_workflow_paths)].sort()
+    if (JSON.stringify(plan.protected_workflow_paths) !== JSON.stringify(sortedProtected)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'protected workflow paths must be sorted and unique' })
+    }
+    if (plan.protected_workflow_paths.some((path) => !plan.github_workflow_paths.includes(path))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'protected workflows must be known GitHub workflows' })
+    }
+
+    if (plan.disposition === 'github_ci_planned') {
+      if (!plan.test_runner_configured || plan.github_workflow_paths.length === 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'github_ci_planned requires a test runner and GitHub workflow' })
+      }
+      if (plan.items.some((item) => item.disposition !== 'required_in_github_ci')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'planned GitHub CI items must be required in GitHub CI' })
+      }
+    } else if (plan.disposition === 'unverified_external_ci') {
+      if (plan.items.some((item) => item.disposition !== 'unverified_external_ci')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'unverified plans must mark every item unverified' })
+      }
+    } else if (plan.items.length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'no_implementable_requirements plans cannot contain items' })
+    }
+  })
+
+const verificationCoverageItemSchema = z
+  .object({
+    plan_item_id: z.string().regex(/^VP-[0-9]{3}$/),
+    status: z.enum([
+      'coverage_path_present',
+      'missing_required_coverage',
+      'planned_in_github_ci',
+      'unverified_external_ci',
+      'requires_protected_workflow_review',
+      'rejected_workflow_gate_relaxation',
+    ]),
+    coverage_paths: z.array(z.string()),
+  })
+  .strict()
+
+export const verificationCoverageSchema = z
+  .object({
+    schema_version: z.literal('verification_coverage@1'),
+    source_ledger_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    authority: z.literal('github_ci'),
+    github_has_not_reported: z.literal(true),
+    apdl_declared_verified: z.literal(false),
+    workflow_gate_policy: z.literal('preserve_or_strengthen'),
+    disposition: z.enum([
+      'ready_for_github_ci',
+      'missing_required_coverage',
+      'unverified_external_ci',
+      'requires_protected_workflow_review',
+      'rejected_workflow_gate_relaxation',
+      'no_implementable_requirements',
+    ]),
+    disposition_reason: z.string().min(1),
+    changed_test_paths: z.array(z.string()),
+    changed_workflow_paths: z.array(z.string()),
+    changed_protected_workflow_paths: z.array(z.string()),
+    relaxed_workflow_paths: z.array(z.string()),
+    items: z.array(verificationCoverageItemSchema),
+  })
+  .strict()
+  .superRefine((coverage, ctx) => {
+    const pathFields = [
+      'changed_test_paths',
+      'changed_workflow_paths',
+      'changed_protected_workflow_paths',
+      'relaxed_workflow_paths',
+    ] as const
+    for (const field of pathFields) {
+      const sorted = [...new Set(coverage[field])].sort()
+      if (JSON.stringify(coverage[field]) !== JSON.stringify(sorted)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} must be sorted and unique`, path: [field] })
+      }
+    }
+    if (
+      coverage.changed_protected_workflow_paths.some(
+        (path) => !coverage.changed_workflow_paths.includes(path),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'changed protected workflows must be changed workflows',
+      })
+    }
+  })
+
 export const KNOWN_CHANGESET_STATUSES = [
   'queued',
   'cloning',
@@ -384,6 +579,8 @@ export const changesetSchema = z
     requirement_ledger: requirementLedgerSchema.nullable(),
     inspection_snapshot: inspectionSnapshotSchema.nullable(),
     dependency_slice: dependencySliceSchema.nullable(),
+    verification_plan: verificationPlanSchema.nullable(),
+    verification_coverage: verificationCoverageSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

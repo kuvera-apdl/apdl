@@ -8,7 +8,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailPage'
-import { seedWorkspace } from '../helpers/fixtures'
+import {
+  makeVerificationCoverage,
+  makeVerificationPlan,
+  seedWorkspace,
+} from '../helpers/fixtures'
 
 function makeChangeset(overrides: Record<string, unknown> = {}) {
   return {
@@ -43,6 +47,8 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     requirement_ledger: null,
     inspection_snapshot: null,
     dependency_slice: null,
+    verification_plan: null,
+    verification_coverage: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
     updated_at: '2026-07-01T03:21:35.000000Z',
@@ -147,6 +153,30 @@ describe('ChangesetDetailPage', () => {
     await screen.findByText('Automated Non-Organic Traffic Detection')
     expect(screen.getByText('Prompts')).toBeInTheDocument()
     expect(screen.getByText(/No prompts recorded for this run yet/)).toBeInTheDocument()
+  })
+
+  test('shows the verification plan and pre-CI coverage without claiming CI passed', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'pr_open',
+            verification_plan: makeVerificationPlan(),
+            verification_coverage: makeVerificationCoverage(),
+          }),
+        ),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('Verification plan')).toBeInTheDocument()
+    expect(screen.getByText('GitHub CI planned')).toBeInTheDocument()
+    expect(screen.getByText('Reject payloads with unknown fields.')).toBeInTheDocument()
+    expect(screen.getByText('Pre-CI coverage')).toBeInTheDocument()
+    expect(screen.getByText('Ready for GitHub CI')).toBeInTheDocument()
+    expect(screen.getAllByText('src/api/__tests__/schema.test.ts')).toHaveLength(2)
+    expect(screen.getByText(/GitHub remains authoritative/)).toBeInTheDocument()
+    expect(screen.queryByText('Passed')).not.toBeInTheDocument()
   })
 
   test('shows a not-found state for an unknown changeset id', async () => {

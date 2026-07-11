@@ -176,6 +176,19 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   )
 }
 
+function verificationLabel(value: string): string {
+  return value
+    .split('_')
+    .map((word, index) => {
+      if (word === 'github') return 'GitHub'
+      if (word === 'ci' || word === 'api' || word === 'sdk' || word === 'ui') {
+        return word.toUpperCase()
+      }
+      return index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word
+    })
+    .join(' ')
+}
+
 export function ChangesetDetailPage() {
   const { id = '' } = useParams()
   const { active } = useWorkspace()
@@ -377,6 +390,145 @@ export function ChangesetDetailPage() {
                 ) : null}
               </div>
             ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.verification_plan ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Verification plan</CardTitle>
+            <CardDescription>
+              Required regression evidence planned before the diff is handed to GitHub CI.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Fact label="Disposition">
+                {verificationLabel(cs.verification_plan.disposition)}
+              </Fact>
+              <Fact label="Authority">GitHub CI</Fact>
+              <Fact label="Risk">{verificationLabel(cs.verification_plan.risk)}</Fact>
+              <Fact label="Test runner">
+                {cs.verification_plan.test_runner_configured ? 'Configured' : 'Not configured'}
+              </Fact>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {cs.verification_plan.disposition_reason}
+            </p>
+            {cs.verification_plan.test_commands.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Repository test commands
+                </p>
+                <ul className="mt-1 space-y-1 text-sm">
+                  {cs.verification_plan.test_commands.map((testCommand) => (
+                    <li key={`${testCommand.cwd}:${testCommand.command}`}>
+                      <code className="font-mono text-xs">{testCommand.command}</code>
+                      <span className="text-muted-foreground"> in {testCommand.cwd}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_plan.github_workflow_paths.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  GitHub workflows
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.verification_plan.github_workflow_paths.map((path) => (
+                    <li key={path}>
+                      <code className="font-mono text-xs">{path}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_plan.items.length > 0 ? (
+              <div className="space-y-2">
+                {cs.verification_plan.items.map((item) => (
+                  <div key={item.plan_item_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{item.plan_item_id}</code>
+                      <code className="font-mono text-xs text-muted-foreground">
+                        {item.requirement_id}
+                      </code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(item.surface)}
+                      </span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {item.requirement_risk} risk
+                      </span>
+                    </div>
+                    <p className="mt-2">{item.expected_assertion}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Expected GitHub evidence: {item.expected_ci_evidence_ids.join(', ')}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.verification_coverage ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pre-CI coverage</CardTitle>
+            <CardDescription>
+              APDL records whether the diff contains planned coverage paths. GitHub remains
+              authoritative for executing CI and reporting its result.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Fact label="Disposition">
+                {verificationLabel(cs.verification_coverage.disposition)}
+              </Fact>
+              <Fact label="Changed tests">
+                {cs.verification_coverage.changed_test_paths.length}
+              </Fact>
+              <Fact label="Workflow policy">
+                {verificationLabel(cs.verification_coverage.workflow_gate_policy)}
+              </Fact>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {cs.verification_coverage.disposition_reason}
+            </p>
+            {cs.verification_coverage.changed_test_paths.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Changed test paths
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.verification_coverage.changed_test_paths.map((path) => (
+                    <li key={path}>
+                      <code className="font-mono text-xs">{path}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_coverage.items.length > 0 ? (
+              <div className="space-y-2">
+                {cs.verification_coverage.items.map((item) => (
+                  <div
+                    key={item.plan_item_id}
+                    className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+                  >
+                    <code className="font-mono text-xs">{item.plan_item_id}</code>
+                    <span>{verificationLabel(item.status)}</span>
+                    {item.coverage_paths.length > 0 ? (
+                      <span className="text-xs text-muted-foreground">
+                        {item.coverage_paths.join(', ')}
+                      </span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       ) : null}

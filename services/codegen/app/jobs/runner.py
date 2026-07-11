@@ -26,6 +26,7 @@ from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
 from app.store import changesets as store
 from app.store import connections as connections_store
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,12 @@ def _slug(text: str) -> str:
     return cleaned[:40] or "change"
 
 
-def _pr_body(task: TaskSpec, ledger: RequirementLedger) -> str:
+def _pr_body(
+    task: TaskSpec,
+    ledger: RequirementLedger,
+    plan: VerificationPlan | None,
+    coverage: VerificationCoverage | None,
+) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
     if not checks:
         checks = "- [ ] Implements the described change with passing tests"
@@ -76,9 +82,23 @@ def _pr_body(task: TaskSpec, ledger: RequirementLedger) -> str:
             f"{requirement.observable_behavior} (expected: {expected})"
         )
     ledger_text = "\n".join(requirement_lines)
+    verification_text = (
+        f"- Plan: `{plan.disposition.value}` — {plan.disposition_reason}\n"
+        if plan is not None
+        else "- Plan unavailable for this editor implementation.\n"
+    )
+    if coverage is not None:
+        verification_text += (
+            f"- Coverage: `{coverage.disposition.value}` — "
+            f"{coverage.disposition_reason}\n"
+        )
+    verification_text += (
+        "- These are expected-coverage facts only; GitHub CI is authoritative."
+    )
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
+        f"## Verification coverage\n\n{verification_text}\n\n"
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
         "- Opened automatically by APDL codegen from an approved feature proposal. "
@@ -202,6 +222,13 @@ async def _execute_changeset_job(
                 snapshot=result.inspection_snapshot,
                 dependency_slice=result.dependency_slice,
             )
+        if result.verification_plan is not None or result.verification_coverage is not None:
+            await store.set_verification_evidence(
+                pool,
+                changeset_id,
+                plan=result.verification_plan,
+                coverage=result.verification_coverage,
+            )
 
         # Persist the prompt transcript regardless of outcome — a failed run is
         # exactly when an operator wants to see what the model was told.
@@ -262,7 +289,12 @@ async def _execute_changeset_job(
             head=result.branch or branch,
             base=base_branch,
             title=changeset.task.title,
-            body=_pr_body(changeset.task, result.requirement_ledger),
+            body=_pr_body(
+                changeset.task,
+                result.requirement_ledger,
+                result.verification_plan,
+                result.verification_coverage,
+            ),
             token=token,
             draft=True,
         )

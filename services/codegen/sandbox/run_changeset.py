@@ -80,6 +80,12 @@ def main() -> int:
         payload["inspection_snapshot"] = result.inspection_snapshot.model_dump(mode="json")
     if result.dependency_slice is not None:
         payload["dependency_slice"] = result.dependency_slice.model_dump(mode="json")
+    if result.verification_plan is not None:
+        payload["verification_plan"] = result.verification_plan.model_dump(mode="json")
+    if result.verification_coverage is not None:
+        payload["verification_coverage"] = result.verification_coverage.model_dump(
+            mode="json"
+        )
     print(json.dumps(payload))
     return 0
 
