@@ -1,10 +1,9 @@
 # Codegen Service
 
 FastAPI service (`:8084`) — the autonomous-development "hands" of APDL. It
-connects to customer repositories, produces **changesets** (branch + commits +
-pull request), and — under policy — merges them. It is the only component that
-holds the GitHub App credentials and runs untrusted customer/AI-authored code in
-a sandbox, isolated from the rest of the platform.
+connects to customer repositories and produces **changesets** (branch + commits
++ pull request). GitHub is the sole authority for CI verification, review rules,
+and merge. APDL observes those results and may push bounded repair commits.
 
 Orchestration, autonomy gating, safety validation, and human approvals live in
 the **agents service** (`:8083`), which calls this service over the internal
@@ -13,16 +12,28 @@ full design and phase plan.
 
 ## Status
 
-Phases 0–7 implemented, with the editing engine **reworked from Claude Managed
+The Phase 0 trust boundary is implemented, with the editing engine **reworked from Claude Managed
 Agents to a model-agnostic OSS coding agent ([Aider](https://github.com/Aider-AI/aider))**.
 The service connects repos (GitHub App), produces changesets by running Aider in
 a sandboxed clone, runs deterministic pre-push safety gates, opens draft PRs,
-ingests CI status (webhook + poll), merges on green CI under the autonomy gate,
-and reverts merged changes. The editor model is a config choice — `CODEGEN_MODEL`
+ingests GitHub CI/PR status (webhook + poll), and makes bounded same-branch
+repairs from failure evidence. The editor model is a config choice — `CODEGEN_MODEL`
 takes any LiteLLM model id (Claude by default, GPT, Gemini, local, …). The real
 agent path is **integration-untested** here: it needs `aider` on `PATH`, a model
 provider key, and a connected repo. The tested core (job runner, safety gates,
-PR/CI/merge, agents queue) runs through a fake editor.
+PR/CI observation and agents queue) runs through a fake editor.
+
+### Canonical repository profiler
+
+Phase 1 replaces editor/API-specific heuristics with one strict `RepoProfile`
+contract. Local clones and bounded GitHub snapshots use the same adapters for
+Node/TypeScript, Python, Go, Rust, Gradle/Maven JVM, and .NET repositories. The
+profile records package/workspace boundaries, exact lockfile versions when
+available, commands, test/browser facilities, routes and entrypoints, services,
+deployment and CI files, scoped `AGENTS.md` contents, branch protection, and
+high-risk paths. Conflicting package managers, unresolved versions, unavailable
+protection metadata, and truncated snapshots are returned as explicit
+`uncertainties`; they are never converted into inferred fallback facts.
 
 ## API
 
@@ -33,21 +44,23 @@ All `/v1` endpoints require the `X-APDL-Internal-Token` header when
 |---|---|---|
 | POST | `/v1/connections` | Register/update a project's repo binding (`installation_id`, `repo`) |
 | GET | `/v1/connections/{project_id}` | Resolve a project's repo binding |
-| GET | `/v1/connections/{project_id}/repo-context` | Compact repo facts (stack, layout, scripts) for planning agents |
+| GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
 | POST | `/v1/changesets` | Enqueue a changeset for a connected project |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
 | GET | `/v1/changesets/{id}` | Fetch one changeset |
 | POST | `/v1/changesets/{id}/abandon` | Abandon an un-merged changeset |
-| POST | `/v1/changesets/{id}/merge` | Merge the PR (green CI required; APDL-gated) |
 | POST | `/webhooks/github` | HMAC-verified CI ingestion (`check_run`/`pull_request`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
 ## Changeset lifecycle
 
 ```
-queued → cloning → editing → testing ──▶ tests_failed (terminal)
-                                  └─▶ pushing → pr_open → ci_running ──▶ ci_failed
-                                                              └─▶ ci_passed → (waiting_approval | merged | abandoned)
+queued → cloning → editing → testing ──▶ tests_failed (generation/safety failure)
+                                  └─▶ pushing → pr_open → ci_running ──▶ ci_passed
+                                                              ├─▶ ci_failed → bounded repair → ci_running
+                                                              └─▶ unverified_external_ci
+
+GitHub pull-request events move an open changeset to `merged` or `abandoned`.
 ```
 
 Transitions are enforced by `app/models/changeset.py`; illegal moves raise
@@ -72,13 +85,14 @@ CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
-(throwaway-clone base), and the `CODEGEN_TIMEOUT` / `CODEGEN_TEST_TIMEOUT` /
+(throwaway-clone base), and the `CODEGEN_TIMEOUT` /
 `CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
-bounded by the derived `codegen_job_budget()` — `(1 + retries) × (agent + test)
-+ git slack` — which also caps the sandbox container and the orphan-sweep
+bounded by `codegen_job_budget()`, which also caps the sandbox container and the orphan-sweep
 deadline; override with `CODEGEN_JOB_BUDGET` if the derivation doesn't fit. A
-repo's test command comes from the connection `policy.test_cmd`; if unset, the
-editor auto-detects it (pytest / npm / make / …). The pre-push gates run inside
+repo's verification command comes from connection `policy.test_cmd`; if unset,
+the editor auto-detects it (pytest / npm / make / …) and gives it to the model as
+test-generation guidance. APDL does not execute it authoritatively; GitHub CI does.
+The pre-push gates run inside
 the editor on the full diff (a violating branch never reaches GitHub), with the
 connection `policy.gates` overrides; the job runner re-checks them as a backstop
 before opening the PR. Orphan recovery: queued changesets are re-enqueued at
@@ -86,24 +100,20 @@ startup (the queued → cloning transition is the dedup claim); active-state
 orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
 (default 300s) once older than twice the job budget.
 
-Two auxiliary LLM passes bracket the edit (both default on; both skip silently
-when LiteLLM or the provider key is absent): `CODEGEN_BRIEF` compiles the
+Two auxiliary LLM passes bracket the edit. Low-risk work may skip them when the
+model is unavailable; medium/high-risk work fails closed. `CODEGEN_BRIEF` compiles the
 approved spec into a repo-grounded engineering brief before the agent runs
 (concrete files, explicit descoping of non-repo asks, checkable acceptance
 criteria), and `CODEGEN_REVIEW` judges the produced diff against the original
-spec before the push — a green build alone happily ships a token diff that
-implements none of the task. A verify or review failure re-invokes the agent
-with the failure output (`CODEGEN_EDIT_RETRIES`, default 1) before the changeset
-fails; the retry message re-carries the full work order, since each aider
+spec before the push. A review rejection re-invokes the agent with feedback
+(`CODEGEN_EDIT_RETRIES`, default 1) before the changeset fails; the retry message
+re-carries the full work order, since each aider
 invocation is a fresh process. `CODEGEN_HELPER_MODEL` runs these passes on a
 different model than the editor (default: `CODEGEN_MODEL`).
 
-Merging records the merge commit SHA, and `/revert` uses it deterministically:
+GitHub merge observation records the merge commit SHA, and `/revert` uses it deterministically:
 the editor fetches the commit into the shallow clone and runs `git revert`
-(mainline parent 1 for merge commits), falling back to the agent only if
-verification fails on the reverted tree. Merge also re-checks live CI status
-before acting — the stored `ci_passed` is not re-synced after later pushes to
-the branch, so it alone never authorizes the merge.
+(mainline parent 1 for merge commits). APDL exposes no merge endpoint or tool.
 
 ## Develop
 
@@ -161,12 +171,12 @@ The autonomous loop runs once these external pieces are set up:
    connection `policy.test_cmd` (otherwise it is auto-detected).
 3. **Add a repo webhook** → `POST /webhooks/github`, secret
    `GITHUB_WEBHOOK_SECRET`, events `check_run` + `pull_request`.
-4. **Enable branch protection** on the default branch (require PR + green checks)
-   as the server-side merge backstop.
+4. **Enable GitHub branch protection/rulesets** on the default branch (require PR,
+   reviews, and green checks). GitHub is the enforcement and merge authority.
 
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
 service) → `POST /v1/changesets` → the job mints a repo token, runs the Aider
-editor (implement until tests pass) in a sandboxed clone, runs pre-push gates,
+editor in a sandboxed clone, runs deterministic pre-push gates,
 pushes a branch, and opens a **draft PR** → the repo's CI runs →
-the webhook advances the changeset to `ci_passed` and promotes the PR to
-ready-for-review → merge is gated on green CI + autonomy level.
+the webhook records `ci_passed` or feeds failure annotations into a bounded
+same-branch repair → GitHub reviews/rulesets decide readiness and merge.
