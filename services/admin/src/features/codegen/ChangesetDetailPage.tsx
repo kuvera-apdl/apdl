@@ -11,7 +11,6 @@ import { toast } from 'sonner'
 import {
   abandonChangeset,
   getChangeset,
-  mergeChangeset,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
@@ -45,6 +44,7 @@ const STAGE_OF: Record<string, number> = {
   ci_running: 6,
   ci_failed: 6,
   ci_passed: 6,
+  unverified_external_ci: 6,
   waiting_approval: 6,
   merged: 7,
   abandoned: -1,
@@ -199,14 +199,6 @@ export function ChangesetDetailPage() {
   const onError = (fallback: string) => (error: Error) =>
     toast.error(error instanceof ApiError ? error.message : fallback)
 
-  const merge = useMutation({
-    mutationFn: () => mergeChangeset(serviceConnection(ws, 'codegen'), id),
-    onSuccess: () => {
-      toast.success('Merge requested')
-      invalidate()
-    },
-    onError: onError('Merge failed'),
-  })
   const abandon = useMutation({
     mutationFn: () => abandonChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
@@ -231,7 +223,7 @@ export function ChangesetDetailPage() {
     },
     onError: onError('Retry failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
+  const busy = abandon.isPending || revert.isPending || retry.isPending
 
   if (query.isPending) {
     return (
@@ -251,11 +243,6 @@ export function ChangesetDetailPage() {
   }
 
   const cs: Changeset = query.data
-  // 'passed' / 'none' / 'no_report' all mean no CI verdict is left to wait on —
-  // mirrors the merge endpoint's gate.
-  const mergeable =
-    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
-    (cs.ci_status === 'passed' || cs.ci_status === 'none' || cs.ci_status === 'no_report')
   const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
   const files = statNumber(cs.diff_stat, 'files')
   const additions = statNumber(cs.diff_stat, 'additions')
@@ -289,11 +276,11 @@ export function ChangesetDetailPage() {
                 <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
                   Retry
                 </Button>
-              ) : (
-                <Button size="sm" disabled={busy || !mergeable} onClick={() => merge.mutate()}>
-                  Merge
+              ) : cs.pr_url ? (
+                <Button size="sm" asChild>
+                  <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
                 </Button>
-              )}
+              ) : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -321,6 +308,22 @@ export function ChangesetDetailPage() {
           <CardContent>
             <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
               {cs.error}
+            </pre>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.ci_failure_summary ? (
+        <Card className="border-amber-400 dark:border-amber-800">
+          <CardHeader>
+            <CardTitle>GitHub CI failure</CardTitle>
+            <CardDescription>
+              Evidence used by APDL's bounded same-branch repair loop.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
+              {cs.ci_failure_summary}
             </pre>
           </CardContent>
         </Card>
@@ -367,11 +370,13 @@ export function ChangesetDetailPage() {
             )}
           </Fact>
           <Fact label="CI status">
-            {cs.ci_status === 'none'
-              ? 'no CI configured'
-              : cs.ci_status === 'no_report'
-                ? 'CI never reported (gate released)'
-                : (cs.ci_status ?? '—')}
+            {cs.ci_status === 'unverified_external_ci'
+              ? 'unverified external CI'
+              : (cs.ci_status ?? '—')}
+          </Fact>
+          <Fact label="CI repair">
+            {cs.ci_remediation_status} · {cs.ci_retry_count} attempt
+            {cs.ci_retry_count === 1 ? '' : 's'}
           </Fact>
           <Fact label="Merge commit">
             {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}

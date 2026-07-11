@@ -1,6 +1,5 @@
 // Codegen changesets: the autonomous PRs the loop opens on connected repos.
-// Lists changesets for the active workspace's project and exposes the gated
-// actions (merge on green CI, abandon un-merged, revert a merged change).
+// Lists changesets for the active workspace and observes GitHub-owned CI/merge.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -9,7 +8,6 @@ import { toast } from 'sonner'
 import {
   abandonChangeset,
   listChangesets,
-  mergeChangeset,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
@@ -52,15 +50,6 @@ export function ChangesetsPage() {
   const onError = (fallback: string) => (error: Error) =>
     toast.error(error instanceof ApiError ? error.message : fallback)
 
-  const merge = useMutation({
-    mutationFn: (id: string) =>
-      mergeChangeset(serviceConnection(ws, 'codegen'), id),
-    onSuccess: () => {
-      toast.success('Merge requested')
-      invalidate()
-    },
-    onError: onError('Merge failed'),
-  })
   const abandon = useMutation({
     mutationFn: (id: string) =>
       abandonChangeset(serviceConnection(ws, 'codegen'), id),
@@ -88,13 +77,13 @@ export function ChangesetsPage() {
     },
     onError: onError('Retry failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
+  const busy = abandon.isPending || revert.isPending || retry.isPending
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Code changes"
-        description="Autonomous changesets — branches, draft PRs, and merges on connected repos. Polled every 5s."
+        description="Autonomous PRs with GitHub-owned CI, review, and merge status. Polled every 5s."
       />
       <GitHubConnectionCard />
       {query.isPending ? (
@@ -126,7 +115,6 @@ export function ChangesetsPage() {
                     key={cs.changeset_id}
                     cs={cs}
                     busy={busy}
-                    onMerge={() => merge.mutate(cs.changeset_id)}
                     onAbandon={() => abandon.mutate(cs.changeset_id)}
                     onRevert={() => revert.mutate(cs.changeset_id)}
                     onRetry={() => retry.mutate(cs.changeset_id)}
@@ -144,20 +132,12 @@ export function ChangesetsPage() {
 interface RowProps {
   cs: Changeset
   busy: boolean
-  onMerge: () => void
   onAbandon: () => void
   onRevert: () => void
   onRetry: () => void
 }
 
-function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowProps) {
-  // 'passed' = CI green; 'none' = the repo has no CI configured; 'no_report' =
-  // CI never reported within the backend's pending deadline. In each case there
-  // is no CI verdict left to wait on and merge is allowed. Anything else
-  // (pending/failed) blocks — mirrors the merge endpoint's gate.
-  const mergeable =
-    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
-    (cs.ci_status === 'passed' || cs.ci_status === 'none' || cs.ci_status === 'no_report')
+function ChangesetRow({ cs, busy, onAbandon, onRevert, onRetry }: RowProps) {
   const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
 
   return (
@@ -171,11 +151,9 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowPr
         <ChangesetStatusPill status={cs.status} />
       </TableCell>
       <TableCell className="text-sm text-muted-foreground">
-        {cs.ci_status === 'none'
-          ? 'no CI'
-          : cs.ci_status === 'no_report'
-            ? 'CI never reported'
-            : (cs.ci_status ?? '—')}
+        {cs.ci_status === 'unverified_external_ci'
+          ? 'unverified external CI'
+          : (cs.ci_status ?? '—')}
       </TableCell>
       <TableCell>
         {cs.pr_url ? (
@@ -206,11 +184,11 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowPr
               <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
                 Retry
               </Button>
-            ) : (
-              <Button size="sm" disabled={busy || !mergeable} onClick={onMerge}>
-                Merge
+            ) : cs.pr_url ? (
+              <Button size="sm" asChild>
+                <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR</a>
               </Button>
-            )}
+            ) : null}
             <Button
               size="sm"
               variant="ghost"

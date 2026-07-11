@@ -17,6 +17,7 @@ const STATUS_STYLES: Record<string, string> = {
   ci_running: ACTIVE,
   ci_failed: BAD,
   ci_passed: GOOD,
+  unverified_external_ci: GATE,
   waiting_approval: GATE,
   merged: GOOD,
   abandoned: MUTED,

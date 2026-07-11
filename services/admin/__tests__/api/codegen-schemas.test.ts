@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import {
   changesetListSchema,
   changesetSchema,
-  mergeRequestSchema,
 } from '@/api/schemas/codegen'
 
 const sample = {
@@ -19,6 +18,10 @@ const sample = {
   pr_node_id: 'PR_1',
   ci_status: 'passed',
   ci_awaiting_since: '2026-06-17T12:03:00Z',
+  ci_retry_count: 0,
+  ci_remediation_status: 'idle',
+  ci_failure_key: null,
+  ci_failure_summary: null,
   merge_sha: null,
   diff_stat: { files: 2, additions: 30 },
   prompts: [
@@ -58,10 +61,5 @@ describe('codegen schemas', () => {
   it('rejects unknown prompt fields (strict)', () => {
     const bad = { ...sample, prompts: [{ ...sample.prompts[0], extra: true }] }
     expect(changesetSchema.safeParse(bad).success).toBe(false)
-  })
-
-  it('validates the merge method', () => {
-    expect(mergeRequestSchema.parse({ merge_method: 'squash' }).merge_method).toBe('squash')
-    expect(mergeRequestSchema.safeParse({ merge_method: 'bad' }).success).toBe(false)
   })
 })

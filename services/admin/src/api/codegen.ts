@@ -4,12 +4,10 @@ import { ApiError, request, type ServiceConnection } from './http'
 import {
   changesetListSchema,
   changesetSchema,
-  mergeRequestSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
 import type {
   Changeset,
-  MergeRequest,
   RepoConnection,
 } from './types/codegen'
 
@@ -38,18 +36,6 @@ export function getChangeset(
   return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}`, {
     schema: changesetSchema,
     signal: options.signal,
-  })
-}
-
-export function mergeChangeset(
-  conn: ServiceConnection,
-  changesetId: string,
-  body: MergeRequest = { merge_method: 'squash' },
-): Promise<Changeset> {
-  return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/merge`, {
-    method: 'POST',
-    body: mergeRequestSchema.parse(body),
-    schema: changesetSchema,
   })
 }
 

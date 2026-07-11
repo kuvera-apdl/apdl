@@ -35,6 +35,7 @@ export const KNOWN_CHANGESET_STATUSES = [
   'ci_running',
   'ci_failed',
   'ci_passed',
+  'unverified_external_ci',
   'waiting_approval',
   'merged',
   'abandoned',
@@ -71,10 +72,16 @@ export const changesetSchema = z
     pr_url: z.string().nullable(),
     pr_number: z.number().int().nullable(),
     pr_node_id: z.string().nullable(),
-    ci_status: z.string().nullable(),
+    ci_status: z
+      .enum(['pending', 'passed', 'failed', 'unverified_external_ci'])
+      .nullable(),
     // Stamped once at pr_open; anchors the CI sync's grace window. Null for
     // pre-PR changesets and rows predating the column.
     ci_awaiting_since: z.string().nullable(),
+    ci_retry_count: z.number().int().nonnegative(),
+    ci_remediation_status: z.enum(['idle', 'repairing', 'awaiting_ci', 'exhausted']),
+    ci_failure_key: z.string().nullable(),
+    ci_failure_summary: z.string().nullable(),
     merge_sha: z.string().nullable(),
     diff_stat: z.record(z.unknown()),
     prompts: z.array(changesetPromptSchema),
@@ -85,12 +92,6 @@ export const changesetSchema = z
   .strict()
 
 export const changesetListSchema = z.array(changesetSchema)
-
-export const mergeRequestSchema = z
-  .object({
-    merge_method: z.enum(['squash', 'merge', 'rebase']),
-  })
-  .strict()
 
 // Repo connection registry (services/codegen/app/models/connection.py):
 // binds a project to a GitHub App installation + repository.
