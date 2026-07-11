@@ -29,6 +29,7 @@ import { queryKeys } from '@/core/queryClient'
 import { cn } from '@/lib/utils'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
 import { ChangesetObservationHistory } from '@/features/codegen/ChangesetObservationHistory'
+import { PublicationAuthorizationCard } from '@/features/codegen/PublicationAuthorizationCard'
 import {
   RuntimeAcceptancePlanCard,
   RuntimeEvidenceHistory,
@@ -383,6 +384,10 @@ export function ChangesetDetailPage() {
           <LifecycleStepper status={cs.status} />
         </CardContent>
       </Card>
+
+      {cs.publication_authorization ? (
+        <PublicationAuthorizationCard authorization={cs.publication_authorization} />
+      ) : null}
 
       {cs.requirement_ledger ? (
         <Card>

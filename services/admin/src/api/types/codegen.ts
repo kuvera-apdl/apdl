@@ -26,6 +26,11 @@ import type {
   runtimeEvidenceAssessmentSchema,
   runtimeEvidenceObservationSchema,
 } from '../schemas/codegen-runtime'
+import type {
+  publicationAuthorizationSchema,
+  publicationRequestSchema,
+  rolloutDecisionSchema,
+} from '../schemas/codegen-publication'
 
 export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type ChangesetPrompt = z.infer<typeof changesetPromptSchema>
@@ -40,6 +45,9 @@ export type RuntimeAcceptancePlan = z.infer<typeof runtimeAcceptancePlanSchema>
 export type RuntimeEvidenceAssessment = z.infer<typeof runtimeEvidenceAssessmentSchema>
 export type RuntimeEvidenceObservation = z.infer<typeof runtimeEvidenceObservationSchema>
 export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>
+export type PublicationRequest = z.infer<typeof publicationRequestSchema>
+export type RolloutDecision = z.infer<typeof rolloutDecisionSchema>
+export type PublicationAuthorization = z.infer<typeof publicationAuthorizationSchema>
 export type PullRequestObservation = z.infer<typeof pullRequestObservationSchema>
 export type CIVerificationObservation = z.infer<typeof ciVerificationObservationSchema>
 export type CIRemediationAttempt = z.infer<typeof ciRemediationAttemptSchema>

@@ -41,6 +41,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     runtime_acceptance_plan: null,
     runtime_evidence_assessment: null,
     review_verdict: null,
+    publication_authorization: null,
     error: null,
     created_at: '2026-07-11T13:00:00+00:00',
     updated_at: '2026-07-11T14:00:00+00:00',

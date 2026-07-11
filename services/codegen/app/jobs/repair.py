@@ -11,6 +11,7 @@ import asyncpg
 
 from app.config import codegen_ci_repair_budget_seconds, codegen_ci_repair_retries
 from app.editor.base import Editor, EditRequest, EditResult
+from app.evaluations.models import RiskLevel
 from app.models.observations import (
     CIRemediationAttempt,
     CIRemediationStatus,
@@ -19,6 +20,7 @@ from app.models.observations import (
     RemediationPromptEvidence,
     RemediationDisposition,
 )
+from app.publication import PublicationGate
 from app.runtime.github_actions import workflow_attestation_is_valid
 from app.runtime.models import RuntimeAcceptancePolicy, RuntimeEvidenceObservation
 from app.safety.gates import evaluate_pre_push
@@ -354,6 +356,7 @@ async def repair_failed_ci(
     *,
     editor: Editor,
     mint_token: TokenMinter,
+    publication_gate: PublicationGate,
 ) -> None:
     """Repair one persisted exact-head failure or leave immutable diagnostics."""
     scopes = observation.remediation_claim_scopes()
@@ -489,6 +492,65 @@ async def repair_failed_ci(
             runtime_evidence=runtime_evidence,
         )
         return
+    try:
+        risk = RiskLevel(
+            str(changeset.task.context.get("risk_level") or "low").lower()
+        )
+        authorization = publication_gate.authorize(
+            risk=risk,
+            canary_identity=f"{changeset.project_id}:{connection.repo}",
+        )
+        await changeset_store.set_publication_authorization(
+            pool, observation.changeset_id, authorization
+        )
+    except Exception as exc:
+        await _finish_without_repair(
+            pool,
+            observation=observation,
+            attempt_id=attempt_id,
+            attempt_number=claim.attempt_number,
+            classification=classification,
+            confidence=confidence,
+            started_at=started_at,
+            error=(
+                "CI repair publication authorization failed before GitHub "
+                f"credential minting: {exc}"
+            ),
+            exhausted=True,
+            runtime_evidence=runtime_evidence,
+        )
+        return
+    if not authorization.decision.allowed:
+        await _finish_without_repair(
+            pool,
+            observation=observation,
+            attempt_id=attempt_id,
+            attempt_number=claim.attempt_number,
+            classification=classification,
+            confidence=confidence,
+            started_at=started_at,
+            error=(
+                "CI repair rollout denied before GitHub credential minting: "
+                + "; ".join(authorization.decision.reasons)
+            ),
+            exhausted=True,
+            runtime_evidence=runtime_evidence,
+        )
+        return
+    if not authorization.decision.publish_branch:
+        await _finish_without_repair(
+            pool,
+            observation=observation,
+            attempt_id=attempt_id,
+            attempt_number=claim.attempt_number,
+            classification=classification,
+            confidence=confidence,
+            started_at=started_at,
+            error="CI repair rollout did not grant branch publication.",
+            exhausted=True,
+            runtime_evidence=runtime_evidence,
+        )
+        return
     policy = connection.policy if isinstance(connection.policy, dict) else {}
     try:
         runtime_policy = RuntimeAcceptancePolicy.model_validate(
@@ -523,9 +585,7 @@ async def repair_failed_ci(
                 gates_policy=gates_policy,
                 existing_branch=True,
                 expected_head_sha=observation.head_sha,
-                risk_level=str(
-                    changeset.task.context.get("risk_level") or "low"
-                ).lower(),
+                risk_level=risk.value,
             )
         )
     except Exception as exc:

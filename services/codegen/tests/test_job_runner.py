@@ -8,11 +8,13 @@ import pytest
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
+from app.evaluations.models import RolloutStage
 from app.github.pulls import PullRequest
 from app.inspection.models import DependencySlice, InspectionSnapshot
-from app.jobs.runner import run_changeset_job
+from app.jobs.runner import run_changeset_job as _run_changeset_job
 from app.models.changeset import ChangesetStatus
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
+from app.publication import ConfiguredPublicationGate
 from app.profiling import RepoProfile
 from app.profiling.models import (
     CIWorkflow,
@@ -35,6 +37,10 @@ from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
+from tests.publication_fakes import (
+    allowing_publication_gate,
+    denying_publication_gate,
+)
 
 _TASK = {
     "title": "Add dark mode",
@@ -42,6 +48,15 @@ _TASK = {
     "context": {},
     "constraints": ["keeps existing tests green"],
 }
+
+
+async def run_changeset_job(*args, publication_gate=None, **kwargs):
+    """Exercise the production runner with an explicit trusted test gate."""
+    return await _run_changeset_job(
+        *args,
+        publication_gate=publication_gate or allowing_publication_gate(),
+        **kwargs,
+    )
 
 
 async def _mint(installation_id: int, repo: str) -> str:
@@ -173,6 +188,8 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert final.diff_stat == {"files": 3}
     assert final.requirement_ledger is not None
     assert final.requirement_ledger.ready_for_pull_request()
+    assert final.publication_authorization is not None
+    assert final.publication_authorization.decision.ready_for_review is True
     # The editor saw the resolved repo/branch + the minted token.
     assert isinstance(editor.last_request, EditRequest)
     assert editor.last_request.repo == "acme/widgets"
@@ -185,6 +202,9 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert calls["token"] == "ghs_tok"
     assert "## Requirement ledger" in calls["body"]
     assert "`REQ-001`" in calls["body"]
+    assert "## Publication rollout" in calls["body"]
+    assert "low_risk_canary" in calls["body"]
+    assert final.publication_authorization.authorization_sha256 in calls["body"]
 
 
 @pytest.mark.asyncio
@@ -206,6 +226,78 @@ async def test_job_marks_failed_generation_as_error_without_opening_pr():
     assert final.status == ChangesetStatus.error
     assert final.error == "tests red"
     assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_rollout_denial_never_mints_token_or_invokes_editor():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_rollout_denied")
+    editor = FakeEditor()
+    minted: list[tuple[int, str]] = []
+
+    async def mint(installation_id: int, repo: str) -> str:
+        minted.append((installation_id, repo))
+        return "must-not-be-returned"
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    gate = denying_publication_gate()
+    await run_changeset_job(
+        pool,
+        "cs_rollout_denied",
+        editor=editor,
+        mint_token=mint,
+        open_pr=open_pr,
+        publication_gate=gate,
+    )
+
+    final = await store.get_changeset(pool, "cs_rollout_denied")
+    assert final is not None
+    assert final.status is ChangesetStatus.error
+    assert "before GitHub credential minting" in (final.error or "")
+    assert final.publication_authorization is not None
+    assert final.publication_authorization.decision.allowed is False
+    assert minted == []
+    assert editor.last_request is None
+
+
+@pytest.mark.asyncio
+async def test_offline_stage_has_no_github_write_capability():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_offline")
+    editor = FakeEditor()
+    minted: list[tuple[int, str]] = []
+
+    async def mint(installation_id: int, repo: str) -> str:
+        minted.append((installation_id, repo))
+        return "must-not-be-returned"
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool,
+        "cs_offline",
+        editor=editor,
+        mint_token=mint,
+        open_pr=open_pr,
+        publication_gate=ConfiguredPublicationGate(
+            stage=RolloutStage.offline,
+            model="test-model@1",
+            codegen_revision="test-revision",
+        ),
+    )
+
+    final = await store.get_changeset(pool, "cs_offline")
+    assert final is not None
+    assert final.status is ChangesetStatus.error
+    assert "offline rollout stage cannot publish" in (final.error or "")
+    assert final.publication_authorization is None
+    assert minted == []
+    assert editor.last_request is None
 
 
 @pytest.mark.asyncio
@@ -316,6 +408,7 @@ async def test_policy_alone_cannot_bypass_workflow_gate_without_attestation():
         editor=editor,
         mint_token=_mint,
         open_pr=open_pr,
+        publication_gate=allowing_publication_gate(RolloutStage.reviewed_pr),
     )
 
     final = await store.get_changeset(pool, "cs_workflow_guard")
@@ -667,6 +760,7 @@ async def test_job_opens_draft_pr_for_higher_risk_change():
         editor=FakeEditor(),
         mint_token=_mint,
         open_pr=open_pr,
+        publication_gate=allowing_publication_gate(RolloutStage.reviewed_pr),
     )
 
     stored = await store.get_changeset(pool, "cs_risk0001")

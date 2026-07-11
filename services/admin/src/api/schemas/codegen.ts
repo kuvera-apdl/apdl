@@ -11,6 +11,7 @@ import {
   runtimeAcceptancePlanSchema,
   runtimeEvidenceAssessmentSchema,
 } from './codegen-runtime'
+import { publicationAuthorizationSchema } from './codegen-publication'
 
 // One LLM prompt the run actually sent (brief compilation, an edit instruction
 // handed to the coding agent, or a pre-push diff review). `system` is null for
@@ -768,6 +769,7 @@ export const changesetSchema = z
     runtime_acceptance_plan: runtimeAcceptancePlanSchema.nullable(),
     runtime_evidence_assessment: runtimeEvidenceAssessmentSchema.nullable(),
     review_verdict: reviewVerdictSchema.nullable(),
+    publication_authorization: publicationAuthorizationSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

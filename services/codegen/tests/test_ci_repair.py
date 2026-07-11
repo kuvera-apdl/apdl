@@ -10,7 +10,7 @@ import pytest
 import app.jobs.repair as repair_module
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
-from app.jobs.repair import repair_failed_ci
+from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
 from app.models.observations import (
     CIRemediationStatus,
@@ -48,6 +48,19 @@ from app.store.observations import (
 )
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
+from tests.publication_fakes import (
+    allowing_publication_gate,
+    denying_publication_gate,
+)
+
+
+async def repair_failed_ci(*args, publication_gate=None, **kwargs):
+    """Exercise repair with an explicit trusted publication gate."""
+    return await _repair_failed_ci(
+        *args,
+        publication_gate=publication_gate or allowing_publication_gate(),
+        **kwargs,
+    )
 
 
 async def _mint(_installation_id: int, _repo: str) -> str:
@@ -300,6 +313,37 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
         by_sequence[2].prompt_evidence[0].evidence_id
     ]
     assert by_sequence[1].attempt_id == by_sequence[2].attempt_id
+
+
+@pytest.mark.asyncio
+async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
+    monkeypatch,
+):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    editor = FakeEditor()
+    minted: list[tuple[int, str]] = []
+
+    async def mint(installation_id: int, repo: str) -> str:
+        minted.append((installation_id, repo))
+        return "must-not-be-returned"
+
+    await repair_failed_ci(
+        pool,
+        failed,
+        editor=editor,
+        mint_token=mint,
+        publication_gate=denying_publication_gate(),
+    )
+
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    assert final is not None
+    assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    assert final.publication_authorization is not None
+    assert final.publication_authorization.decision.allowed is False
+    assert minted == []
+    assert editor.last_request is None
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailPage'
 import {
   makeChangesetObservationHistory,
+  makePublicationAuthorization,
   makeReviewVerdict,
   makeRuntimeAcceptancePlan,
   makeRuntimeEvidenceAssessment,
@@ -58,6 +59,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     runtime_acceptance_plan: null,
     runtime_evidence_assessment: null,
     review_verdict: null,
+    publication_authorization: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
     updated_at: '2026-07-01T03:21:35.000000Z',
@@ -210,6 +212,33 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getByText('b'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/This is not a GitHub CI result/)).toBeInTheDocument()
     expect(screen.queryByText('CI passed')).not.toBeInTheDocument()
+  })
+
+  test('shows the evidence-bound publication decision without offering merge controls', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'error',
+            error: 'publication denied by rollout evidence',
+            publication_authorization: makePublicationAuthorization(),
+          }),
+        ),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('Publication authorization')).toBeInTheDocument()
+    expect(screen.getByText('Denied')).toBeInTheDocument()
+    expect(screen.getByText('Reviewed PR')).toBeInTheDocument()
+    expect(screen.getByText('openai/gpt-5.3-codex')).toBeInTheDocument()
+    expect(screen.getByText('codegen-improvements@9838401')).toBeInTheDocument()
+    expect(screen.getByText('test pass rate 0.800 is below required 0.950')).toBeInTheDocument()
+    expect(screen.getByText('1'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText('2'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText('5'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText(/GitHub remains authoritative for CI, review policy, and merge/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
   })
 
   test('shows runtime plans and exact-head evidence without promoting external CI', async () => {

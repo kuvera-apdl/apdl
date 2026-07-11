@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.evaluations.models import RolloutStage
 from app.models.observations import CIVerificationObservation, ExternalCIStatus
 from app.runtime.collector import RuntimeEvidenceCollection
 from app.runtime.evidence import build_runtime_evidence_observation
@@ -27,6 +28,28 @@ async def test_create_changeset_requires_connection():
             json={"project_id": "demo", "task": {"title": "x", "spec": "do the thing"}},
         )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_evaluation_only_stage_rejects_changeset_before_queueing():
+    pool = FakePool()
+    pool.add_connection("demo")
+    app.state.codegen_rollout_stage = RolloutStage.shadow
+    try:
+        async with _client(pool) as client:
+            response = await client.post(
+                "/v1/changesets",
+                json={
+                    "project_id": "demo",
+                    "task": {"title": "x", "spec": "do the thing"},
+                },
+            )
+    finally:
+        del app.state.codegen_rollout_stage
+
+    assert response.status_code == 409
+    assert "publication are disabled" in response.json()["detail"]
+    assert pool.store["changesets"] == {}
 
 
 @pytest.mark.asyncio

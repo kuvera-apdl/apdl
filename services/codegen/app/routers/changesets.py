@@ -14,6 +14,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from app.auth import require_internal_token
+from app.evaluations.models import RolloutStage
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
     RETRYABLE_STATUSES,
@@ -38,6 +39,19 @@ router = APIRouter(
 )
 
 
+def _require_publication_stage(app: Any) -> None:
+    """Reject production work while this deployment is evaluation-only."""
+    stage = getattr(app.state, "codegen_rollout_stage", None)
+    if stage in {RolloutStage.offline, RolloutStage.shadow}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Codegen is configured for the '{stage.value}' evaluation stage; "
+                "GitHub branch and pull-request publication are disabled."
+            ),
+        )
+
+
 def _maybe_enqueue(app: Any, background_tasks: BackgroundTasks, changeset_id: str) -> None:
     """Schedule the changeset job when the runner deps are configured.
 
@@ -58,6 +72,7 @@ async def create_changeset(
 ) -> Changeset:
     """Enqueue a changeset for a connected project."""
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
 
     connection = await connections_store.get_connection(pool, body.project_id)
     if connection is None:
@@ -178,6 +193,7 @@ async def revert_changeset(
     revert the original PR. (Un-merged changes roll back via /abandon instead.)
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
     original = await store.get_changeset(pool, changeset_id)
     if original is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
@@ -237,6 +253,7 @@ async def retry_changeset(
     the same GitHub PR branch, and closed PRs may only be reopened on GitHub.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
     original = await store.get_changeset(pool, changeset_id)
     if original is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")

@@ -7,7 +7,11 @@ well as from a file, so these cover inline (incl. escaped newlines), base64, the
 
 import base64
 
+import pytest
+
 from app import config
+from app.evaluations.models import RolloutStage
+from app.main import _make_publication_gate
 
 _PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVQIBADAN\n-----END RSA PRIVATE KEY-----\n"
 
@@ -134,3 +138,39 @@ def test_stale_sweep_interval_default_and_disable(monkeypatch):
     assert config.codegen_stale_sweep_interval() == 300
     monkeypatch.setenv("CODEGEN_STALE_SWEEP_INTERVAL", "0")
     assert config.codegen_stale_sweep_interval() == 0
+
+
+def test_rollout_config_defaults_fail_closed_and_binds_revision(monkeypatch):
+    monkeypatch.delenv("CODEGEN_ROLLOUT_STAGE", raising=False)
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    monkeypatch.delenv("CODEGEN_REVISION", raising=False)
+    monkeypatch.delenv("GIT_COMMIT_SHA", raising=False)
+
+    assert config.codegen_rollout_stage() is RolloutStage.offline
+    assert config.codegen_rollout_authorization_path() == ""
+    assert config.codegen_revision() == "development-unversioned"
+
+    monkeypatch.setenv("CODEGEN_REVISION", "image@sha256:abc")
+    assert config.codegen_revision() == "image@sha256:abc"
+
+
+def test_rollout_stage_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "automatic_merge")
+    with pytest.raises(ValueError, match="CODEGEN_ROLLOUT_STAGE"):
+        config.codegen_rollout_stage()
+
+
+def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="AUTHORIZATION_PATH"):
+        _make_publication_gate()
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "relative.json")
+    with pytest.raises(RuntimeError, match="absolute path"):
+        _make_publication_gate()
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "offline")
+    gate = _make_publication_gate()
+    assert gate.stage is RolloutStage.offline
+    assert gate.provider is None

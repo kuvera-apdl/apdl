@@ -22,8 +22,11 @@ import asyncpg
 
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
+from app.evaluations.models import RiskLevel
+from app.evaluations.publication import PublicationAuthorization
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.models.observations import ExternalCIStatus, PullRequestObservation
+from app.publication import PublicationGate
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.runtime.github_actions import workflow_attestation_is_valid
@@ -71,6 +74,7 @@ def _pr_body(
     coverage: VerificationCoverage | None,
     runtime_plan: RuntimeAcceptancePlan | None,
     review: ReviewVerdict | None,
+    publication: PublicationAuthorization,
 ) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
     if not checks:
@@ -120,12 +124,22 @@ def _pr_body(
         if review is not None
         else "- No semantic-review verdict was produced by this editor."
     )
+    publication_text = (
+        f"- Stage: `{publication.request.requested_stage.value}`\n"
+        f"- Model: `{publication.request.model}`\n"
+        f"- Codegen revision: `{publication.request.codegen_revision}`\n"
+        f"- Evaluation report SHA-256: `{publication.report_sha256}`\n"
+        f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
+        "- This authorizes PR publication only; GitHub CI, review, and merge "
+        "remain authoritative."
+    )
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
         f"## Verification coverage\n\n{verification_text}\n\n"
         f"## Runtime acceptance\n\n{runtime_text}\n\n"
         f"## Semantic review\n\n{review_text}\n\n"
+        f"## Publication rollout\n\n{publication_text}\n\n"
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
         "- Opened automatically by APDL codegen from an approved feature proposal. "
@@ -140,6 +154,7 @@ async def run_changeset_job(
     editor: Editor,
     mint_token: TokenMinter,
     open_pr: PROpener,
+    publication_gate: PublicationGate,
 ) -> None:
     """Run one changeset, gated by the concurrency slot.
 
@@ -148,7 +163,12 @@ async def run_changeset_job(
     """
     async with _job_slot():
         await _execute_changeset_job(
-            pool, changeset_id, editor=editor, mint_token=mint_token, open_pr=open_pr
+            pool,
+            changeset_id,
+            editor=editor,
+            mint_token=mint_token,
+            open_pr=open_pr,
+            publication_gate=publication_gate,
         )
 
 
@@ -159,6 +179,7 @@ async def _execute_changeset_job(
     editor: Editor,
     mint_token: TokenMinter,
     open_pr: PROpener,
+    publication_gate: PublicationGate,
 ) -> None:
     """Execute one changeset end-to-end (edit → push → open draft PR)."""
     changeset = await store.get_changeset(pool, changeset_id)
@@ -197,6 +218,38 @@ async def _execute_changeset_job(
                 changeset_id,
             )
             return
+        try:
+            risk = RiskLevel(
+                str(changeset.task.context.get("risk_level") or "low").lower()
+            )
+        except ValueError as exc:
+            raise ValueError("task risk_level must be low, medium, or high") from exc
+        authorization = publication_gate.authorize(
+            risk=risk,
+            canary_identity=f"{changeset.project_id}:{connection.repo}",
+        )
+        await store.set_publication_authorization(
+            pool, changeset_id, authorization
+        )
+        if not authorization.decision.allowed:
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
+                error=(
+                    "Publication rollout denied before GitHub credential minting: "
+                    + "; ".join(authorization.decision.reasons)
+                ),
+            )
+            return
+        if not (
+            authorization.decision.publish_branch
+            and authorization.decision.create_pull_request
+        ):
+            raise RuntimeError(
+                "rollout authorization did not grant branch and PR publication"
+            )
+
         token = await mint_token(connection.installation_id, connection.repo)
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
@@ -221,7 +274,7 @@ async def _execute_changeset_job(
                 gates_policy=gates_policy,
                 runtime_acceptance_policy=runtime_policy,
                 revert_sha=revert_sha if isinstance(revert_sha, str) else None,
-                risk_level=str(changeset.task.context.get("risk_level") or "low").lower(),
+                risk_level=risk.value,
             )
         )
 
@@ -353,7 +406,6 @@ async def _execute_changeset_job(
             return
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.pushing)
-        risk = str(changeset.task.context.get("risk_level") or "low").lower()
         lacks_external_ci = (
             result.verification_plan is not None
             and result.verification_plan.disposition
@@ -368,7 +420,7 @@ async def _execute_changeset_job(
             and result.runtime_acceptance_plan.blockers
         )
         draft = (
-            risk != "low"
+            not authorization.decision.ready_for_review
             or lacks_external_ci
             or semantic_unverified
             or runtime_unverified
@@ -385,6 +437,7 @@ async def _execute_changeset_job(
                 result.verification_coverage,
                 result.runtime_acceptance_plan,
                 result.review_verdict,
+                authorization,
             ),
             token=token,
             draft=draft,

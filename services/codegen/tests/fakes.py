@@ -205,6 +205,8 @@ class FakeConn:
             row["review_verdict"] = args[1]
         elif "SET runtime_acceptance_plan" in query:
             row["runtime_acceptance_plan"] = args[1]
+        elif "SET publication_authorization" in query:
+            row["publication_authorization"] = args[1]
         row["updated_at"] = _T0
         return None
 
@@ -341,6 +343,7 @@ class FakeConn:
                 "review_verdict": None,
                 "runtime_acceptance_plan": None,
                 "runtime_evidence_assessment": None,
+                "publication_authorization": None,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -682,6 +685,7 @@ class FakePool:
             "review_verdict": None,
             "runtime_acceptance_plan": None,
             "runtime_evidence_assessment": None,
+            "publication_authorization": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

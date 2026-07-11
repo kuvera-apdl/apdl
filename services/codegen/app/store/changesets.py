@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from app.contracts.models import ContractBundle
+from app.evaluations.publication import PublicationAuthorization
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
@@ -148,6 +149,16 @@ def _runtime_evidence_assessment_from_row(
     return RuntimeEvidenceAssessment.model_validate_json(raw)
 
 
+def _publication_authorization_from_row(
+    row: asyncpg.Record,
+) -> PublicationAuthorization | None:
+    value = _optional_column(row, "publication_authorization")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return PublicationAuthorization.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -183,6 +194,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         runtime_acceptance_plan=_runtime_acceptance_plan_from_row(row),
         runtime_evidence_assessment=_runtime_evidence_assessment_from_row(row),
         review_verdict=_review_verdict_from_row(row),
+        publication_authorization=_publication_authorization_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -573,6 +585,27 @@ async def set_runtime_acceptance_plan(
             """,
             changeset_id,
             json.dumps(plan.model_dump(mode="json")),
+        )
+
+
+async def set_publication_authorization(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    authorization: PublicationAuthorization,
+) -> None:
+    """Persist the exact evidence-bound decision before any GitHub credential use."""
+    validated = PublicationAuthorization.model_validate(
+        authorization.model_dump(mode="python")
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET publication_authorization = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(validated.model_dump(mode="json")),
         )
 
 

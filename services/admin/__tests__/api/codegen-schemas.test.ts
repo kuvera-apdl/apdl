@@ -6,6 +6,7 @@ import {
 } from '@/api/schemas/codegen'
 import {
   makeReviewVerdict,
+  makePublicationAuthorization,
   makeRuntimeAcceptancePlan,
   makeRuntimeEvidenceAssessment,
   makeVerificationCoverage,
@@ -50,6 +51,7 @@ const sample = {
   runtime_acceptance_plan: null,
   runtime_evidence_assessment: null,
   review_verdict: null,
+  publication_authorization: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',
@@ -142,6 +144,71 @@ describe('codegen schemas', () => {
     }
 
     expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('parses a strict publication authorization and its nested decision', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      publication_authorization: makePublicationAuthorization(),
+    })
+
+    expect(parsed.publication_authorization?.request.requested_stage).toBe('reviewed_pr')
+    expect(parsed.publication_authorization?.decision.allowed).toBe(false)
+  })
+
+  it('rejects a publication decision for a different stage or policy', () => {
+    const authorization = makePublicationAuthorization()
+    const mismatchedStage = {
+      ...authorization,
+      decision: { ...authorization.decision, requested_stage: 'low_risk_canary' },
+    }
+    const mismatchedPolicy = {
+      ...authorization,
+      decision: { ...authorization.decision, policy_sha256: '9'.repeat(64) },
+    }
+
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: mismatchedStage,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: mismatchedPolicy,
+    }).success).toBe(false)
+  })
+
+  it('rejects denied publication that grants a GitHub publication capability', () => {
+    const authorization = makePublicationAuthorization()
+    const bad = {
+      ...authorization,
+      decision: { ...authorization.decision, publish_branch: true },
+    }
+
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: bad,
+    }).success).toBe(false)
+  })
+
+  it('rejects unknown fields inside publication requests and decisions', () => {
+    const authorization = makePublicationAuthorization()
+    const requestWithExtra = {
+      ...authorization,
+      request: { ...authorization.request, legacy_stage: 'reviewed_pr' },
+    }
+    const decisionWithExtra = {
+      ...authorization,
+      decision: { ...authorization.decision, merge_pull_request: true },
+    }
+
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: requestWithExtra,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: decisionWithExtra,
+    }).success).toBe(false)
   })
 
   it('parses a semantic review verdict bound to the reviewed diff', () => {

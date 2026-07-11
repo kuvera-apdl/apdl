@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     runtime_acceptance_plan JSONB,
     runtime_evidence_assessment JSONB,
     review_verdict JSONB,
+    publication_authorization JSONB,
     external_ci_awaiting_since TIMESTAMPTZ,
     ci_retry_count INTEGER NOT NULL DEFAULT 0,
     ci_remediation_status TEXT NOT NULL DEFAULT 'idle',
@@ -106,6 +107,11 @@ ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS runtime_acceptance_plan JSONB;
 ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS runtime_evidence_assessment JSONB;
+"""
+
+CHANGESETS_PUBLICATION_AUTHORIZATION_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS publication_authorization JSONB;
 """
 
 CHANGESETS_GITHUB_STATE_DDL = """
@@ -326,6 +332,7 @@ ALL_DDL = (
     CHANGESETS_VERIFICATION_PLAN_DDL,
     CHANGESETS_REVIEW_VERDICT_DDL,
     CHANGESETS_RUNTIME_ACCEPTANCE_DDL,
+    CHANGESETS_PUBLICATION_AUTHORIZATION_DDL,
     CHANGESETS_GITHUB_STATE_DDL,
     OBSERVATIONS_DDL,
     RUNTIME_EVIDENCE_BINDING_DDL,

@@ -11,6 +11,8 @@ import base64
 import os
 import tempfile
 
+from app.evaluations.models import RolloutStage
+
 _DEFAULT_MODEL = "claude-opus-4-8"
 
 
@@ -103,6 +105,37 @@ def github_webhook_secret() -> str:
 def codegen_model() -> str:
     """LiteLLM model id the editor drives (any provider key present in env)."""
     return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
+
+
+def codegen_revision() -> str:
+    """Immutable codegen candidate revision bound to rollout evidence.
+
+    Production deployments should set ``CODEGEN_REVISION`` to the image or Git
+    digest. The development fallback is intentionally conspicuous and can only
+    publish if an operator explicitly authorizes that exact value.
+    """
+    return (
+        os.getenv("CODEGEN_REVISION", "").strip()
+        or os.getenv("GIT_COMMIT_SHA", "").strip()
+        or "development-unversioned"
+    )
+
+
+def codegen_rollout_stage() -> RolloutStage:
+    """Configured deployment stage; offline is the fail-closed default."""
+    raw = os.getenv("CODEGEN_ROLLOUT_STAGE", RolloutStage.offline.value).strip()
+    try:
+        return RolloutStage(raw)
+    except ValueError as exc:
+        allowed = ", ".join(stage.value for stage in RolloutStage)
+        raise ValueError(
+            f"CODEGEN_ROLLOUT_STAGE must be one of: {allowed}"
+        ) from exc
+
+
+def codegen_rollout_authorization_path() -> str:
+    """Operator-mounted rollout authorization artifact used for PR stages."""
+    return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
 
 
 def codegen_aider_bin() -> str:

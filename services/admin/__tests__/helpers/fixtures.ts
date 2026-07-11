@@ -3,6 +3,7 @@
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
 import type {
   ChangesetObservationHistory,
+  PublicationAuthorization,
   ReviewVerdict,
   RuntimeAcceptancePlan,
   RuntimeEvidenceAssessment,
@@ -11,6 +12,44 @@ import type {
   VerificationPlan,
 } from '../../src/api/types/codegen'
 import type { Workspace } from '../../src/core/workspace'
+
+export function makePublicationAuthorization(
+  overrides: Partial<PublicationAuthorization> = {},
+): PublicationAuthorization {
+  return {
+    schema_version: 'publication_authorization@1',
+    request: {
+      schema_version: 'publication_request@1',
+      requested_stage: 'reviewed_pr',
+      risk: 'medium',
+      model: 'openai/gpt-5.3-codex',
+      codegen_revision: 'codegen-improvements@9838401',
+      canary_identity: null,
+    },
+    expected_model: 'openai/gpt-5.3-codex',
+    expected_codegen_revision: 'codegen-improvements@9838401',
+    report_sha256: '1'.repeat(64),
+    bundle_sha256: '2'.repeat(64),
+    policy_sha256: '3'.repeat(64),
+    decision: {
+      schema_version: 'rollout_decision@2',
+      requested_stage: 'reviewed_pr',
+      risk: 'medium',
+      allowed: false,
+      publish_branch: false,
+      create_pull_request: false,
+      ready_for_review: false,
+      reasons: ['test pass rate 0.800 is below required 0.950'],
+      evaluation_summary_sha256: '4'.repeat(64),
+      policy_sha256: '3'.repeat(64),
+      canary_identity_sha256: null,
+      canary_bucket: null,
+      decision_sha256: '5'.repeat(64),
+    },
+    authorization_sha256: '6'.repeat(64),
+    ...overrides,
+  }
+}
 
 export function makeRuntimeAcceptancePlan(
   overrides: Partial<RuntimeAcceptancePlan> = {},

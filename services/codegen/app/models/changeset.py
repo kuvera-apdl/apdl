@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.models import ContractBundle
+from app.evaluations.publication import PublicationAuthorization
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.observations import (
     CIRemediationStatus,
@@ -163,6 +164,7 @@ class Changeset(BaseModel):
     runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
     runtime_evidence_assessment: RuntimeEvidenceAssessment | None = None
     review_verdict: ReviewVerdict | None = None
+    publication_authorization: PublicationAuthorization | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime
