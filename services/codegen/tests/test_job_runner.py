@@ -19,6 +19,7 @@ from app.profiling.models import (
     TestFacility as ProfileTestFacility,
 )
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
+from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
@@ -426,6 +427,15 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
     coverage = evaluate_verification_coverage(
         plan, changed_paths=["src/theme.ts", "tests/theme.test.ts"]
     )
+    review = assemble_review_verdict(
+        ledger=ledger,
+        contracts=ContractBundle(),
+        dependency_slice=DependencySlice(),
+        verification_plan=plan,
+        verification_coverage=coverage,
+        diff_text="diff --git a/src/theme.ts b/src/theme.ts\n+changed",
+        model_response_text=None,
+    )
 
     await run_changeset_job(
         pool,
@@ -437,6 +447,7 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
                 requirement_ledger=ledger,
                 verification_plan=plan,
                 verification_coverage=coverage,
+                review_verdict=review,
             )
         ),
         mint_token=_mint,
@@ -446,7 +457,10 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
     stored = await store.get_changeset(pool, "cs_verification")
     assert stored.verification_plan == plan
     assert stored.verification_coverage == coverage
+    assert stored.review_verdict == review
     assert stored.ci_status is None
     assert "## Verification coverage" in calls["body"]
     assert "GitHub CI is authoritative" in calls["body"]
+    assert "## Semantic review" in calls["body"]
+    assert review.reviewed_diff_sha256 in calls["body"]
     assert "passed" not in calls["body"].lower()

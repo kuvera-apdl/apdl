@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     dependency_slice JSONB,
     verification_plan JSONB,
     verification_coverage JSONB,
+    review_verdict JSONB,
     ci_awaiting_since TIMESTAMPTZ,
     ci_retry_count INTEGER NOT NULL DEFAULT 0,
     ci_remediation_status TEXT NOT NULL DEFAULT 'idle',
@@ -92,6 +93,11 @@ ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS verification_coverage JSONB;
 """
 
+CHANGESETS_REVIEW_VERDICT_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS review_verdict JSONB;
+"""
+
 # When the changeset started awaiting CI (set once at pr_open). The CI sync's
 # grace window and pending deadline anchor on this rather than updated_at,
 # which every status transition refreshes — the sync must not reset its own
@@ -130,6 +136,7 @@ ALL_DDL = (
     CHANGESETS_REQUIREMENT_LEDGER_DDL,
     CHANGESETS_INSPECTION_DDL,
     CHANGESETS_VERIFICATION_PLAN_DDL,
+    CHANGESETS_REVIEW_VERDICT_DDL,
     CHANGESETS_CI_AWAITING_DDL,
     CHANGESETS_CI_REMEDIATION_DDL,
 )

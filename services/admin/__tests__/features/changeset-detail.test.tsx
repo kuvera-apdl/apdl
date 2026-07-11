@@ -9,6 +9,7 @@ import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailPage'
 import {
+  makeReviewVerdict,
   makeVerificationCoverage,
   makeVerificationPlan,
   seedWorkspace,
@@ -49,6 +50,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     dependency_slice: null,
     verification_plan: null,
     verification_coverage: null,
+    review_verdict: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
     updated_at: '2026-07-01T03:21:35.000000Z',
@@ -177,6 +179,28 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getAllByText('src/api/__tests__/schema.test.ts')).toHaveLength(2)
     expect(screen.getByText(/GitHub remains authoritative/)).toBeInTheDocument()
     expect(screen.queryByText('Passed')).not.toBeInTheDocument()
+  })
+
+  test('shows the semantic verdict as a pre-push review rather than GitHub CI', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'editing',
+            error: null,
+            review_verdict: makeReviewVerdict(),
+          }),
+        ),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('Semantic review')).toBeInTheDocument()
+    expect(screen.getAllByText('Rejected')).toHaveLength(2)
+    expect(screen.getByText('The generated diff initializes a resource but does not release it.')).toBeInTheDocument()
+    expect(screen.getByText('b'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText(/This is not a GitHub CI result/)).toBeInTheDocument()
+    expect(screen.queryByText('CI passed')).not.toBeInTheDocument()
   })
 
   test('shows a not-found state for an unknown changeset id', async () => {

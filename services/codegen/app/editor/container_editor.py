@@ -39,6 +39,7 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,13 @@ class ContainerAiderEditor:
                         json.dumps(data["verification_coverage"])
                     )
                     if data.get("verification_coverage") is not None
+                    else None
+                ),
+                review_verdict=(
+                    ReviewVerdict.model_validate_json(
+                        json.dumps(data["review_verdict"])
+                    )
+                    if data.get("review_verdict") is not None
                     else None
                 ),
             )

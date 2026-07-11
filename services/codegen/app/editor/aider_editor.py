@@ -60,12 +60,6 @@ from app.editor.brief import (
 )
 from app.editor.conventions import CONVENTIONS_MD
 from app.editor.llm import CompleteFn, resolve_completer
-from app.editor.review import (
-    REVIEW_SYSTEM,
-    ReviewVerdict,
-    build_review_user,
-    review_change,
-)
 from app.inspection import (
     DependencySlice,
     InspectionSnapshot,
@@ -84,6 +78,17 @@ from app.requirements import (
 )
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
+from app.semantic_review import (
+    ModelResponseStatus,
+    ReviewDecision,
+    ReviewVerdict,
+    SEMANTIC_REVIEW_SYSTEM,
+    UncertaintyCode,
+    assemble_review_verdict,
+    build_deterministic_findings,
+    build_deterministic_uncertainties,
+    render_semantic_review_prompt,
+)
 from app.verification import (
     CoverageDisposition,
     VerificationCoverage,
@@ -330,14 +335,26 @@ def _verify_retry_message(test_cmd: str, output: str) -> str:
 
 
 def _review_retry_message(verdict: ReviewVerdict) -> str:
-    """Follow-up agent feedback after the pre-push quality review rejected the diff."""
-    problems = "\n".join(f"- {p}" for p in verdict.problems)
-    instructions = verdict.fix_instructions.strip() or "Address every problem above."
+    """Turn the strict evidence-backed verdict into actionable edit feedback."""
+    problems = "\n".join(
+        f"- {finding.message}" for finding in verdict.deterministic_findings
+    )
+    instructions = "\n".join(
+        f"- {instruction}" for instruction in verdict.actionable_instructions
+    )
     return (
-        "An automated reviewer compared your committed change against the task "
+        "An independent reviewer compared your committed change against the task "
         "spec and REJECTED it.\n\n"
         f"Problems found:\n{problems or '- (see instructions below)'}\n\n"
-        f"Do this now:\n{instructions}"
+        f"Do this now:\n{instructions or '- Address every evidence-backed gap.'}"
+    )
+
+
+def _sole_external_ci_uncertainty(verdict: ReviewVerdict) -> bool:
+    """Missing external CI may produce a draft, but no other uncertainty may hide."""
+    return bool(verdict.uncertainties) and all(
+        item.code is UncertaintyCode.verification_unverified
+        for item in verdict.uncertainties
     )
 
 
@@ -533,6 +550,7 @@ class AiderEditor:
         verification_coverage: VerificationCoverage | None = (
             request.verification_coverage
         )
+        review_verdict: ReviewVerdict | None = None
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -546,6 +564,7 @@ class AiderEditor:
                 dependency_slice=dependency_slice,
                 verification_plan=verification_plan,
                 verification_coverage=verification_coverage,
+                review_verdict=review_verdict,
             )
 
         try:
@@ -896,56 +915,120 @@ class AiderEditor:
                         continue
                     return fail(verification_coverage.disposition_reason)
 
-                # Review the diff against the ORIGINAL spec before pushing: green
-                # builds happily ship a token diff that implements none of the
-                # task. Fail-open on infrastructure, fail-closed on judgment
-                # (see app.editor.review). A deterministic revert's diff is
-                # mechanically derived, so it is not judged.
-                if need_review and complete is not None:
-                    review_round += 1
-                    prompts.append(
-                        {
-                            "stage": "review",
-                            "label": f"Diff review (round {review_round})",
-                            "system": REVIEW_SYSTEM,
-                            "user": build_review_user(
-                                spec=request.spec,
-                                diff_text=diff_text,
-                                changed_paths=changed_paths,
-                                evidence_context=evidence_context,
-                            ),
-                            "notes": None,
-                        }
-                    )
-                    verdict = await review_change(
-                        spec=request.spec,
+                # Run deterministic semantic checks on every material diff, even
+                # when the optional independent model call is disabled. The model
+                # can add judgment but cannot override a deterministic error.
+                # A mechanical revert remains outside this judgment boundary.
+                if request.revert_sha is None:
+                    contracts_for_review = contract_bundle or ContractBundle()
+                    findings = build_deterministic_findings(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
                         diff_text=diff_text,
-                        changed_paths=changed_paths,
-                        evidence_context=evidence_context,
-                        complete=complete,
                     )
-                    if verdict.skipped and fail_closed_auxiliary:
-                        return fail(
-                            f"{request.risk_level}-risk change requires a parseable "
-                            "diff-review verdict."
+                    uncertainties = build_deterministic_uncertainties(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
+                        diff_text=diff_text,
+                    )
+                    model_response: str | None = None
+                    if need_review and complete is not None:
+                        review_round += 1
+                        review_prompt = render_semantic_review_prompt(
+                            ledger=requirement_ledger,
+                            contracts=contracts_for_review,
+                            dependency_slice=dependency_slice,
+                            verification_plan=verification_plan,
+                            verification_coverage=verification_coverage,
+                            deterministic_findings=findings,
+                            deterministic_uncertainties=uncertainties,
+                            diff_text=diff_text,
                         )
-                    if not verdict.approved:
+                        prompts.append(
+                            {
+                                "stage": "review",
+                                "label": f"Semantic review (round {review_round})",
+                                "system": SEMANTIC_REVIEW_SYSTEM,
+                                "user": review_prompt,
+                                "notes": (
+                                    "Independent evidence context; GitHub CI has "
+                                    "not reported at this stage."
+                                ),
+                            }
+                        )
+                        model_response = await complete(
+                            SEMANTIC_REVIEW_SYSTEM, review_prompt
+                        )
+                    review_verdict = assemble_review_verdict(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
+                        diff_text=diff_text,
+                        model_response_text=model_response,
+                    )
+
+                    if review_verdict.overall_decision is ReviewDecision.rejected:
                         if retries_left > 0:
                             retries_left -= 1
                             message = _with_feedback(
                                 initial_message + "\n\n" + evidence_context,
-                                _review_retry_message(verdict),
+                                _review_retry_message(review_verdict),
                             )
                             logger.info(
-                                "Quality review rejected the change for %s; "
-                                "retrying the edit with the reviewer's instructions.",
+                                "Semantic review rejected the change for %s; "
+                                "retrying with evidence-backed instructions.",
                                 request.repo,
                             )
                             continue
-                        problems = (
-                            "; ".join(verdict.problems) or verdict.fix_instructions
+                        return fail(
+                            "semantic review rejected the change: "
+                            + "; ".join(review_verdict.actionable_instructions)
                         )
-                        return fail(f"quality review rejected the change: {problems}")
+
+                    if review_verdict.overall_decision is ReviewDecision.unverified:
+                        external_ci_only = (
+                            verification_coverage.disposition
+                            is CoverageDisposition.unverified_external_ci
+                            and review_verdict.model_response_status
+                            is ModelResponseStatus.parsed
+                            and _sole_external_ci_uncertainty(review_verdict)
+                        )
+                        model_failed = review_verdict.model_response_status in {
+                            ModelResponseStatus.unavailable,
+                            ModelResponseStatus.invalid,
+                        }
+                        if external_ci_only:
+                            logger.info(
+                                "Semantic review for %s remains explicitly "
+                                "unverified only because GitHub CI is unavailable.",
+                                request.repo,
+                            )
+                        elif model_failed:
+                            if fail_closed_auxiliary:
+                                return fail(
+                                    f"{request.risk_level}-risk change requires a "
+                                    "valid independent semantic-review verdict."
+                                )
+                        elif retries_left > 0:
+                            retries_left -= 1
+                            message = _with_feedback(
+                                initial_message + "\n\n" + evidence_context,
+                                _review_retry_message(review_verdict),
+                            )
+                            continue
+                        elif fail_closed_auxiliary:
+                            return fail(
+                                "semantic review could not verify the change: "
+                                + "; ".join(review_verdict.actionable_instructions)
+                            )
                 break
 
             requirement_ledger = map_implementation_evidence(
@@ -1024,6 +1107,7 @@ class AiderEditor:
                 dependency_slice=dependency_slice,
                 verification_plan=verification_plan,
                 verification_coverage=verification_coverage,
+                review_verdict=review_verdict,
             )
         finally:
             if not keep:

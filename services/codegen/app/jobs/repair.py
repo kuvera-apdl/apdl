@@ -122,6 +122,8 @@ async def repair_failed_ci(
                 plan=result.verification_plan,
                 coverage=result.verification_coverage,
             )
+        if result.review_verdict is not None:
+            await store.set_review_verdict(pool, changeset_id, result.review_verdict)
         if result.prompts:
             await store.set_prompts(pool, changeset_id, [*claimed.prompts, *result.prompts])
         if not result.success:

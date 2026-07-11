@@ -8,6 +8,7 @@ import type {
   dependencySliceSchema,
   inspectionSnapshotSchema,
   requirementLedgerSchema,
+  reviewVerdictSchema,
   repoConnectionCreateSchema,
   repoConnectionSchema,
   taskSpecSchema,
@@ -24,6 +25,7 @@ export type InspectionSnapshot = z.infer<typeof inspectionSnapshotSchema>
 export type DependencySlice = z.infer<typeof dependencySliceSchema>
 export type VerificationPlan = z.infer<typeof verificationPlanSchema>
 export type VerificationCoverage = z.infer<typeof verificationCoverageSchema>
+export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>
 export type RepoConnection = z.infer<typeof repoConnectionSchema>
 export type RepoConnectionCreate = z.infer<typeof repoConnectionCreateSchema>
 export type AccessibleRepo = z.infer<typeof accessibleRepoSchema>

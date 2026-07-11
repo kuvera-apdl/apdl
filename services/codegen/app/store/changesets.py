@@ -24,6 +24,7 @@ from app.models.changeset import (
     assert_transition,
 )
 from app.requirements.models import RequirementLedger
+from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
 from app.verification.models import VerificationCoverage, VerificationPlan
 
@@ -115,6 +116,14 @@ def _verification_coverage_from_row(
     return VerificationCoverage.model_validate_json(raw)
 
 
+def _review_verdict_from_row(row: asyncpg.Record) -> ReviewVerdict | None:
+    value = _optional_column(row, "review_verdict")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return ReviewVerdict.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -144,6 +153,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         dependency_slice=_dependency_slice_from_row(row),
         verification_plan=_verification_plan_from_row(row),
         verification_coverage=_verification_coverage_from_row(row),
+        review_verdict=_review_verdict_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -484,6 +494,24 @@ async def set_verification_evidence(
                 if coverage is not None
                 else None
             ),
+        )
+
+
+async def set_review_verdict(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    verdict: ReviewVerdict,
+) -> None:
+    """Persist the evidence-backed pre-push judgment without changing CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET review_verdict = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(verdict.model_dump(mode="json")),
         )
 
 

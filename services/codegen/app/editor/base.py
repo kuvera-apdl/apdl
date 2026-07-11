@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
 
@@ -76,6 +77,7 @@ class EditResult:
     dependency_slice: DependencySlice | None = None
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
+    review_verdict: ReviewVerdict | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
     #: each pre-push diff review. Entries are

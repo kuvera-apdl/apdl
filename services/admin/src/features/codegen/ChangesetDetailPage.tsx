@@ -533,6 +533,119 @@ export function ChangesetDetailPage() {
         </Card>
       ) : null}
 
+      {cs.review_verdict ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Semantic review</CardTitle>
+            <CardDescription>
+              APDL&apos;s evidence-backed pre-push review of the exact generated diff. This is not a
+              GitHub CI result; GitHub remains authoritative for checks, review policy, and merge.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Fact label="Decision">
+                {verificationLabel(cs.review_verdict.overall_decision)}
+              </Fact>
+              <Fact label="Model response">
+                {verificationLabel(cs.review_verdict.model_response_status)}
+              </Fact>
+              <Fact label="Deterministic findings">
+                {cs.review_verdict.deterministic_findings.length}
+              </Fact>
+            </div>
+            <Fact label="Reviewed diff SHA-256">
+              <code className="font-mono text-xs break-all">
+                {cs.review_verdict.reviewed_diff_sha256}
+              </code>
+            </Fact>
+            <p className="text-xs text-muted-foreground">
+              Deterministic errors override any model approval.
+            </p>
+            {cs.review_verdict.requirement_decisions.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Requirement decisions
+                </p>
+                {cs.review_verdict.requirement_decisions.map((decision) => (
+                  <div key={decision.requirement_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{decision.requirement_id}</code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(decision.decision)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{decision.rationale}</p>
+                    {decision.evidence_ids.length > 0 ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Evidence: {decision.evidence_ids.join(', ')}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.deterministic_findings.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Deterministic findings
+                </p>
+                {cs.review_verdict.deterministic_findings.map((finding) => (
+                  <div key={finding.finding_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{finding.finding_id}</code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(finding.severity)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {verificationLabel(finding.code)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{finding.message}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Action: {finding.actionable_instruction}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.uncertainties.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Uncertainties
+                </p>
+                {cs.review_verdict.uncertainties.map((uncertainty) => (
+                  <div key={uncertainty.uncertainty_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{uncertainty.uncertainty_id}</code>
+                      <span className="text-xs text-muted-foreground">
+                        {verificationLabel(uncertainty.code)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{uncertainty.message}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Resolution: {uncertainty.resolution_instruction}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.actionable_instructions.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Required actions
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.review_verdict.actionable_instructions.map((instruction, index) => (
+                    <li key={`${index}:${instruction}`}>{instruction}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
       {cs.dependency_slice ? (
         <Card>
           <CardHeader>

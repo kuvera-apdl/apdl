@@ -86,6 +86,8 @@ def main() -> int:
         payload["verification_coverage"] = result.verification_coverage.model_dump(
             mode="json"
         )
+    if result.review_verdict is not None:
+        payload["review_verdict"] = result.review_verdict.model_dump(mode="json")
     print(json.dumps(payload))
     return 0
 

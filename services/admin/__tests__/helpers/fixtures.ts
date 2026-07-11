@@ -2,6 +2,7 @@
 // these are what the live API returns (Strict Schema Rule test material).
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
 import type {
+  ReviewVerdict,
   VerificationCoverage,
   VerificationPlan,
 } from '../../src/api/types/codegen'
@@ -70,6 +71,41 @@ export function makeVerificationCoverage(
         coverage_paths: ['src/api/__tests__/schema.test.ts'],
       },
     ],
+    ...overrides,
+  }
+}
+
+export function makeReviewVerdict(
+  overrides: Partial<ReviewVerdict> = {},
+): ReviewVerdict {
+  return {
+    schema_version: 'review_verdict@1',
+    reviewed_diff_sha256: 'b'.repeat(64),
+    overall_decision: 'rejected',
+    model_response_status: 'parsed',
+    deterministic_errors_override_model: true,
+    requirement_decisions: [
+      {
+        requirement_id: 'REQ-001',
+        decision: 'rejected',
+        evidence_ids: ['DIFF:src/api/schema.ts'],
+        rationale: 'The new resource is initialized without a corresponding cleanup path.',
+        actionable_instructions: ['Add cleanup for the initialized resource.'],
+      },
+    ],
+    deterministic_findings: [
+      {
+        finding_id: 'RF-001',
+        code: 'missing_cleanup',
+        severity: 'error',
+        requirement_ids: ['REQ-001'],
+        evidence_ids: ['DIFF:src/api/schema.ts'],
+        message: 'The generated diff initializes a resource but does not release it.',
+        actionable_instruction: 'Add cleanup for the initialized resource.',
+      },
+    ],
+    uncertainties: [],
+    actionable_instructions: ['Add cleanup for the initialized resource.'],
     ...overrides,
   }
 }

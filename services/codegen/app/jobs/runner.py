@@ -24,6 +24,7 @@ from app.requirements import compile_requirement_ledger, map_implementation_evid
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
+from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
 from app.verification.models import VerificationCoverage, VerificationPlan
@@ -62,6 +63,7 @@ def _pr_body(
     ledger: RequirementLedger,
     plan: VerificationPlan | None,
     coverage: VerificationCoverage | None,
+    review: ReviewVerdict | None,
 ) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
     if not checks:
@@ -95,10 +97,18 @@ def _pr_body(
     verification_text += (
         "- These are expected-coverage facts only; GitHub CI is authoritative."
     )
+    review_text = (
+        f"- Decision: `{review.overall_decision.value}`\n"
+        f"- Reviewed diff SHA-256: `{review.reviewed_diff_sha256}`\n"
+        "- This pre-push semantic judgment is not a GitHub CI result."
+        if review is not None
+        else "- No semantic-review verdict was produced by this editor."
+    )
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
         f"## Verification coverage\n\n{verification_text}\n\n"
+        f"## Semantic review\n\n{review_text}\n\n"
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
         "- Opened automatically by APDL codegen from an approved feature proposal. "
@@ -229,6 +239,8 @@ async def _execute_changeset_job(
                 plan=result.verification_plan,
                 coverage=result.verification_coverage,
             )
+        if result.review_verdict is not None:
+            await store.set_review_verdict(pool, changeset_id, result.review_verdict)
 
         # Persist the prompt transcript regardless of outcome — a failed run is
         # exactly when an operator wants to see what the model was told.
@@ -264,6 +276,20 @@ async def _execute_changeset_job(
                 ),
             )
             return
+        if (
+            result.review_verdict is not None
+            and result.review_verdict.overall_decision is ReviewDecision.rejected
+        ):
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.tests_failed,
+                error=(
+                    "Semantic review rejected the change: "
+                    + "; ".join(result.review_verdict.actionable_instructions)
+                ),
+            )
+            return
 
         # Backstop only: the editor already ran these gates on the FULL diff
         # before pushing. This re-check (on the possibly capped diff_text)
@@ -294,6 +320,7 @@ async def _execute_changeset_job(
                 result.requirement_ledger,
                 result.verification_plan,
                 result.verification_coverage,
+                result.review_verdict,
             ),
             token=token,
             draft=True,

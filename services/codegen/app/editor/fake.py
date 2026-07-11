@@ -49,5 +49,6 @@ class FakeEditor:
                 dependency_slice=result.dependency_slice,
                 verification_plan=result.verification_plan,
                 verification_coverage=result.verification_coverage,
+                review_verdict=result.review_verdict,
             )
         return result

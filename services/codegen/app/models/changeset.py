@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
+from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
 
@@ -238,6 +239,7 @@ class Changeset(BaseModel):
     dependency_slice: DependencySlice | None = None
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
+    review_verdict: ReviewVerdict | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

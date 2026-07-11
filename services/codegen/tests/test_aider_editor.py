@@ -6,6 +6,8 @@ invoking ``aider`` or touching the network.
 """
 
 import base64
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -427,14 +429,47 @@ class _Pipeline:
         monkeypatch.setattr(editor, "_exec", fake_exec)
 
 
+def _strict_review_response(
+    prompt: str,
+    *,
+    decision: str = "approved",
+    rationale: str = "The repository evidence supports the change.",
+    instructions: list[str] | None = None,
+) -> str:
+    requirement_ids = sorted(set(re.findall(r'"requirement_id": "(REQ-[0-9]{3})"', prompt)))
+    evidence_ids = sorted(set(re.findall(r'"evidence_id": "(ev_[0-9a-f]{24})"', prompt)))
+    assert requirement_ids and evidence_ids
+    actions = instructions or ([] if decision == "approved" else ["Fix the evidenced defect."])
+    return json.dumps(
+        {
+            "schema_version": "review_model_response@1",
+            "requirement_decisions": [
+                {
+                    "requirement_id": requirement_id,
+                    "decision": decision,
+                    "evidence_ids": [evidence_ids[0]],
+                    "rationale": rationale,
+                    "actionable_instructions": actions,
+                }
+                for requirement_id in requirement_ids
+            ],
+            "uncertainties": [],
+            "actionable_instructions": actions,
+        }
+    )
+
+
 def _routing_complete(brief_reply=None, review_replies=None):
     """One completer serving both auxiliary passes, routed by system prompt."""
     replies = list(review_replies or [])
 
-    async def complete(system: str, _user: str):
+    async def complete(system: str, user: str):
         if "engineering briefs" in system:
             return brief_reply
-        return replies.pop(0) if replies else '{"approved": true}'
+        reply = replies.pop(0) if replies else {"decision": "approved"}
+        if isinstance(reply, str):
+            return reply
+        return _strict_review_response(user, **reply)
 
     return complete
 
@@ -481,7 +516,7 @@ async def test_high_risk_fails_closed_on_unparseable_review(monkeypatch, tmp_pat
     result = await editor.implement(request)
 
     assert result.success is False
-    assert "diff-review verdict" in (result.error or "")
+    assert "semantic-review verdict" in (result.error or "")
     assert pipeline.pushed is False
 
 
@@ -521,7 +556,6 @@ async def test_medium_risk_missing_test_coverage_retries_before_push(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
-    monkeypatch.setenv("CODEGEN_REVIEW", "false")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
     profile = RepoProfile(
         commands=[
@@ -552,7 +586,11 @@ async def test_medium_risk_missing_test_coverage_retries_before_push(
             profile=profile,
         ),
     )
-    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=_routing_complete(),
+    )
     pipeline = _Pipeline(
         editor,
         monkeypatch,
@@ -625,13 +663,18 @@ async def test_local_verify_failures_do_not_block_generation(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
-    rejected = (
-        '{"approved": false, "problems": ["link targets a route that does not exist"],'
-        ' "fix_instructions": "Create the page and wire it in."}'
-    )
     editor = AiderEditor(
         model="claude-opus-4-8", workdir_base=str(tmp_path),
-        complete=_routing_complete(review_replies=[rejected, '{"approved": true}']),
+        complete=_routing_complete(
+            review_replies=[
+                {
+                    "decision": "rejected",
+                    "rationale": "The link targets a route that does not exist.",
+                    "instructions": ["Create the page and wire it in."],
+                },
+                {"decision": "approved"},
+            ]
+        ),
     )
     pipeline = _Pipeline(editor, monkeypatch)
 
@@ -648,18 +691,25 @@ async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path)
 async def test_review_rejection_without_retries_fails_the_changeset(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "0")
-    rejected = '{"approved": false, "problems": ["a token diff"], "fix_instructions": "x"}'
     editor = AiderEditor(
         model="claude-opus-4-8", workdir_base=str(tmp_path),
-        complete=_routing_complete(review_replies=[rejected]),
+        complete=_routing_complete(
+            review_replies=[
+                {
+                    "decision": "rejected",
+                    "rationale": "The diff is only a token gesture.",
+                    "instructions": ["Implement the complete behavior."],
+                }
+            ]
+        ),
     )
     pipeline = _Pipeline(editor, monkeypatch)
 
     result = await editor.implement(_request())
 
     assert result.success is False
-    assert "quality review rejected" in (result.error or "")
-    assert "a token diff" in (result.error or "")
+    assert "semantic review rejected" in (result.error or "")
+    assert "Implement the complete behavior" in (result.error or "")
     assert pipeline.pushed is False
 
 
@@ -864,8 +914,8 @@ async def test_prompt_transcript_records_brief_edit_and_review(monkeypatch, tmp_
     assert "Ship the bot filter." in edit["user"]
     assert "Aider's built-in editing prompt" in edit["notes"]
 
-    assert review["system"].startswith("You review a code change")
-    assert "Build a bot filter." in review["user"]  # judged against the ORIGINAL spec
+    assert review["system"].startswith("You review an automated code change")
+    assert '"original_source_text": "Build a bot filter."' in review["user"]
     assert "```diff" in review["user"]
 
 

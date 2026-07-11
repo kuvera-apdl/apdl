@@ -5,6 +5,7 @@ import {
   changesetSchema,
 } from '@/api/schemas/codegen'
 import {
+  makeReviewVerdict,
   makeVerificationCoverage,
   makeVerificationPlan,
 } from '../helpers/fixtures'
@@ -43,6 +44,7 @@ const sample = {
   dependency_slice: null,
   verification_plan: null,
   verification_coverage: null,
+  review_verdict: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',
@@ -106,5 +108,72 @@ describe('codegen schemas', () => {
     }
 
     expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('parses a semantic review verdict bound to the reviewed diff', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      review_verdict: makeReviewVerdict(),
+    })
+
+    expect(parsed.review_verdict?.reviewed_diff_sha256).toBe('b'.repeat(64))
+    expect(parsed.review_verdict?.overall_decision).toBe('rejected')
+  })
+
+  it('rejects semantic review payloads that disable deterministic overrides', () => {
+    const bad = {
+      ...sample,
+      review_verdict: {
+        ...makeReviewVerdict(),
+        deterministic_errors_override_model: false,
+      },
+    }
+
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('rejects a semantic approval that conflicts with a deterministic error', () => {
+    const bad = {
+      ...sample,
+      review_verdict: {
+        ...makeReviewVerdict(),
+        overall_decision: 'approved',
+        actionable_instructions: [],
+      },
+    }
+
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('rejects unknown semantic review fields (strict)', () => {
+    const bad = {
+      ...sample,
+      review_verdict: {
+        ...makeReviewVerdict(),
+        extra: true,
+      },
+    }
+
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
+  })
+
+  it('parses the fail-closed diff-truncation uncertainty', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      review_verdict: makeReviewVerdict({
+        uncertainties: [
+          {
+            uncertainty_id: 'RU-001',
+            code: 'diff_truncated',
+            requirement_ids: ['REQ-001'],
+            evidence_ids: [],
+            message: 'The diff exceeded the semantic review input budget.',
+            resolution_instruction: 'Review the complete diff before publishing.',
+          },
+        ],
+      }),
+    })
+
+    expect(parsed.review_verdict?.uncertainties[0].code).toBe('diff_truncated')
   })
 })

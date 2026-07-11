@@ -514,6 +514,173 @@ export const verificationCoverageSchema = z
     }
   })
 
+const reviewDecisionSchema = z.enum(['approved', 'rejected', 'unverified'])
+
+const reviewRequirementDecisionSchema = z
+  .object({
+    requirement_id: z.string().regex(/^REQ-[0-9]{3}$/),
+    decision: reviewDecisionSchema,
+    evidence_ids: z.array(z.string()),
+    rationale: z.string().min(1),
+    actionable_instructions: z.array(z.string()),
+  })
+  .strict()
+  .superRefine((decision, ctx) => {
+    if (new Set(decision.evidence_ids).size !== decision.evidence_ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision evidence IDs must be unique' })
+    }
+    if (decision.evidence_ids.some((value) => value.trim().length === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'decision evidence IDs cannot be blank' })
+    }
+    if (
+      (decision.decision === 'approved' || decision.decision === 'rejected') &&
+      decision.evidence_ids.length === 0
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'approved/rejected decisions require evidence' })
+    }
+    if (decision.decision === 'approved' && decision.actionable_instructions.length > 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'approved decisions cannot contain fix instructions' })
+    }
+    if (
+      (decision.decision === 'rejected' || decision.decision === 'unverified') &&
+      decision.actionable_instructions.length === 0
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'rejected/unverified decisions need actionable instructions' })
+    }
+    if (decision.actionable_instructions.some((instruction) => instruction.trim().length === 0)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'actionable instructions cannot be blank' })
+    }
+  })
+
+const deterministicFindingSchema = z
+  .object({
+    finding_id: z.string().regex(/^RF-[0-9]{3}$/),
+    code: z.enum([
+      'missing_route_or_link',
+      'missing_cleanup',
+      'dropped_handler_prop',
+      'duplicate_initialization',
+      'strict_schema_violation',
+      'absent_metric',
+      'async_readiness',
+      'missing_contract_evidence',
+      'missing_verification_coverage',
+      'workflow_gate_relaxation',
+    ]),
+    severity: z.enum(['error', 'warning']),
+    requirement_ids: z.array(z.string()).min(1),
+    evidence_ids: z.array(z.string()).min(1),
+    message: z.string().min(1),
+    actionable_instruction: z.string().min(1),
+  })
+  .strict()
+  .superRefine((finding, ctx) => {
+    if (new Set(finding.requirement_ids).size !== finding.requirement_ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'finding requirement IDs must be unique' })
+    }
+    if (new Set(finding.evidence_ids).size !== finding.evidence_ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'finding evidence IDs must be unique' })
+    }
+  })
+
+const reviewUncertaintySchema = z
+  .object({
+    uncertainty_id: z.string().regex(/^RU-[0-9]{3}$/),
+    code: z.enum([
+      'diff_truncated',
+      'dependency_slice_truncated',
+      'unresolved_reference',
+      'contract_blocked',
+      'verification_unverified',
+      'protected_workflow_review',
+      'model_response_unavailable',
+      'model_response_invalid',
+      'metric_contract_ambiguous',
+    ]),
+    requirement_ids: z.array(z.string()),
+    evidence_ids: z.array(z.string()),
+    message: z.string().min(1),
+    resolution_instruction: z.string().min(1),
+  })
+  .strict()
+  .superRefine((uncertainty, ctx) => {
+    if (new Set(uncertainty.requirement_ids).size !== uncertainty.requirement_ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'uncertainty requirement IDs must be unique' })
+    }
+    if (new Set(uncertainty.evidence_ids).size !== uncertainty.evidence_ids.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'uncertainty evidence IDs must be unique' })
+    }
+  })
+
+export const reviewVerdictSchema = z
+  .object({
+    schema_version: z.literal('review_verdict@1'),
+    reviewed_diff_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    overall_decision: reviewDecisionSchema,
+    model_response_status: z.enum(['parsed', 'unavailable', 'invalid']),
+    deterministic_errors_override_model: z.literal(true),
+    requirement_decisions: z.array(reviewRequirementDecisionSchema),
+    deterministic_findings: z.array(deterministicFindingSchema),
+    uncertainties: z.array(reviewUncertaintySchema),
+    actionable_instructions: z.array(z.string()),
+  })
+  .strict()
+  .superRefine((verdict, ctx) => {
+    const requirementIds = verdict.requirement_decisions.map((decision) => decision.requirement_id)
+    if (new Set(requirementIds).size !== requirementIds.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'verdict requirement decisions must be unique' })
+    }
+
+    const expectedFindingIds = verdict.deterministic_findings.map(
+      (_, index) => `RF-${String(index + 1).padStart(3, '0')}`,
+    )
+    if (
+      verdict.deterministic_findings.some(
+        (finding, index) => finding.finding_id !== expectedFindingIds[index],
+      )
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'finding IDs must be contiguous and ordered from RF-001' })
+    }
+
+    const expectedUncertaintyIds = verdict.uncertainties.map(
+      (_, index) => `RU-${String(index + 1).padStart(3, '0')}`,
+    )
+    if (
+      verdict.uncertainties.some(
+        (uncertainty, index) => uncertainty.uncertainty_id !== expectedUncertaintyIds[index],
+      )
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'uncertainty IDs must be contiguous and ordered from RU-001' })
+    }
+
+    const hasError = verdict.deterministic_findings.some((finding) => finding.severity === 'error')
+    const hasRejection = verdict.requirement_decisions.some(
+      (decision) => decision.decision === 'rejected',
+    )
+    const hasUnverified = verdict.requirement_decisions.some(
+      (decision) => decision.decision === 'unverified',
+    )
+    if (hasError || hasRejection) {
+      if (verdict.overall_decision !== 'rejected') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'deterministic errors/rejections require rejected overall' })
+      }
+    } else if (hasUnverified || verdict.uncertainties.length > 0) {
+      if (verdict.overall_decision !== 'unverified') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'unverified decisions/uncertainties require unverified overall' })
+      }
+    } else if (verdict.overall_decision !== 'approved') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'fully evidenced decisions must be approved overall' })
+    }
+
+    if (verdict.overall_decision === 'approved') {
+      if (verdict.actionable_instructions.length > 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'approved verdicts cannot contain actionable instructions' })
+      }
+    } else if (verdict.actionable_instructions.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'rejected/unverified verdicts need actionable instructions' })
+    }
+  })
+
 export const KNOWN_CHANGESET_STATUSES = [
   'queued',
   'cloning',
@@ -581,6 +748,7 @@ export const changesetSchema = z
     dependency_slice: dependencySliceSchema.nullable(),
     verification_plan: verificationPlanSchema.nullable(),
     verification_coverage: verificationCoverageSchema.nullable(),
+    review_verdict: reviewVerdictSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
