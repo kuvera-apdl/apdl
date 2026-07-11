@@ -1,0 +1,5 @@
+{
+  "name": "evaluation-fixture",
+  "private": true,
+  "dependencies": {"react": "18.3.1"}
+}

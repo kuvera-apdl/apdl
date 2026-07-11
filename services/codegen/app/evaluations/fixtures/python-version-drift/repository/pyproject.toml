@@ -1,0 +1,4 @@
+[project]
+name = "evaluation-fixture"
+version = "0.0.0"
+dependencies = ["analytics-client==1.2.0"]

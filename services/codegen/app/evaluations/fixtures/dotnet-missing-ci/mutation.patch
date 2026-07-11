@@ -1,0 +1,11 @@
+--- a/Status.cs
++++ b/Status.cs
+@@ -2,7 +2,7 @@
+ {
+     public static string FromCheckCount(int checks)
+     {
+-        if (checks == 0) return "unverified_external_ci";
++        if (checks == 0) return "passed";
+         return "ci_running";
+     }
+ }

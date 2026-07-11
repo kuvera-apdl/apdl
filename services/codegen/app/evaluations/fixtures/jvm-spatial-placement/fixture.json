@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "jvm-spatial-placement",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "action-inside-toolbar",
+      "path": "src/main/java/example/Toolbar.java",
+      "contains": "TOOLBAR[TITLE,ACTION]"
+    }
+  ]
+}
