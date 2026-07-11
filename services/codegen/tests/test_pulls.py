@@ -1,11 +1,13 @@
 """GitHub pull-request creation/observation helpers (no merge capability)."""
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from app.github.pulls import close_pull_request, mark_ready_for_review, open_pull_request
+from app.github.pulls import get_pull_request, open_pull_request
+from app.models.observations import GitHubPRStatus
 
 
 @pytest.mark.asyncio
@@ -20,7 +22,9 @@ async def test_open_pull_request_posts_a_draft():
             json={
                 "html_url": "https://github.com/acme/widgets/pull/12",
                 "number": 12,
-                "node_id": "PR_12",
+                "draft": True,
+                "head": {"sha": "abc123"},
+                "updated_at": "2026-07-11T12:00:00Z",
             },
         )
 
@@ -35,35 +39,34 @@ async def test_open_pull_request_posts_a_draft():
             client=client,
         )
     assert pr.number == 12
-    assert pr.node_id == "PR_12"
+    assert pr.head_sha == "abc123"
+    assert pr.status is GitHubPRStatus.draft
+    assert pr.github_updated_at == datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
     assert captured["body"]["draft"] is True
     assert captured["url"].endswith("/repos/acme/widgets/pulls")
 
 
 @pytest.mark.asyncio
-async def test_close_pull_request_only_closes():
+async def test_get_pull_request_reads_live_github_state():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["method"] = request.method
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"state": "closed"})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await close_pull_request(
-            repo="acme/widgets", number=12, token="ghs_tok", client=client
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "number": 12,
+                "state": "open",
+                "draft": False,
+                "head": {"sha": "abc123"},
+            },
         )
-    assert captured == {"method": "PATCH", "body": {"state": "closed"}}
-
-
-@pytest.mark.asyncio
-async def test_mark_ready_uses_github_graphql():
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"data": {}})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await mark_ready_for_review(node_id="PR_12", token="ghs_tok", client=client)
-    assert captured["body"]["variables"] == {"id": "PR_12"}
+        data = await get_pull_request(
+            "acme/widgets", 12, "ghs_tok", client=client
+        )
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/repos/acme/widgets/pulls/12")
+    assert data["head"]["sha"] == "abc123"

@@ -1,7 +1,8 @@
 """Changeset job runner — drives a changeset through its lifecycle.
 
-Phase 2 path: ``queued → cloning → editing → testing → (tests_failed | pushing →
-pr_open)``. The edit itself is delegated to an :class:`~app.editor.base.Editor`
+Lifecycle path: ``queued → cloning → editing → pushing → pr_open``. Generation,
+review, or safety failures move directly to ``error``; CI is a separate external
+projection. The edit itself is delegated to an :class:`~app.editor.base.Editor`
 (Aider in production, a fake in tests); the PR is opened by codegen via
 the GitHub App; GitHub owns verification and merge. The job never raises — any
 unexpected fault lands the changeset in ``error``.
@@ -12,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
@@ -20,6 +23,7 @@ import asyncpg
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
+from app.models.observations import ExternalCIStatus, PullRequestObservation
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.safety.gates import evaluate_pre_push
@@ -27,7 +31,7 @@ from app.safety.killswitch import automation_enabled
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
-from app.verification.models import VerificationCoverage, VerificationPlan
+from app.verification.models import PlanDisposition, VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -255,10 +259,9 @@ async def _execute_changeset_job(
                     exc_info=True,
                 )
 
-        await store.transition_changeset(pool, changeset_id, ChangesetStatus.testing)
         if not result.success:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.tests_failed,
+                pool, changeset_id, ChangesetStatus.error,
                 error=result.error or "The edit attempt did not pass tests.",
             )
             return
@@ -269,7 +272,7 @@ async def _execute_changeset_job(
             await store.transition_changeset(
                 pool,
                 changeset_id,
-                ChangesetStatus.tests_failed,
+                ChangesetStatus.error,
                 error=(
                     "Editor returned no complete RequirementLedger; no pull request "
                     "was created."
@@ -283,7 +286,7 @@ async def _execute_changeset_job(
             await store.transition_changeset(
                 pool,
                 changeset_id,
-                ChangesetStatus.tests_failed,
+                ChangesetStatus.error,
                 error=(
                     "Semantic review rejected the change: "
                     + "; ".join(result.review_verdict.actionable_instructions)
@@ -304,12 +307,32 @@ async def _execute_changeset_job(
             await store.transition_changeset(
                 pool,
                 changeset_id,
-                ChangesetStatus.tests_failed,
+                ChangesetStatus.error,
                 error="Pre-push gate failed: " + "; ".join(gate.violations),
             )
             return
 
+        if not result.head_sha:
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
+                error="Editor pushed a branch without returning its exact head SHA.",
+            )
+            return
+
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.pushing)
+        risk = str(changeset.task.context.get("risk_level") or "low").lower()
+        lacks_external_ci = (
+            result.verification_plan is not None
+            and result.verification_plan.disposition
+            is PlanDisposition.unverified_external_ci
+        )
+        semantic_unverified = (
+            result.review_verdict is not None
+            and result.review_verdict.overall_decision.value == "unverified"
+        )
+        draft = risk != "low" or lacks_external_ci or semantic_unverified
         pr = await open_pr(
             repo=connection.repo,
             head=result.branch or branch,
@@ -323,17 +346,38 @@ async def _execute_changeset_job(
                 result.review_verdict,
             ),
             token=token,
-            draft=True,
+            draft=draft,
+        )
+        if not pr.head_sha or pr.head_sha != result.head_sha:
+            raise RuntimeError(
+                "GitHub PR head does not match the exact branch head pushed by codegen."
+            )
+        external_ci_status = (
+            ExternalCIStatus.unverified_external_ci
+            if lacks_external_ci
+            else ExternalCIStatus.pending
+        )
+        observation = PullRequestObservation(
+            observation_id=f"probs_{uuid.uuid4().hex}",
+            changeset_id=changeset_id,
+            repository=connection.repo,
+            pr_number=pr.number,
+            head_sha=pr.head_sha,
+            status=pr.status,
+            action="opened",
+            github_url=pr.url,
+            github_updated_at=pr.github_updated_at,
+            observed_at=datetime.now(timezone.utc),
         )
         await store.mark_pr_open(
-            pool, changeset_id,
+            pool,
+            changeset_id,
             branch=result.branch or branch,
-            pr_url=pr.url,
-            pr_number=pr.number,
+            observation=observation,
+            external_ci_status=external_ci_status,
             diff_stat=result.diff_stat,
-            node_id=pr.node_id,
         )
-        logger.info("Changeset %s opened draft PR %s", changeset_id, pr.url)
+        logger.info("Changeset %s opened GitHub PR %s", changeset_id, pr.url)
     except Exception as exc:
         logger.exception("Changeset job %s failed", changeset_id)
         try:

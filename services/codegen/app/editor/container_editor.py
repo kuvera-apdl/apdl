@@ -157,6 +157,8 @@ class ContainerAiderEditor:
             argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
         if request.existing_branch:
             argv += ["-e", "CS_EXISTING_BRANCH=true"]
+        if request.expected_head_sha:
+            argv += ["-e", f"CS_EXPECTED_HEAD_SHA={request.expected_head_sha}"]
         if request.requirement_ledger is not None:
             argv += [
                 "-e",

@@ -49,6 +49,7 @@ def _request_from_env() -> EditRequest:
         gates_policy=json.loads(os.environ.get("CS_GATES_POLICY") or "null"),
         revert_sha=(os.environ.get("CS_REVERT_SHA") or None),
         existing_branch=os.environ.get("CS_EXISTING_BRANCH") == "true",
+        expected_head_sha=(os.environ.get("CS_EXPECTED_HEAD_SHA") or None),
         risk_level=os.environ.get("CS_RISK_LEVEL", "low"),
         requirement_ledger=(
             RequirementLedger.model_validate_json(os.environ["CS_REQUIREMENT_LEDGER"])

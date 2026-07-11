@@ -6,8 +6,10 @@ import {
   changesetSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
+import { changesetObservationHistorySchema } from './schemas/codegen-observations'
 import type {
   Changeset,
+  ChangesetObservationHistory,
   RepoConnection,
 } from './types/codegen'
 
@@ -37,6 +39,21 @@ export function getChangeset(
     schema: changesetSchema,
     signal: options.signal,
   })
+}
+
+export function getChangesetObservations(
+  conn: ServiceConnection,
+  changesetId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<ChangesetObservationHistory> {
+  return request(
+    conn,
+    `/v1/changesets/${encodeURIComponent(changesetId)}/observations`,
+    {
+      schema: changesetObservationHistorySchema,
+      signal: options.signal,
+    },
+  )
 }
 
 export function abandonChangeset(

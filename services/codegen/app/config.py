@@ -300,47 +300,11 @@ def codegen_ci_poll_interval() -> int:
     return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))
 
 
-def codegen_ci_sync_max_age_seconds() -> int:
-    """Age cap (default 7 days) for what the CI poller re-sweeps.
-
-    list_syncable_changeset_ids includes ci_failed, which is never abandoned
-    automatically — so without a cap the poller re-mints a token and re-queries
-    CI every interval for every changeset that ever failed, a set that only
-    grows. Skip changesets whose updated_at is older than this; a long-dead PR is
-    not going to flip green. Set ``0`` to disable the cap (sweep everything).
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", str(7 * 24 * 3600))))
-
-
-def codegen_ci_pending_timeout() -> int:
-    """Deadline (default 1800s) for CI that never actually reports. ``0`` disables.
-
-    An *inferred* ``pending`` — no commit status or check run has ever appeared
-    on the ref; the "CI is coming" verdict rests only on circumstantial evidence
-    (live check-suites, the repo having active workflows) — can be wrong forever:
-    an active deploy-on-main workflow never runs on PR branches, and an installed
-    app's phantom suite never completes. Without a deadline such a changeset sits
-    in ``ci_running`` permanently. Once a
-    changeset has awaited CI this long with nothing *observed*, the sync resolves
-    it to ``unverified_external_ci`` — honestly recorded, never confused with a
-    pass. An observed ``pending`` (real CI executing) is NEVER
-    timed out by this.
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_PENDING_TIMEOUT", "1800")))
-
-
-def codegen_ci_none_grace_seconds() -> int:
-    """Grace window before a ``none`` result becomes externally unverified.
-
-    ``get_ci_status`` returns ``none`` for "repo has no CI", but commit-status-only
-    CI (classic Travis/CircleCI) reports neither a check-suite nor an Actions
-    workflow until its first status post — so right after a PR opens it can look
-    identical to a no-CI repo. The grace lets a late status arrive; after it,
-    the state becomes ``unverified_external_ci`` rather than waiting forever.
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_NONE_GRACE_SECONDS", "300")))
-
-
 def codegen_ci_repair_retries() -> int:
     """Maximum same-PR repair commits after actionable GitHub CI failures."""
     return max(0, int(os.getenv("CODEGEN_CI_REPAIR_RETRIES", "2")))
+
+
+def codegen_ci_repair_budget_seconds() -> int:
+    """Maximum age of a failed head eligible for automated remediation."""
+    return max(0, int(os.getenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")))

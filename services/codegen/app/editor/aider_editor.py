@@ -592,6 +592,11 @@ class AiderEditor:
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
             baseline = baseline.strip()
+            if request.expected_head_sha and baseline != request.expected_head_sha:
+                return fail(
+                    "Repair refused because the PR head changed from "
+                    f"{request.expected_head_sha} to {baseline}."
+                )
             if not request.existing_branch:
                 rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
                 if rc != 0:
@@ -1082,9 +1087,16 @@ class AiderEditor:
                 )
 
             # 6. Push the branch from the orchestrator (token via one-shot header).
+            push_args = ["push"]
+            if request.expected_head_sha:
+                push_args.append(
+                    "--force-with-lease="
+                    f"refs/heads/{request.branch}:{request.expected_head_sha}"
+                )
+            push_args += ["origin", f"{request.branch}:{request.branch}"]
             rc, out = await self._git(
                 repo_dir,
-                ["push", "origin", f"{request.branch}:{request.branch}"],
+                push_args,
                 auth_header=header,
             )
             if rc != 0:

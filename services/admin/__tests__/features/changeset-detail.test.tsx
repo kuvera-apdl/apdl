@@ -9,6 +9,7 @@ import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailPage'
 import {
+  makeChangesetObservationHistory,
   makeReviewVerdict,
   makeVerificationCoverage,
   makeVerificationPlan,
@@ -29,14 +30,15 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
       context: {},
       constraints: ['All existing tests must pass.'],
     },
-    status: 'tests_failed',
+    status: 'error',
     base_branch: 'main',
     branch: null,
     pr_url: null,
     pr_number: null,
-    pr_node_id: null,
-    ci_status: null,
-    ci_awaiting_since: null,
+    head_sha: null,
+    github_pr_status: null,
+    external_ci_status: null,
+    external_ci_awaiting_since: null,
     ci_retry_count: 0,
     ci_remediation_status: 'idle',
     ci_failure_key: null,
@@ -89,7 +91,7 @@ function renderDetail(path = '/codegen/cs_abc123') {
 }
 
 describe('ChangesetDetailPage', () => {
-  test('surfaces the full failure reason for a tests_failed run', async () => {
+  test('surfaces the full failure reason and retry for a pre-PR error', async () => {
     renderDetail()
     expect(await screen.findByText('Automated Non-Organic Traffic Detection')).toBeInTheDocument()
     expect(screen.getByText('Failure reason')).toBeInTheDocument()
@@ -98,6 +100,8 @@ describe('ChangesetDetailPage', () => {
       screen.getByText(/verification failed \(`npm run build`\):/),
     ).toBeInTheDocument()
     expect(screen.getByText(/Did you mean to import hashBucket\?/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Abandon' })).not.toBeInTheDocument()
   })
 
   test('splits the trailing JSON metadata out of the spec prose', async () => {
@@ -201,6 +205,102 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getByText('b'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/This is not a GitHub CI result/)).toBeInTheDocument()
     expect(screen.queryByText('CI passed')).not.toBeInTheDocument()
+  })
+
+  test('renders append-only PR, exact-head CI, and remediation observations', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'pr_open',
+            error: null,
+            pr_url: 'https://github.com/acme/widgets/pull/17',
+            pr_number: 17,
+            head_sha: 'c'.repeat(40),
+            github_pr_status: 'open',
+            external_ci_status: 'failed',
+            external_ci_awaiting_since: '2026-07-11T14:00:01+00:00',
+            ci_remediation_status: 'awaiting_ci',
+          }),
+        ),
+      ),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id/observations', () =>
+        HttpResponse.json(makeChangesetObservationHistory()),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('GitHub observation history')).toBeInTheDocument()
+    expect(screen.getByText('Pull request events')).toBeInTheDocument()
+    expect(screen.getByText('External CI observations')).toBeInTheDocument()
+    expect(screen.getByText('Remediation events')).toBeInTheDocument()
+    expect(document.body).toHaveTextContent('Expected unknown fields to be rejected.')
+    expect(screen.getByText(/GitHub test failed on the exact pull-request head/)).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: /cccccccccccc/i }).length).toBeGreaterThan(0)
+    expect(screen.getByRole('link', { name: 'Open PR on GitHub' })).toHaveAttribute(
+      'href',
+      'https://github.com/acme/widgets/pull/17',
+    )
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Abandon' })).not.toBeInTheDocument()
+  })
+
+  test('warns that a head with no configured CI is unverified, never passed', async () => {
+    const history = makeChangesetObservationHistory({
+      ci_verifications: [
+        {
+          schema_version: 'ci_verification_observation@1',
+          observation_id: 'ci_observation:no-ci',
+          changeset_id: 'cs_abc123',
+          repository: 'acme/widgets',
+          pr_number: 17,
+          head_sha: 'c'.repeat(40),
+          status: 'unverified_external_ci',
+          signals: [],
+          requirement_results: [],
+          observed_at: '2026-07-11T14:01:00+00:00',
+          failure_key: null,
+          failure_summary: null,
+        },
+      ],
+      remediation_attempts: [],
+    })
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'pr_open',
+            error: null,
+            pr_url: 'https://github.com/acme/widgets/pull/17',
+            pr_number: 17,
+            head_sha: 'c'.repeat(40),
+            github_pr_status: 'open',
+            external_ci_status: 'unverified_external_ci',
+          }),
+        ),
+      ),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id/observations', () =>
+        HttpResponse.json(history),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('No external CI configured')).toBeInTheDocument()
+    expect(screen.getByText(/absence of CI is never represented as passed/)).toBeInTheDocument()
+    expect(await screen.findByText('GitHub observation history')).toBeInTheDocument()
+    expect(document.body).toHaveTextContent('No CI signals were configured or observed for this head.')
+  })
+
+  test('allows abandon only while pre-PR work is queued', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(makeChangeset({ status: 'queued', error: null })),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByRole('button', { name: 'Abandon' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
   test('shows a not-found state for an unknown changeset id', async () => {

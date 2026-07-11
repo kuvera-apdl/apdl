@@ -20,9 +20,10 @@ const sample = {
   branch: 'apdl/add-dark-mode-cs_1',
   pr_url: 'https://github.com/acme/widgets/pull/1',
   pr_number: 1,
-  pr_node_id: 'PR_1',
-  ci_status: 'passed',
-  ci_awaiting_since: '2026-06-17T12:03:00Z',
+  head_sha: 'a'.repeat(40),
+  github_pr_status: 'open',
+  external_ci_status: 'passed',
+  external_ci_awaiting_since: '2026-06-17T12:03:00Z',
   ci_retry_count: 0,
   ci_remediation_status: 'idle',
   ci_failure_key: null,
@@ -61,6 +62,11 @@ describe('codegen schemas', () => {
 
   it('rejects unknown fields (strict)', () => {
     expect(changesetSchema.safeParse({ ...sample, extra: true }).success).toBe(false)
+  })
+
+  it('rejects CI or review values as lifecycle statuses', () => {
+    expect(changesetSchema.safeParse({ ...sample, status: 'ci_passed' }).success).toBe(false)
+    expect(changesetSchema.safeParse({ ...sample, status: 'tests_failed' }).success).toBe(false)
   })
 
   it('parses the prompt transcript', () => {

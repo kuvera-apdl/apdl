@@ -42,7 +42,7 @@ class FakeEditor:
                 changed_paths=result.changed_paths,
                 diff_text=result.diff_text,
                 prompts=result.prompts,
-                head_sha=result.head_sha,
+                head_sha=result.head_sha or "fake-head-sha",
                 contract_bundle=result.contract_bundle,
                 requirement_ledger=_ledger(request, result),
                 inspection_snapshot=result.inspection_snapshot,

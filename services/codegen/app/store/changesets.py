@@ -12,16 +12,20 @@ from typing import Any
 
 import asyncpg
 
-from app.config import codegen_ci_sync_max_age_seconds
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
-    CIRemediationStatus,
     CI_SYNCABLE_STATUSES,
     Changeset,
     ChangesetStatus,
     TaskSpec,
     assert_transition,
+)
+from app.models.observations import (
+    CIRemediationStatus,
+    ExternalCIStatus,
+    GitHubPRStatus,
+    PullRequestObservation,
 )
 from app.requirements.models import RequirementLedger
 from app.semantic_review.models import ReviewVerdict
@@ -36,7 +40,6 @@ from app.verification.models import VerificationCoverage, VerificationPlan
 _ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
     ChangesetStatus.cloning,
     ChangesetStatus.editing,
-    ChangesetStatus.testing,
     ChangesetStatus.pushing,
 )
 
@@ -135,9 +138,12 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         branch=row["branch"],
         pr_url=row["pr_url"],
         pr_number=row["pr_number"],
-        pr_node_id=row["pr_node_id"],
-        ci_status=row["ci_status"],
-        ci_awaiting_since=_optional_column(row, "ci_awaiting_since"),
+        head_sha=_optional_column(row, "head_sha"),
+        github_pr_status=_optional_column(row, "github_pr_status"),
+        external_ci_status=_optional_column(row, "external_ci_status"),
+        external_ci_awaiting_since=_optional_column(
+            row, "external_ci_awaiting_since"
+        ),
         ci_retry_count=_optional_column(row, "ci_retry_count") or 0,
         ci_remediation_status=(
             _optional_column(row, "ci_remediation_status") or CIRemediationStatus.idle
@@ -197,30 +203,22 @@ async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | No
     return _row_to_changeset(row) if row else None
 
 
-async def get_changeset_by_branch(
-    pool: asyncpg.Pool, branch: str, repo: str
+async def get_changeset_by_head_sha(
+    pool: asyncpg.Pool, head_sha: str, repo: str
 ) -> Changeset | None:
-    """Find the active changeset for a ``branch`` on a specific ``repo``.
-
-    Used to route GitHub webhooks. Scoped by repo (joined through the project's
-    connection) as well as branch + status, so two connected repos that happen
-    to share a branch name can't mis-route each other's CI events.
-    """
+    """Find an open changeset by exact GitHub head SHA and repository."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
             JOIN codegen_connections conn ON conn.project_id = cs.project_id
-            WHERE cs.branch = $1
+            WHERE cs.head_sha = $1
               AND conn.repo = $2
-              AND cs.status IN (
-                  'pr_open', 'ci_running', 'ci_failed', 'ci_passed',
-                  'unverified_external_ci'
-              )
+              AND cs.status = 'pr_open'
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
-            branch,
+            head_sha,
             repo,
         )
     return _row_to_changeset(row) if row else None
@@ -262,34 +260,18 @@ async def list_changesets(
     return [_row_to_changeset(r) for r in rows]
 
 
-async def list_syncable_changeset_ids(
-    pool: asyncpg.Pool, *, max_age_seconds: int | None = None
-) -> list[str]:
-    """Ids of changesets whose CI status a poll can still advance, oldest first.
-
-    The CI poller sweeps these every interval. ``sync_ci_status`` re-checks each
-    one under a row lock, so an id that has moved to a terminal/ineligible state
-    by the time it runs is simply a no-op.
-
-    ``ci_failed`` is syncable (a re-run can flip it green) but is never abandoned
-    automatically, so an age cap (``max_age_seconds``, default from config) drops
-    changesets that haven't moved in a long time — otherwise the failed set grows
-    unbounded and the poller re-mints a token for each one every interval. Pass
-    ``0`` to disable the cap.
-    """
-    if max_age_seconds is None:
-        max_age_seconds = codegen_ci_sync_max_age_seconds()
+async def list_syncable_changeset_ids(pool: asyncpg.Pool) -> list[str]:
+    """Open PR changesets to recover from GitHub; never age them out."""
     statuses = [s.value for s in CI_SYNCABLE_STATUSES]
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT changeset_id FROM codegen_changesets
             WHERE status = ANY($1::text[])
-              AND ($2 <= 0 OR updated_at >= now() - $2 * interval '1 second')
-            ORDER BY updated_at ASC
+              AND (github_pr_status IS NULL OR github_pr_status IN ('open', 'draft'))
+            ORDER BY updated_at ASC, changeset_id ASC
             """,
             statuses,
-            max_age_seconds,
         )
     return [r["changeset_id"] for r in rows]
 
@@ -357,28 +339,66 @@ async def mark_pr_open(
     changeset_id: str,
     *,
     branch: str,
-    pr_url: str,
-    pr_number: int,
+    observation: PullRequestObservation,
+    external_ci_status: ExternalCIStatus,
     diff_stat: dict[str, Any],
-    node_id: str = "",
 ) -> Changeset | None:
-    """Transition ``pushing → pr_open`` and persist the branch + PR identifiers.
-
-    Also stamps ``ci_awaiting_since``: the PR being open is the moment the
-    changeset starts awaiting CI, and this anchor (unlike ``updated_at``) is
-    never refreshed by later transitions — the CI sync's grace window and
-    pending deadline measure from here.
-    """
-    return await _guarded_update(
-        pool,
-        changeset_id,
-        ChangesetStatus.pr_open,
-        set_clause=(
-            "branch = $3, pr_url = $4, pr_number = $5, "
-            "pr_node_id = $6, diff_stat = $7::jsonb, ci_awaiting_since = now()"
-        ),
-        params=(branch, pr_url, pr_number, node_id, json.dumps(diff_stat)),
-    )
+    """Atomically journal and project the exact GitHub PR created by APDL."""
+    if observation.changeset_id != changeset_id or observation.action != "opened":
+        raise ValueError("initial PR observation must identify this changeset and open")
+    if observation.status not in {GitHubPRStatus.draft, GitHubPRStatus.open}:
+        raise ValueError("initial PR observation must be draft or open")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchval(
+                "SELECT status FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if current is None:
+                return None
+            assert_transition(ChangesetStatus(current), ChangesetStatus.pr_open)
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO codegen_pull_request_observations
+                    (observation_id, delivery_id, changeset_id, repository,
+                     pr_number, head_sha, status, github_updated_at,
+                     observed_at, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                ON CONFLICT DO NOTHING RETURNING observation_id
+                """,
+                observation.observation_id,
+                observation.delivery_id,
+                observation.changeset_id,
+                observation.repository,
+                observation.pr_number,
+                observation.head_sha,
+                observation.status.value,
+                observation.github_updated_at,
+                observation.observed_at,
+                observation.model_dump_json(),
+            )
+            if inserted is None:
+                raise ValueError("initial pull-request observation already exists")
+            row = await conn.fetchrow(
+                """
+                UPDATE codegen_changesets
+                SET status = 'pr_open', branch = $2, pr_url = $3,
+                    pr_number = $4, head_sha = $5, github_pr_status = $6,
+                    external_ci_status = $7, diff_stat = $8::jsonb,
+                    external_ci_awaiting_since = now(),
+                    ci_remediation_status = 'idle', updated_at = now()
+                WHERE changeset_id = $1 RETURNING *
+                """,
+                changeset_id,
+                branch,
+                observation.github_url,
+                observation.pr_number,
+                observation.head_sha,
+                observation.status.value,
+                external_ci_status.value,
+                json.dumps(diff_stat),
+            )
+    return _row_to_changeset(row)
 
 
 async def set_prompts(
@@ -530,133 +550,6 @@ async def mark_merged(
         set_clause="merge_sha = $3",
         params=(merge_sha,),
     )
-
-
-async def set_ci_status(
-    pool: asyncpg.Pool,
-    changeset_id: str,
-    *,
-    target: ChangesetStatus,
-    ci_status: str,
-) -> Changeset | None:
-    """Transition to ``target`` and persist the external ``ci_status`` string.
-
-    Used to move ``pr_open → ci_running → ci_passed | ci_failed`` as the repo's
-    own CI reports in (via webhook or poll).
-    """
-    return await _guarded_update(
-        pool,
-        changeset_id,
-        target,
-        set_clause="ci_status = $3",
-        params=(ci_status,),
-    )
-
-
-async def claim_ci_repair(
-    pool: asyncpg.Pool,
-    changeset_id: str,
-    *,
-    failure_key: str,
-    failure_summary: str,
-    max_attempts: int,
-) -> Changeset | None:
-    """Atomically claim one bounded repair for the current failed PR head.
-
-    The failure key includes the GitHub head SHA/check identities. Repeated
-    webhook deliveries for the same failure therefore cannot start concurrent
-    edits, while a new failed repair commit may consume the next attempt.
-    """
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT * FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
-                changeset_id,
-            )
-            if row is None or row["status"] != ChangesetStatus.ci_failed.value:
-                return None
-            retry_count = _optional_column(row, "ci_retry_count") or 0
-            remediation = _optional_column(row, "ci_remediation_status") or "idle"
-            prior_key = _optional_column(row, "ci_failure_key")
-            if retry_count >= max_attempts:
-                if remediation == CIRemediationStatus.exhausted.value:
-                    return None
-                row = await conn.fetchrow(
-                    """
-                    UPDATE codegen_changesets
-                    SET ci_remediation_status = 'exhausted', updated_at = now()
-                    WHERE changeset_id = $1 RETURNING *
-                    """,
-                    changeset_id,
-                )
-                return _row_to_changeset(row)
-            if prior_key == failure_key and remediation in ("repairing", "awaiting_ci"):
-                return None
-            row = await conn.fetchrow(
-                """
-                UPDATE codegen_changesets
-                SET ci_retry_count = ci_retry_count + 1,
-                    ci_remediation_status = 'repairing',
-                    ci_failure_key = $2,
-                    ci_failure_summary = $3,
-                    updated_at = now()
-                WHERE changeset_id = $1
-                RETURNING *
-                """,
-                changeset_id,
-                failure_key,
-                failure_summary,
-            )
-    return _row_to_changeset(row)
-
-
-async def finish_ci_repair(
-    pool: asyncpg.Pool,
-    changeset_id: str,
-    *,
-    success: bool,
-    exhausted: bool = False,
-    error: str | None = None,
-) -> Changeset | None:
-    """Record a repair result; a pushed commit returns to GitHub CI pending."""
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            current_row = await conn.fetchrow(
-                "SELECT * FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
-                changeset_id,
-            )
-            if current_row is None:
-                return None
-            current = ChangesetStatus(current_row["status"])
-            # GitHub may merge/close the PR while an in-flight repair finishes.
-            # Never overwrite or annotate that terminal external outcome.
-            if current is not ChangesetStatus.ci_failed:
-                return _row_to_changeset(current_row)
-            if success:
-                assert_transition(current, ChangesetStatus.ci_running)
-                row = await conn.fetchrow(
-                    """
-                    UPDATE codegen_changesets
-                    SET status = 'ci_running', ci_status = 'pending',
-                        ci_remediation_status = 'awaiting_ci', error = NULL,
-                        updated_at = now()
-                    WHERE changeset_id = $1 RETURNING *
-                    """,
-                    changeset_id,
-                )
-            else:
-                row = await conn.fetchrow(
-                    """
-                    UPDATE codegen_changesets
-                    SET ci_remediation_status = $2,
-                        error = COALESCE($3, error), updated_at = now()
-                    WHERE changeset_id = $1 RETURNING *
-                    """,
-                    changeset_id,
-                    "exhausted" if exhausted else "idle",
-                    error,
-                )
-    return _row_to_changeset(row)
 
 
 async def list_queued_changeset_ids(pool: asyncpg.Pool) -> list[str]:

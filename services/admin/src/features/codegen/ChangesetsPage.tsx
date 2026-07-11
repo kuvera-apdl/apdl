@@ -12,7 +12,6 @@ import {
   revertChangeset,
 } from '@/api/codegen'
 import { ApiError } from '@/api/http'
-import { RETRYABLE_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -23,11 +22,14 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
-import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
+import {
+  ChangesetStatusPill,
+  ExternalCIStatusPill,
+  GitHubPRStatusPill,
+} from '@/features/codegen/ChangesetStatusPill'
 import { GitHubConnectionCard } from '@/features/codegen/GitHubConnectionCard'
 
 const REFETCH_MS = 5000
-const TERMINAL = new Set(['merged', 'abandoned', 'tests_failed', 'error'])
 
 export function ChangesetsPage() {
   const { active } = useWorkspace()
@@ -102,9 +104,9 @@ export function ChangesetsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Task</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>CI</TableHead>
-                  <TableHead>PR</TableHead>
+                  <TableHead>Lifecycle</TableHead>
+                  <TableHead>GitHub PR</TableHead>
+                  <TableHead>External CI</TableHead>
                   <TableHead>Updated</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -138,7 +140,7 @@ interface RowProps {
 }
 
 function ChangesetRow({ cs, busy, onAbandon, onRevert, onRetry }: RowProps) {
-  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
+  const hasPullRequest = cs.pr_number !== null || cs.pr_url !== null
 
   return (
     <TableRow>
@@ -150,22 +152,39 @@ function ChangesetRow({ cs, busy, onAbandon, onRevert, onRetry }: RowProps) {
       <TableCell>
         <ChangesetStatusPill status={cs.status} />
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {cs.ci_status === 'unverified_external_ci'
-          ? 'unverified external CI'
-          : (cs.ci_status ?? '—')}
-      </TableCell>
       <TableCell>
-        {cs.pr_url ? (
-          <a
-            href={cs.pr_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-sm underline"
-          >
-            #{cs.pr_number}
-            <ExternalLink className="h-3 w-3" />
-          </a>
+        <div className="flex flex-wrap items-center gap-2">
+          {cs.github_pr_status ? <GitHubPRStatusPill status={cs.github_pr_status} /> : null}
+          {cs.pr_url ? (
+            <a
+              href={cs.pr_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm underline"
+            >
+              #{cs.pr_number}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : cs.pr_number !== null ? (
+            <span className="text-sm">#{cs.pr_number}</span>
+          ) : (
+            '—'
+          )}
+          {cs.head_sha ? (
+            <code className="font-mono text-xs text-muted-foreground">
+              {cs.head_sha.slice(0, 12)}
+            </code>
+          ) : null}
+        </div>
+      </TableCell>
+      <TableCell className="text-sm text-muted-foreground">
+        {cs.external_ci_status ? (
+          <div className="space-y-1">
+            <ExternalCIStatusPill status={cs.external_ci_status} />
+            {cs.external_ci_status === 'unverified_external_ci' ? (
+              <p className="text-xs text-amber-700 dark:text-amber-400">no CI configured</p>
+            ) : null}
+          </div>
         ) : (
           '—'
         )}
@@ -178,27 +197,21 @@ function ChangesetRow({ cs, busy, onAbandon, onRevert, onRetry }: RowProps) {
           <Button size="sm" variant="outline" disabled={busy} onClick={onRevert}>
             Revert
           </Button>
-        ) : (
-          <>
-            {retryable ? (
-              <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
-                Retry
-              </Button>
-            ) : cs.pr_url ? (
-              <Button size="sm" asChild>
-                <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR</a>
-              </Button>
-            ) : null}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy || TERMINAL.has(cs.status)}
-              onClick={onAbandon}
-            >
-              Abandon
+        ) : hasPullRequest ? (
+          cs.pr_url ? (
+            <Button size="sm" asChild>
+              <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
             </Button>
-          </>
-        )}
+          ) : null
+        ) : cs.status === 'error' ? (
+          <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
+            Retry
+          </Button>
+        ) : cs.status === 'queued' ? (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onAbandon}>
+            Abandon
+          </Button>
+        ) : null}
       </TableCell>
     </TableRow>
   )

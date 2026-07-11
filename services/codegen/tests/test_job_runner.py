@@ -1,6 +1,7 @@
 """Tests for the changeset job runner (fake editor + fake pool, no network)."""
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.github.pulls import PullRequest
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import ChangesetStatus
+from app.models.observations import ExternalCIStatus, GitHubPRStatus
 from app.profiling import RepoProfile
 from app.profiling.models import (
     CIWorkflow,
@@ -47,18 +49,76 @@ async def _seed(pool: FakePool, changeset_id: str, project_id: str = "demo", bas
     )
 
 
+def _pr(
+    number: int,
+    *,
+    head_sha: str = "fake-head-sha",
+    status: GitHubPRStatus = GitHubPRStatus.open,
+) -> PullRequest:
+    return PullRequest(
+        url=f"https://github.com/acme/widgets/pull/{number}",
+        number=number,
+        head_sha=head_sha,
+        status=status,
+        github_updated_at=datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
+    )
+
+
+def _implemented_ledger(paths: list[str]):
+    return map_implementation_evidence(
+        compile_requirement_ledger(
+            title=_TASK["title"],
+            spec=_TASK["spec"],
+            constraints=_TASK["constraints"],
+        ),
+        paths,
+    )
+
+
+def _profile_with_github_ci() -> RepoProfile:
+    return RepoProfile(
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm test",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+        ci_workflows=[
+            CIWorkflow(provider="github_actions", path=".github/workflows/ci.yml")
+        ],
+    )
+
+
 @pytest.mark.asyncio
-async def test_job_opens_draft_pr_on_success():
+async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets", installation_id=1)
     await _seed(pool, "cs_abc12345")
 
-    editor = FakeEditor(EditResult(success=True, diff_stat={"files": 3}))
+    ledger = _implemented_ledger(["src/theme.ts"])
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 3},
+            changed_paths=["src/theme.ts"],
+            requirement_ledger=ledger,
+            verification_plan=build_verification_plan(
+                ledger, _profile_with_github_ci()
+            ),
+        )
+    )
     calls: dict = {}
 
     async def open_pr(**kwargs) -> PullRequest:
         calls.update(kwargs)
-        return PullRequest(url="https://github.com/acme/widgets/pull/9", number=9)
+        return _pr(9)
 
     await run_changeset_job(pool, "cs_abc12345", editor=editor, mint_token=_mint, open_pr=open_pr)
 
@@ -66,6 +126,9 @@ async def test_job_opens_draft_pr_on_success():
     assert final.status == ChangesetStatus.pr_open
     assert final.pr_url.endswith("/pull/9")
     assert final.pr_number == 9
+    assert final.head_sha == "fake-head-sha"
+    assert final.github_pr_status is GitHubPRStatus.open
+    assert final.external_ci_status is ExternalCIStatus.pending
     assert final.branch.startswith("apdl/add-dark-mode-")
     assert final.diff_stat == {"files": 3}
     assert final.requirement_ledger is not None
@@ -75,8 +138,8 @@ async def test_job_opens_draft_pr_on_success():
     assert editor.last_request.repo == "acme/widgets"
     assert editor.last_request.base_branch == "main"
     assert editor.last_request.token == "ghs_tok"
-    # The PR was opened as a draft, on the right repo/base, with the token.
-    assert calls["draft"] is True
+    # Low-risk work with external CI is ready for GitHub review immediately.
+    assert calls["draft"] is False
     assert calls["repo"] == "acme/widgets"
     assert calls["base"] == "main"
     assert calls["token"] == "ghs_tok"
@@ -85,7 +148,7 @@ async def test_job_opens_draft_pr_on_success():
 
 
 @pytest.mark.asyncio
-async def test_job_marks_tests_failed_without_opening_pr():
+async def test_job_marks_failed_generation_as_error_without_opening_pr():
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_fail0001")
@@ -95,12 +158,12 @@ async def test_job_marks_tests_failed_without_opening_pr():
 
     async def open_pr(**kwargs) -> PullRequest:
         opened.append(kwargs)
-        return PullRequest(url="x", number=1)
+        return _pr(1)
 
     await run_changeset_job(pool, "cs_fail0001", editor=editor, mint_token=_mint, open_pr=open_pr)
 
     final = await store.get_changeset(pool, "cs_fail0001")
-    assert final.status == ChangesetStatus.tests_failed
+    assert final.status == ChangesetStatus.error
     assert final.error == "tests red"
     assert opened == []
 
@@ -170,12 +233,12 @@ async def test_job_blocks_on_pre_push_gate_violation():
 
     async def open_pr(**kwargs) -> PullRequest:
         opened.append(kwargs)
-        return PullRequest(url="x", number=1)
+        return _pr(1)
 
     await run_changeset_job(pool, "cs_secret01", editor=editor, mint_token=_mint, open_pr=open_pr)
 
     final = await store.get_changeset(pool, "cs_secret01")
-    assert final.status == ChangesetStatus.tests_failed
+    assert final.status == ChangesetStatus.error
     assert "gate" in (final.error or "").lower()
     assert opened == []
 
@@ -218,7 +281,7 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
     editor = FakeEditor(EditResult(success=True, diff_stat={"files": 1}))
 
     async def open_pr(**kwargs) -> PullRequest:
-        return PullRequest(url="https://github.com/acme/widgets/pull/2", number=2)
+        return _pr(2)
 
     await run_changeset_job(
         pool, "cs_pol00001", editor=editor, mint_token=_mint, open_pr=open_pr
@@ -259,7 +322,12 @@ class _BlockingEditor:
         self.started += 1
         self.first_started.set()
         await self.release.wait()
-        return EditResult(success=True, branch=request.branch, diff_stat={"files": 1})
+        return EditResult(
+            success=True,
+            branch=request.branch,
+            diff_stat={"files": 1},
+            head_sha="fake-head-sha",
+        )
 
 
 @pytest.mark.asyncio
@@ -277,7 +345,7 @@ async def test_jobs_serialize_at_concurrency_one(monkeypatch):
     editor = _BlockingEditor()
 
     async def open_pr(**kwargs) -> PullRequest:
-        return PullRequest(url="https://github.com/acme/widgets/pull/1", number=1)
+        return _pr(1)
 
     t1 = asyncio.create_task(
         run_changeset_job(pool, "cs_one", editor=editor, mint_token=_mint, open_pr=open_pr)
@@ -312,7 +380,7 @@ async def test_job_persists_prompt_transcript_on_success_and_failure():
     ]
 
     async def open_pr(**kwargs) -> PullRequest:
-        return PullRequest(url="https://github.com/acme/widgets/pull/9", number=9)
+        return _pr(9)
 
     pool = FakePool()
     pool.add_connection("demo")
@@ -328,14 +396,14 @@ async def test_job_persists_prompt_transcript_on_success_and_failure():
     editor = FakeEditor(EditResult(success=False, error="tests red", prompts=transcript))
     await run_changeset_job(pool, "cs_prompt_ko", editor=editor, mint_token=_mint, open_pr=open_pr)
     ko = await store.get_changeset(pool, "cs_prompt_ko")
-    assert ko.status == ChangesetStatus.tests_failed
+    assert ko.status == ChangesetStatus.error
     assert ko.prompts == transcript
 
 
 @pytest.mark.asyncio
 async def test_job_persists_contract_evidence_without_changing_ci_status():
     async def open_pr(**kwargs) -> PullRequest:
-        return PullRequest(url="https://github.com/acme/widgets/pull/10", number=10)
+        return _pr(10)
 
     pool = FakePool()
     pool.add_connection("demo")
@@ -353,13 +421,13 @@ async def test_job_persists_contract_evidence_without_changing_ci_status():
     stored = await store.get_changeset(pool, "cs_contracts")
     assert stored.contract_bundle == bundle
     assert stored.status is ChangesetStatus.pr_open
-    assert stored.ci_status is None
+    assert stored.external_ci_status is ExternalCIStatus.pending
 
 
 @pytest.mark.asyncio
 async def test_job_persists_repository_inspection_evidence():
     async def open_pr(**kwargs) -> PullRequest:
-        return PullRequest(url="https://github.com/acme/widgets/pull/11", number=11)
+        return _pr(11)
 
     pool = FakePool()
     pool.add_connection("demo")
@@ -392,37 +460,13 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
 
     async def open_pr(**kwargs) -> PullRequest:
         calls.update(kwargs)
-        return PullRequest(url="https://github.com/acme/widgets/pull/12", number=12)
+        return _pr(12, status=GitHubPRStatus.draft)
 
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_verification")
-    ledger = map_implementation_evidence(
-        compile_requirement_ledger(
-            title=_TASK["title"],
-            spec=_TASK["spec"],
-            constraints=_TASK["constraints"],
-        ),
-        ["src/theme.ts", "tests/theme.test.ts"],
-    )
-    profile = RepoProfile(
-        commands=[
-            RepoCommand(
-                kind=CommandKind.test,
-                command="npm test",
-                cwd=".",
-                source_path="package.json",
-            )
-        ],
-        test_facilities=[
-            ProfileTestFacility(
-                name="vitest", package_path=".", source_path="package.json"
-            )
-        ],
-        ci_workflows=[
-            CIWorkflow(provider="github_actions", path=".github/workflows/ci.yml")
-        ],
-    )
+    ledger = _implemented_ledger(["src/theme.ts", "tests/theme.test.ts"])
+    profile = _profile_with_github_ci()
     plan = build_verification_plan(ledger, profile)
     coverage = evaluate_verification_coverage(
         plan, changed_paths=["src/theme.ts", "tests/theme.test.ts"]
@@ -458,9 +502,100 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
     assert stored.verification_plan == plan
     assert stored.verification_coverage == coverage
     assert stored.review_verdict == review
-    assert stored.ci_status is None
+    assert stored.external_ci_status is ExternalCIStatus.pending
     assert "## Verification coverage" in calls["body"]
     assert "GitHub CI is authoritative" in calls["body"]
     assert "## Semantic review" in calls["body"]
     assert review.reviewed_diff_sha256 in calls["body"]
     assert "passed" not in calls["body"].lower()
+
+
+@pytest.mark.asyncio
+async def test_job_opens_draft_pr_for_higher_risk_change():
+    pool = FakePool()
+    pool.add_connection("demo")
+    task = {**_TASK, "context": {"risk_level": "medium"}}
+    await store.create_changeset(
+        pool,
+        changeset_id="cs_risk0001",
+        project_id="demo",
+        run_id=None,
+        base_branch="main",
+        task=task,
+    )
+    calls: dict = {}
+
+    async def open_pr(**kwargs) -> PullRequest:
+        calls.update(kwargs)
+        return _pr(13, status=GitHubPRStatus.draft)
+
+    await run_changeset_job(
+        pool,
+        "cs_risk0001",
+        editor=FakeEditor(),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_risk0001")
+    assert stored.status is ChangesetStatus.pr_open
+    assert stored.github_pr_status is GitHubPRStatus.draft
+    assert calls["draft"] is True
+
+
+@pytest.mark.asyncio
+async def test_job_opens_draft_and_records_unverified_when_repo_has_no_ci():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_noci0001")
+    ledger = _implemented_ledger(["src/theme.ts"])
+    plan = build_verification_plan(ledger, RepoProfile())
+    calls: dict = {}
+
+    async def open_pr(**kwargs) -> PullRequest:
+        calls.update(kwargs)
+        return _pr(14, status=GitHubPRStatus.draft)
+
+    await run_changeset_job(
+        pool,
+        "cs_noci0001",
+        editor=FakeEditor(
+            EditResult(
+                success=True,
+                changed_paths=["src/theme.ts"],
+                requirement_ledger=ledger,
+                verification_plan=plan,
+            )
+        ),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_noci0001")
+    assert stored.status is ChangesetStatus.pr_open
+    assert stored.external_ci_status is ExternalCIStatus.unverified_external_ci
+    assert stored.github_pr_status is GitHubPRStatus.draft
+    assert calls["draft"] is True
+
+
+@pytest.mark.asyncio
+async def test_job_rejects_pr_whose_head_differs_from_pushed_branch():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_head0001")
+
+    async def open_pr(**kwargs) -> PullRequest:
+        return _pr(15, head_sha="different-head")
+
+    await run_changeset_job(
+        pool,
+        "cs_head0001",
+        editor=FakeEditor(),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_head0001")
+    assert stored.status is ChangesetStatus.error
+    assert "exact branch head" in (stored.error or "")
+    assert stored.pr_number is None

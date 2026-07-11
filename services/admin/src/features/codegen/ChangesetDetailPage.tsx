@@ -1,7 +1,7 @@
 // Per-changeset detail (/codegen/:id). The list view is a scannable summary;
 // this page is the diagnostic surface — the full task + spec the agent was
 // given, the lifecycle stage it reached, PR/CI/diff facts, and (crucially) the
-// UNTRUNCATED failure reason for a tests_failed / error run, which is the one
+// UNTRUNCATED failure reason for an error run, which is the one
 // thing an operator needs to know why an autonomous PR never opened.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronRight, ExternalLink, GitBranch } from 'lucide-react'
@@ -11,11 +11,12 @@ import { toast } from 'sonner'
 import {
   abandonChangeset,
   getChangeset,
+  getChangesetObservations,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
 import { ApiError } from '@/api/http'
-import { RETRYABLE_CHANGESET_STATUSES, TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
+import { TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset, ChangesetPrompt } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -26,31 +27,29 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { queryKeys } from '@/core/queryClient'
 import { cn } from '@/lib/utils'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
-import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
+import { ChangesetObservationHistory } from '@/features/codegen/ChangesetObservationHistory'
+import {
+  ChangesetStatusPill,
+  ExternalCIStatusPill,
+  GitHubPRStatusPill,
+} from '@/features/codegen/ChangesetStatusPill'
 
 const REFETCH_MS = 5000
 
 // Happy-path lifecycle stages, in order. A failure status maps to the stage it
 // died on (STAGE_OF); statuses that can fail anywhere map to -1 (no highlight).
-const STAGE_LABELS = ['Queued', 'Clone', 'Edit', 'Test', 'Push', 'PR', 'CI', 'Merged'] as const
+const STAGE_LABELS = ['Queued', 'Clone', 'Edit', 'Push', 'PR', 'Merged'] as const
 const STAGE_OF: Record<string, number> = {
   queued: 0,
   cloning: 1,
   editing: 2,
-  testing: 3,
-  tests_failed: 3,
-  pushing: 4,
-  pr_open: 5,
-  ci_running: 6,
-  ci_failed: 6,
-  ci_passed: 6,
-  unverified_external_ci: 6,
-  waiting_approval: 6,
-  merged: 7,
-  abandoned: -1,
+  pushing: 3,
+  pr_open: 4,
+  abandoned: 4,
+  merged: 5,
   error: -1,
 }
-const FAILED_STATUSES = new Set(['tests_failed', 'ci_failed', 'error'])
+const FAILED_STATUSES = new Set(['error'])
 
 function statNumber(diffStat: Record<string, unknown>, key: string): number | null {
   const value = diffStat[key]
@@ -203,6 +202,14 @@ export function ChangesetDetailPage() {
     queryFn: ({ signal }) => getChangeset(serviceConnection(ws, 'codegen'), id, { signal }),
   })
 
+  const observations = useQuery({
+    queryKey: queryKeys.changesetObservations(active?.id ?? 'none', id),
+    enabled: active !== null && id !== '' && query.data?.pr_number != null,
+    refetchInterval: query.data?.status === 'merged' ? false : REFETCH_MS,
+    queryFn: ({ signal }) =>
+      getChangesetObservations(serviceConnection(ws, 'codegen'), id, { signal }),
+  })
+
   const invalidate = () => {
     if (active) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.changeset(active.id, id) })
@@ -256,7 +263,7 @@ export function ChangesetDetailPage() {
   }
 
   const cs: Changeset = query.data
-  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
+  const hasPullRequest = cs.pr_number !== null || cs.pr_url !== null
   const files = statNumber(cs.diff_stat, 'files')
   const additions = statNumber(cs.diff_stat, 'additions')
   const deletions = statNumber(cs.diff_stat, 'deletions')
@@ -283,27 +290,21 @@ export function ChangesetDetailPage() {
             <Button size="sm" variant="outline" disabled={busy} onClick={() => revert.mutate()}>
               Revert
             </Button>
-          ) : (
-            <>
-              {retryable ? (
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
-                  Retry
-                </Button>
-              ) : cs.pr_url ? (
-                <Button size="sm" asChild>
-                  <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
-                </Button>
-              ) : null}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy || TERMINAL_CHANGESET_STATUSES.has(cs.status)}
-                onClick={() => abandon.mutate()}
-              >
-                Abandon
+          ) : hasPullRequest ? (
+            cs.pr_url ? (
+              <Button size="sm" asChild>
+                <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
               </Button>
-            </>
-          )
+            ) : null
+          ) : cs.status === 'error' ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
+              Retry
+            </Button>
+          ) : cs.status === 'queued' ? (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => abandon.mutate()}>
+              Abandon
+            </Button>
+          ) : null
         }
       />
 
@@ -315,7 +316,7 @@ export function ChangesetDetailPage() {
               Failure reason
             </CardTitle>
             <CardDescription>
-              Why this run ended in <code className="font-mono">{cs.status}</code> without opening (or completing) a PR.
+              Why generation ended in <code className="font-mono">{cs.status}</code> before APDL could complete its lifecycle step.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -342,10 +343,24 @@ export function ChangesetDetailPage() {
         </Card>
       ) : null}
 
+      {cs.external_ci_status === 'unverified_external_ci' ? (
+        <Card className="border-amber-400 dark:border-amber-800">
+          <CardHeader>
+            <CardTitle>No external CI configured</CardTitle>
+            <CardDescription>
+              GitHub reported no CI signals for the exact PR head. This changeset is unverified;
+              absence of CI is never represented as passed.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
+
       <Card>
         <CardHeader>
-          <CardTitle>Lifecycle</CardTitle>
-          <CardDescription>Stage this changeset reached in the autonomous pipeline.</CardDescription>
+          <CardTitle>APDL lifecycle</CardTitle>
+          <CardDescription>
+            APDL generation and PR-publication stage only. GitHub PR and CI state are separate.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <LifecycleStepper status={cs.status} />
@@ -707,14 +722,39 @@ export function ChangesetDetailPage() {
               '—'
             )}
           </Fact>
-          <Fact label="CI status">
-            {cs.ci_status === 'unverified_external_ci'
-              ? 'unverified external CI'
-              : (cs.ci_status ?? '—')}
+          <Fact label="GitHub PR status">
+            {cs.github_pr_status ? (
+              <GitHubPRStatusPill status={cs.github_pr_status} />
+            ) : (
+              '—'
+            )}
+          </Fact>
+          <Fact label="External CI status">
+            {cs.external_ci_status ? (
+              <ExternalCIStatusPill status={cs.external_ci_status} />
+            ) : (
+              '—'
+            )}
+          </Fact>
+          <Fact label="Exact PR head">
+            {cs.head_sha ? (
+              <code className="font-mono text-xs break-all" title={cs.head_sha}>
+                {cs.head_sha}
+              </code>
+            ) : (
+              '—'
+            )}
           </Fact>
           <Fact label="CI repair">
             {cs.ci_remediation_status} · {cs.ci_retry_count} attempt
             {cs.ci_retry_count === 1 ? '' : 's'}
+          </Fact>
+          <Fact label="Awaiting external CI since">
+            {cs.external_ci_awaiting_since ? (
+              <RelativeTime value={cs.external_ci_awaiting_since} />
+            ) : (
+              '—'
+            )}
           </Fact>
           <Fact label="Merge commit">
             {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
@@ -745,6 +785,16 @@ export function ChangesetDetailPage() {
           </Fact>
         </CardContent>
       </Card>
+
+      {cs.pr_number !== null ? (
+        observations.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : observations.isError ? (
+          <ErrorState error={observations.error} onRetry={() => void observations.refetch()} />
+        ) : (
+          <ChangesetObservationHistory history={observations.data} />
+        )
+      ) : null}
 
       <Card>
         <CardHeader>

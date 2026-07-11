@@ -137,12 +137,11 @@ async def test_revert_unknown_changeset_404():
     assert resp.status_code == 404
 
 
-@pytest.mark.parametrize("status", ["tests_failed", "ci_failed", "error", "abandoned"])
 @pytest.mark.asyncio
-async def test_retry_failed_changeset_enqueues_same_task(status):
+async def test_retry_pre_pr_error_enqueues_same_task():
     pool = FakePool()
     pool.add_connection("demo")
-    pool.add_changeset("cs_bad", "demo", status=status, base_branch="develop")
+    pool.add_changeset("cs_bad", "demo", status="error", base_branch="develop")
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_bad/retry")
     assert resp.status_code == 202
@@ -157,7 +156,9 @@ async def test_retry_failed_changeset_enqueues_same_task(status):
     assert body["task"]["context"]["retry_of"] == "cs_bad"
 
 
-@pytest.mark.parametrize("status", ["merged", "queued", "pr_open", "ci_passed"])
+@pytest.mark.parametrize(
+    "status", ["merged", "queued", "editing", "pushing", "pr_open", "abandoned"]
+)
 @pytest.mark.asyncio
 async def test_retry_non_failed_changeset_409(status):
     pool = FakePool()
@@ -175,53 +176,23 @@ async def test_retry_unknown_changeset_404():
 
 
 @pytest.mark.asyncio
-async def test_abandon_open_pr_closes_it_on_github(monkeypatch):
-    """Abandoning a changeset with an open PR closes that PR on GitHub."""
-    import types
-
-    from app.routers import changesets as router_mod
-
-    closed: dict = {}
-
-    async def fake_mint(installation_id, repo):
-        return types.SimpleNamespace(token="tok")
-
-    async def fake_close(*, repo, number, token):
-        closed.update(repo=repo, number=number, token=token)
-
-    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
-    monkeypatch.setattr(router_mod, "close_pull_request", fake_close)
-
+async def test_abandon_open_pr_is_rejected_and_github_remains_authoritative():
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets", installation_id=42)
     pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_open/abandon")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "abandoned"
-    assert closed == {"repo": "acme/widgets", "number": 7, "token": "tok"}
+    assert resp.status_code == 409
+    assert "managed on GitHub" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_abandon_survives_github_close_failure(monkeypatch):
-    """A GitHub failure while closing the PR is best-effort: abandon still wins."""
-    import types
-
-    from app.routers import changesets as router_mod
-
-    async def fake_mint(installation_id, repo):
-        return types.SimpleNamespace(token="tok")
-
-    async def boom(*, repo, number, token):
-        raise RuntimeError("github down")
-
-    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
-    monkeypatch.setattr(router_mod, "close_pull_request", boom)
-
+async def test_retry_closed_pr_cannot_create_replacement_pr():
     pool = FakePool()
     pool.add_connection("demo")
-    pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
+    pool.add_changeset(
+        "cs_closed", "demo", status="abandoned", pr_number=7, branch="apdl/x"
+    )
     async with _client(pool) as client:
-        resp = await client.post("/v1/changesets/cs_open/abandon")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "abandoned"
+        resp = await client.post("/v1/changesets/cs_closed/retry")
+    assert resp.status_code == 409

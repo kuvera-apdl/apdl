@@ -33,12 +33,13 @@ from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
 from app.github.app_auth import mint_token_for_repo
-from app.github.checks import get_ci_status
-from app.github.pulls import mark_ready_for_review, open_pull_request
-from app.jobs.ci_poller import run_ci_poller
+from app.github.checks import get_ci_evidence
+from app.github.pulls import get_pull_request, open_pull_request
+from app.jobs.ci_poller import run_github_poller
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.routers import changesets, connections, github, webhooks
+from app.models.observations import CIVerificationObservation
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -102,22 +103,29 @@ async def lifespan(application: FastAPI):
     editor = _make_editor()
     repair_jobs: set[asyncio.Task] = set()
 
-    async def _schedule_ci_repair(
-        changeset_id: str, failure_key: str, failure_summary: str
-    ) -> None:
+    def _repair_finished(task: asyncio.Task) -> None:
+        repair_jobs.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "CI remediation background task failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _schedule_ci_repair(observation: CIVerificationObservation) -> None:
         """Start a deduplicated repair without blocking CI observation sweeps."""
         task = asyncio.create_task(
             repair_failed_ci(
                 pool,
-                changeset_id,
-                failure_key,
-                failure_summary,
+                observation,
                 editor=editor,
                 mint_token=_mint_token,
             )
         )
         repair_jobs.add(task)
-        task.add_done_callback(repair_jobs.discard)
+        task.add_done_callback(_repair_finished)
 
     application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
@@ -143,12 +151,11 @@ async def lifespan(application: FastAPI):
             len(queued_ids),
             ", ".join(queued_ids),
         )
-    # Dependencies for CI-status sync, shared by the poller and the (optional)
-    # GitHub webhook receiver.
-    application.state.ci_deps = {
-        "get_status": get_ci_status,
+    # Live GitHub recovery dependencies shared by polling and webhooks.
+    application.state.github_sync_deps = {
+        "get_pull_request": get_pull_request,
+        "get_ci_evidence": get_ci_evidence,
         "mint_token": _mint_token,
-        "mark_ready": mark_ready_for_review,
         "repair_failure": _schedule_ci_repair,
     }
 
@@ -159,7 +166,11 @@ async def lifespan(application: FastAPI):
     poll_interval = codegen_ci_poll_interval()
     if poll_interval > 0:
         poller_task = asyncio.create_task(
-            run_ci_poller(pool, interval_seconds=poll_interval, **application.state.ci_deps)
+            run_github_poller(
+                pool,
+                interval_seconds=poll_interval,
+                **application.state.github_sync_deps,
+            )
         )
     else:
         logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")

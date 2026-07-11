@@ -15,6 +15,12 @@ import type {
   verificationCoverageSchema,
   verificationPlanSchema,
 } from '../schemas/codegen'
+import type {
+  changesetObservationHistorySchema,
+  ciRemediationAttemptSchema,
+  ciVerificationObservationSchema,
+  pullRequestObservationSchema,
+} from '../schemas/codegen-observations'
 
 export type TaskSpec = z.infer<typeof taskSpecSchema>
 export type ChangesetPrompt = z.infer<typeof changesetPromptSchema>
@@ -26,6 +32,10 @@ export type DependencySlice = z.infer<typeof dependencySliceSchema>
 export type VerificationPlan = z.infer<typeof verificationPlanSchema>
 export type VerificationCoverage = z.infer<typeof verificationCoverageSchema>
 export type ReviewVerdict = z.infer<typeof reviewVerdictSchema>
+export type PullRequestObservation = z.infer<typeof pullRequestObservationSchema>
+export type CIVerificationObservation = z.infer<typeof ciVerificationObservationSchema>
+export type CIRemediationAttempt = z.infer<typeof ciRemediationAttemptSchema>
+export type ChangesetObservationHistory = z.infer<typeof changesetObservationHistorySchema>
 export type RepoConnection = z.infer<typeof repoConnectionSchema>
 export type RepoConnectionCreate = z.infer<typeof repoConnectionCreateSchema>
 export type AccessibleRepo = z.infer<typeof accessibleRepoSchema>

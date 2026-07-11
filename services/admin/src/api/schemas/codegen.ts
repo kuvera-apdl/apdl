@@ -1,6 +1,12 @@
-// Codegen-service mirrors (services/codegen/app/models/changeset.py). The
-// changeset status is a plain string on the wire; the UI maps known values.
+// Strict codegen-service mirrors (services/codegen/app/models/changeset.py).
+// Lifecycle, GitHub PR, and external CI statuses remain separate contracts.
 import { z } from 'zod'
+
+import {
+  ciRemediationStatusSchema,
+  externalCIStatusSchema,
+  githubPRStatusSchema,
+} from './codegen-observations'
 
 // One LLM prompt the run actually sent (brief compilation, an edit instruction
 // handed to the coding agent, or a pre-push diff review). `system` is null for
@@ -685,37 +691,23 @@ export const KNOWN_CHANGESET_STATUSES = [
   'queued',
   'cloning',
   'editing',
-  'testing',
-  'tests_failed',
   'pushing',
   'pr_open',
-  'ci_running',
-  'ci_failed',
-  'ci_passed',
-  'unverified_external_ci',
-  'waiting_approval',
   'merged',
   'abandoned',
   'error',
 ] as const
 
+export const changesetStatusSchema = z.enum(KNOWN_CHANGESET_STATUSES)
+
 export const TERMINAL_CHANGESET_STATUSES = new Set<string>([
-  'tests_failed',
   'merged',
-  'abandoned',
   'error',
 ])
 
-// Failed outcomes the codegen service will re-run via POST /{id}/retry (mirrors
-// RETRYABLE_STATUSES in services/codegen/app/models/changeset.py). A retry
-// enqueues a fresh changeset carrying the same task; `merged` rolls back with
-// /revert instead, and in-flight statuses are still running.
-export const RETRYABLE_CHANGESET_STATUSES = new Set<string>([
-  'tests_failed',
-  'ci_failed',
-  'error',
-  'abandoned',
-])
+// Only a pre-PR generation error can enqueue a fresh retry. PR and CI outcomes
+// stay GitHub-owned and never become lifecycle retry states.
+export const RETRYABLE_CHANGESET_STATUSES = new Set<string>(['error'])
 
 export const changesetSchema = z
   .object({
@@ -723,20 +715,19 @@ export const changesetSchema = z
     project_id: z.string(),
     run_id: z.string().nullable(),
     task: taskSpecSchema,
-    status: z.string(),
+    status: changesetStatusSchema,
     base_branch: z.string().nullable(),
     branch: z.string().nullable(),
     pr_url: z.string().nullable(),
     pr_number: z.number().int().nullable(),
-    pr_node_id: z.string().nullable(),
-    ci_status: z
-      .enum(['pending', 'passed', 'failed', 'unverified_external_ci'])
-      .nullable(),
-    // Stamped once at pr_open; anchors the CI sync's grace window. Null for
-    // pre-PR changesets and rows predating the column.
-    ci_awaiting_since: z.string().nullable(),
+    head_sha: z.string().nullable(),
+    github_pr_status: githubPRStatusSchema.nullable(),
+    external_ci_status: externalCIStatusSchema.nullable(),
+    // Diagnostic start time for awaiting external evidence on the current head.
+    // It cannot promote, time out, or age an open PR out of synchronization.
+    external_ci_awaiting_since: z.string().datetime({ offset: true }).nullable(),
     ci_retry_count: z.number().int().nonnegative(),
-    ci_remediation_status: z.enum(['idle', 'repairing', 'awaiting_ci', 'exhausted']),
+    ci_remediation_status: ciRemediationStatusSchema,
     ci_failure_key: z.string().nullable(),
     ci_failure_summary: z.string().nullable(),
     merge_sha: z.string().nullable(),

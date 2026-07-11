@@ -74,7 +74,7 @@ async def open_changeset(
 
 
 async def get_changeset(changeset_id: str) -> dict[str, Any]:
-    """Fetch a changeset's current status (incl. ``pr_url`` and ``ci_status``)."""
+    """Fetch lifecycle, GitHub PR, external CI, and remediation projections."""
     return await _get(f"/v1/changesets/{_seg(changeset_id)}")
 
 
@@ -91,11 +91,6 @@ async def get_repo_context(project_id: str) -> dict[str, Any]:
 async def list_changesets(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """List the project's changesets (newest first), incl. task title + PR state."""
     return await _get("/v1/changesets", params={"project_id": project_id, "limit": limit})
-
-
-async def abandon_changeset(changeset_id: str) -> dict[str, Any]:
-    """Abandon a changeset (close PR / drop branch) — rollback for un-merged work."""
-    return await _post(f"/v1/changesets/{_seg(changeset_id)}/abandon")
 
 
 async def revert_changeset(changeset_id: str) -> dict[str, Any]:

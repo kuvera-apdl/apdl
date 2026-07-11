@@ -96,16 +96,23 @@ def test_cors_origins_parsed_from_env(monkeypatch):
     ]
 
 
-def test_ci_sync_max_age_defaults_to_seven_days(monkeypatch):
-    monkeypatch.delenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", raising=False)
-    assert config.codegen_ci_sync_max_age_seconds() == 7 * 24 * 3600
+def test_ci_poll_interval_default_and_disable(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CI_POLL_INTERVAL", raising=False)
+    assert config.codegen_ci_poll_interval() == 60
+    monkeypatch.setenv("CODEGEN_CI_POLL_INTERVAL", "0")
+    assert config.codegen_ci_poll_interval() == 0
 
 
-def test_ci_sync_max_age_env_override_and_floor(monkeypatch):
-    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "3600")
-    assert config.codegen_ci_sync_max_age_seconds() == 3600
-    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "-5")
-    assert config.codegen_ci_sync_max_age_seconds() == 0
+def test_ci_repair_limits_default_and_floor(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CI_REPAIR_RETRIES", raising=False)
+    monkeypatch.delenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", raising=False)
+    assert config.codegen_ci_repair_retries() == 2
+    assert config.codegen_ci_repair_budget_seconds() == 3600
+
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "-1")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "-1")
+    assert config.codegen_ci_repair_retries() == 0
+    assert config.codegen_ci_repair_budget_seconds() == 0
 
 
 def test_job_budget_derives_from_the_inner_timeouts(monkeypatch):

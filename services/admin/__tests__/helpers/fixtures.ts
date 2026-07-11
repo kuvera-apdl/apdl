@@ -2,6 +2,7 @@
 // these are what the live API returns (Strict Schema Rule test material).
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
 import type {
+  ChangesetObservationHistory,
   ReviewVerdict,
   VerificationCoverage,
   VerificationPlan,
@@ -106,6 +107,110 @@ export function makeReviewVerdict(
     ],
     uncertainties: [],
     actionable_instructions: ['Add cleanup for the initialized resource.'],
+    ...overrides,
+  }
+}
+
+export function makeChangesetObservationHistory(
+  overrides: Partial<ChangesetObservationHistory> = {},
+): ChangesetObservationHistory {
+  const failedHead = 'c'.repeat(40)
+  return {
+    schema_version: 'changeset_observation_history@1',
+    pull_requests: [
+      {
+        schema_version: 'pull_request_observation@1',
+        observation_id: 'pr_observation:1',
+        delivery_id: 'delivery-1',
+        changeset_id: 'cs_abc123',
+        repository: 'acme/widgets',
+        pr_number: 17,
+        head_sha: failedHead,
+        status: 'open',
+        action: 'synchronize',
+        github_url: 'https://github.com/acme/widgets/pull/17',
+        merge_sha: null,
+        github_updated_at: '2026-07-11T14:00:00+00:00',
+        observed_at: '2026-07-11T14:00:01+00:00',
+      },
+    ],
+    ci_verifications: [
+      {
+        schema_version: 'ci_verification_observation@1',
+        observation_id: 'ci_observation:1',
+        changeset_id: 'cs_abc123',
+        repository: 'acme/widgets',
+        pr_number: 17,
+        head_sha: failedHead,
+        status: 'failed',
+        signals: [
+          {
+            signal_id: 'check_run:101',
+            kind: 'check_run',
+            name: 'test',
+            conclusion: 'failed',
+            github_url: 'https://github.com/acme/widgets/actions/runs/101',
+            check_suite_id: 100,
+            check_run_id: 101,
+            summary: 'One test failed.',
+            annotations: [
+              {
+                path: 'src/api/schema.ts',
+                start_line: 42,
+                end_line: 42,
+                level: 'failure',
+                message: 'Expected unknown fields to be rejected.',
+              },
+            ],
+          },
+        ],
+        requirement_results: [
+          {
+            requirement_id: 'REQ-001',
+            evidence_id: 'CI-REQ-001-01',
+            status: 'failed',
+            matched_signal_ids: ['check_run:101'],
+            explanation: 'The strict schema regression check failed.',
+          },
+        ],
+        observed_at: '2026-07-11T14:01:00+00:00',
+        failure_key: 'ci_failure:key',
+        failure_summary: 'GitHub test failed on the exact pull-request head.',
+      },
+    ],
+    remediation_attempts: [
+      {
+        schema_version: 'ci_remediation_attempt@1',
+        attempt_id: 'repair-1',
+        event_sequence: 1,
+        event_id: 'repair-1:1',
+        changeset_id: 'cs_abc123',
+        repository: 'acme/widgets',
+        pr_number: 17,
+        failed_head_sha: failedHead,
+        failure_observation_id: 'ci_observation:1',
+        attempt_number: 1,
+        classification: 'actionable_code',
+        confidence: 0.95,
+        prompt_evidence_ids: ['prompt:111111111111111111111111'],
+        prompt_evidence: [
+          {
+            evidence_id: 'prompt:111111111111111111111111',
+            content_sha256: 'e'.repeat(64),
+            stage: 'repair',
+            label: 'Exact-head CI repair instruction',
+            excerpt: 'Fix the strict schema failure reported by GitHub on this exact head.',
+          },
+        ],
+        changed_files: ['src/api/schema.ts'],
+        resulting_commit_sha: 'd'.repeat(40),
+        disposition: 'awaiting_ci',
+        started_at: '2026-07-11T14:02:00+00:00',
+        recorded_at: '2026-07-11T14:03:00+00:00',
+        finished_at: null,
+        error: null,
+      },
+    ],
     ...overrides,
   }
 }

@@ -52,6 +52,9 @@ class EditRequest:
     revert_sha: str | None = None
     #: Update the already-pushed PR branch instead of cutting a new branch.
     existing_branch: bool = False
+    #: Exact failed PR head a repair is allowed to extend. A mismatch blocks
+    #: editing and the push uses an explicit force-with-lease for this SHA.
+    expected_head_sha: str | None = None
     #: Risk controls whether unavailable/unparseable auxiliary model gates may
     #: fail open. Only low-risk changes may skip them.
     risk_level: str = "low"

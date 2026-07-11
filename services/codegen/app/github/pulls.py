@@ -7,17 +7,22 @@ GitHub owns verification and merge.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 import httpx
 
 from app.config import github_api_url
 from app.github.client import gh_client, gh_headers
+from app.models.observations import GitHubPRStatus
 
 @dataclass(frozen=True)
 class PullRequest:
     url: str
     number: int
-    node_id: str = ""
+    head_sha: str
+    status: GitHubPRStatus
+    github_updated_at: datetime
 
 
 async def open_pull_request(
@@ -40,44 +45,41 @@ async def open_pull_request(
         resp.raise_for_status()
         data = resp.json()
 
+    updated_at = data.get("updated_at")
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        raise ValueError("GitHub pull-request response is missing updated_at")
+    try:
+        github_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("GitHub pull-request response has invalid updated_at") from exc
+    if github_updated_at.tzinfo is None or github_updated_at.utcoffset() is None:
+        raise ValueError("GitHub pull-request updated_at must include a timezone")
     return PullRequest(
-        url=data["html_url"], number=data["number"], node_id=data.get("node_id", "")
+        url=data["html_url"],
+        number=data["number"],
+        head_sha=str((data.get("head") or {}).get("sha") or ""),
+        status=(
+            GitHubPRStatus.draft
+            if data.get("draft") is True
+            else GitHubPRStatus.open
+        ),
+        github_updated_at=github_updated_at,
     )
 
 
-async def mark_ready_for_review(
-    *, node_id: str, token: str, client: httpx.AsyncClient | None = None
-) -> None:
-    """Promote a draft PR to ready-for-review (GraphQL) once CI is green (D5)."""
-    if not node_id:
-        return
-    query = (
-        "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
-        "{pullRequest{id isDraft}}}"
-    )
-    async with gh_client(client) as c:
-        resp = await c.post(
-            f"{github_api_url()}/graphql",
-            headers=gh_headers(token),
-            json={"query": query, "variables": {"id": node_id}},
-        )
-        resp.raise_for_status()
-
-
-async def close_pull_request(
-    *,
+async def get_pull_request(
     repo: str,
     number: int,
     token: str,
+    *,
     client: httpx.AsyncClient | None = None,
-) -> None:
-    """Close a pull request without merging (``PATCH`` state=closed).
-
-    Used by ``/abandon``: the change is being dropped, not landed. GitHub returns
-    200 even if the PR is already closed, so this is safe to call idempotently.
-    The head branch is intentionally left in place (it can be reopened/inspected).
-    """
+) -> dict[str, Any]:
+    """Read the live GitHub PR used by webhook and polling recovery."""
     url = f"{github_api_url()}/repos/{repo}/pulls/{number}"
     async with gh_client(client) as c:
-        resp = await c.patch(url, headers=gh_headers(token), json={"state": "closed"})
+        resp = await c.get(url, headers=gh_headers(token))
         resp.raise_for_status()
+        data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("GitHub pull-request response must be an object")
+    return data
