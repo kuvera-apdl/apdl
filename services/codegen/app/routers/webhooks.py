@@ -1,4 +1,4 @@
-"""GitHub webhook receiver — ingests CI status so merges can be gated on it.
+"""GitHub webhook receiver for authoritative CI and PR observations.
 
 GitHub POSTs ``check_run`` / ``check_suite`` / ``pull_request`` / ``status``
 events here; the body is HMAC-verified (when a secret is configured), the target
@@ -19,7 +19,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from app.config import github_webhook_secret
 from app.jobs.ci import sync_ci_status
-from app.store.changesets import get_changeset_by_branch
+from app.models.changeset import ChangesetStatus, InvalidTransition
+from app.store import changesets as changeset_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -60,15 +61,40 @@ async def github_webhook(request: Request, background_tasks: BackgroundTasks) ->
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Malformed webhook body.") from None
 
-    branch = _branch_of(event, payload)
     repo = payload.get("repository", {}).get("full_name", "")
-    if not branch or not repo:
+    if not repo:
         return {"status": "ignored"}
 
     pool = request.app.state.pg_pool
+    if event == "pull_request" and payload.get("action") == "closed":
+        pr = payload.get("pull_request") or {}
+        number = pr.get("number") or payload.get("number")
+        if not isinstance(number, int):
+            return {"status": "ignored"}
+        changeset = await changeset_store.get_changeset_by_pr_number(pool, number, repo)
+        if changeset is None:
+            return {"status": "no_changeset"}
+        try:
+            if pr.get("merged") is True:
+                await changeset_store.mark_merged(
+                    pool,
+                    changeset.changeset_id,
+                    merge_sha=str(pr.get("merge_commit_sha") or ""),
+                )
+                return {"status": "observed_merged", "changeset_id": changeset.changeset_id}
+            await changeset_store.transition_changeset(
+                pool, changeset.changeset_id, ChangesetStatus.abandoned
+            )
+            return {"status": "observed_closed", "changeset_id": changeset.changeset_id}
+        except InvalidTransition:
+            return {"status": "ignored"}
+
+    branch = _branch_of(event, payload)
+    if not branch:
+        return {"status": "ignored"}
     # Scope by repo as well as branch so two connected repos sharing a branch
     # name can't mis-route each other's CI events.
-    changeset = await get_changeset_by_branch(pool, branch, repo)
+    changeset = await changeset_store.get_changeset_by_branch(pool, branch, repo)
     if changeset is None:
         return {"status": "no_changeset"}
 

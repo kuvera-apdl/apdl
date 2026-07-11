@@ -2,13 +2,13 @@
 
 A self-hosted codegen rarely has a public HTTPS endpoint for GitHub to deliver
 webhooks to (it may sit behind NAT, on a laptop, or be reachable only by an SSH
-tunnel). Rather than make the merge queue depend on inbound connectivity, this
+tunnel). Rather than make status observation depend on inbound connectivity, this
 poller drives CI sync from the outside in: every interval it sweeps the
 changesets a sync can still advance and runs :func:`sync_ci_status` on each,
 reusing the very same injected deps as the webhook path (``app.state.ci_deps``).
 
-A repo with no CI resolves to ``none`` and unblocks merge within one interval; a
-repo with CI advances as its checks report. The GitHub webhook remains an
+A repo with no CI settles as ``unverified_external_ci``; a repo with CI advances
+as its checks report. The GitHub webhook remains an
 optional lower-latency accelerator — not a requirement. Set the interval to 0
 (``CODEGEN_CI_POLL_INTERVAL=0``) to disable polling when webhooks are wired.
 """
@@ -20,7 +20,13 @@ import logging
 
 import asyncpg
 
-from app.jobs.ci import CIStatusReader, ReadyMarker, TokenMinter, sync_ci_status
+from app.jobs.ci import (
+    CIFailureHandler,
+    CIStatusReader,
+    ReadyMarker,
+    TokenMinter,
+    sync_ci_status,
+)
 from app.store import changesets as store
 
 logger = logging.getLogger(__name__)
@@ -32,6 +38,7 @@ async def poll_ci_once(
     get_status: CIStatusReader,
     mint_token: TokenMinter,
     mark_ready: ReadyMarker | None = None,
+    repair_failure: CIFailureHandler | None = None,
 ) -> int:
     """Run a single CI-sync sweep over every syncable changeset.
 
@@ -47,6 +54,7 @@ async def poll_ci_once(
                 get_status=get_status,
                 mint_token=mint_token,
                 mark_ready=mark_ready,
+                repair_failure=repair_failure,
             )
         except Exception:
             logger.warning("CI poll failed for changeset %s", changeset_id, exc_info=True)
@@ -60,6 +68,7 @@ async def run_ci_poller(
     get_status: CIStatusReader,
     mint_token: TokenMinter,
     mark_ready: ReadyMarker | None = None,
+    repair_failure: CIFailureHandler | None = None,
 ) -> None:
     """Sweep CI status forever, every ``interval_seconds``, until cancelled.
 
@@ -76,6 +85,7 @@ async def run_ci_poller(
                     get_status=get_status,
                     mint_token=mint_token,
                     mark_ready=mark_ready,
+                    repair_failure=repair_failure,
                 )
                 if swept:
                     logger.debug("CI poll swept %d changeset(s)", swept)

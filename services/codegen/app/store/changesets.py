@@ -14,6 +14,7 @@ import asyncpg
 
 from app.config import codegen_ci_sync_max_age_seconds
 from app.models.changeset import (
+    CIRemediationStatus,
     CI_SYNCABLE_STATUSES,
     Changeset,
     ChangesetStatus,
@@ -72,6 +73,12 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         pr_node_id=row["pr_node_id"],
         ci_status=row["ci_status"],
         ci_awaiting_since=_optional_column(row, "ci_awaiting_since"),
+        ci_retry_count=_optional_column(row, "ci_retry_count") or 0,
+        ci_remediation_status=(
+            _optional_column(row, "ci_remediation_status") or CIRemediationStatus.idle
+        ),
+        ci_failure_key=_optional_column(row, "ci_failure_key"),
+        ci_failure_summary=_optional_column(row, "ci_failure_summary"),
         merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
         prompts=_prompts_from_row(row),
@@ -134,11 +141,33 @@ async def get_changeset_by_branch(
             JOIN codegen_connections conn ON conn.project_id = cs.project_id
             WHERE cs.branch = $1
               AND conn.repo = $2
-              AND cs.status IN ('pr_open', 'ci_running', 'ci_failed', 'ci_passed')
+              AND cs.status IN (
+                  'pr_open', 'ci_running', 'ci_failed', 'ci_passed',
+                  'unverified_external_ci'
+              )
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
             branch,
+            repo,
+        )
+    return _row_to_changeset(row) if row else None
+
+
+async def get_changeset_by_pr_number(
+    pool: asyncpg.Pool, pr_number: int, repo: str
+) -> Changeset | None:
+    """Find the APDL changeset associated with a GitHub pull request."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT cs.* FROM codegen_changesets cs
+            JOIN codegen_connections conn ON conn.project_id = cs.project_id
+            WHERE cs.pr_number = $1 AND conn.repo = $2
+            ORDER BY cs.created_at DESC
+            LIMIT 1
+            """,
+            pr_number,
             repo,
         )
     return _row_to_changeset(row) if row else None
@@ -338,6 +367,112 @@ async def set_ci_status(
         set_clause="ci_status = $3",
         params=(ci_status,),
     )
+
+
+async def claim_ci_repair(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    failure_key: str,
+    failure_summary: str,
+    max_attempts: int,
+) -> Changeset | None:
+    """Atomically claim one bounded repair for the current failed PR head.
+
+    The failure key includes the GitHub head SHA/check identities. Repeated
+    webhook deliveries for the same failure therefore cannot start concurrent
+    edits, while a new failed repair commit may consume the next attempt.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if row is None or row["status"] != ChangesetStatus.ci_failed.value:
+                return None
+            retry_count = _optional_column(row, "ci_retry_count") or 0
+            remediation = _optional_column(row, "ci_remediation_status") or "idle"
+            prior_key = _optional_column(row, "ci_failure_key")
+            if retry_count >= max_attempts:
+                if remediation == CIRemediationStatus.exhausted.value:
+                    return None
+                row = await conn.fetchrow(
+                    """
+                    UPDATE codegen_changesets
+                    SET ci_remediation_status = 'exhausted', updated_at = now()
+                    WHERE changeset_id = $1 RETURNING *
+                    """,
+                    changeset_id,
+                )
+                return _row_to_changeset(row)
+            if prior_key == failure_key and remediation in ("repairing", "awaiting_ci"):
+                return None
+            row = await conn.fetchrow(
+                """
+                UPDATE codegen_changesets
+                SET ci_retry_count = ci_retry_count + 1,
+                    ci_remediation_status = 'repairing',
+                    ci_failure_key = $2,
+                    ci_failure_summary = $3,
+                    updated_at = now()
+                WHERE changeset_id = $1
+                RETURNING *
+                """,
+                changeset_id,
+                failure_key,
+                failure_summary,
+            )
+    return _row_to_changeset(row)
+
+
+async def finish_ci_repair(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    success: bool,
+    exhausted: bool = False,
+    error: str | None = None,
+) -> Changeset | None:
+    """Record a repair result; a pushed commit returns to GitHub CI pending."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current_row = await conn.fetchrow(
+                "SELECT * FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if current_row is None:
+                return None
+            current = ChangesetStatus(current_row["status"])
+            # GitHub may merge/close the PR while an in-flight repair finishes.
+            # Never overwrite or annotate that terminal external outcome.
+            if current is not ChangesetStatus.ci_failed:
+                return _row_to_changeset(current_row)
+            if success:
+                assert_transition(current, ChangesetStatus.ci_running)
+                row = await conn.fetchrow(
+                    """
+                    UPDATE codegen_changesets
+                    SET status = 'ci_running', ci_status = 'pending',
+                        ci_remediation_status = 'awaiting_ci', error = NULL,
+                        updated_at = now()
+                    WHERE changeset_id = $1 RETURNING *
+                    """,
+                    changeset_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE codegen_changesets
+                    SET ci_remediation_status = $2,
+                        error = COALESCE($3, error), updated_at = now()
+                    WHERE changeset_id = $1 RETURNING *
+                    """,
+                    changeset_id,
+                    "exhausted" if exhausted else "idle",
+                    error,
+                )
+    return _row_to_changeset(row)
 
 
 async def list_queued_changeset_ids(pool: asyncpg.Pool) -> list[str]:

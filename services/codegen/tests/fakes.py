@@ -74,6 +74,10 @@ class FakeConn:
                 "pr_node_id": None,
                 "ci_status": None,
                 "ci_awaiting_since": None,
+                "ci_retry_count": 0,
+                "ci_remediation_status": "idle",
+                "ci_failure_key": None,
+                "ci_failure_summary": None,
                 "merge_sha": None,
                 "task": args[5],
                 "diff_stat": "{}",
@@ -84,6 +88,16 @@ class FakeConn:
             self.store["changesets"][args[0]] = row
             return row
         if "JOIN codegen_connections" in query:
+            if "cs.pr_number" in query:
+                pr_number, repo = args[0], args[1]
+                matches = [
+                    r
+                    for r in self.store["changesets"].values()
+                    if r.get("pr_number") == pr_number
+                    and (self.store["connections"].get(r["project_id"]) or {}).get("repo") == repo
+                ]
+                matches.sort(key=lambda r: r["created_at"], reverse=True)
+                return matches[0] if matches else None
             # get_changeset_by_branch: route by (branch, repo), repo joined
             # through the project's connection.
             branch, repo = args[0], args[1]
@@ -91,7 +105,10 @@ class FakeConn:
                 r
                 for r in self.store["changesets"].values()
                 if r.get("branch") == branch
-                and r["status"] in ("pr_open", "ci_running", "ci_failed", "ci_passed")
+                and r["status"] in (
+                    "pr_open", "ci_running", "ci_failed", "ci_passed",
+                    "unverified_external_ci",
+                )
                 and (self.store["connections"].get(r["project_id"]) or {}).get("repo") == repo
             ]
             matches.sort(key=lambda r: r["created_at"], reverse=True)
@@ -102,7 +119,23 @@ class FakeConn:
             row = self.store["changesets"].get(args[0])
             if row is None:
                 return None
-            if "pr_url" in query:
+            if "ci_retry_count = ci_retry_count + 1" in query:
+                row["ci_retry_count"] += 1
+                row["ci_remediation_status"] = "repairing"
+                row["ci_failure_key"] = args[1]
+                row["ci_failure_summary"] = args[2]
+            elif "ci_remediation_status = 'exhausted'" in query:
+                row["ci_remediation_status"] = "exhausted"
+            elif "status = 'ci_running'" in query:
+                row["status"] = "ci_running"
+                row["ci_status"] = "pending"
+                row["ci_remediation_status"] = "awaiting_ci"
+                row["error"] = None
+            elif "ci_remediation_status = $2" in query:
+                row["ci_remediation_status"] = args[1]
+                if args[2] is not None:
+                    row["error"] = args[2]
+            elif "pr_url" in query:
                 # mark_pr_open: (id, status, branch, pr_url, pr_number, node_id, diff_stat)
                 row["status"] = args[1]
                 row["branch"] = args[2]
@@ -227,6 +260,10 @@ class FakePool:
             "pr_node_id": pr_node_id,
             "ci_status": ci_status,
             "ci_awaiting_since": ci_awaiting_since,
+            "ci_retry_count": 0,
+            "ci_remediation_status": "idle",
+            "ci_failure_key": None,
+            "ci_failure_summary": None,
             "merge_sha": merge_sha,
             "task": '{"title": "t", "spec": "spec spec spec"}',
             "diff_stat": "{}",

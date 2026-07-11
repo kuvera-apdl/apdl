@@ -68,9 +68,7 @@ _CONFIG_ENV_FORWARD: tuple[str, ...] = (
     "CODEGEN_REQUIRE_VERIFY",
     "CODEGEN_CACHE_PROMPTS",
     "CODEGEN_CONVENTIONS",
-    "CODEGEN_SDK_REFERENCE",
     "CODEGEN_TIMEOUT",
-    "CODEGEN_TEST_TIMEOUT",
     "CODEGEN_GIT_TIMEOUT",
     "CODEGEN_LLM_TIMEOUT",
 )
@@ -139,6 +137,7 @@ class ContainerAiderEditor:
             "-e", f"CS_BRANCH={request.branch}",
             "-e", f"CS_TITLE={request.title}",
             "-e", f"CS_SPEC={request.spec}",
+            "-e", f"CS_RISK_LEVEL={request.risk_level}",
             "-e", f"CS_CONSTRAINTS={json.dumps(request.constraints)}",
             "-e", f"CODEGEN_MODEL={self._model}",
         ]
@@ -148,6 +147,8 @@ class ContainerAiderEditor:
             argv += ["-e", f"CS_GATES_POLICY={json.dumps(request.gates_policy)}"]
         if request.revert_sha:
             argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
+        if request.existing_branch:
+            argv += ["-e", "CS_EXISTING_BRANCH=true"]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
@@ -182,6 +183,7 @@ class ContainerAiderEditor:
                 diff_text=data.get("diff_text") or "",
                 error=data.get("error"),
                 logs_uri=data.get("logs_uri"),
+                head_sha=data.get("head_sha"),
             )
         tail = (stderr or stdout or "").strip()[-_ERR_TAIL:]
         return EditResult(

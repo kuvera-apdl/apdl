@@ -3,7 +3,7 @@
 Phase 2 path: ``queued → cloning → editing → testing → (tests_failed | pushing →
 pr_open)``. The edit itself is delegated to an :class:`~app.editor.base.Editor`
 (Aider in production, a fake in tests); the PR is opened by codegen via
-the GitHub App so merge gating stays in APDL. The job never raises — any
+the GitHub App; GitHub owns verification and merge. The job never raises — any
 unexpected fault lands the changeset in ``error``.
 """
 
@@ -63,7 +63,7 @@ def _pr_body(task: TaskSpec) -> str:
         f"## Test plan\n\n{checks}\n\n"
         "## Notes\n\n"
         "- Opened automatically by APDL codegen from an approved feature proposal. "
-        "Draft until CI is green; the merge decision is gated by APDL.\n"
+        "GitHub CI, review rules, and merge controls are authoritative.\n"
     )
 
 
@@ -149,6 +149,7 @@ async def _execute_changeset_job(
                 test_cmd=policy.get("test_cmd"),
                 gates_policy=policy.get("gates"),
                 revert_sha=revert_sha if isinstance(revert_sha, str) else None,
+                risk_level=str(changeset.task.context.get("risk_level") or "low").lower(),
             )
         )
 

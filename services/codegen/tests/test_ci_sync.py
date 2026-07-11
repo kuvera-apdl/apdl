@@ -43,10 +43,8 @@ async def test_sync_marks_passed_and_promotes_ready():
 
 
 @pytest.mark.asyncio
-async def test_sync_no_ci_advances_to_passed_and_unblocks_merge():
-    # A repo with no CI configured reports "none": nothing to wait on, so the
-    # changeset advances to ci_passed (recorded as ci_status="none") and the PR
-    # is promoted ready — the Merge gate is cleared without any checks. The seeded
+async def test_sync_no_ci_becomes_unverified_and_does_not_promote_ready():
+    # A repo with no CI configured settles as explicitly unverified. The seeded
     # changeset's updated_at (_T0) is well outside the no-CI grace window, so
     # "none" is acted on rather than held as pending.
     pool = FakePool()
@@ -66,11 +64,11 @@ async def test_sync_no_ci_advances_to_passed_and_unblocks_merge():
         pool, "cs_none", get_status=get_status, mint_token=_mint, mark_ready=mark_ready
     )
 
-    assert result == "none"
+    assert result == "unverified_external_ci"
     final = await store.get_changeset(pool, "cs_none")
-    assert final.status == ChangesetStatus.ci_passed
-    assert final.ci_status == "none"
-    assert ready and ready[0]["node_id"] == "PR_n"
+    assert final.status == ChangesetStatus.unverified_external_ci
+    assert final.ci_status == "unverified_external_ci"
+    assert not ready
 
 
 @pytest.mark.asyncio
@@ -106,7 +104,7 @@ async def test_sync_holds_none_as_pending_within_grace_window():
 @pytest.mark.asyncio
 async def test_sync_acts_on_none_after_grace_with_grace_disabled(monkeypatch):
     # With the grace window disabled (CODEGEN_CI_NONE_GRACE_SECONDS=0), a recent
-    # changeset reporting "none" clears the gate immediately — the escape hatch.
+    # changeset reporting "none" becomes unverified immediately.
     monkeypatch.setenv("CODEGEN_CI_NONE_GRACE_SECONDS", "0")
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets")
@@ -120,10 +118,10 @@ async def test_sync_acts_on_none_after_grace_with_grace_disabled(monkeypatch):
 
     result = await sync_ci_status(pool, "cs_now", get_status=get_status, mint_token=_mint)
 
-    assert result == "none"
+    assert result == "unverified_external_ci"
     final = await store.get_changeset(pool, "cs_now")
-    assert final.status == ChangesetStatus.ci_passed
-    assert final.ci_status == "none"
+    assert final.status == ChangesetStatus.unverified_external_ci
+    assert final.ci_status == "unverified_external_ci"
 
 
 @pytest.mark.asyncio
@@ -140,6 +138,32 @@ async def test_sync_marks_failed():
     assert result == "failed"
     final = await store.get_changeset(pool, "cs_c2")
     assert final.status == ChangesetStatus.ci_failed
+
+
+@pytest.mark.asyncio
+async def test_new_head_can_demote_previous_pass_to_pending():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_new_head",
+        "demo",
+        status="ci_passed",
+        ci_status="passed",
+        pr_number=5,
+        branch="apdl/x",
+    )
+
+    async def get_status(repo, ref, token):
+        return CIStatus("pending", observed=True, head_sha="new-head")
+
+    result = await sync_ci_status(
+        pool, "cs_new_head", get_status=get_status, mint_token=_mint
+    )
+
+    assert result == "pending"
+    final = await store.get_changeset(pool, "cs_new_head")
+    assert final.status is ChangesetStatus.ci_running
+    assert final.ci_status == "pending"
 
 
 @pytest.mark.asyncio
@@ -185,8 +209,7 @@ async def test_sync_still_failed_writes_nothing(monkeypatch):
 async def test_sync_releases_inferred_pending_after_deadline(monkeypatch):
     # Inferred pending (phantom app check-suites / a workflow that never triggers
     # on PR branches) past the deadline: nothing was ever observed on the ref, so
-    # the gate is released as ci_passed / ci_status="no_report" and the PR is
-    # promoted — instead of holding ci_running forever.
+    # observation settles as unverified instead of holding ci_running forever.
     monkeypatch.setenv("CODEGEN_CI_PENDING_TIMEOUT", "600")
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets")
@@ -212,11 +235,11 @@ async def test_sync_releases_inferred_pending_after_deadline(monkeypatch):
         pool, "cs_dead", get_status=get_status, mint_token=_mint, mark_ready=mark_ready
     )
 
-    assert result == "no_report"
+    assert result == "unverified_external_ci"
     final = await store.get_changeset(pool, "cs_dead")
-    assert final.status == ChangesetStatus.ci_passed
-    assert final.ci_status == "no_report"
-    assert ready and ready[0]["node_id"] == "PR_d"
+    assert final.status == ChangesetStatus.unverified_external_ci
+    assert final.ci_status == "unverified_external_ci"
+    assert not ready
 
 
 @pytest.mark.asyncio
@@ -321,6 +344,6 @@ async def test_sync_deadline_anchors_on_ci_awaiting_since_not_updated_at(monkeyp
 
     result = await sync_ci_status(pool, "cs_anchor", get_status=get_status, mint_token=_mint)
 
-    assert result == "no_report"
+    assert result == "unverified_external_ci"
     final = await store.get_changeset(pool, "cs_anchor")
-    assert final.status == ChangesetStatus.ci_passed
+    assert final.status == ChangesetStatus.unverified_external_ci

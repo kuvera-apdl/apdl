@@ -24,14 +24,14 @@ async def test_poll_sweeps_only_syncable_and_advances_them():
     pool.add_changeset("cs_done", "demo", status="merged", pr_number=3, branch="apdl/c")
 
     async def get_status(repo, ref, token):
-        return "none"  # repo has no CI → unblock merge
+        return "none"  # repo has no CI → explicitly unverified
 
     swept = await poll_ci_once(pool, get_status=get_status, mint_token=_mint)
 
     assert swept == 2  # the merged one is not swept
-    assert (await store.get_changeset(pool, "cs_open")).status == ChangesetStatus.ci_passed
-    assert (await store.get_changeset(pool, "cs_run")).status == ChangesetStatus.ci_passed
-    assert (await store.get_changeset(pool, "cs_open")).ci_status == "none"
+    assert (await store.get_changeset(pool, "cs_open")).status == ChangesetStatus.unverified_external_ci
+    assert (await store.get_changeset(pool, "cs_run")).status == ChangesetStatus.unverified_external_ci
+    assert (await store.get_changeset(pool, "cs_open")).ci_status == "unverified_external_ci"
     # The terminal changeset is untouched.
     assert (await store.get_changeset(pool, "cs_done")).status == ChangesetStatus.merged
 

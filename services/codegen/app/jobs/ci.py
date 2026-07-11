@@ -4,7 +4,7 @@ Moves ``pr_open → ci_running → ci_passed | ci_failed`` as the customer repo'
 reports in, and promotes the draft PR to ready-for-review once green (decision
 D5). Dependencies are injected so the path is testable without GitHub.
 
-Two guards keep the CI gate *bounded* instead of trusting GitHub's signals
+Two guards keep observation *bounded* instead of trusting GitHub's signals
 blindly (see ``github.checks`` for the evidence model):
 
 - a grace window before acting on ``none`` (CI may exist but not have reported
@@ -12,7 +12,7 @@ blindly (see ``github.checks`` for the evidence model):
 - a deadline on *inferred* ``pending`` (evidence said CI should report, but
   nothing was ever observed on the ref — e.g. phantom app check-suites, or a
   workflow that never triggers on PR branches). Past the deadline the gate is
-  released as ``ci_status="no_report"`` rather than held forever.
+  recorded as ``unverified_external_ci`` rather than held forever.
 
 Both are anchored on ``ci_awaiting_since`` (set once when the PR opens), not on
 ``updated_at`` — status transitions refresh ``updated_at``, which would let the
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 CIStatusReader = Callable[[str, str, str], Awaitable[str]]  # (repo, ref, token) -> status
 TokenMinter = Callable[[int, str], Awaitable[str]]
 ReadyMarker = Callable[..., Awaitable[None]]
+CIFailureHandler = Callable[[str, str, str], Awaitable[None]]
 
 
 def _seconds_awaiting(awaiting_since: datetime | None) -> float | None:
@@ -76,16 +77,13 @@ async def sync_ci_status(
     get_status: CIStatusReader,
     mint_token: TokenMinter,
     mark_ready: ReadyMarker | None = None,
+    repair_failure: CIFailureHandler | None = None,
 ) -> str | None:
     """Pull the latest CI status for a changeset's branch and advance its state.
 
-    Returns the resolved CI status (``passed`` / ``failed`` / ``pending`` /
-    ``none`` / ``no_report``), or ``None`` if the changeset is not in a state
-    where CI applies. ``none`` means the repo has no CI configured and
-    ``no_report`` means CI evidence existed but nothing ever reported within the
-    deadline: in both cases there is nothing (left) to wait on, so the changeset
-    advances to ``ci_passed`` (with the distinction preserved in ``ci_status``)
-    and the Merge button is unblocked — a human still makes the merge decision.
+    Returns the resolved GitHub observation, or ``None`` when CI does not apply.
+    Missing signals settle as ``unverified_external_ci``: they are neither a
+    pass nor a reason to remain in ``ci_running`` forever.
     """
     changeset = await store.get_changeset(pool, changeset_id)
     if changeset is None or changeset.branch is None:
@@ -110,7 +108,15 @@ async def sync_ci_status(
     # updated_at on every poll — churn that defeats the poller's age cap
     # (CODEGEN_CI_SYNC_MAX_AGE_SECONDS) so a long-dead PR is re-polled forever.
     if status == "failed" and changeset.status is ChangesetStatus.ci_failed:
+        if repair_failure is not None:
+            await repair_failure(
+                changeset_id,
+                str(getattr(status, "failure_key", "") or changeset.branch),
+                str(getattr(status, "failure_summary", "") or "GitHub CI failed."),
+            )
         return "failed"
+    if status == "passed" and changeset.status is ChangesetStatus.ci_passed:
+        return "passed"
 
     # A "none" result inside the grace window is most likely "CI hasn't reported
     # yet" rather than "repo has no CI" — commit-status-only CI registers no
@@ -132,7 +138,7 @@ async def sync_ci_status(
     # Inferred-pending deadline: evidence said CI should report (live suites /
     # active workflows) but nothing was ever OBSERVED on the ref. Past the
     # deadline that inference is judged wrong — phantom suite, workflow that
-    # never triggers on PR branches — and the gate is released as "no_report".
+    # never triggers on PR branches — and observation becomes unverified.
     # An observed pending (real CI executing) never times out, and a changeset
     # that once observed a failure (ci_failed) is never released this way.
     resolved = str(status)
@@ -142,24 +148,32 @@ async def sync_ci_status(
         and changeset.status is not ChangesetStatus.ci_failed
         and _pending_wait_expired(awaiting_since)
     ):
-        resolved = "no_report"
+        resolved = "unverified_external_ci"
         logger.warning(
             "Changeset %s has awaited CI beyond the pending deadline with nothing "
-            "observed on the ref; releasing the CI gate as 'no_report'.",
+            "observed on the ref; recording external CI as unverified.",
             changeset_id,
         )
 
+    if (
+        changeset.status is ChangesetStatus.unverified_external_ci
+        and resolved in ("none", "unverified_external_ci")
+    ):
+        return "unverified_external_ci"
+
     # Ensure we are in ci_running before recording a terminal CI result (also
     # handles a re-run after a previous ci_failed).
-    if changeset.status in (ChangesetStatus.pr_open, ChangesetStatus.ci_failed):
+    if changeset.status in (
+        ChangesetStatus.pr_open,
+        ChangesetStatus.ci_failed,
+        ChangesetStatus.ci_passed,
+        ChangesetStatus.unverified_external_ci,
+    ):
         await store.set_ci_status(
             pool, changeset_id, target=ChangesetStatus.ci_running, ci_status="pending"
         )
 
-    # "passed" (CI green), "none" (repo has no CI to wait on), and "no_report"
-    # (CI never reported within the deadline) all clear the CI gate; the
-    # ci_status column preserves which one it was for the audit/UI.
-    if resolved in ("passed", "none", "no_report"):
+    if resolved == "passed":
         await store.set_ci_status(
             pool, changeset_id, target=ChangesetStatus.ci_passed, ci_status=resolved
         )
@@ -172,5 +186,19 @@ async def sync_ci_status(
         await store.set_ci_status(
             pool, changeset_id, target=ChangesetStatus.ci_failed, ci_status="failed"
         )
+        if repair_failure is not None:
+            await repair_failure(
+                changeset_id,
+                str(getattr(status, "failure_key", "") or changeset.branch),
+                str(getattr(status, "failure_summary", "") or "GitHub CI failed."),
+            )
+    elif resolved in ("none", "unverified_external_ci"):
+        await store.set_ci_status(
+            pool,
+            changeset_id,
+            target=ChangesetStatus.unverified_external_ci,
+            ci_status="unverified_external_ci",
+        )
+        resolved = "unverified_external_ci"
 
     return resolved

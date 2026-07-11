@@ -26,5 +26,6 @@ class FakeEditor:
                 changed_paths=result.changed_paths,
                 diff_text=result.diff_text,
                 prompts=result.prompts,
+                head_sha=result.head_sha,
             )
         return result

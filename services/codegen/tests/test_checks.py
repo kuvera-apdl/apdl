@@ -60,6 +60,49 @@ async def test_failed_when_a_check_run_failed():
 
 
 @pytest.mark.asyncio
+async def test_failed_check_includes_actionable_annotations():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(
+                200, json={"state": "success", "total_count": 1, "sha": "head123"}
+            )
+        if request.url.path.endswith("/commits/sha/check-runs"):
+            return httpx.Response(
+                200,
+                json={
+                    "check_runs": [
+                        {
+                            "id": 42,
+                            "name": "pytest",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "details_url": "https://github.com/acme/widgets/actions/runs/1",
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith("/check-runs/42/annotations"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "path": "tests/test_api.py",
+                        "start_line": 17,
+                        "message": "expected 200, got 500",
+                    }
+                ],
+            )
+        return httpx.Response(404)
+
+    status = await _status(httpx.MockTransport(handler))
+    assert status == "failed"
+    assert status.head_sha == "head123"
+    assert "check:42" in status.failure_key
+    assert "tests/test_api.py:17" in status.failure_summary
+    assert "expected 200, got 500" in status.failure_summary
+
+
+@pytest.mark.asyncio
 async def test_failed_wins_over_a_sibling_still_running():
     # A red conclusion fails the ref even while another run is still executing —
     # the verdict cannot improve, and it must not hide behind the slower run.
@@ -107,7 +150,7 @@ async def test_check_runs_are_paginated_so_a_late_failure_is_seen():
 @pytest.mark.asyncio
 async def test_none_when_no_signal_and_no_workflows():
     # No statuses, no check-runs, and the repo has zero Actions workflows → the
-    # repo has no CI to wait on, so report "none" (merge is not blocked on CI).
+    # repo has no CI to wait on, so report "none" for sync to mark unverified.
     status = await _status(_transport("pending", 0, []))
     assert status == "none"
     assert not status.observed

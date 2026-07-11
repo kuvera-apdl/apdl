@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS codegen_changesets (
     diff_stat     JSONB NOT NULL DEFAULT '{}',
     prompts       JSONB NOT NULL DEFAULT '[]',
     ci_awaiting_since TIMESTAMPTZ,
+    ci_retry_count INTEGER NOT NULL DEFAULT 0,
+    ci_remediation_status TEXT NOT NULL DEFAULT 'idle',
+    ci_failure_key TEXT,
+    ci_failure_summary TEXT,
     error         TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -67,6 +71,25 @@ ALTER TABLE codegen_changesets
 ADD COLUMN IF NOT EXISTS ci_awaiting_since TIMESTAMPTZ;
 """
 
+CHANGESETS_CI_REMEDIATION_DDL = """
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS ci_retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS ci_remediation_status TEXT NOT NULL DEFAULT 'idle';
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS ci_failure_key TEXT;
+ALTER TABLE codegen_changesets
+ADD COLUMN IF NOT EXISTS ci_failure_summary TEXT;
+UPDATE codegen_changesets
+SET status = CASE
+        WHEN status IN ('pr_open', 'ci_running', 'ci_passed', 'waiting_approval')
+        THEN 'unverified_external_ci'
+        ELSE status
+    END,
+    ci_status = 'unverified_external_ci'
+WHERE ci_status IN ('none', 'no_report');
+"""
+
 ALL_DDL = (
     CONNECTIONS_DDL,
     CHANGESETS_DDL,
@@ -74,4 +97,5 @@ ALL_DDL = (
     CHANGESETS_MERGE_SHA_DDL,
     CHANGESETS_PROMPTS_DDL,
     CHANGESETS_CI_AWAITING_DDL,
+    CHANGESETS_CI_REMEDIATION_DDL,
 )

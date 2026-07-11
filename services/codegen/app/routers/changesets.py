@@ -1,9 +1,7 @@
 """Changeset lifecycle endpoints.
 
-Phase 1 scope: create (enqueue), read, list, and abandon. The sandboxed job
-that drives ``queued → … → merged`` is wired in later phases; the seam is
-:func:`_enqueue_job`. Merge (``POST /{id}/merge``) arrives with CI gating in a
-later phase and is intentionally absent here rather than stubbed to lie.
+APDL creates and manages changeset work, but GitHub owns CI verification and
+merge. There is intentionally no merge endpoint.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 
 from app.auth import require_internal_token
 from app.github.app_auth import mint_token_for_repo
-from app.github.pulls import close_pull_request, merge_pull_request
+from app.github.pulls import close_pull_request
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
     RETRYABLE_STATUSES,
@@ -25,7 +23,6 @@ from app.models.changeset import (
     ChangesetCreate,
     ChangesetStatus,
     InvalidTransition,
-    MergeRequest,
 )
 from app.store import changesets as store
 from app.store import connections as connections_store
@@ -158,89 +155,6 @@ async def abandon_changeset(changeset_id: str, request: Request) -> Changeset:
     if changeset.pr_number is not None:
         await _close_pr_best_effort(pool, changeset)
     return changeset
-
-
-@router.post("/{changeset_id}/merge", response_model=Changeset)
-async def merge_changeset(
-    changeset_id: str, body: MergeRequest, request: Request
-) -> Changeset:
-    """Merge a changeset's PR. Green CI is mandatory; APDL gates the decision."""
-    pool: asyncpg.Pool = request.app.state.pg_pool
-    changeset = await store.get_changeset(pool, changeset_id)
-    if changeset is None:
-        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
-    if changeset.status not in (ChangesetStatus.ci_passed, ChangesetStatus.waiting_approval):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Changeset is '{changeset.status.value}', not mergeable.",
-        )
-    # "passed" = CI green; "none" = the repo has no CI configured; "no_report" =
-    # CI evidence existed but nothing ever reported within the pending deadline
-    # (sync_ci_status records all three). In each case there is no CI verdict
-    # left to wait on. Any other value (pending / failed / unset) still blocks
-    # the merge.
-    if changeset.ci_status not in ("passed", "none", "no_report"):
-        raise HTTPException(status_code=409, detail="Merge requires green CI.")
-    if changeset.pr_number is None:
-        raise HTTPException(status_code=409, detail="Changeset has no open pull request.")
-
-    connection = await connections_store.get_connection(pool, changeset.project_id)
-    if connection is None:
-        raise HTTPException(status_code=404, detail="Repository connection is missing.")
-
-    token = (
-        await mint_token_for_repo(connection.installation_id, connection.repo)
-    ).token
-
-    # The stored ci_status was recorded when CI last reported and is never
-    # re-synced out of ci_passed — a push to the PR branch since then would not
-    # have demoted it. Re-check live before the irreversible action; fail open
-    # only on a transport fault (GitHub being down blocks the merge call anyway).
-    ci_deps = getattr(request.app.state, "ci_deps", None)
-    if ci_deps and changeset.branch:
-        try:
-            live = await ci_deps["get_status"](connection.repo, changeset.branch, token)
-        except Exception:
-            logger.warning(
-                "Live CI re-check failed for changeset %s; merging on the stored "
-                "ci_status.",
-                changeset_id,
-                exc_info=True,
-            )
-            live = None
-        # Block on a live failure, or on a live pending that is OBSERVED (real
-        # runs/statuses executing on the ref right now). An *inferred* pending —
-        # no actual reports, just phantom suites / dormant workflows (see
-        # github.checks.CIStatus) — must not re-block a gate the sync already
-        # resolved as none/no_report, or the merge wedges on CI that will never
-        # report. Plain-string readers default to observed (conservative).
-        live_observed = bool(getattr(live, "observed", True))
-        if live == "failed" or (live == "pending" and live_observed):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Live CI status for branch '{changeset.branch}' is '{live}'; "
-                    "the stored result is stale. Merge requires green CI."
-                ),
-            )
-
-    merge = await merge_pull_request(
-        repo=connection.repo,
-        number=changeset.pr_number,
-        token=token,
-        merge_method=body.merge_method,
-    )
-    if not merge.merged:
-        # Not-mergeable (conflict / unmet checks / head moved) is a client-state
-        # 409, not a 502 — merge_pull_request already maps GitHub's 405/409/422
-        # refusals to this clean result instead of letting them surface as a 500.
-        raise HTTPException(
-            status_code=409,
-            detail=merge.reason or "GitHub declined the merge (the PR is not mergeable).",
-        )
-
-    # Record the merge commit SHA: it is the deterministic /revert target.
-    return await store.mark_merged(pool, changeset_id, merge_sha=merge.sha)
 
 
 @router.post("/{changeset_id}/revert", response_model=Changeset, status_code=202)

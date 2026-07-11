@@ -1,16 +1,15 @@
 """Canonical changeset domain model and lifecycle state machine.
 
 A *changeset* is one unit of autonomous code work: clone a connected repo, edit
-it to satisfy a task, test it, push a branch, open a pull request, and — once CI
-is green and policy permits — merge. Exactly one canonical ``status`` field
-tracks its lifecycle (Strict Schema Rule: no aliases, no parallel state).
+it to satisfy a task, push a branch, and open a pull request. GitHub owns CI
+verification and merge; APDL only observes those external outcomes.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,16 +21,35 @@ class ChangesetStatus(str, Enum):
     cloning = "cloning"
     editing = "editing"
     testing = "testing"
-    tests_failed = "tests_failed"  # terminal: local tests never went green; no PR
+    tests_failed = "tests_failed"  # terminal: generation/review/safety failed; no PR
     pushing = "pushing"
     pr_open = "pr_open"
     ci_running = "ci_running"
     ci_failed = "ci_failed"
     ci_passed = "ci_passed"
+    unverified_external_ci = "unverified_external_ci"
     waiting_approval = "waiting_approval"
     merged = "merged"  # terminal: change landed on the base branch
     abandoned = "abandoned"  # terminal: PR closed / branch dropped
     error = "error"  # terminal: unexpected failure
+
+
+class ExternalCIStatus(str, Enum):
+    """GitHub CI observation for the current PR head."""
+
+    pending = "pending"
+    passed = "passed"
+    failed = "failed"
+    unverified_external_ci = "unverified_external_ci"
+
+
+class CIRemediationStatus(str, Enum):
+    """State of APDL's bounded response to a GitHub CI failure."""
+
+    idle = "idle"
+    repairing = "repairing"
+    awaiting_ci = "awaiting_ci"
+    exhausted = "exhausted"
 
 
 #: Allowed forward transitions. Anything not listed is rejected by
@@ -47,16 +65,34 @@ ALLOWED_TRANSITIONS: dict[ChangesetStatus, frozenset[ChangesetStatus]] = {
     ),
     ChangesetStatus.pushing: frozenset({ChangesetStatus.pr_open, ChangesetStatus.error}),
     ChangesetStatus.pr_open: frozenset(
-        {ChangesetStatus.ci_running, ChangesetStatus.abandoned, ChangesetStatus.error}
+        {
+            ChangesetStatus.ci_running,
+            ChangesetStatus.merged,
+            ChangesetStatus.abandoned,
+            ChangesetStatus.error,
+        }
     ),
     ChangesetStatus.ci_running: frozenset(
-        {ChangesetStatus.ci_passed, ChangesetStatus.ci_failed, ChangesetStatus.error}
+        {
+            ChangesetStatus.ci_passed,
+            ChangesetStatus.ci_failed,
+            ChangesetStatus.unverified_external_ci,
+            ChangesetStatus.merged,
+            ChangesetStatus.abandoned,
+            ChangesetStatus.error,
+        }
     ),
     ChangesetStatus.ci_failed: frozenset(
-        {ChangesetStatus.ci_running, ChangesetStatus.abandoned, ChangesetStatus.error}
+        {
+            ChangesetStatus.ci_running,
+            ChangesetStatus.merged,
+            ChangesetStatus.abandoned,
+            ChangesetStatus.error,
+        }
     ),
     ChangesetStatus.ci_passed: frozenset(
         {
+            ChangesetStatus.ci_running,
             ChangesetStatus.waiting_approval,
             ChangesetStatus.merged,
             ChangesetStatus.abandoned,
@@ -65,6 +101,14 @@ ALLOWED_TRANSITIONS: dict[ChangesetStatus, frozenset[ChangesetStatus]] = {
     ),
     ChangesetStatus.waiting_approval: frozenset(
         {ChangesetStatus.merged, ChangesetStatus.abandoned, ChangesetStatus.error}
+    ),
+    ChangesetStatus.unverified_external_ci: frozenset(
+        {
+            ChangesetStatus.ci_running,
+            ChangesetStatus.merged,
+            ChangesetStatus.abandoned,
+            ChangesetStatus.error,
+        }
     ),
     # Terminal states intentionally map to the empty set.
     ChangesetStatus.tests_failed: frozenset(),
@@ -97,7 +141,13 @@ RETRYABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
 #: PR is open and CI may report or be re-run). The single source of truth shared
 #: by the sync (``jobs.ci``) and the poller's "what to sweep" query (``store``).
 CI_SYNCABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
-    {ChangesetStatus.pr_open, ChangesetStatus.ci_running, ChangesetStatus.ci_failed}
+    {
+        ChangesetStatus.pr_open,
+        ChangesetStatus.ci_running,
+        ChangesetStatus.ci_failed,
+        ChangesetStatus.ci_passed,
+        ChangesetStatus.unverified_external_ci,
+    }
 )
 
 
@@ -159,12 +209,16 @@ class Changeset(BaseModel):
     pr_url: str | None = None
     pr_number: int | None = None
     pr_node_id: str | None = None
-    ci_status: str | None = None
+    ci_status: ExternalCIStatus | None = None
     #: When the changeset started awaiting CI (set once at pr_open). Anchors the
     #: CI sync's grace window and pending deadline — unlike ``updated_at``, it is
     #: never refreshed by status transitions. ``None`` for pre-PR changesets and
     #: rows that predate the column (the sync falls back to ``updated_at``).
     ci_awaiting_since: datetime | None = None
+    ci_retry_count: int = Field(default=0, ge=0)
+    ci_remediation_status: CIRemediationStatus = CIRemediationStatus.idle
+    ci_failure_key: str | None = None
+    ci_failure_summary: str | None = None
     #: Merge commit SHA recorded at merge time; the deterministic revert target.
     merge_sha: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)
@@ -176,11 +230,3 @@ class Changeset(BaseModel):
     error: str | None = None
     created_at: datetime
     updated_at: datetime
-
-
-class MergeRequest(BaseModel):
-    """Request body for ``POST /v1/changesets/{id}/merge``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    merge_method: Literal["squash", "merge", "rebase"] = "squash"

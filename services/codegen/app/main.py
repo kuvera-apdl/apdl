@@ -1,8 +1,8 @@
 """APDL Codegen Service — FastAPI application entry point.
 
 The codegen service is the platform's "hands": it connects to customer
-repositories, produces changesets (branch + commits + pull request), and —
-under policy — merges them. It is the only component that holds the GitHub App
+repositories and produces changesets (branch + commits + pull request). GitHub
+owns CI verification and merge. This service holds the GitHub App
 credentials and runs untrusted code in a sandbox, isolated from the rest of the
 platform. Orchestration, autonomy gating, and approvals stay in the agents
 service, which calls this one over the internal API.
@@ -36,6 +36,7 @@ from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
 from app.jobs.ci_poller import run_ci_poller
+from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.routers import changesets, connections, github, webhooks
 from app.store import changesets as changeset_store
@@ -98,8 +99,29 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
+    editor = _make_editor()
+    repair_jobs: set[asyncio.Task] = set()
+
+    async def _schedule_ci_repair(
+        changeset_id: str, failure_key: str, failure_summary: str
+    ) -> None:
+        """Start a deduplicated repair without blocking CI observation sweeps."""
+        task = asyncio.create_task(
+            repair_failed_ci(
+                pool,
+                changeset_id,
+                failure_key,
+                failure_summary,
+                editor=editor,
+                mint_token=_mint_token,
+            )
+        )
+        repair_jobs.add(task)
+        task.add_done_callback(repair_jobs.discard)
+
+    application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
-        "editor": _make_editor(),
+        "editor": editor,
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
     }
@@ -127,6 +149,7 @@ async def lifespan(application: FastAPI):
         "get_status": get_ci_status,
         "mint_token": _mint_token,
         "mark_ready": mark_ready_for_review,
+        "repair_failure": _schedule_ci_repair,
     }
 
     # CI poller: the zero-config trigger that keeps open changesets advancing
@@ -166,6 +189,10 @@ async def lifespan(application: FastAPI):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+    for task in tuple(repair_jobs):
+        task.cancel()
+    if repair_jobs:
+        await asyncio.gather(*repair_jobs, return_exceptions=True)
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -177,7 +204,7 @@ app = FastAPI(
 )
 
 # The admin console calls these endpoints directly from the browser, so CORS
-# must be permitted — but this service opens/merges PRs on customer repos, so it
+# must be permitted — but this service opens PRs on customer repos, so it
 # uses an explicit origin allow-list rather than wildcard-with-credentials (which
 # would let any site issue credentialed cross-origin requests). Configure prod
 # origins via CODEGEN_CORS_ORIGINS; defaults to the local admin-console origins.
