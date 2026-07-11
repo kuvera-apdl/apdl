@@ -24,7 +24,9 @@ flowchart LR
     D --> E["Editing agent with inspection tools"]
     E --> F["Pre-push safety and semantic review"]
     F -->|Actionable rejection| E
-    F --> G["Create pull request"]
+    F --> R["Evidence-backed rollout authorization"]
+    R -->|Denied| O["No GitHub write credential"]
+    R -->|Reviewed PR or canary| G["Create pull request"]
     G --> H["GitHub CI verification"]
     H -->|Failure| I["APDL failure diagnosis"]
     I -->|Repair budget available| M["Repair editor"]
@@ -131,6 +133,11 @@ explicit uncertainty instead of an inferred fallback.
 
 ## Phase 2: Resolve Exact Dependency Contracts
 
+**Status: implemented (2026-07-11).** Exact lockfile inputs are resolved in the
+credential-minimal worker, cached by project and content digest, checked for
+manifest drift before push, and exposed through strict versioned contract
+evidence. Unresolved or ambiguous contracts block dependent work.
+
 Install dependencies in an isolated sandbox before the editing stage, using the
 repository lockfile.
 
@@ -162,6 +169,12 @@ Rules:
 - Every external API claim presented to the model has versioned provenance.
 
 ## Phase 3: Convert Requirements into an Evidence Ledger
+
+**Status: implemented (2026-07-11).** One strict requirement ledger is compiled
+before editing, retains stable IDs through same-PR repairs, maps implementation
+files and expected GitHub evidence, and prevents PR creation when active
+requirements lack implementation evidence or an explicit blocker/descoping
+decision.
 
 Replace prose-only engineering briefs with a strict `RequirementLedger`.
 
@@ -198,6 +211,11 @@ weaken requested behavior.
 
 ## Phase 4: Give the Editor Real Inspection Capabilities
 
+**Status: implemented (2026-07-11).** Bounded, content-addressed inspection
+snapshots and dependency slices cover files, symbols, imports, callers, routes,
+tests, lockfiles, and external contracts. The same evidence is retained for
+review and repair rather than relying on an untraceable repository-map claim.
+
 A repository map alone is insufficient. The editor should have bounded,
 read-only discovery tools before and during editing:
 
@@ -231,6 +249,11 @@ whether a destination route implements the required behavior.
 
 ## Phase 5: Generate Risk-Based Verification Coverage for GitHub CI
 
+**Status: implemented (2026-07-11).** Strict risk/surface policy packs derive a
+GitHub verification plan and coverage assessment from the ledger and repository
+profile. Missing CI or missing required coverage stays explicitly unverified and
+forces a draft PR; it is never treated as an APDL-local pass.
+
 Apply reusable policy packs to decide which tests and CI evidence the generated
 change should include. APDL writes or updates the tests; GitHub CI executes them
 and remains the verification authority.
@@ -263,6 +286,12 @@ reported as verified. The service should either:
   pack or is explicitly marked unverified.
 
 ## Phase 6: Strengthen Semantic Review
+
+**Status: implemented (2026-07-11).** The independent semantic reviewer consumes
+the requirement ledger, exact contracts, dependency slice, verification plan,
+and deterministic repository facts. Its strict evidence-backed verdict can
+reject and retry an edit, and medium/high-risk work fails closed when the review
+is unavailable or malformed.
 
 The reviewer should receive more than the diff:
 
@@ -299,6 +328,13 @@ assumptions are not automatically repeated.
 
 ## Phase 7: Add GitHub-CI Runtime Acceptance Validation
 
+**Status: implemented (2026-07-11).** Runtime requirements produce a
+provenance-bound plan and, only when repository policy authorizes it, one exact
+deterministically rendered GitHub Actions workflow. Exact-head runs, bounded and
+redacted logs, structured manifests, and safe artifacts are stored as immutable
+observations; absent or stale evidence remains unverified and can inform the
+same-branch repair loop without becoming an APDL CI result.
+
 For runnable applications, generate the tests and workflow configuration needed
 for GitHub CI to start the changed system in an ephemeral environment and
 exercise the relevant path. APDL consumes the resulting status, logs, and
@@ -325,6 +361,12 @@ structured measurements to the GitHub check run or workflow artifacts.
   loop as actionable failure evidence.
 
 ## Phase 8: Separate PR Creation from GitHub Merge Authority
+
+**Status: implemented (2026-07-11).** Changeset lifecycle, GitHub PR state,
+external CI, and remediation state are separate strict dimensions. Webhooks and
+polling project exact-head observations; APDL exposes no merge, rerun, close, or
+open-PR abandon control. GitHub alone applies review, branch-protection, merge
+queue, auto-merge, and final merge policy.
 
 APDL should create pull requests, observe GitHub CI, and repair actionable CI
 failures, but it should neither verify nor merge pull requests. GitHub is the
@@ -458,6 +500,16 @@ Suggested PR-creation policy:
 
 ## Phase 9: Build Continuous Codegen Evaluations
 
+**Status: implemented (2026-07-11).** A digest-bound multi-stack mutation corpus,
+sealed evaluator oracles, strict finite metrics with explicit denominators, and
+content-addressed reports support offline and non-publishing shadow runs. PR
+publication requires an operator-mounted report/policy bundle bound to the exact
+model and codegen revision; the service recomputes a per-request decision before
+minting any GitHub write token. Reviewed rollout always creates a draft, while
+only an eligible low-risk canary may be ready for review. The default sample and
+metric thresholds fail closed; smaller migration corpora require an explicit
+operator policy rather than an implicit threshold reduction.
+
 Maintain a multi-stack evaluation corpus with real repositories and synthetic
 mutations.
 
@@ -510,6 +562,9 @@ Introduce one strict schema for each pipeline boundary:
 5. `PullRequestObservation`
 6. `CIVerificationObservation`
 7. `CIRemediationAttempt`
+8. `RuntimeAcceptancePlan`
+9. `EvaluationRun` and `EvaluationReport`
+10. `PublicationAuthorization`
 
 Do not introduce aliases or permissive fallback field names. Version schema
 changes explicitly and reject unknown or ambiguous shapes where practical.
@@ -554,5 +609,9 @@ The generalized codegen service is ready for broader autonomous use when:
 - actionable GitHub CI failures can be repaired on the same PR within a bounded
   retry budget, without duplicate or stale-head repair attempts;
 - model upgrades can be evaluated independently from orchestration changes;
+- offline and shadow evaluation cannot receive a GitHub publication capability;
+- PR generation and CI repair cannot mint a GitHub write token without a
+  persisted authorization bound to the exact evaluated model and codegen
+  revision;
 - escaped defects and human correction size improve against the existing
   baseline over a representative evaluation set.
