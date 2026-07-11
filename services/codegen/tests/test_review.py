@@ -25,6 +25,7 @@ async def test_review_approves_and_feeds_spec_paths_and_diff():
         spec="Build the monitor.",
         diff_text="diff --git a/x b/x",
         changed_paths=["app/x.ts"],
+        evidence_context='{"schema_version":"dependency_slice@1"}',
         complete=complete,
     )
 
@@ -34,6 +35,7 @@ async def test_review_approves_and_feeds_spec_paths_and_diff():
     assert "Build the monitor." in user
     assert "app/x.ts" in user
     assert "diff --git" in user
+    assert "dependency_slice@1" in user
 
 
 @pytest.mark.asyncio

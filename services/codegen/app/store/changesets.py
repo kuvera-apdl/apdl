@@ -14,6 +14,7 @@ import asyncpg
 
 from app.config import codegen_ci_sync_max_age_seconds
 from app.contracts.models import ContractBundle
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CIRemediationStatus,
     CI_SYNCABLE_STATUSES,
@@ -79,6 +80,22 @@ def _requirement_ledger_from_row(row: asyncpg.Record) -> RequirementLedger | Non
     return RequirementLedger.model_validate_json(json.dumps(value))
 
 
+def _inspection_snapshot_from_row(row: asyncpg.Record) -> InspectionSnapshot | None:
+    value = _optional_column(row, "inspection_snapshot")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return InspectionSnapshot.model_validate_json(raw)
+
+
+def _dependency_slice_from_row(row: asyncpg.Record) -> DependencySlice | None:
+    value = _optional_column(row, "dependency_slice")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return DependencySlice.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -104,6 +121,8 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         prompts=_prompts_from_row(row),
         contract_bundle=_contract_bundle_from_row(row),
         requirement_ledger=_requirement_ledger_from_row(row),
+        inspection_snapshot=_inspection_snapshot_from_row(row),
+        dependency_slice=_dependency_slice_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -386,6 +405,37 @@ async def set_requirement_ledger(
             """,
             changeset_id,
             json.dumps(ledger.model_dump(mode="json")),
+        )
+
+
+async def set_inspection_evidence(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    snapshot: InspectionSnapshot | None,
+    dependency_slice: DependencySlice | None,
+) -> None:
+    """Persist auditable repository evidence without changing lifecycle or CI."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET inspection_snapshot = COALESCE($2::jsonb, inspection_snapshot),
+                dependency_slice = COALESCE($3::jsonb, dependency_slice),
+                updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            (
+                json.dumps(snapshot.model_dump(mode="json"))
+                if snapshot is not None
+                else None
+            ),
+            (
+                json.dumps(dependency_slice.model_dump(mode="json"))
+                if dependency_slice is not None
+                else None
+            ),
         )
 
 

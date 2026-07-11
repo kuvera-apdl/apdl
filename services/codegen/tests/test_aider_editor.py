@@ -162,7 +162,9 @@ async def _capture_aider_argv(editor: AiderEditor, monkeypatch) -> list[str]:
     """Drive implement() far enough to capture the aider invocation's argv."""
     captured: dict = {}
 
-    async def fake_git(*_args, **_kwargs):
+    async def fake_git(_cwd, args, **_kwargs):
+        if args and args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
         return 0, ""  # clone / checkout / config all succeed
 
     async def fake_exec(argv, **_kwargs):
@@ -219,7 +221,9 @@ async def test_aider_argv_omits_conventions_when_disabled(monkeypatch, tmp_path)
     monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     argv = await _capture_aider_argv(editor, monkeypatch)
-    assert "--read" not in argv
+    read_names = [Path(argv[index + 1]).name for index, value in enumerate(argv) if value == "--read"]
+    assert "CONVENTIONS.md" not in read_names
+    assert "INSPECTION.md" in read_names
 
 
 def _fake_probe_with_refs(refs):
@@ -300,7 +304,9 @@ async def test_implement_does_not_run_local_verification_gate(monkeypatch, tmp_p
     monkeypatch.delenv("CODEGEN_REQUIRE_VERIFY", raising=False)  # default: on
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
 
-    async def fake_git(*_args, **_kwargs):
+    async def fake_git(_cwd, args, **_kwargs):
+        if args and args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
         return 0, ""  # clone / checkout / config succeed
 
     async def fake_exec(_argv, **_kwargs):
@@ -331,7 +337,9 @@ async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_
     monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
 
-    async def fake_git(*_args, **_kwargs):
+    async def fake_git(_cwd, args, **_kwargs):
+        if args and args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
         return 0, ""
 
     async def fake_exec(_argv, **_kwargs):
@@ -375,6 +383,8 @@ class _Pipeline:
 
         async def fake_git(cwd, args, **_kwargs):
             self.git_calls.append(list(args))
+            if args[0] == "clone":
+                Path(args[-1]).mkdir(parents=True)
             if args[0] == "diff" and "--name-only" in args:
                 return 0, "app/x.ts\n"
             if args[0] == "diff" and "--numstat" in args:
@@ -465,6 +475,9 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
 
     assert result.success is True
     assert pipeline.pushed is True
+    assert result.inspection_snapshot is not None
+    assert result.dependency_slice is not None
+    assert [item.path for item in result.dependency_slice.changed_files] == ["app/x.ts"]
     assert len(pipeline.aider_messages) == 1
     assert "Ship the bot filter." in pipeline.aider_messages[0]
     # The prose work order replaces the raw spec as implementation guidance,
@@ -716,6 +729,8 @@ async def test_revert_conflict_fails_cleanly(monkeypatch, tmp_path):
 
     async def conflicting_git(cwd, args, **_kwargs):
         pipeline.git_calls.append(list(args))
+        if args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True)
         if args[0] == "rev-list":
             return 0, "abc123 parent1\n"
         if args[0] == "revert" and "--abort" not in args:
@@ -820,6 +835,7 @@ async def test_prompt_transcript_lists_attached_context_files(monkeypatch, tmp_p
 
     edit = next(p for p in result.prompts if p["stage"] == "edit")
     assert "CONVENTIONS.md" in edit["notes"]
+    assert "INSPECTION.md" in edit["notes"]
     assert "APDL_SDK_JS.md" not in edit["notes"]
 
 

@@ -264,6 +264,61 @@ export const requirementLedgerSchema = z
   })
   .strict()
 
+const inspectionEvidenceSchema = z
+  .object({
+    evidence_id: z.string(),
+    kind: z.enum([
+      'file',
+      'search',
+      'symbol',
+      'local_import',
+      'caller',
+      'route',
+      'link',
+      'test',
+      'lockfile',
+      'contract',
+      'config',
+    ]),
+    path: z.string(),
+    content_sha256: z.string(),
+    start_line: z.number().int().nullable(),
+    end_line: z.number().int().nullable(),
+    source_path: z.string().nullable(),
+    source_line: z.number().int().nullable(),
+    target_path: z.string().nullable(),
+    symbol: z.string().nullable(),
+    excerpt: z.string().nullable(),
+    truncated: z.boolean(),
+  })
+  .strict()
+
+export const inspectionSnapshotSchema = z
+  .object({
+    schema_version: z.literal('inspection_snapshot@1'),
+    root_label: z.literal('.'),
+    evidence: z.array(inspectionEvidenceSchema),
+    skipped_paths: z.array(z.string()),
+    bytes_inspected: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  })
+  .strict()
+
+export const dependencySliceSchema = z
+  .object({
+    schema_version: z.literal('dependency_slice@1'),
+    changed_files: z.array(inspectionEvidenceSchema),
+    imported_local_symbols: z.array(inspectionEvidenceSchema),
+    callers: z.array(inspectionEvidenceSchema),
+    routes_and_handlers: z.array(inspectionEvidenceSchema),
+    affected_tests: z.array(inspectionEvidenceSchema),
+    relevant_lockfiles: z.array(inspectionEvidenceSchema),
+    external_contracts: z.array(inspectionEvidenceSchema),
+    unresolved_references: z.array(z.string()),
+    truncated: z.boolean(),
+  })
+  .strict()
+
 export const KNOWN_CHANGESET_STATUSES = [
   'queued',
   'cloning',
@@ -327,6 +382,8 @@ export const changesetSchema = z
     prompts: z.array(changesetPromptSchema),
     contract_bundle: contractBundleSchema.nullable(),
     requirement_ledger: requirementLedgerSchema.nullable(),
+    inspection_snapshot: inspectionSnapshotSchema.nullable(),
+    dependency_slice: dependencySliceSchema.nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

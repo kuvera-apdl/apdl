@@ -195,6 +195,13 @@ async def _execute_changeset_job(
             await store.set_requirement_ledger(
                 pool, changeset_id, result.requirement_ledger
             )
+        if result.inspection_snapshot is not None or result.dependency_slice is not None:
+            await store.set_inspection_evidence(
+                pool,
+                changeset_id,
+                snapshot=result.inspection_snapshot,
+                dependency_slice=result.dependency_slice,
+            )
 
         # Persist the prompt transcript regardless of outcome — a failed run is
         # exactly when an operator wants to see what the model was told.

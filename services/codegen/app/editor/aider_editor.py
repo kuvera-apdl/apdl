@@ -32,6 +32,7 @@ import base64
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -64,6 +65,14 @@ from app.editor.review import (
     ReviewVerdict,
     build_review_user,
     review_change,
+)
+from app.inspection import (
+    DependencySlice,
+    InspectionSnapshot,
+    RepositoryInspector,
+    build_dependency_slice,
+    render_dependency_slice,
+    render_inspection_snapshot,
 )
 from app.profiling import profile_repository
 from app.profiling.models import CommandKind, RepoProfile
@@ -396,6 +405,57 @@ def _contract_requests_for_ledger(
     return [selected[key] for key in sorted(selected)]
 
 
+_INSPECTION_STOPWORDS = frozenset(
+    {
+        "acceptance",
+        "change",
+        "existing",
+        "implement",
+        "requirement",
+        "should",
+        "tests",
+        "that",
+        "this",
+        "with",
+    }
+)
+
+
+def _inspection_for_ledger(
+    repo_dir: Path, ledger: RequirementLedger
+) -> InspectionSnapshot:
+    """Build a safe inventory enriched with bounded task-focused searches."""
+    inspector = RepositoryInspector(repo_dir)
+    snapshot = inspector.snapshot()
+    candidates: list[str] = []
+    for requirement in ledger.requirements:
+        for token in re.findall(
+            r"[A-Za-z_][A-Za-z0-9_.:/-]{3,}", requirement.observable_behavior
+        ):
+            normalized = token.strip(".,:;()[]{}")
+            if normalized.casefold() not in _INSPECTION_STOPWORDS:
+                candidates.append(normalized)
+    evidence = list(snapshot.evidence)
+    for token in list(dict.fromkeys(candidates))[:12]:
+        evidence.extend(
+            inspector.search(
+                token,
+                case_sensitive=False,
+                max_results=8,
+            )
+        )
+    evidence = sorted(
+        {item.evidence_id: item for item in evidence}.values(),
+        key=lambda item: (item.path, item.start_line or 0, item.evidence_id),
+    )
+    return InspectionSnapshot(
+        evidence=evidence,
+        skipped_paths=snapshot.skipped_paths,
+        bytes_inspected=snapshot.bytes_inspected,
+        truncated=snapshot.truncated,
+    )
+
+
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
@@ -448,6 +508,8 @@ class AiderEditor:
         prompts: list[dict[str, Any]] = []
         contract_bundle: ContractBundle | None = None
         requirement_ledger: RequirementLedger | None = request.requirement_ledger
+        inspection_snapshot: InspectionSnapshot | None = request.inspection_snapshot
+        dependency_slice: DependencySlice | None = request.dependency_slice
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -457,6 +519,8 @@ class AiderEditor:
                 prompts=prompts,
                 contract_bundle=contract_bundle,
                 requirement_ledger=requirement_ledger,
+                inspection_snapshot=inspection_snapshot,
+                dependency_slice=dependency_slice,
             )
 
         try:
@@ -517,6 +581,10 @@ class AiderEditor:
                     "Every requirement is explicitly blocked or descoped; no pull "
                     "request can be created."
                 )
+
+            inspection_snapshot = _inspection_for_ledger(
+                repo_dir, requirement_ledger
+            )
 
             # 2c. Resolve every explicitly named direct dependency from an
             # isolated frozen install before the model sees an API claim. The
@@ -655,6 +723,12 @@ class AiderEditor:
                 conventions_file = work / "CONVENTIONS.md"
                 conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
                 argv += ["--read", str(conventions_file)]
+            if inspection_snapshot is not None:
+                inspection_file = work / "INSPECTION.md"
+                inspection_file.write_text(
+                    render_inspection_snapshot(inspection_snapshot), encoding="utf-8"
+                )
+                argv += ["--read", str(inspection_file)]
             if contract_bundle and contract_bundle.resolutions:
                 contracts_file = work / "CONTRACTS.md"
                 contracts_file.write_text(
@@ -754,6 +828,8 @@ class AiderEditor:
                         f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}"
                     )
                 _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
+                dependency_slice = build_dependency_slice(repo_dir, changed_paths)
+                dependency_context = render_dependency_slice(dependency_slice)
 
                 # Review the diff against the ORIGINAL spec before pushing: green
                 # builds happily ship a token diff that implements none of the
@@ -771,6 +847,7 @@ class AiderEditor:
                                 spec=request.spec,
                                 diff_text=diff_text,
                                 changed_paths=changed_paths,
+                                evidence_context=dependency_context,
                             ),
                             "notes": None,
                         }
@@ -779,6 +856,7 @@ class AiderEditor:
                         spec=request.spec,
                         diff_text=diff_text,
                         changed_paths=changed_paths,
+                        evidence_context=dependency_context,
                         complete=complete,
                     )
                     if verdict.skipped and fail_closed_auxiliary:
@@ -790,7 +868,8 @@ class AiderEditor:
                         if retries_left > 0:
                             retries_left -= 1
                             message = _with_feedback(
-                                initial_message, _review_retry_message(verdict)
+                                initial_message + "\n\n" + dependency_context,
+                                _review_retry_message(verdict),
                             )
                             logger.info(
                                 "Quality review rejected the change for %s; "
@@ -876,6 +955,8 @@ class AiderEditor:
                 head_sha=head_sha.strip(),
                 contract_bundle=contract_bundle,
                 requirement_ledger=requirement_ledger,
+                inspection_snapshot=inspection_snapshot,
+                dependency_slice=dependency_slice,
             )
         finally:
             if not keep:

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.contracts.models import ContractBundle
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
 
 
@@ -31,6 +32,8 @@ class EditRequest:
     #: Stable requirement contract reused for same-PR CI repairs. Initial runs
     #: omit it and compile one deterministically from the task source.
     requirement_ledger: RequirementLedger | None = None
+    inspection_snapshot: InspectionSnapshot | None = None
+    dependency_slice: DependencySlice | None = None
     constraints: list[str] = field(default_factory=list)
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
@@ -66,6 +69,8 @@ class EditResult:
     #: grounding, never an APDL-local CI result.
     contract_bundle: ContractBundle | None = None
     requirement_ledger: RequirementLedger | None = None
+    inspection_snapshot: InspectionSnapshot | None = None
+    dependency_slice: DependencySlice | None = None
     #: Ordered transcript of the LLM prompts this attempt actually sent — the
     #: brief compilation, each edit instruction handed to the coding agent, and
     #: each pre-push diff review. Entries are

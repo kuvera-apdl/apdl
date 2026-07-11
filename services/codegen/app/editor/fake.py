@@ -45,5 +45,7 @@ class FakeEditor:
                 head_sha=result.head_sha,
                 contract_bundle=result.contract_bundle,
                 requirement_ledger=_ledger(request, result),
+                inspection_snapshot=result.inspection_snapshot,
+                dependency_slice=result.dependency_slice,
             )
         return result

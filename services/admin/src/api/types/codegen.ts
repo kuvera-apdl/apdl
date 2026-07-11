@@ -5,6 +5,8 @@ import type {
   changesetPromptSchema,
   changesetSchema,
   contractBundleSchema,
+  dependencySliceSchema,
+  inspectionSnapshotSchema,
   requirementLedgerSchema,
   repoConnectionCreateSchema,
   repoConnectionSchema,
@@ -16,6 +18,8 @@ export type ChangesetPrompt = z.infer<typeof changesetPromptSchema>
 export type Changeset = z.infer<typeof changesetSchema>
 export type ContractBundle = z.infer<typeof contractBundleSchema>
 export type RequirementLedger = z.infer<typeof requirementLedgerSchema>
+export type InspectionSnapshot = z.infer<typeof inspectionSnapshotSchema>
+export type DependencySlice = z.infer<typeof dependencySliceSchema>
 export type RepoConnection = z.infer<typeof repoConnectionSchema>
 export type RepoConnectionCreate = z.infer<typeof repoConnectionCreateSchema>
 export type AccessibleRepo = z.infer<typeof accessibleRepoSchema>

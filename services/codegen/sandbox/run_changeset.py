@@ -76,6 +76,10 @@ def main() -> int:
         payload["contract_bundle"] = result.contract_bundle.model_dump(mode="json")
     if result.requirement_ledger is not None:
         payload["requirement_ledger"] = result.requirement_ledger.model_dump(mode="json")
+    if result.inspection_snapshot is not None:
+        payload["inspection_snapshot"] = result.inspection_snapshot.model_dump(mode="json")
+    if result.dependency_slice is not None:
+        payload["dependency_slice"] = result.dependency_slice.model_dump(mode="json")
     print(json.dumps(payload))
     return 0
 

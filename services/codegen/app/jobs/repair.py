@@ -79,6 +79,8 @@ async def repair_failed_ci(
                 repo=connection.repo,
                 project_scope=claimed.project_id,
                 requirement_ledger=claimed.requirement_ledger,
+                inspection_snapshot=claimed.inspection_snapshot,
+                dependency_slice=claimed.dependency_slice,
                 base_branch=claimed.base_branch or connection.default_base_branch,
                 branch=claimed.branch,
                 token=token,
@@ -103,6 +105,13 @@ async def repair_failed_ci(
         if result.requirement_ledger is not None:
             await store.set_requirement_ledger(
                 pool, changeset_id, result.requirement_ledger
+            )
+        if result.inspection_snapshot is not None or result.dependency_slice is not None:
+            await store.set_inspection_evidence(
+                pool,
+                changeset_id,
+                snapshot=result.inspection_snapshot,
+                dependency_slice=result.dependency_slice,
             )
         if result.prompts:
             await store.set_prompts(pool, changeset_id, [*claimed.prompts, *result.prompts])

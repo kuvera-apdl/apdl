@@ -12,6 +12,7 @@ import pytest
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements import compile_requirement_ledger
 
 
@@ -118,6 +119,8 @@ def test_parse_result_maps_success_json():
         "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
         "contract_bundle": ContractBundle().model_dump(mode="json"),
         "requirement_ledger": ledger.model_dump(mode="json"),
+        "inspection_snapshot": InspectionSnapshot().model_dump(mode="json"),
+        "dependency_slice": DependencySlice().model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
@@ -126,6 +129,8 @@ def test_parse_result_maps_success_json():
     assert res.prompts[0]["stage"] == "edit"
     assert res.contract_bundle == ContractBundle()
     assert res.requirement_ledger == ledger
+    assert res.inspection_snapshot == InspectionSnapshot()
+    assert res.dependency_slice == DependencySlice()
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():

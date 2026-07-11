@@ -8,6 +8,7 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
 from app.github.pulls import PullRequest
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import ChangesetStatus
 from app.store import changesets as store
@@ -343,3 +344,33 @@ async def test_job_persists_contract_evidence_without_changing_ci_status():
     assert stored.contract_bundle == bundle
     assert stored.status is ChangesetStatus.pr_open
     assert stored.ci_status is None
+
+
+@pytest.mark.asyncio
+async def test_job_persists_repository_inspection_evidence():
+    async def open_pr(**kwargs) -> PullRequest:
+        return PullRequest(url="https://github.com/acme/widgets/pull/11", number=11)
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_inspection")
+    snapshot = InspectionSnapshot()
+    dependency_slice = DependencySlice()
+
+    await run_changeset_job(
+        pool,
+        "cs_inspection",
+        editor=FakeEditor(
+            EditResult(
+                success=True,
+                inspection_snapshot=snapshot,
+                dependency_slice=dependency_slice,
+            )
+        ),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_inspection")
+    assert stored.inspection_snapshot == snapshot
+    assert stored.dependency_slice == dependency_slice

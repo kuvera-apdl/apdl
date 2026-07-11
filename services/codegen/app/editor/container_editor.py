@@ -37,6 +37,7 @@ import os
 from app.config import codegen_job_budget
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,16 @@ class ContainerAiderEditor:
                         json.dumps(data["requirement_ledger"])
                     )
                     if data.get("requirement_ledger") is not None
+                    else None
+                ),
+                inspection_snapshot=(
+                    InspectionSnapshot.model_validate(data["inspection_snapshot"])
+                    if data.get("inspection_snapshot") is not None
+                    else None
+                ),
+                dependency_slice=(
+                    DependencySlice.model_validate(data["dependency_slice"])
+                    if data.get("dependency_slice") is not None
                     else None
                 ),
             )

@@ -381,6 +381,37 @@ export function ChangesetDetailPage() {
         </Card>
       ) : null}
 
+      {cs.dependency_slice ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Repository evidence</CardTitle>
+            <CardDescription>
+              Content-addressed files, callers, routes, and tests connected to the generated diff.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Fact label="Changed files">{cs.dependency_slice.changed_files.length}</Fact>
+            <Fact label="Local dependencies">
+              {cs.dependency_slice.imported_local_symbols.length}
+            </Fact>
+            <Fact label="Callers">{cs.dependency_slice.callers.length}</Fact>
+            <Fact label="Affected tests">{cs.dependency_slice.affected_tests.length}</Fact>
+            {cs.dependency_slice.unresolved_references.length > 0 ? (
+              <div className="sm:col-span-2 lg:col-span-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                  Unresolved references
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.dependency_slice.unresolved_references.map((reference) => (
+                    <li key={reference}>{reference}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
           <Fact label="Base branch">

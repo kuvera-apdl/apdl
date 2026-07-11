@@ -14,6 +14,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.models import ContractBundle
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
 
 
@@ -232,6 +233,8 @@ class Changeset(BaseModel):
     prompts: list[dict[str, Any]] = Field(default_factory=list)
     contract_bundle: ContractBundle | None = None
     requirement_ledger: RequirementLedger | None = None
+    inspection_snapshot: InspectionSnapshot | None = None
+    dependency_slice: DependencySlice | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime
