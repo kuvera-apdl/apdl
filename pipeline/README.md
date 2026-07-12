@@ -22,20 +22,32 @@ stream — discovered via `SCAN`, or pinned with `PROJECT_IDS` — using the
 `clickhouse-writer` consumer group (consumer name `worker-{pid}`) and
 batch-inserts into the `events` table.
 
-- **Batching:** flushes at 1000 buffered events (`BUFFER_SIZE`) or every
-  5 seconds (`FLUSH_INTERVAL`), whichever comes first.
+- **Batching:** rotates fairly across streams and reads one tenant at a time so
+  Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
+  buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
+  (`FLUSH_INTERVAL`), whichever comes first.
 - **Delivery:** at-least-once. Consumer groups start at `$` (no historical
   replay); on startup the writer drains the Pending Entries List from any
-  previous crash before reading new messages. Messages are XACKed after
-  parsing/buffering (malformed messages are logged, ACKed, and skipped).
-- **Retries:** a failed ClickHouse flush puts the batch back in the buffer;
-  after 5 consecutive failures (`MAX_FLUSH_RETRIES`) the batch is dropped to
-  bound memory. Redis connection errors back off 5s and retry.
+  previous crash before reading new messages. Messages are XACKed only after
+  ClickHouse accepts their rows. A crash between insert and ACK may replay a
+  row; the legacy table does not provide exactly-once storage semantics.
+- **Validation and DLQ:** canonical ClickHouse row types are validated before
+  buffering. Terminal parse/row rejects write safe metadata (never the event
+  payload) to the bounded `events:dlq:{project_id}` Redis stream. The source is
+  XACKed only after DLQ persistence; a DLQ failure leaves it in the PEL for
+  later retry. A terminal row cannot hold valid rows or other tenants behind
+  it.
+- **Retries:** a failed ClickHouse flush remains buffered and stops further
+  reads once the bounded buffer is full. Retries use capped exponential
+  backoff shared by the consumer and periodic flusher; events are not dropped
+  after an arbitrary retry count. Only narrow client-side row serialization
+  errors are terminal—server/schema failures retain the batch.
 - **Shutdown:** SIGINT/SIGTERM trigger a final flush and stats log.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
 `CLICKHOUSE_URL` (default `clickhouse://localhost:9000/apdl`), `BUFFER_SIZE`,
-`FLUSH_INTERVAL`, `PROJECT_IDS` (optional comma-separated allowlist).
+`FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project), and `PROJECT_IDS`
+(optional comma-separated allowlist).
 
 ## ClickHouse schema
 
@@ -89,9 +101,8 @@ make run-pipeline        # start the ClickHouse writer
 ## Tests
 
 ```bash
+make test-writer # pytest for the Redis ClickHouse writer
+make lint-writer # ruff for the writer and its tests
 make test-etl   # pytest for the ETL framework (pipeline/etl/tests/)
 make lint-etl   # ruff for etl/, scripts/, tests/
 ```
-
-The Redis ClickHouse writer currently has no test suite; it is exercised via
-the local stack above.
