@@ -27,8 +27,8 @@ batch-inserts into the `events` table.
   buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
   (`FLUSH_INTERVAL`), whichever comes first.
 - **Delivery:** at-least-once. Consumer groups start at `$` (no historical
-  replay); on startup the writer drains the Pending Entries List from any
-  previous crash before reading new messages. Messages are XACKed only after
+  replay); the writer periodically uses `XAUTOCLAIM` to take over stale Pending
+  Entries List deliveries from prior consumers. Messages are XACKed only after
   ClickHouse accepts their rows. A crash between insert and ACK may replay a
   row; the legacy table does not provide exactly-once storage semantics.
 - **Validation and DLQ:** canonical ClickHouse row types are validated before
@@ -46,8 +46,10 @@ batch-inserts into the `events` table.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
 `CLICKHOUSE_URL` (default `clickhouse://localhost:9000/apdl`), `BUFFER_SIZE`,
-`FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project), and `PROJECT_IDS`
-(optional comma-separated allowlist).
+`FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),
+`PENDING_CLAIM_IDLE_MS` (default 60000),
+`PENDING_CLAIM_INTERVAL_SECONDS` (default 30), and `PROJECT_IDS` (optional
+comma-separated allowlist).
 
 ## ClickHouse schema
 

@@ -171,6 +171,52 @@ def test_durable_rows_are_not_reinserted_when_redis_ack_retries(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_reclaims_and_flushes_stale_messages_from_prior_consumers(monkeypatch):
+    async def scenario():
+        redis_client = FakeRedis()
+        redis_client.claim_responses = [["0-0", stream_message()[1], []]]
+        writer, _, ch_client = make_writer(monkeypatch, redis_client=redis_client)
+        writer.running = True
+
+        await writer._process_pending(["demo"])
+
+        assert len(ch_client.inserts) == 1
+        assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("1-0",))]
+        assert redis_client.claim_calls == [
+            {
+                "name": "events:raw:demo",
+                "groupname": "clickhouse-writer",
+                "consumername": writer.consumer_name,
+                "min_idle_time": 60_000,
+                "start_id": "0-0",
+                "count": 10,
+            }
+        ]
+        assert redis_client.read_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_claim_cursor_scans_past_ineligible_pending_entries(monkeypatch):
+    async def scenario():
+        redis_client = FakeRedis()
+        redis_client.claim_responses = [
+            ["5-0", [], []],
+            ["0-0", [], []],
+        ]
+        writer, _, _ = make_writer(monkeypatch, redis_client=redis_client)
+        writer.running = True
+
+        await writer._process_pending(["demo"])
+
+        assert [call["start_id"] for call in redis_client.claim_calls] == [
+            "0-0",
+            "5-0",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_type_only_nullable_legacy_event_projects_to_canonical_row(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 
@@ -360,7 +406,7 @@ def test_multistream_overdelivery_never_exceeds_global_buffer(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_new_and_current_pending_streams_rotate_with_remaining_capacity(monkeypatch):
+def test_new_and_pending_streams_rotate_with_remaining_capacity(monkeypatch):
     async def scenario():
         writer, redis_client, _ = make_writer(monkeypatch, buffer_size=2)
         keys = ["events:raw:zeta", "events:raw:alpha"]
@@ -374,13 +420,13 @@ def test_new_and_current_pending_streams_rotate_with_remaining_capacity(monkeypa
         await writer._process_pending(["zeta", "alpha"])
         await writer._process_pending(["zeta", "alpha"])
 
-        assert [call["streams"] for call in redis_client.read_args] == [
-            {"events:raw:alpha": "0"},
-            {"events:raw:zeta": "0"},
-            {"events:raw:zeta": "0"},
-            {"events:raw:alpha": "0"},
+        assert [call["name"] for call in redis_client.claim_calls] == [
+            "events:raw:alpha",
+            "events:raw:zeta",
+            "events:raw:zeta",
+            "events:raw:alpha",
         ]
-        assert {call["count"] for call in redis_client.read_args} == {1}
+        assert {call["count"] for call in redis_client.claim_calls} == {1}
 
     asyncio.run(scenario())
 

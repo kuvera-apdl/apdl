@@ -36,6 +36,8 @@ DEFAULT_DLQ_MAXLEN = 10_000
 FLUSH_RETRY_BASE_SECONDS = 1.0
 FLUSH_RETRY_MAX_SECONDS = 30.0
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
+PENDING_CLAIM_IDLE_MS = 60_000
+PENDING_CLAIM_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,8 @@ class ClickHouseWriter:
         buffer_size: int = 1000,
         flush_interval: float = 5.0,
         dlq_maxlen: int = DEFAULT_DLQ_MAXLEN,
+        pending_claim_idle_ms: int = PENDING_CLAIM_IDLE_MS,
+        pending_claim_interval: float = PENDING_CLAIM_INTERVAL_SECONDS,
     ):
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive")
@@ -78,8 +82,11 @@ class ClickHouseWriter:
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval
         self.dlq_maxlen = dlq_maxlen
+        self.pending_claim_idle_ms = pending_claim_idle_ms
+        self.pending_claim_interval = pending_claim_interval
         self.running = False
         self.last_flush = time.monotonic()
+        self._last_pending_claim = 0.0
         self.consumer_name = f"worker-{os.getpid()}"
         self.stats = {
             "consumed": 0,
@@ -192,6 +199,14 @@ class ClickHouseWriter:
                     await self._flush_after_retry_deadline()
                     continue
 
+                if (
+                    time.monotonic() - self._last_pending_claim
+                    >= self.pending_claim_interval
+                ):
+                    await self._process_pending(project_ids)
+                    if self._delivery_is_backpressured():
+                        continue
+
                 stream_keys = await self._get_stream_keys(project_ids)
                 if not stream_keys:
                     # No streams found yet, wait and retry
@@ -232,8 +247,10 @@ class ClickHouseWriter:
     async def _process_pending(self, project_ids: list[str] | None):
         """Process any pending messages left from a previous crash.
 
-        This initial implementation drains deliveries already owned by the
-        current consumer. Cross-consumer reclaim is added by APDL-AUD-069.
+        When a consumer crashes after XREADGROUP but before XACK, messages
+        remain owned by its consumer name in the Pending Entries List (PEL).
+        XAUTOCLAIM transfers deliveries that have exceeded the idle threshold
+        to this consumer so they can be inserted and ACKed.
         """
         logger.info("Checking for pending messages")
         stream_keys = await self._get_stream_keys(project_ids)
@@ -243,33 +260,43 @@ class ClickHouseWriter:
                 if not await self._flush_after_retry_deadline():
                     return
 
+            start_id = "0-0"
             while self.running:
                 try:
                     remaining = self._remaining_capacity()
                     if remaining <= 0:
                         return
-                    results = await self.redis_client.xreadgroup(
+                    claimed = await self.redis_client.xautoclaim(
+                        name=stream_key,
                         groupname=CONSUMER_GROUP,
                         consumername=self.consumer_name,
-                        streams={stream_key: "0"},
+                        min_idle_time=self.pending_claim_idle_ms,
+                        start_id=start_id,
                         count=remaining,
                     )
-                    if not results or not any(messages for _, messages in results):
+                    next_start_id, messages = self._claimed_messages(claimed)
+                    if not messages and next_start_id in {"0-0", start_id}:
                         break
-                    buffered = await self._process_messages(results)
-                    if buffered:
-                        if not self._flush_retry_is_due():
-                            return
-                        if not await self._flush():
-                            return
-                    logger.info(
-                        "Processed %d pending messages from '%s'",
-                        buffered,
-                        stream_key,
-                    )
-                    # One page per stream per sweep prevents a busy tenant's
-                    # PEL from starving every later tenant.
-                    break
+                    if messages:
+                        buffered = await self._process_messages(
+                            [(stream_key, messages)]
+                        )
+                        if buffered:
+                            if not self._flush_retry_is_due():
+                                return
+                            if not await self._flush():
+                                return
+                        logger.info(
+                            "Processed %d stale pending messages from '%s'",
+                            buffered,
+                            stream_key,
+                        )
+                        # One claimed page per stream per sweep prevents a busy
+                        # tenant's PEL from starving every later tenant.
+                        break
+                    if next_start_id == "0-0":
+                        break
+                    start_id = next_start_id
                 except Exception as e:
                     logger.error(
                         "Error processing pending from '%s': %s",
@@ -277,6 +304,14 @@ class ClickHouseWriter:
                         e,
                     )
                     break
+        self._last_pending_claim = time.monotonic()
+
+    @staticmethod
+    def _claimed_messages(claimed) -> tuple[str, list[tuple[str, dict]]]:
+        """Normalize Redis 6.2/7 XAUTOCLAIM response variants."""
+        if not claimed or len(claimed) < 2:
+            return "0-0", []
+        return str(claimed[0]), list(claimed[1])
 
     def _rotated_stream_keys(
         self, stream_keys: list[str], *, pending: bool
@@ -766,6 +801,15 @@ async def main():
     buffer_size = int(os.environ.get("BUFFER_SIZE", "1000"))
     flush_interval = float(os.environ.get("FLUSH_INTERVAL", "5.0"))
     dlq_maxlen = int(os.environ.get("DLQ_MAXLEN", str(DEFAULT_DLQ_MAXLEN)))
+    pending_claim_idle_ms = int(
+        os.environ.get("PENDING_CLAIM_IDLE_MS", str(PENDING_CLAIM_IDLE_MS))
+    )
+    pending_claim_interval = float(
+        os.environ.get(
+            "PENDING_CLAIM_INTERVAL_SECONDS",
+            str(PENDING_CLAIM_INTERVAL_SECONDS),
+        )
+    )
 
     # Optional: comma-separated list of project IDs to consume
     project_ids_env = os.environ.get("PROJECT_IDS", "")
@@ -781,6 +825,8 @@ async def main():
         buffer_size=buffer_size,
         flush_interval=flush_interval,
         dlq_maxlen=dlq_maxlen,
+        pending_claim_idle_ms=pending_claim_idle_ms,
+        pending_claim_interval=pending_claim_interval,
     )
 
     loop = asyncio.get_event_loop()
