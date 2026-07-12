@@ -25,7 +25,7 @@ export const authIdentitySchema = z
   .object({
     user_id: z.string().uuid(),
     email: z.string().email(),
-    projects: z.array(projectAccessSchema).min(1),
+    projects: z.array(projectAccessSchema),
   })
   .strict()
 
@@ -35,6 +35,15 @@ const authConnection = { baseUrl: '', actor: '' }
 
 export function loginAdmin(email: string, password: string): Promise<AuthIdentity> {
   return request(authConnection, '/api/auth/login', {
+    method: 'POST',
+    body: { email, password },
+    schema: authIdentitySchema,
+    redirectOnUnauthorized: false,
+  })
+}
+
+export function registerAdmin(email: string, password: string): Promise<AuthIdentity> {
+  return request(authConnection, '/api/auth/register', {
     method: 'POST',
     body: { email, password },
     schema: authIdentitySchema,

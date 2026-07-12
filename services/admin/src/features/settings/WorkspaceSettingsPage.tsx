@@ -31,6 +31,18 @@ export function WorkspaceSettingsPage() {
         </CardHeader>
       </Card>
 
+      {identity?.projects.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>No project access yet</CardTitle>
+            <CardDescription>
+              This account is registered but has not been assigned to a project. An operator must
+              grant project roles before service data becomes available.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2">
         {identity?.projects.map((project) => (
           <Card key={project.project_id} className={active?.id === project.project_id ? 'border-primary' : undefined}>

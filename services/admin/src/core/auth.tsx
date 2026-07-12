@@ -13,6 +13,7 @@ import {
   getAdminSession,
   loginAdmin,
   logoutAdmin,
+  registerAdmin,
   type AuthIdentity,
 } from '@/api/auth'
 import { ApiError } from '@/api/http'
@@ -26,6 +27,7 @@ interface AuthContextValue {
   identity: AuthIdentity | null
   logoutReason: LogoutReason
   login: (email: string, password: string) => Promise<void>
+  register: (email: string, password: string) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -87,6 +89,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logoutReason,
       login: async (email, password) => {
         const next = await loginAdmin(email, password)
+        queryClient.clear()
+        setIdentity(next)
+        setLogoutReason(null)
+      },
+      register: async (email, password) => {
+        const next = await registerAdmin(email, password)
         queryClient.clear()
         setIdentity(next)
         setLogoutReason(null)
