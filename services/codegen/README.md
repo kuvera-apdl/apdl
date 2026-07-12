@@ -93,6 +93,9 @@ CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
 CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only operator JSON bundle for PR stages
+CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
+CODEGEN_SANDBOX_NETWORK=           # required named filtered network for PR stages
+CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
                                    #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
@@ -219,30 +222,37 @@ To exercise the real editor locally, install the agent extra so `aider` is on
 
 The editor sits behind the `Editor` interface; *how/where* it runs is config:
 
-- **In-process (default)** — `AiderEditor` runs `git`/`aider`/tests as
-  subprocesses in the codegen process, in a throwaway workdir. Simplest, but it
-  **executes untrusted repo code in the codegen container** — use it only for
-  trusted repos / local dev.
-- **Sandboxed container (`CODEGEN_SANDBOX=docker`)** — `ContainerAiderEditor`
+- **Sandboxed container (`CODEGEN_SANDBOX=docker`, the default)** —
+  `ContainerAiderEditor`
   runs each changeset in an ephemeral container from `Dockerfile.worker`
-  (`--rm`, `--cap-drop ALL`, `no-new-privileges`, pid/memory/cpu caps, non-root),
+  (read-only root, no-exec tmpfs workspaces, `--cap-drop ALL`,
+  `no-new-privileges`, pid/memory/cpu caps, non-root),
   reusing the same `AiderEditor` inside it. Untrusted code never touches the API
   container's secrets; the sandbox only gets the short-lived install token (which
-  the runner drops from the env before aider/tests run) and the model key.
+  the runner drops from the env before Aider starts) and the model key. Aider is
+  pinned, receives service-owned empty config/env files, and cannot auto-run
+  repository lint, test, shell-suggestion, hook, URL, or browser commands.
+- **Trusted local in-process (`CODEGEN_SANDBOX=in-process`)** — available only
+  with `CODEGEN_TRUSTED_REPOS_ONLY=true` while the rollout is `offline` or
+  `shadow`. The service refuses this mode for either PR publication stage.
 
 Enable the sandbox:
 
 ```bash
 make build-codegen-sandbox        # build apdl-codegen-sandbox:latest
 export CODEGEN_SANDBOX=docker
+export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
 # If codegen itself runs in a container, mount /var/run/docker.sock (see compose)
 # so it can launch the sandbox (Docker-out-of-Docker); on a Docker host it just works.
 ```
 
-Remaining deploy-time hardening: an egress allowlist (GitHub + registries only;
-block the internal CIDR + `169.254.169.254`) via `CODEGEN_SANDBOX_NETWORK`, and a
-read-only rootfs. Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
-`CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`.
+PR stages fail startup unless `CODEGEN_SANDBOX_NETWORK` is a non-default named
+network. The operator must enforce its egress policy: allow only the required
+GitHub/model endpoints and block APDL/private CIDRs plus `169.254.169.254`.
+Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
+`CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`. Mounting a
+Docker socket still grants the API process host-level Docker authority; deploy
+the API and worker launcher on a dedicated host or use a remote worker boundary.
 
 ## Going live (end-to-end)
 

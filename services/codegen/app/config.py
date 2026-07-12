@@ -202,6 +202,29 @@ def codegen_isolated_worker() -> bool:
     return os.getenv("APDL_CODEGEN_ISOLATED_WORKER") == "true"
 
 
+def codegen_sandbox_mode() -> str:
+    """Editor isolation mode.
+
+    Docker is the fail-closed default. The in-process editor exists only for
+    explicitly trusted local repositories and is never valid for a PR rollout
+    stage.
+    """
+    mode = os.getenv("CODEGEN_SANDBOX", "docker").strip().lower() or "docker"
+    if mode not in {"docker", "in-process"}:
+        raise ValueError("CODEGEN_SANDBOX must be 'docker' or 'in-process'")
+    return mode
+
+
+def codegen_sandbox_network() -> str:
+    """Named, operator-managed network used by the isolated worker."""
+    return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
+
+
+def codegen_trusted_repos_only() -> bool:
+    """Explicit acknowledgement required for trusted local in-process edits."""
+    return os.getenv("CODEGEN_TRUSTED_REPOS_ONLY", "").strip().lower() == "true"
+
+
 def codegen_helper_model() -> str:
     """LiteLLM model id for the auxiliary calls (brief compile + diff review).
 

@@ -4,16 +4,16 @@ This is how the editor runs under ``CODEGEN_SANDBOX=docker`` (decision D4 /
 Option B). The orchestrator (``app.editor.container_editor.ContainerAiderEditor``)
 launches one ephemeral container per changeset from the hardened sandbox image
 and this script runs *inside* it. It reuses the very same ``AiderEditor`` used by
-the in-process path — clone → aider → verify → push — so the edit logic lives in
+the in-process path — clone → Aider → gate → push — so the edit logic lives in
 exactly one place; the only difference is *where* it runs.
 
 Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
-on **stdout** and send everything else (logs, aider/test output) to **stderr**,
+on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
 Token custody: the short-lived install token arrives as ``GH_TOKEN``. We read it
 into the in-memory request and immediately drop it from ``os.environ`` so it is
-not visible to the (untrusted) aider/test child processes — not even via
+not visible to the Aider child process — not even via
 ``/proc/<pid>/environ``. ``AiderEditor`` then uses it only for the one-shot
 clone/push git header. The model provider key necessarily stays in the
 environment (aider needs it); the sandbox never receives the GitHub App private

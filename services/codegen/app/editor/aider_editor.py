@@ -7,12 +7,11 @@ local, …) chosen via ``CODEGEN_MODEL``, edits inside a clone, and iterates on 
 failures reported by GitHub CI. The model is now a config choice, not a vendor
 lock-in.
 
-Execution model (v1): a subprocess in a constrained, throwaway workdir on the
-codegen host. The hardened container image (``Dockerfile.worker``) is the deploy
-substrate to graduate to — running each changeset inside its own container is the
-documented next step. This real path is INTEGRATION-UNTESTED here (it needs
-``aider`` on PATH, a model key, and a live repo) — the tested execution path runs
-through ``FakeEditor``.
+Execution model: the API defaults to a hardened, per-change container from
+``Dockerfile.worker``. An in-process subprocess is available only for explicitly
+trusted local repositories while publication is disabled. The real isolated path
+still needs integration evidence with a model key and disposable live repository;
+the deterministic boundary and argv/env construction are unit-tested.
 
 Token custody (entirely ours now — there is no Anthropic git proxy): the GitHub
 installation token is used only by the orchestrator for clone/push, injected into
@@ -20,9 +19,10 @@ git as a one-shot ``http.extraHeader`` via ``GIT_CONFIG_*`` environment variable
 Going through the env (not ``-c`` on the command line) keeps the header — and the
 reversible base64 token inside it — off git's argv, so it can't leak through
 ``ps`` / ``/proc/<pid>/cmdline``; it is likewise never written to ``.git/config``.
-It is never handed to the agent/test subprocesses either: the agent runs with a
-minimal env — PATH/HOME plus LLM provider keys only — never the GitHub token or
-APDL secrets.
+It is never handed to Aider: that process runs with an isolated home, empty
+service-owned configuration, and only the required model-provider credentials —
+never the GitHub token or APDL service secrets. Repository-defined commands are
+disabled; GitHub CI is the execution authority.
 """
 
 from __future__ import annotations
@@ -161,15 +161,13 @@ def _tail(text: str, limit: int = _ERR_TAIL) -> str:
     return f"[…truncated {dropped} leading chars of {len(text)}…]\n{clipped}"
 
 
-# Env vars forwarded to the agent + test subprocesses. LLM access only: the
+# Env vars forwarded to the agent subprocess. LLM access only: the
 # GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
 # APDL_INTERNAL_TOKEN, POSTGRES_URL, …) are deliberately NOT in this allowlist.
 _ENV_PASSTHROUGH: tuple[str, ...] = (
     "PATH",
-    "HOME",
     "LANG",
     "LC_ALL",
-    "TMPDIR",
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
     "OPENAI_BASE_URL",
@@ -199,10 +197,19 @@ def _basic_auth_header(token: str) -> str:
     return f"AUTHORIZATION: basic {raw}"
 
 
-def _agent_env() -> dict[str, str]:
-    """Minimal environment for the agent subprocess — LLM keys only."""
+def _agent_env(home: Path) -> dict[str, str]:
+    """Minimal agent environment with an isolated home and no repo configuration."""
+    home.mkdir(parents=True, exist_ok=True)
+    tmp = home / "tmp"
+    tmp.mkdir(exist_ok=True)
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
     env.setdefault("PATH", os.defpath)
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(tmp)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["AIDER_CONFIG_FILE"] = os.devnull
+    env["AIDER_ENV_FILE"] = os.devnull
     env["AIDER_ANALYTICS"] = "false"  # headless: no phone-home / update prompts
     env["AIDER_CHECK_UPDATE"] = "false"
     return env
@@ -869,8 +876,19 @@ class AiderEditor:
             settings_file.write_text(
                 _model_settings_yaml(self._model), encoding="utf-8"
             )
+            # A connected repository is untrusted input. Pin Aider to empty,
+            # service-owned config/env files outside the clone and explicitly
+            # disable every facility that can run repository-provided commands.
+            aider_config = work / "aider.conf.yml"
+            aider_config.write_text("{}\n", encoding="utf-8")
+            aider_env = work / "aider.env"
+            aider_env.write_text("", encoding="utf-8")
             argv = [
                 self._aider_bin,
+                "--config",
+                str(aider_config),
+                "--env-file",
+                str(aider_env),
                 "--model",
                 self._model,
                 "--model-settings-file",
@@ -878,6 +896,17 @@ class AiderEditor:
                 "--yes-always",
                 "--no-stream",
                 "--no-pretty",
+                "--no-auto-lint",
+                "--no-auto-test",
+                "--no-suggest-shell-commands",
+                "--no-git-commit-verify",
+                "--no-detect-urls",
+                "--disable-playwright",
+                "--no-notifications",
+                "--no-watch-files",
+                "--no-restore-chat-history",
+                "--no-analytics",
+                "--no-check-update",
             ]
             if self._conventions:
                 # Standing house rules as a read-only context file (kept outside
@@ -988,7 +1017,7 @@ class AiderEditor:
                     rc, out = await self._exec(
                         [*argv, "--message", message],
                         cwd=repo_dir,
-                        env=_agent_env(),
+                        env=_agent_env(work / "agent-home"),
                         timeout=self._agent_timeout,
                     )
                     if rc != 0:

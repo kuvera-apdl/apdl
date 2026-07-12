@@ -1,30 +1,29 @@
 """Sandboxed editor (decision D4 / Option B) — run the edit in a throwaway container.
 
-Where :class:`~app.editor.aider_editor.AiderEditor` runs aider + the repo's tests
-as subprocesses *inside the codegen API process*, ``ContainerAiderEditor``
+Where :class:`~app.editor.aider_editor.AiderEditor` runs Aider inside the
+codegen API process, ``ContainerAiderEditor``
 launches an ephemeral container from the hardened sandbox image
-(``Dockerfile.worker``) and runs the whole clone → aider → test → push there —
+(``Dockerfile.worker``) and runs the whole clone → Aider → gate → push there —
 one container per changeset. The untrusted repo code therefore never executes in
 the API container that holds the GitHub App key, the Postgres DSN, and the
 internal token. The sandbox receives only the short-lived installation token
 (kept out of the agent's reach by the reused ``AiderEditor`` token custody) and
 the model provider key.
 
-Selected when ``CODEGEN_SANDBOX=docker`` (see ``app.main``); otherwise the
-in-process ``AiderEditor`` is used. It shells out to ``docker run``, so the
-codegen process needs a Docker client + socket (run codegen on a Docker host, or
-mount the socket for Docker-out-of-Docker).
+Selected by default with ``CODEGEN_SANDBOX=docker`` (see ``app.main``). The
+trusted local in-process mode requires an explicit opt-in. It shells out to
+``docker run``, so the codegen process needs a Docker client + socket (run
+codegen on a Docker host, or mount the socket for Docker-out-of-Docker).
 
 INTEGRATION-UNTESTED, like the editor it wraps: needs a built sandbox image, a
 Docker socket, a model key, and a live repo. The pure pieces (argv/env assembly,
 result parsing, the never-raise contract) are unit-tested.
 
-Hardening applied here via ``docker run`` flags: ``--rm``, ``--cap-drop ALL``,
-``--security-opt no-new-privileges``, and pids/memory/cpu caps; the image runs
-non-root. Egress allowlisting (GitHub + registries only; block the internal CIDR
-and the cloud metadata IP) needs a network policy beyond ``docker run`` and
-remains a deploy-time TODO — set ``CODEGEN_SANDBOX_NETWORK`` to a locked-down
-docker network when you have one.
+Hardening applied here via ``docker run`` flags: ``--rm``, a read-only root,
+writable no-exec tmpfs mounts, ``--cap-drop ALL``, ``--security-opt
+no-new-privileges``, and pids/memory/cpu caps; the image runs non-root. PR
+rollout stages additionally require an operator-managed network instead of a
+Docker default network.
 """
 
 from __future__ import annotations
@@ -133,11 +132,15 @@ class ContainerAiderEditor:
         """Assemble the ``docker run`` command. Secrets are passed by name only."""
         argv = [
             self._docker, "run", "--rm",
+            "--read-only",
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--pids-limit", str(self._pids),
             "--memory", str(self._memory),
             "--cpus", str(self._cpus),
+            "--tmpfs", "/workspace:rw,nosuid,nodev,noexec,size=4g,uid=1000,gid=1000",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
+            "--user", "1000:1000",
         ]
         if self._network:
             argv += ["--network", self._network]
@@ -152,6 +155,8 @@ class ContainerAiderEditor:
             "-e", f"CS_RISK_LEVEL={request.risk_level}",
             "-e", f"CS_CONSTRAINTS={json.dumps(request.constraints)}",
             "-e", f"CODEGEN_MODEL={self._model}",
+            "-e", "HOME=/workspace/home",
+            "-e", "TMPDIR=/workspace/tmp",
         ]
         if request.test_cmd:
             argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]

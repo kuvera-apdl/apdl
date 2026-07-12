@@ -34,5 +34,5 @@ dev = [
 # it is only needed where the real editor runs (the codegen host or the sandbox
 # image), not for the FakeEditor-backed tests. Pulls in LiteLLM for any model.
 agent = [
-    "aider-chat>=0.50",
+    "aider-chat==0.86.2",
 ]

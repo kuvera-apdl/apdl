@@ -39,6 +39,9 @@ def test_docker_argv_has_hardening_and_image_last():
     assert argv[:3] == ["docker", "run", "--rm"]
     assert "--cap-drop" in argv and "ALL" in argv
     assert "no-new-privileges" in argv
+    assert "--read-only" in argv
+    assert argv.count("--tmpfs") == 2
+    assert "--user" in argv and "1000:1000" in argv
     assert "--pids-limit" in argv and "--memory" in argv and "--cpus" in argv
     assert argv[-1] == "apdl-sandbox:test"  # image is the final arg
 
@@ -50,6 +53,7 @@ def test_docker_argv_passes_nonsecret_inputs_as_values():
     assert "CS_BRANCH=apdl/x" in argv
     assert "CS_TEST_CMD=python -m pytest -q" in argv
     assert 'CS_CONSTRAINTS=["keep tests green"]' in argv
+    assert "HOME=/workspace/home" in argv
 
 
 def test_docker_argv_omits_test_cmd_when_unset():

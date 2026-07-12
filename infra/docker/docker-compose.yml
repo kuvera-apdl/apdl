@@ -196,11 +196,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      # Editor execution model: unset = in-process subprocess (default); "docker"
-      # = isolated sandbox container per changeset (Option B). Needs the sandbox
-      # image (`make build-codegen-sandbox`) + the Docker socket mounted below.
-      CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-}
+      # The isolated worker is the fail-closed default. PR rollout stages also
+      # require an explicitly named, egress-filtered sandbox network.
+      CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-docker}
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
+      CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:-}
+      CODEGEN_TRUSTED_REPOS_ONLY: ${CODEGEN_TRUSTED_REPOS_ONLY:-false}
       # Max changeset jobs to run at once. Each runs a coding agent + the repo's
       # build/test (CPU/memory heavy), so the default serializes (1); raise only
       # on a host with cores to spare. Excess jobs wait in `queued`.

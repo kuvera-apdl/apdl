@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -30,7 +29,10 @@ from app.config import (
     codegen_revision,
     codegen_rollout_authorization_path,
     codegen_rollout_stage,
+    codegen_sandbox_mode,
+    codegen_sandbox_network,
     codegen_stale_sweep_interval,
+    codegen_trusted_repos_only,
     postgres_url,
 )
 from app.db import assert_schema_ready
@@ -69,16 +71,35 @@ async def _mint_token(installation_id: int, repo: str) -> str:
     return token.token
 
 
-def _make_editor() -> Editor:
+def _make_editor(stage: RolloutStage | None = None) -> Editor:
     """Pick the editor execution model from ``CODEGEN_SANDBOX``.
 
-    ``docker`` runs each changeset in an isolated, ephemeral sandbox container
-    (Option B); anything else uses the in-process subprocess editor (default).
+    The isolated Docker worker is the default. In-process execution is available
+    only for explicitly trusted local repositories while publication is disabled.
     """
-    if os.getenv("CODEGEN_SANDBOX", "").strip().lower() == "docker":
+    resolved_stage = stage or codegen_rollout_stage()
+    mode = codegen_sandbox_mode()
+    publication_stage = resolved_stage in {
+        RolloutStage.reviewed_pr,
+        RolloutStage.low_risk_canary,
+    }
+    if mode == "docker":
+        network = codegen_sandbox_network()
+        if publication_stage and network in {"", "bridge", "default", "host"}:
+            raise RuntimeError(
+                "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
+                "operator-managed egress-filtered network"
+            )
         logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
         return ContainerAiderEditor()
-    logger.info("Codegen editor: in-process subprocess execution")
+    if publication_stage:
+        raise RuntimeError("PR rollout stages require CODEGEN_SANDBOX=docker")
+    if not codegen_trusted_repos_only():
+        raise RuntimeError(
+            "In-process codegen requires CODEGEN_TRUSTED_REPOS_ONLY=true and is "
+            "limited to offline/shadow development"
+        )
+    logger.warning("Codegen editor: trusted-repository in-process development mode")
     return AiderEditor()
 
 
@@ -140,7 +161,7 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
-    editor = _make_editor()
+    editor = _make_editor(publication_gate.stage)
     repair_jobs: set[asyncio.Task] = set()
 
     def _repair_finished(task: asyncio.Task) -> None:

@@ -11,7 +11,9 @@ import pytest
 
 from app import config
 from app.evaluations.models import RolloutStage
-from app.main import _make_publication_gate
+from app.editor.aider_editor import AiderEditor
+from app.editor.container_editor import ContainerAiderEditor
+from app.main import _make_editor, _make_publication_gate
 
 _PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVQIBADAN\n-----END RSA PRIVATE KEY-----\n"
 
@@ -174,3 +176,34 @@ def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
     gate = _make_publication_gate()
     assert gate.stage is RolloutStage.offline
     assert gate.provider is None
+
+
+def test_editor_defaults_to_isolated_container(monkeypatch):
+    monkeypatch.delenv("CODEGEN_SANDBOX", raising=False)
+    editor = _make_editor(RolloutStage.offline)
+    assert isinstance(editor, ContainerAiderEditor)
+
+
+def test_pr_stage_requires_named_filtered_sandbox_network(monkeypatch):
+    monkeypatch.setenv("CODEGEN_SANDBOX", "docker")
+    for network in ("", "bridge", "default", "host"):
+        monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
+        with pytest.raises(RuntimeError, match="SANDBOX_NETWORK"):
+            _make_editor(RolloutStage.reviewed_pr)
+
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress-filtered")
+    assert isinstance(
+        _make_editor(RolloutStage.reviewed_pr), ContainerAiderEditor
+    )
+
+
+def test_in_process_editor_is_explicit_trusted_dev_only(monkeypatch):
+    monkeypatch.setenv("CODEGEN_SANDBOX", "in-process")
+    monkeypatch.delenv("CODEGEN_TRUSTED_REPOS_ONLY", raising=False)
+    with pytest.raises(RuntimeError, match="TRUSTED_REPOS_ONLY"):
+        _make_editor(RolloutStage.offline)
+
+    monkeypatch.setenv("CODEGEN_TRUSTED_REPOS_ONLY", "true")
+    assert isinstance(_make_editor(RolloutStage.shadow), AiderEditor)
+    with pytest.raises(RuntimeError, match="require CODEGEN_SANDBOX=docker"):
+        _make_editor(RolloutStage.low_risk_canary)

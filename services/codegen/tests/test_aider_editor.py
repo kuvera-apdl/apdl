@@ -127,20 +127,52 @@ def test_basic_auth_header_encodes_x_access_token():
     assert base64.b64decode(encoded).decode() == "x-access-token:ghs_tok"
 
 
-def test_agent_env_forwards_llm_keys_but_not_github_or_apdl_secrets(monkeypatch):
+def test_agent_env_forwards_llm_keys_but_not_github_or_apdl_secrets(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xyz")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xyz")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     monkeypatch.setenv("POSTGRES_URL", "postgresql://nope")
 
-    env = _agent_env()
+    env = _agent_env(tmp_path / "agent-home")
 
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-xyz"
     assert env["OPENAI_API_KEY"] == "sk-openai-xyz"
     assert "GITHUB_APP_PRIVATE_KEY" not in env
     assert "APDL_INTERNAL_TOKEN" not in env
     assert "POSTGRES_URL" not in env
+    assert env["HOME"] == str(tmp_path / "agent-home")
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert env["AIDER_CONFIG_FILE"] == "/dev/null"
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_disables_repository_command_and_config_loading(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEGEN_KEEP_WORKDIR", "true")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+
+    for flag in (
+        "--no-auto-lint",
+        "--no-auto-test",
+        "--no-suggest-shell-commands",
+        "--no-git-commit-verify",
+        "--no-detect-urls",
+        "--disable-playwright",
+        "--no-analytics",
+        "--no-check-update",
+    ):
+        assert flag in argv
+    config_path = Path(argv[argv.index("--config") + 1])
+    env_path = Path(argv[argv.index("--env-file") + 1])
+    assert config_path.parent.name.startswith("apdl-cs-")
+    assert "repo" not in config_path.parts
+    assert config_path.read_text(encoding="utf-8") == "{}\n"
+    assert env_path.read_text(encoding="utf-8") == ""
 
 
 @pytest.mark.asyncio
