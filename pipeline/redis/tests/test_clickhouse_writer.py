@@ -174,7 +174,9 @@ def test_durable_rows_are_not_reinserted_when_redis_ack_retries(monkeypatch):
 def test_reclaims_and_flushes_stale_messages_from_prior_consumers(monkeypatch):
     async def scenario():
         redis_client = FakeRedis()
-        redis_client.claim_responses = [["0-0", stream_message()[1], []]]
+        redis_client.claim_responses = [
+            ["0-0", stream_message()[1], []],
+        ]
         writer, _, ch_client = make_writer(monkeypatch, redis_client=redis_client)
         writer.running = True
 
@@ -234,6 +236,88 @@ def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
         assert redis_client.group_creates[-1]["id"] == "0-0"
 
     asyncio.run(scenario())
+
+
+def test_project_authority_is_derived_from_validated_stream_key(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch, buffer_size=1)
+        event_json = {
+            "event": "signup",
+            "project_id": "demo",
+        }
+        results = [
+            (
+                "events:raw:demo",
+                [
+                    (
+                        "1-0",
+                        {
+                            "project_id": "demo",
+                            "event_json": json.dumps(event_json),
+                        },
+                    )
+                ],
+            )
+        ]
+
+        assert await writer._process_messages(results) == 1
+        assert ch_client.inserts[0][0]["project_id"] == "demo"
+        assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("1-0",))]
+
+    asyncio.run(scenario())
+
+
+def test_conflicting_project_assertions_are_rejected_without_ack(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch)
+        results = [
+            (
+                "events:raw:demo",
+                [
+                    (
+                        "1-0",
+                        {
+                            "project_id": "victim",
+                            "event_json": json.dumps(
+                                {"event": "signup", "project_id": "demo"}
+                            ),
+                        },
+                    ),
+                    (
+                        "2-0",
+                        {
+                            "event_json": json.dumps(
+                                {"event": "signup", "project_id": "victim"}
+                            )
+                        },
+                    ),
+                ],
+            )
+        ]
+
+        assert await writer._process_messages(results) == 0
+        assert writer.buffer == []
+        assert ch_client.inserts == []
+        assert redis_client.acks == []
+
+    asyncio.run(scenario())
+
+
+def test_invalid_stream_project_is_rejected(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+
+    for stream_key in (
+        "events:raw:",
+        "events:raw:has-hyphen",
+        "events:raw:demo:other",
+        "other:raw:demo",
+    ):
+        try:
+            writer._project_id_from_stream(stream_key)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid stream key {stream_key!r}")
 
 
 def test_type_only_nullable_legacy_event_projects_to_canonical_row(monkeypatch):
@@ -425,7 +509,7 @@ def test_multistream_overdelivery_never_exceeds_global_buffer(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_new_and_pending_streams_rotate_with_remaining_capacity(monkeypatch):
+def test_new_and_pending_streams_rotate_fairly_with_remaining_capacity(monkeypatch):
     async def scenario():
         writer, redis_client, _ = make_writer(monkeypatch, buffer_size=2)
         keys = ["events:raw:zeta", "events:raw:alpha"]
@@ -453,14 +537,11 @@ def test_new_and_pending_streams_rotate_with_remaining_capacity(monkeypatch):
 def test_consume_reads_one_stream_per_call_in_round_robin_order(monkeypatch):
     class StoppingRedis(FakeRedis):
         writer = None
-        new_read_calls = 0
 
         async def xreadgroup(self, **kwargs):
             await super().xreadgroup(**kwargs)
-            if set(kwargs["streams"].values()) == {">"}:
-                self.new_read_calls += 1
-                if self.new_read_calls == 2:
-                    self.writer.running = False
+            if self.read_calls == 2:
+                self.writer.running = False
             return []
 
     async def scenario():
@@ -471,16 +552,13 @@ def test_consume_reads_one_stream_per_call_in_round_robin_order(monkeypatch):
 
         await writer._consume_loop(["zeta", "alpha"])
 
-        new_reads = [
-            call
-            for call in redis_client.read_args
-            if set(call["streams"].values()) == {">"}
-        ]
-        assert [call["streams"] for call in new_reads] == [
+        assert [call["streams"] for call in redis_client.read_args] == [
             {"events:raw:alpha": ">"},
             {"events:raw:zeta": ">"},
         ]
-        assert {call["count"] for call in new_reads} == {writer.buffer_size}
+        assert {call["count"] for call in redis_client.read_args} == {
+            writer.buffer_size
+        }
 
     asyncio.run(scenario())
 

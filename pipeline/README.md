@@ -32,11 +32,14 @@ batch-inserts into the `events` table.
   consumers. Messages are XACKed only after ClickHouse accepts their rows. A
   crash between insert and ACK may replay a row; the legacy table does not
   provide exactly-once storage semantics.
+- **Tenant authority:** the project is derived only from a validated
+  `events:raw:{project_id}` stream key. Conflicting project assertions inside a
+  Redis message or its event JSON are rejected.
 - **Validation and DLQ:** canonical ClickHouse row types are validated before
   buffering. Terminal parse/row rejects write safe metadata (never the event
   payload) to the bounded `events:dlq:{project_id}` Redis stream. The source is
   XACKed only after DLQ persistence; a DLQ failure leaves it in the PEL for
-  later retry. A terminal row cannot hold valid rows or other tenants behind
+  later reclaim. A terminal row cannot hold valid rows or other tenants behind
   it.
 - **Retries:** a failed ClickHouse flush remains buffered and stops further
   reads once the bounded buffer is full. Retries use capped exponential

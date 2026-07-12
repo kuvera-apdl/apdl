@@ -32,13 +32,13 @@ logger = logging.getLogger(__name__)
 STREAM_PREFIX = "events:raw:"
 DLQ_STREAM_PREFIX = "events:dlq:"
 CONSUMER_GROUP = "clickhouse-writer"
-DEFAULT_DLQ_MAXLEN = 10_000
 CONSUMER_GROUP_START_ID = "0-0"
+DEFAULT_DLQ_MAXLEN = 10_000
 FLUSH_RETRY_BASE_SECONDS = 1.0
 FLUSH_RETRY_MAX_SECONDS = 30.0
-PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 PENDING_CLAIM_IDLE_MS = 60_000
 PENDING_CLAIM_INTERVAL_SECONDS = 30.0
+PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 
 
 @dataclass(frozen=True)
@@ -143,7 +143,16 @@ class ClickHouseWriter:
             cursor, keys = await self.redis_client.scan(
                 cursor=cursor, match=f"{STREAM_PREFIX}*", count=100
             )
-            streams.extend(keys)
+            for stream_key in keys:
+                try:
+                    self._project_id_from_stream(stream_key)
+                except ValueError as exc:
+                    self.stats["errors"] += 1
+                    logger.warning(
+                        "Ignoring invalid event stream %r: %s", stream_key, exc
+                    )
+                    continue
+                streams.append(stream_key)
             if cursor == 0:
                 break
         return streams
@@ -155,7 +164,7 @@ class ClickHouseWriter:
         before writer discovery remain available to the group.
         """
         if project_ids:
-            stream_keys = [f"{STREAM_PREFIX}{pid}" for pid in project_ids]
+            stream_keys = [self._stream_key_for_project(pid) for pid in project_ids]
         else:
             stream_keys = await self._discover_streams()
 
@@ -340,7 +349,7 @@ class ClickHouseWriter:
         newly discovered streams.
         """
         if project_ids:
-            stream_keys = [f"{STREAM_PREFIX}{pid}" for pid in project_ids]
+            stream_keys = [self._stream_key_for_project(pid) for pid in project_ids]
         else:
             stream_keys = await self._discover_streams()
 
@@ -370,7 +379,12 @@ class ClickHouseWriter:
         """
         buffered_count = 0
         for stream_key, messages in results:
-            project_id = stream_key.removeprefix(STREAM_PREFIX)
+            try:
+                project_id = self._project_id_from_stream(stream_key)
+            except ValueError as exc:
+                self.stats["errors"] += len(messages)
+                logger.error("Rejecting invalid event stream %r: %s", stream_key, exc)
+                continue
             for message_id, data in messages:
                 try:
                     parsed = self._parse_event(data, project_id)
@@ -426,9 +440,26 @@ class ClickHouseWriter:
         return buffered_count
 
     @staticmethod
-    def _dlq_stream_for_project(project_id: str) -> str:
+    def _project_id_from_stream(stream_key: str) -> str:
+        if not isinstance(stream_key, str) or not stream_key.startswith(STREAM_PREFIX):
+            raise ValueError("stream key must use events:raw:{project_id}")
+        project_id = stream_key.removeprefix(STREAM_PREFIX)
         if PROJECT_ID_PATTERN.fullmatch(project_id) is None:
-            raise ValueError("DLQ project ID is not canonical")
+            raise ValueError("stream project ID is not canonical")
+        return project_id
+
+    @classmethod
+    def _stream_key_for_project(cls, project_id: str) -> str:
+        if (
+            not isinstance(project_id, str)
+            or PROJECT_ID_PATTERN.fullmatch(project_id) is None
+        ):
+            raise ValueError(f"invalid project ID: {project_id!r}")
+        return f"{STREAM_PREFIX}{project_id}"
+
+    @classmethod
+    def _dlq_stream_for_project(cls, project_id: str) -> str:
+        cls._stream_key_for_project(project_id)
         return f"{DLQ_STREAM_PREFIX}{project_id}"
 
     async def _dead_letter_delivery(
@@ -458,7 +489,7 @@ class ClickHouseWriter:
             )
         except Exception as exc:
             # No ACK is queued: the original delivery remains in the PEL and a
-            # later pending sweep can retry DLQ persistence.
+            # later XAUTOCLAIM sweep can retry DLQ persistence.
             self.stats["errors"] += 1
             logger.error(
                 "Could not persist reject metadata for %s on %s: %s",
@@ -590,7 +621,7 @@ class ClickHouseWriter:
             if len(batch) == 1:
                 event = batch[0]
                 self.stats["errors"] += 1
-                project_id = event.stream_key.removeprefix(STREAM_PREFIX)
+                project_id = self._project_id_from_stream(event.stream_key)
                 await self._dead_letter_delivery(
                     event.stream_key,
                     event.message_id,
@@ -665,8 +696,9 @@ class ClickHouseWriter:
         Expected Redis message fields:
             - event_json: str (JSON-encoded event payload)
 
-        ``project_id`` is the stream-derived fallback. Stream-only project
-        authority is enforced separately by APDL-AUD-104.
+        Project authority comes exclusively from the validated Redis stream
+        key. Optional project assertions in the Redis fields or event JSON must
+        match that authority.
 
         The event JSON should contain the ingestion contract fields:
             - event or type: str (canonical ClickHouse event name)
@@ -689,11 +721,12 @@ class ClickHouseWriter:
         )
         if not isinstance(event_json, dict):
             raise ValueError("event_json must decode to an object")
-        selected_project = (
-            data.get("project_id") or event_json.get("project_id") or project_id
-        )
-        if not isinstance(selected_project, str):
-            raise TypeError("project_id must be a string")
+        for asserted_project in (
+            data.get("project_id"),
+            event_json.get("project_id"),
+        ):
+            if asserted_project is not None and asserted_project != project_id:
+                raise ValueError("event project ID conflicts with stream authority")
         event_name = self._event_name(event_json)
         raw_timestamp = event_json.get("timestamp")
         if raw_timestamp not in (None, ""):
@@ -715,7 +748,7 @@ class ClickHouseWriter:
             raise TypeError("properties must be an object")
 
         row = {
-            "project_id": selected_project,
+            "project_id": project_id,
             "event_name": event_name,
             "user_id": self._identity_string(event_json, "user_id", "userId"),
             "anonymous_id": self._identity_string(
