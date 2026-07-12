@@ -127,7 +127,10 @@ async def test_trigger_starts_run_and_serializes_config(monkeypatch):
     query, args = next(
         (q, a) for q, a in pool.conn.executed if "INSERT INTO agent_runs" in q
     )
-    assert "$5::jsonb" in query
+    assert "lease_expires_at" in query
+    assert "now() + ($5 * interval '1 second')" in query
+    assert "$6::jsonb" in query
+    assert args[-2] == triggers.RUN_LEASE_SECONDS
     config_arg = args[-1]
     assert isinstance(config_arg, str)
     assert json.loads(config_arg) == {

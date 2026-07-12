@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -25,7 +26,12 @@ from app.store.experiments import (
     DESIGNED_EXPERIMENTS_INDEX_DDL,
     DESIGNED_EXPERIMENTS_MIGRATE_DDL,
 )
-from app.store.proposals import FEATURE_PROPOSALS_DDL
+from app.store.proposals import FEATURE_PROPOSALS_DDL, FEATURE_PROPOSALS_MIGRATE_DDL
+from app.store.run_leases import (
+    AGENT_RUN_LEASE_MIGRATE_DDL,
+    reap_abandoned_runs_forever,
+    recover_abandoned_runs,
+)
 from app.store.verdicts import (
     EXPERIMENT_VERDICTS_DDL,
     EXPERIMENT_VERDICTS_INDEX_DDL,
@@ -112,9 +118,12 @@ async def lifespan(application: FastAPI):
                 experiments_count INTEGER DEFAULT 0,
                 config JSONB DEFAULT '{}',
                 started_at TIMESTAMPTZ DEFAULT now(),
-                updated_at TIMESTAMPTZ DEFAULT now()
+                updated_at TIMESTAMPTZ DEFAULT now(),
+                lease_owner_id TEXT,
+                lease_expires_at TIMESTAMPTZ
             );
         """)
+        await conn.execute(AGENT_RUN_LEASE_MIGRATE_DDL)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS agent_audit_log (
                 id BIGSERIAL PRIMARY KEY,
@@ -137,6 +146,7 @@ async def lifespan(application: FastAPI):
             );
         """)
         await conn.execute(FEATURE_PROPOSALS_DDL)
+        await conn.execute(FEATURE_PROPOSALS_MIGRATE_DDL)
         await conn.execute(DESIGNED_EXPERIMENTS_DDL)
         await conn.execute(DESIGNED_EXPERIMENTS_INDEX_DDL)
         await conn.execute(DESIGNED_EXPERIMENTS_MIGRATE_DDL)
@@ -146,41 +156,35 @@ async def lifespan(application: FastAPI):
         await conn.execute(CUSTOM_AGENTS_INDEX_DDL)
         await conn.execute(CUSTOM_AGENTS_MIGRATE_DDL)
 
-    # Crash/restart reconciliation. Supervisor runs live only as in-process
-    # background tasks, so at startup every run still marked in-flight is
-    # definitionally dead (a deploy/OOM killed it mid-run) — without this it
-    # would sit at 'started'/'running'/'resuming' forever, and the proposals
-    # it claimed would stay 'implementing', permanently excluded from claims.
-    async with pool.acquire() as conn:
-        orphaned_runs = await conn.execute(
-            """
-            UPDATE agent_runs
-            SET status = 'failed', phase = 'orphaned', updated_at = now()
-            WHERE status IN ('started', 'running')
-               OR (phase = 'resuming' AND status IN ('approved', 'rejected'))
-            """
-        )
-        reclaimed = await conn.execute(
-            "UPDATE feature_proposals SET status = 'approved', updated_at = now() "
-            "WHERE status = 'implementing'"
-        )
-    if not orphaned_runs.endswith(" 0"):
+    # Reconcile only expired ownership. Every replica may run this safely: an
+    # unexpired lease belongs to a live task on this or another replica, and a
+    # proposal is reopened only when it was claimed by the abandoned run.
+    recovered = await recover_abandoned_runs(pool)
+    if recovered.abandoned_run_ids:
         logger.warning(
-            "Startup reconciliation: %s orphaned run(s) marked failed", orphaned_runs
+            "Startup lease recovery marked %d abandoned run(s) failed",
+            len(recovered.abandoned_run_ids),
         )
-    if not reclaimed.endswith(" 0"):
+    if recovered.reopened_proposal_ids:
         logger.warning(
-            "Startup reconciliation: %s stale proposal claim(s) re-approved", reclaimed
+            "Startup lease recovery reopened %d abandoned proposal claim(s)",
+            len(recovered.reopened_proposal_ids),
         )
+
+    reaper_stop = asyncio.Event()
+    reaper_task = asyncio.create_task(reap_abandoned_runs_forever(pool, reaper_stop))
 
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store
 
     logger.info("Agents service started: PostgreSQL pool and vector store initialized")
-    yield
-
-    await pool.close()
-    logger.info("Agents service shut down: PostgreSQL pool closed")
+    try:
+        yield
+    finally:
+        reaper_stop.set()
+        await reaper_task
+        await pool.close()
+        logger.info("Agents service shut down: PostgreSQL pool closed")
 
 
 app = FastAPI(

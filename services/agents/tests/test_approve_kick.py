@@ -3,6 +3,7 @@ designs, audits each decision, and always resumes (never wedges at resuming)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -13,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from app.auth import Principal, authenticate_request
 from app.main import app
 from app.routers import approvals
+from app.store.run_leases import recover_abandoned_runs
 
 _PROPOSAL = {
     "proposal_id": "p1",
@@ -26,6 +28,14 @@ _PROPOSAL2 = {
 }
 
 
+class _Transaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
 class _FakeConn:
     def __init__(self, store: dict[str, Any]) -> None:
         self.store = store
@@ -34,6 +44,9 @@ class _FakeConn:
         # Result of the atomic gate-claim UPDATE ... RETURNING run_id.
         # None simulates losing the claim race to a concurrent submit.
         self.claim_result: Any = "run-1"
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
 
     async def fetchrow(self, query: str, *args: Any):
         if "FROM agent_runs" in query:
@@ -50,6 +63,19 @@ class _FakeConn:
     async def fetch(self, query: str, *args: Any):
         if "FROM agent_run_results" in query:
             return self.store["results"]
+        if "SET status = 'failed'" in query:
+            run = self.store["run"]
+            if run.get("lease_expires_at") != "expired":
+                return []
+            run.update(
+                status="failed",
+                phase="orphaned",
+                lease_owner_id=None,
+                lease_expires_at=None,
+            )
+            return [{"run_id": run["run_id"]}]
+        if "claim_run_id = ANY" in query or "proposal.claim_run_id IS NULL" in query:
+            return []
         raise AssertionError(f"Unexpected fetch: {query}")
 
     async def execute(self, query: str, *args: Any):
@@ -59,7 +85,33 @@ class _FakeConn:
         self.fetchvals.append((query, args))
         if "agent_audit_log" in query:
             return 1
-        return self.claim_result  # the gate-claim UPDATE
+        run = self.store["run"]
+        if "status = 'waiting_approval'" in query:
+            if (
+                self.claim_result is None
+                or run.get("lease_owner_id") is not None
+                or run.get("lease_expires_at") is not None
+            ):
+                return None
+            run.update(
+                status=args[1],
+                phase="resuming",
+                lease_owner_id=args[4],
+                lease_expires_at="live",
+            )
+            return run["run_id"]
+        if "phase = 'resuming'" in query and "SET lease_owner_id = NULL" in query:
+            if run.get("lease_owner_id") != args[1]:
+                return None
+            run.update(lease_owner_id=None, lease_expires_at="queued")
+            self.store["handoff_count"] = self.store.get("handoff_count", 0) + 1
+            return run["run_id"]
+        if "SET lease_expires_at" in query:
+            if run.get("lease_owner_id") != args[1]:
+                return None
+            run["lease_expires_at"] = "live"
+            return run["run_id"]
+        raise AssertionError(f"Unexpected fetchval: {query}")
 
 
 class _Acquire:
@@ -94,6 +146,8 @@ def _run_row(
         "project_id": "demo",
         "autonomy_level": level,
         "config": json.dumps({"analysis_types": list(analysis_types), "time_range_days": 7}),
+        "lease_owner_id": None,
+        "lease_expires_at": None,
     }
 
 
@@ -191,9 +245,12 @@ async def test_legacy_approved_forks_single_proposal(monkeypatch):
 
     # The forked run's config must be a JSON *string* for the jsonb column;
     # a raw dict makes asyncpg raise "expected str, got dict".
-    _, run_insert_args = next(
+    run_insert_query, run_insert_args = next(
         (q, a) for q, a in app.state.pg_pool.conn.executed if "INSERT INTO agent_runs" in q
     )
+    assert "lease_expires_at" in run_insert_query
+    assert "now() + ($4 * interval '1 second')" in run_insert_query
+    assert run_insert_args[-2] == approvals.RUN_LEASE_SECONDS
     assert isinstance(run_insert_args[-1], str)
     cfg = json.loads(run_insert_args[-1])
     assert cfg["analysis_types"] == ["code_implementation"] and cfg["target_proposal_id"] == "p1"
@@ -391,8 +448,8 @@ async def test_code_implementation_gate_opens_pr_on_approval(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_1", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id):
-        implemented.append((proposal_id, changeset_id))
+    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
+        implemented.append((proposal_id, changeset_id, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
@@ -410,7 +467,8 @@ async def test_code_implementation_gate_opens_pr_on_approval(monkeypatch):
     assert body["approved_count"] == 1 and body["opened_changesets"] == ["cs_1"]
     assert opened and opened[0]["title"] == "Add dark mode"
     assert opened[0]["project_id"] == "demo" and opened[0]["run_id"] == "run-1"
-    assert implemented == [("p1", "cs_1")]
+    assert opened[0]["context"] == {"proposal_id": "p1"}
+    assert implemented == [("p1", "cs_1", "run-1")]
     # Opening a PR is not a new run fork — no kicked run carries a target proposal.
     assert not any(k.get("target_proposal_id") for k in kicked)
     assert _resumes(kicked)  # the run still resumes to finalize
@@ -427,8 +485,8 @@ async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_1"}
 
-    async def fake_failed(pool, proposal_id, error):
-        failed.append((proposal_id, error))
+    async def fake_failed(pool, proposal_id, error, run_id):
+        failed.append((proposal_id, error, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_failed", fake_failed)
@@ -443,7 +501,7 @@ async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
 
     assert resp.status_code == 200
     assert opened == []  # nothing opened on reject
-    assert failed == [("p1", "PR rejected at the approval gate.")]
+    assert failed == [("p1", "PR rejected at the approval gate.", "run-1")]
     assert resp.json()["opened_changesets"] == []
     assert _resumes(kicked)
 
@@ -462,8 +520,8 @@ async def test_blanket_approve_skips_safety_halted_changeset(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_ok", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id):
-        implemented.append((proposal_id, changeset_id))
+    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
+        implemented.append((proposal_id, changeset_id, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
@@ -486,7 +544,7 @@ async def test_blanket_approve_skips_safety_halted_changeset(monkeypatch):
     assert resp.status_code == 200
     # Only the approvable changeset (p1) is opened; the halted p2 is skipped.
     assert [o["title"] for o in opened] == ["Add dark mode"]
-    assert implemented == [("p1", "cs_ok")]
+    assert implemented == [("p1", "cs_ok", "run-1")]
     assert resp.json()["opened_changesets"] == ["cs_ok"]
     assert _resumes(kicked)
 
@@ -513,6 +571,23 @@ async def test_lost_claim_race_is_400(monkeypatch):
 
     assert resp.status_code == 400
     assert _forks(kicked) == []  # nothing forked when the claim is lost
+
+
+@pytest.mark.asyncio
+async def test_approval_does_not_overwrite_a_lingering_owner(monkeypatch):
+    _, kicked, _ = _patch(monkeypatch)
+    run = _run_row()
+    run.update(lease_owner_id="finishing-worker", lease_expires_at="live")
+    store = {"run": run, "results": [{"output": json.dumps([_PROPOSAL])}]}
+
+    async with _client(store) as client:
+        response = await client.post(
+            "/v1/agents/run-1/approve", json={"approved": True}
+        )
+
+    assert response.status_code == 400
+    assert store["run"]["lease_owner_id"] == "finishing-worker"
+    assert kicked == []
 
 
 @pytest.mark.asyncio
@@ -579,3 +654,147 @@ async def test_approved_experiment_opens_treatment_changeset(monkeypatch):
     assert deployed and treatments == ["exp_demo"]
     assert resp.json()["opened_changesets"] == ["cs-treat-1"]
     assert _resumes(kicked)
+
+
+@pytest.mark.asyncio
+async def test_slow_approval_keeps_owner_heartbeat_against_competing_reaper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, kicked, _ = _patch(monkeypatch)
+    effect_started = asyncio.Event()
+    finish_effect = asyncio.Event()
+    heartbeat_started = asyncio.Event()
+    real_maintain = approvals.maintain_run_lease
+
+    async def tracked_maintain(*args: Any, **kwargs: Any) -> None:
+        heartbeat_started.set()
+        await real_maintain(*args, **kwargs)
+
+    async def slow_deploy(project_id: str, design: dict[str, Any]) -> bool:
+        effect_started.set()
+        await finish_effect.wait()
+        return True
+
+    monkeypatch.setattr(approvals, "maintain_run_lease", tracked_maintain)
+    monkeypatch.setattr(approvals, "deploy_experiment", slow_deploy)
+    design = {"experiment_id": "exp_slow", "flag_config": {"key": "exp_slow"}}
+    store = {
+        "run": _run_row(
+            phase="experiment_design_approval",
+            analysis_types=("experiment_design",),
+        ),
+        "results": [{"output": json.dumps([design])}],
+    }
+
+    async with _client(store) as client:
+        request_task = asyncio.create_task(
+            client.post("/v1/agents/run-1/approve", json={"approved": True})
+        )
+        await asyncio.wait_for(effect_started.wait(), timeout=1)
+
+        run = app.state.pg_pool.conn.store["run"]
+        assert heartbeat_started.is_set()
+        assert run["phase"] == "resuming"
+        assert run["lease_owner_id"] is not None
+        assert run["lease_expires_at"] == "live"
+
+        competing = await recover_abandoned_runs(app.state.pg_pool)
+        assert competing.abandoned_run_ids == ()
+        assert run["status"] == "approved"
+
+        finish_effect.set()
+        response = await asyncio.wait_for(request_task, timeout=1)
+
+    assert response.status_code == 200
+    assert store["handoff_count"] == 1
+    assert store["run"]["lease_owner_id"] is None
+    assert store["run"]["lease_expires_at"] == "queued"
+    assert _resumes(kicked)
+
+
+@pytest.mark.asyncio
+async def test_approval_lease_loss_cancels_config_before_codegen_continues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch(monkeypatch)
+    config_started = asyncio.Event()
+    config_cancelled = asyncio.Event()
+    effects: list[str] = []
+
+    async def lose_during_config(
+        pool: Any,
+        run_id: str,
+        owner_id: str,
+        stop: asyncio.Event,
+        lost: asyncio.Event,
+        **kwargs: Any,
+    ) -> None:
+        await config_started.wait()
+        lost.set()
+        await stop.wait()
+
+    async def blocked_config(project_id: str, design: dict[str, Any]) -> bool:
+        effects.append("config-started")
+        config_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            effects.append("config-cancelled")
+            config_cancelled.set()
+            raise
+        return True
+
+    async def forbidden_codegen(*args: Any, **kwargs: Any) -> str:
+        effects.append("codegen-after-loss")
+        return "cs-should-not-open"
+
+    monkeypatch.setattr(approvals, "maintain_run_lease", lose_during_config)
+    monkeypatch.setattr(approvals, "deploy_experiment", blocked_config)
+    monkeypatch.setattr(approvals, "open_treatment_changeset", forbidden_codegen)
+    design = {"experiment_id": "exp_loss", "flag_config": {"key": "exp_loss"}}
+    store = {
+        "run": _run_row(
+            phase="experiment_design_approval",
+            analysis_types=("experiment_design",),
+        ),
+        "results": [{"output": json.dumps([design])}],
+    }
+
+    async with _client(store) as client:
+        response = await client.post(
+            "/v1/agents/run-1/approve", json={"approved": True}
+        )
+
+    assert response.status_code == 503
+    assert config_cancelled.is_set()
+    assert effects == ["config-started", "config-cancelled"]
+    assert store.get("handoff_count", 0) == 0
+    assert store["run"]["lease_owner_id"] is not None
+    assert store["run"]["lease_expires_at"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_queued_resume_and_forks_start_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started: set[str] = set()
+
+    async def blocking_supervisor(**kwargs: Any) -> None:
+        started.add(str(kwargs["run_id"]))
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+
+    monkeypatch.setattr(approvals, "run_supervisor", blocking_supervisor)
+    batch = asyncio.create_task(
+        approvals._run_supervisor_batch(
+            [{"run_id": "run-resume"}, {"run_id": "run-fork"}]
+        )
+    )
+
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    assert started == {"run-resume", "run-fork"}
+    release.set()
+    await asyncio.wait_for(batch, timeout=1)
