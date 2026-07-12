@@ -181,14 +181,24 @@ export class EventQueue {
       window.addEventListener('beforeunload', this.unloadHandler);
     }
 
-    // Drain offline storage and re-enqueue events
+    // Drain offline storage and re-enqueue events. Consent is checked again
+    // because it may have changed since these events originally failed.
     try {
       const offlineEvents = await this.storage.drain();
+      if (!this.consentManager.isGranted('analytics')) {
+        if (offlineEvents.length > 0 && this.config.debug) {
+          console.debug(
+            `APDL: Discarded ${offlineEvents.length} offline events — analytics consent not granted`
+          );
+        }
+        return;
+      }
+
       if (offlineEvents.length > 0) {
         if (this.config.debug) {
           console.debug(`APDL: Drained ${offlineEvents.length} events from offline storage`);
         }
-        // Push directly to queue (already scrubbed and consent-checked)
+        // Push directly to queue (already scrubbed and checked against current consent)
         this.queue.push(...offlineEvents);
         if (this.queue.length >= this.config.batchSize) {
           void this.flush();
