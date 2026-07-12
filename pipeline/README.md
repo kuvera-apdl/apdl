@@ -9,7 +9,7 @@ the ClickHouse schema, and provides the ETL framework for custom event types.
 |-----------|------------|
 | `redis/` | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
 | `clickhouse/` | SQL migrations and reference schemas (tables + materialized views) |
-| `postgres/` | Versioned PostgreSQL migrations, including the credential registry |
+| `postgres/` | The authoritative, versioned PostgreSQL migration sequence |
 | `etl/` | Standalone custom-events ETL framework (`apdl-etl` package) |
 | `kafka/` | Kafka topic definitions for the Phase 3+ migration |
 | `flink/` | Flink jobs (sessionization, enrichment, aggregations) for Phase 3+ |
@@ -76,8 +76,46 @@ copy of the events table.
 - `feature_flag_exposures_mv` (006) — extracts flag fields from `events.properties` into `feature_flag_exposures`
 - `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
 
-Note: `005_pgvector_setup.sql` runs against **PostgreSQL**, not ClickHouse
-(agent memory, audit log, runs, experiments, ui_configs tables + pgvector).
+Every file in `clickhouse/migrations/` must be executable ClickHouse SQL. The
+runner fails if a PostgreSQL marker is found there instead of silently skipping
+the misplaced migration.
+
+## PostgreSQL schema
+
+PostgreSQL migrations live only in `postgres/migrations/` and are applied by
+`make migrate-postgres` in a strict, contiguous, zero-padded filename order.
+The runner records each file's version, exact name, and SHA-256 checksum in the
+immutable `apdl_schema_migrations` ledger. A file and its ledger insert commit
+in the same transaction under an advisory lock. Applied files run exactly once;
+renaming, editing, deleting, or inserting an older file fails closed.
+
+- `001_auth_credentials.sql` -- project-scoped service credential registry
+- `002_admin_auth.sql` -- admin users, sessions, project grants, and proxy audit
+- `003_admin_projects.sql` -- self-service project registry and grant backfill
+- `004_agents_core.sql` -- the live Agents tables and pgvector memory shape
+- `005_agent_observability.sql` -- agent envelope metadata and `llm_calls`
+- `006_config.sql` -- flags, flag audit history, and Config experiments
+- `007_codegen.sql` -- connections, changesets, GitHub/CI observations, and claims
+
+Config, Agents, and Codegen never create or alter tables at process startup.
+They verify the required ledger entry and schema columns, then fail with a
+`make migrate-postgres` instruction if the database is behind. Docker Compose
+gates all PostgreSQL consumers on the one-shot `postgres-migrate` service, so a
+plain full-stack Compose start has the same ordering as `make dev-all`.
+
+The obsolete PostgreSQL files formerly numbered 005 and 011 under the
+ClickHouse directory are not applied verbatim. Their UUID/`vector(1536)` Agent
+tables and integer project identifiers conflict with the running services.
+Migration 004 installs the live TEXT/BIGSERIAL/`vector(384)` contracts and, if
+someone previously ran the obsolete SQL manually, preserves incompatible rows
+in `*_legacy_005` tables. It also preserves embeddings from a non-canonical
+vector width in `agent_memory_legacy_vectors` before installing `vector(384)`.
+Migration 005 similarly preserves an incompatible `llm_calls` table as
+`llm_calls_legacy_011`. The deprecated `ui_configs` scaffold is not recreated;
+Config owns the one canonical `experiments` table. Migration 006 preserves an
+unprojectable `feature_flags` table as `feature_flags_legacy`, and migration 007
+preserves runtime-evidence rows without an exact CI binding in
+`codegen_runtime_evidence_observations_legacy_unbound`.
 
 ## ETL framework
 
@@ -99,8 +137,8 @@ exceeds ~10K events/sec or retention beyond 7 days is needed.
 
 ```bash
 make dev                 # start Redis, ClickHouse, PostgreSQL (Docker)
-make migrate-clickhouse  # apply clickhouse/migrations/*.sql
-make migrate-postgres    # apply postgres/migrations/*.sql
+make migrate-clickhouse  # apply ClickHouse-only migrations
+make migrate-postgres    # transactionally apply the PostgreSQL sequence
 make run-pipeline        # start the ClickHouse writer
 ```
 

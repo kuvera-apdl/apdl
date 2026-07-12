@@ -30,18 +30,6 @@ LEGACY_PROPOSAL_STALE_SECONDS = 24 * 60 * 60
 
 _T = TypeVar("_T")
 
-AGENT_RUN_LEASE_MIGRATE_DDL = """
-ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS lease_owner_id TEXT;
-ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
-ALTER TABLE agent_runs
-    ALTER COLUMN lease_expires_at
-    DROP DEFAULT;
-CREATE INDEX IF NOT EXISTS idx_agent_runs_lease_expiry
-    ON agent_runs (lease_expires_at)
-    WHERE status IN ('started', 'running')
-       OR (phase = 'resuming' AND status IN ('approved', 'rejected'));
-"""
-
 
 class RunLeaseLostError(RuntimeError):
     """Raised when a supervisor no longer owns its run."""

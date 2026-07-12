@@ -17,51 +17,6 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-FEATURE_PROPOSALS_DDL = """
-CREATE TABLE IF NOT EXISTS feature_proposals (
-    proposal_id   TEXT PRIMARY KEY,
-    project_id    TEXT NOT NULL,
-    run_id        TEXT,
-    claim_run_id  TEXT,
-    status        TEXT NOT NULL DEFAULT 'approved',
-    title         TEXT NOT NULL,
-    spec          TEXT NOT NULL,
-    priority      TEXT,
-    changeset_id  TEXT,
-    error         TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-FEATURE_PROPOSALS_MIGRATE_DDL = """
-ALTER TABLE feature_proposals ADD COLUMN IF NOT EXISTS claim_run_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_feature_proposals_claim_run
-    ON feature_proposals (claim_run_id)
-    WHERE status = 'implementing';
-WITH active_claims AS (
-    SELECT project_id,
-           config ->> 'target_proposal_id' AS proposal_id,
-           min(run_id) AS claim_run_id
-    FROM agent_runs
-    WHERE config ->> 'target_proposal_id' IS NOT NULL
-      AND (
-          status IN ('started', 'running', 'waiting_approval')
-          OR (phase = 'resuming' AND status IN ('approved', 'rejected'))
-      )
-    GROUP BY project_id, config ->> 'target_proposal_id'
-    HAVING count(*) = 1
-)
-UPDATE feature_proposals AS proposal
-SET claim_run_id = active_claims.claim_run_id,
-    updated_at = now()
-FROM active_claims
-WHERE proposal.project_id = active_claims.project_id
-  AND proposal.proposal_id = active_claims.proposal_id
-  AND proposal.status = 'implementing'
-  AND proposal.claim_run_id IS NULL;
-"""
-
 
 def _text(value: Any) -> str:
     if isinstance(value, str):

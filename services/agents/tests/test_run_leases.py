@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -313,7 +314,13 @@ def _proposal(
 
 
 def test_lease_migration_preserves_null_for_pre_upgrade_replicas() -> None:
-    ddl = run_leases.AGENT_RUN_LEASE_MIGRATE_DDL
+    ddl = (
+        Path(__file__).resolve().parents[3]
+        / "pipeline"
+        / "postgres"
+        / "migrations"
+        / "004_agents_core.sql"
+    ).read_text()
 
     assert "ALTER COLUMN lease_expires_at" in ddl
     assert "DROP DEFAULT" in ddl
@@ -363,11 +370,11 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
     async def fake_create_pool(*args: Any, **kwargs: Any) -> _Pool:
         return pool
 
-    async def fake_memory_schema(conn: _Conn) -> None:
+    async def fake_schema_ready(conn: _Conn) -> None:
         return None
 
     monkeypatch.setattr(agents_main.asyncpg, "create_pool", fake_create_pool)
-    monkeypatch.setattr(agents_main, "ensure_agent_memory_schema", fake_memory_schema)
+    monkeypatch.setattr(agents_main, "assert_schema_ready", fake_schema_ready)
 
     for _ in range(2):
         application = SimpleNamespace(state=SimpleNamespace())

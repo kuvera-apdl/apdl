@@ -49,6 +49,22 @@ services:
       timeout: 3s
       retries: 5
 
+  postgres-migrate:
+    build:
+      context: ../../pipeline/postgres
+      dockerfile: Dockerfile
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: apdl
+      PGPASSWORD: apdl_dev
+      PGDATABASE: apdl
+      POSTGRES_MIGRATIONS_DIR: /migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   redis-data:
   clickhouse-data:

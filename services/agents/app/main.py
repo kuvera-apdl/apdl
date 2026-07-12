@@ -13,85 +13,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth import PostgresAuthenticator, authenticate_request
-from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
 from app.routers import approvals, custom_agents, runs, status, triggers
-from app.store.custom_agents import (
-    CUSTOM_AGENTS_DDL,
-    CUSTOM_AGENTS_INDEX_DDL,
-    CUSTOM_AGENTS_MIGRATE_DDL,
-)
-from app.store.experiments import (
-    DESIGNED_EXPERIMENTS_DDL,
-    DESIGNED_EXPERIMENTS_INDEX_DDL,
-    DESIGNED_EXPERIMENTS_MIGRATE_DDL,
-)
-from app.store.proposals import FEATURE_PROPOSALS_DDL, FEATURE_PROPOSALS_MIGRATE_DDL
+from app.schema import assert_schema_ready
 from app.store.run_leases import (
-    AGENT_RUN_LEASE_MIGRATE_DDL,
     reap_abandoned_runs_forever,
     recover_abandoned_runs,
 )
-from app.store.verdicts import (
-    EXPERIMENT_VERDICTS_DDL,
-    EXPERIMENT_VERDICTS_INDEX_DDL,
-)
 
 logger = logging.getLogger(__name__)
-
-
-async def ensure_agent_memory_schema(conn) -> None:
-    """Create agent_memory and reconcile the embedding column dimension.
-
-    The table DDL is ``CREATE TABLE IF NOT EXISTS``, so on a DB that already
-    booted an older build the embedding column keeps its previous dimension while
-    embed() now emits EMBEDDING_DIMENSIONS-dim vectors — every store()/search()
-    would then raise a dimension mismatch, silently swallowed by the supervisor.
-    Detect a stale dimension and migrate in place: drop the ivfflat index, purge
-    the now-incompatible rows (old vectors are from a different model, not just a
-    different width), and ALTER the column to the current dimension. The index is
-    (re)created afterward. Idempotent: a no-op once the column already matches.
-    """
-    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    await conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS agent_memory (
-            id BIGSERIAL PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            content TEXT NOT NULL,
-            metadata JSONB DEFAULT '{{}}',
-            embedding vector({EMBEDDING_DIMENSIONS}),
-            created_at TIMESTAMPTZ DEFAULT now()
-        );
-        """
-    )
-
-    # pgvector stores the declared dimension in atttypmod (-1 if unspecified).
-    current_dim = await conn.fetchval(
-        "SELECT atttypmod FROM pg_attribute "
-        "WHERE attrelid = 'agent_memory'::regclass AND attname = 'embedding' "
-        "AND NOT attisdropped"
-    )
-    if current_dim is not None and current_dim not in (-1, EMBEDDING_DIMENSIONS):
-        logger.warning(
-            "agent_memory.embedding is vector(%s) but the model now emits %s-dim "
-            "vectors; migrating in place and purging incompatible rows.",
-            current_dim,
-            EMBEDDING_DIMENSIONS,
-        )
-        await conn.execute("DROP INDEX IF EXISTS idx_agent_memory_embedding;")
-        await conn.execute("DELETE FROM agent_memory;")
-        await conn.execute(
-            f"ALTER TABLE agent_memory ALTER COLUMN embedding TYPE vector({EMBEDDING_DIMENSIONS});"
-        )
-
-    await conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding
-        ON agent_memory USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100);
-        """
-    )
 
 
 @asynccontextmanager
@@ -103,58 +33,10 @@ async def lifespan(application: FastAPI):
     application.state.pg_pool = pool
     application.state.authenticator = PostgresAuthenticator(pool)
 
-    # Ensure required tables exist
+    # Schema authority belongs to pipeline/postgres/migrations. Application
+    # replicas validate it and fail closed instead of racing startup DDL.
     async with pool.acquire() as conn:
-        await ensure_agent_memory_schema(conn)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS agent_runs (
-                run_id TEXT PRIMARY KEY,
-                project_id TEXT NOT NULL,
-                trigger_type TEXT NOT NULL,
-                autonomy_level INTEGER NOT NULL DEFAULT 2,
-                status TEXT NOT NULL DEFAULT 'started',
-                phase TEXT DEFAULT 'initializing',
-                insights_count INTEGER DEFAULT 0,
-                experiments_count INTEGER DEFAULT 0,
-                config JSONB DEFAULT '{}',
-                started_at TIMESTAMPTZ DEFAULT now(),
-                updated_at TIMESTAMPTZ DEFAULT now(),
-                lease_owner_id TEXT,
-                lease_expires_at TIMESTAMPTZ
-            );
-        """)
-        await conn.execute(AGENT_RUN_LEASE_MIGRATE_DDL)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS agent_audit_log (
-                id BIGSERIAL PRIMARY KEY,
-                run_id TEXT NOT NULL,
-                action_type TEXT NOT NULL,
-                config JSONB DEFAULT '{}',
-                safety_result JSONB DEFAULT '{}',
-                approval_status TEXT,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS agent_run_results (
-                run_id TEXT NOT NULL,
-                agent_name TEXT NOT NULL,
-                produces TEXT NOT NULL,
-                output JSONB DEFAULT '[]',
-                created_at TIMESTAMPTZ DEFAULT now(),
-                PRIMARY KEY (run_id, agent_name)
-            );
-        """)
-        await conn.execute(FEATURE_PROPOSALS_DDL)
-        await conn.execute(FEATURE_PROPOSALS_MIGRATE_DDL)
-        await conn.execute(DESIGNED_EXPERIMENTS_DDL)
-        await conn.execute(DESIGNED_EXPERIMENTS_INDEX_DDL)
-        await conn.execute(DESIGNED_EXPERIMENTS_MIGRATE_DDL)
-        await conn.execute(EXPERIMENT_VERDICTS_DDL)
-        await conn.execute(EXPERIMENT_VERDICTS_INDEX_DDL)
-        await conn.execute(CUSTOM_AGENTS_DDL)
-        await conn.execute(CUSTOM_AGENTS_INDEX_DDL)
-        await conn.execute(CUSTOM_AGENTS_MIGRATE_DDL)
+        await assert_schema_ready(conn)
 
     # Reconcile only expired ownership. Every replica may run this safely: an
     # unexpired lease belongs to a live task on this or another replica, and a

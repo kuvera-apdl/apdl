@@ -18,32 +18,6 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-DESIGNED_EXPERIMENTS_DDL = """
-CREATE TABLE IF NOT EXISTS designed_experiments (
-    project_id     TEXT NOT NULL,
-    experiment_id  TEXT NOT NULL,
-    run_id         TEXT,
-    insight_key    TEXT NOT NULL DEFAULT '',
-    title          TEXT NOT NULL DEFAULT '',
-    hypothesis     TEXT NOT NULL DEFAULT '',
-    status         TEXT NOT NULL DEFAULT 'designed',
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, experiment_id)
-);
-"""
-
-DESIGNED_EXPERIMENTS_INDEX_DDL = """
-CREATE INDEX IF NOT EXISTS designed_experiments_project_created_idx
-    ON designed_experiments (project_id, created_at DESC);
-"""
-
-#: Phase 2: the treatment changeset implementing a deployed design, when one
-#: was opened. Idempotent for pre-phase-2 databases.
-DESIGNED_EXPERIMENTS_MIGRATE_DDL = """
-ALTER TABLE designed_experiments ADD COLUMN IF NOT EXISTS changeset_id TEXT;
-"""
-
 
 def insight_key(value: Any) -> str:
     """Fingerprint an insight (or its title) for exact-match dedup.
