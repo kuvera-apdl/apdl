@@ -240,17 +240,18 @@ cmd_status() {
 cmd_smoke() {
     [ -n "$SMOKE_API_KEY" ] || die "APDL_DEV_API_KEY is required for the smoke test"
     info "Smoke test against http://localhost:{8080,8081,8082}"
-    local failures=0 code flag_key
+    local failures=0 code flag_key event_name
     flag_key="smoke-test-$$"
+    event_name="smoke_test_$$_$(date -u +%Y%m%dT%H%M%S)"
 
     check_health "Ingestion" "http://localhost:8080/health" || die "Start the stack first: scripts/dev.sh up-full"
     check_health "Config"    "http://localhost:8081/health" || die "Config service is not running"
     check_health "Query"     "http://localhost:8082/health" || die "Query service is not running"
     check_health "Agents"    "http://localhost:8083/health" optional || true
 
-    info "Ingesting an event batch"
+    info "Ingesting one backlog-probe event '$event_name'"
     code=$(http_code POST "http://localhost:8080/v1/events" \
-        '{"events":[{"event":"smoke_test","user_id":"u_smoke","properties":{"source":"dev.sh"}}]}')
+        "{\"events\":[{\"event\":\"$event_name\",\"user_id\":\"u_smoke\",\"properties\":{\"source\":\"dev.sh\"}}]}")
     if [ "$code" = "202" ]; then ok "POST /v1/events → 202"; else
         echo -e "${RED}  ✗${NC} POST /v1/events → $code ($(cat /tmp/apdl-smoke-body))"; failures=$((failures+1)); fi
 
@@ -273,7 +274,7 @@ cmd_smoke() {
     info "Waiting for the event to land in ClickHouse (writer flushes every 5s)"
     local count_body landed=0 attempt
     count_body="{\"project_id\":\"demo\",\"start_date\":\"$(date -u +%Y-%m-%d)\",\"end_date\":\"$(date -u +%Y-%m-%d)\",
-                 \"selectors\":[{\"event_name\":\"smoke_test\"}]}"
+                 \"selectors\":[{\"event_name\":\"$event_name\"}]}"
     for attempt in $(seq 1 12); do
         code=$(http_code POST "http://localhost:8082/v1/query/events/count" "$count_body")
         if [ "$code" != "200" ]; then
@@ -285,16 +286,10 @@ cmd_smoke() {
             ok "POST /v1/query/events/count → 200, total_events=$total"
             landed=1; break
         fi
-        # On a brand-new stream the writer's consumer group is created at '$'
-        # after the first event, skipping it — re-send once halfway through.
-        if [ "$attempt" = "5" ]; then
-            http_code POST "http://localhost:8080/v1/events" \
-                '{"events":[{"event":"smoke_test","user_id":"u_smoke","properties":{"source":"dev.sh","retry":true}}]}' >/dev/null
-        fi
         sleep 2
     done
     if [ "$code" = "200" ] && [ "$landed" != "1" ]; then
-        echo -e "${RED}  ✗${NC} Event never appeared in ClickHouse — is the clickhouse-writer running?"
+        echo -e "${RED}  ✗${NC} Exact event '$event_name' never appeared in ClickHouse — is the clickhouse-writer running?"
         failures=$((failures+1))
     fi
 

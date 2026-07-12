@@ -217,6 +217,25 @@ def test_claim_cursor_scans_past_ineligible_pending_entries(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
+    async def scenario():
+        writer, redis_client, _ = make_writer(monkeypatch)
+
+        await writer._ensure_consumer_groups(["demo"])
+        assert redis_client.group_creates[-1] == {
+            "name": "events:raw:demo",
+            "groupname": "clickhouse-writer",
+            "id": "0-0",
+            "mkstream": True,
+        }
+
+        redis_client.group_creates.clear()
+        assert await writer._get_stream_keys(["demo"]) == ["events:raw:demo"]
+        assert redis_client.group_creates[-1]["id"] == "0-0"
+
+    asyncio.run(scenario())
+
+
 def test_type_only_nullable_legacy_event_projects_to_canonical_row(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 

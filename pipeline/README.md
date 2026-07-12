@@ -26,11 +26,12 @@ batch-inserts into the `events` table.
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
   buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
   (`FLUSH_INTERVAL`), whichever comes first.
-- **Delivery:** at-least-once. Consumer groups start at `$` (no historical
-  replay); the writer periodically uses `XAUTOCLAIM` to take over stale Pending
-  Entries List deliveries from prior consumers. Messages are XACKed only after
-  ClickHouse accepts their rows. A crash between insert and ACK may replay a
-  row; the legacy table does not provide exactly-once storage semantics.
+- **Delivery:** at-least-once. New consumer groups start at `0-0`, so a stream's
+  existing backlog is consumed on first discovery. The writer periodically uses
+  `XAUTOCLAIM` to take over stale Pending Entries List deliveries from prior
+  consumers. Messages are XACKed only after ClickHouse accepts their rows. A
+  crash between insert and ACK may replay a row; the legacy table does not
+  provide exactly-once storage semantics.
 - **Validation and DLQ:** canonical ClickHouse row types are validated before
   buffering. Terminal parse/row rejects write safe metadata (never the event
   payload) to the bounded `events:dlq:{project_id}` Redis stream. The source is

@@ -33,6 +33,7 @@ STREAM_PREFIX = "events:raw:"
 DLQ_STREAM_PREFIX = "events:dlq:"
 CONSUMER_GROUP = "clickhouse-writer"
 DEFAULT_DLQ_MAXLEN = 10_000
+CONSUMER_GROUP_START_ID = "0-0"
 FLUSH_RETRY_BASE_SECONDS = 1.0
 FLUSH_RETRY_MAX_SECONDS = 30.0
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -150,8 +151,8 @@ class ClickHouseWriter:
     async def _ensure_consumer_groups(self, project_ids: list[str] | None):
         """Create consumer groups if they don't exist.
 
-        Groups initially start at the latest message. Backlog consumption is
-        changed separately by APDL-AUD-070.
+        New groups start at the beginning of the stream so events published
+        before writer discovery remain available to the group.
         """
         if project_ids:
             stream_keys = [f"{STREAM_PREFIX}{pid}" for pid in project_ids]
@@ -163,7 +164,7 @@ class ClickHouseWriter:
                 await self.redis_client.xgroup_create(
                     name=stream_key,
                     groupname=CONSUMER_GROUP,
-                    id="$",
+                    id=CONSUMER_GROUP_START_ID,
                     mkstream=True,
                 )
                 logger.info(
@@ -349,7 +350,7 @@ class ClickHouseWriter:
                 await self.redis_client.xgroup_create(
                     name=stream_key,
                     groupname=CONSUMER_GROUP,
-                    id="$",
+                    id=CONSUMER_GROUP_START_ID,
                     mkstream=True,
                 )
             except redis.ResponseError as e:
