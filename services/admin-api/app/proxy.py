@@ -22,6 +22,7 @@ router = APIRouter(tags=["service proxy"])
 logger = logging.getLogger(__name__)
 
 _SAFE_METHODS = frozenset({"GET", "HEAD"})
+_JSON_MEDIA_TYPE = "application/json"
 _FORWARDED_REQUEST_HEADERS = frozenset({"accept", "content-type", "if-none-match"})
 _FORWARDED_RESPONSE_HEADERS = frozenset(
     {
@@ -234,7 +235,13 @@ def _assert_tenant_value(value: object, project_id: str) -> None:
         )
 
 
-async def _request_body(request: Request, settings: Settings, project_id: str) -> bytes:
+async def _request_body(
+    request: Request,
+    settings: Settings,
+    project_id: str,
+    *,
+    require_json: bool = False,
+) -> bytes:
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
@@ -249,11 +256,15 @@ async def _request_body(request: Request, settings: Settings, project_id: str) -
     body = await request.body()
     if len(body) > settings.max_request_bytes:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
-    if (
-        body
-        and request.headers.get("content-type", "").split(";", 1)[0]
-        == "application/json"
-    ):
+    media_type = (
+        request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    )
+    if body and require_json and media_type != _JSON_MEDIA_TYPE:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Codegen request bodies must use application/json",
+        )
+    if body and media_type == _JSON_MEDIA_TYPE:
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
@@ -351,7 +362,12 @@ async def proxy_service(
         )
     for value in request.query_params.getlist("project_id"):
         _assert_tenant_value(value, project_id)
-    body = await _request_body(request, settings, project_id)
+    body = await _request_body(
+        request,
+        settings,
+        project_id,
+        require_json=service == "codegen",
+    )
     if service == "codegen":
         await _require_codegen_scope(request, project_id, upstream_path, settings)
 

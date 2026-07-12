@@ -223,3 +223,49 @@ async def test_proxy_validates_csrf_and_project_assertions(
     )
     assert completed[1][1] == 202
     assert "{'events':" not in repr(insert[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "media_type",
+    [
+        "application/merge-patch+json",
+        "application/vnd.apdl+json",
+        "text/json",
+    ],
+)
+async def test_codegen_proxy_rejects_noncanonical_json_media_types(
+    admin_session: AdminSession,
+    media_type: str,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(201, json={"changeset_id": "changeset-1"})
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.post(
+            "/api/projects/demo/codegen/v1/changesets",
+            headers={
+                "Origin": "http://admin.test",
+                "X-CSRF-Token": csrf,
+                "Content-Type": media_type,
+            },
+            content=json.dumps({"project_id": "other"}),
+        )
+
+    assert response.status_code == 415
+    assert response.json() == {
+        "detail": "Codegen request bodies must use application/json"
+    }
+    assert not called
