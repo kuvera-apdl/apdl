@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,11 +17,18 @@ class FakeConnection:
     def __init__(self) -> None:
         self.user_id = uuid.UUID("20000000-0000-4000-8000-000000000002")
         self.password_hash = hash_password("a-correct-horse-battery-staple")
+        self.failed_login_attempts = 0
+        self.locked_until: datetime | None = None
         self.executions: list[tuple[str, tuple[object, ...]]] = []
 
     @asynccontextmanager
     async def transaction(self):
-        yield
+        snapshot = (self.failed_login_attempts, self.locked_until)
+        try:
+            yield
+        except Exception:
+            self.failed_login_attempts, self.locked_until = snapshot
+            raise
 
     async def fetchrow(self, query: str, *args):
         if "FROM admin_users" in query:
@@ -31,8 +39,8 @@ class FakeConnection:
                 "email": "admin@example.com",
                 "password_hash": self.password_hash,
                 "active": True,
-                "failed_login_attempts": 0,
-                "locked_until": None,
+                "failed_login_attempts": self.failed_login_attempts,
+                "locked_until": self.locked_until,
             }
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
@@ -43,6 +51,12 @@ class FakeConnection:
 
     async def execute(self, query: str, *args):
         self.executions.append((query, args))
+        if "SET failed_login_attempts = $2" in query:
+            self.failed_login_attempts = int(args[1])
+            self.locked_until = args[2]
+        elif "SET failed_login_attempts = 0" in query:
+            self.failed_login_attempts = 0
+            self.locked_until = None
         return "OK"
 
 
@@ -117,6 +131,64 @@ def test_login_uses_a_generic_error_for_unknown_users() -> None:
 
     assert response.status_code == 401
     assert response.json() == {"detail": "Invalid email or password"}
+
+
+def test_failed_login_attempts_commit_and_lock_the_account() -> None:
+    connection = FakeConnection()
+    with make_client(connection) as client:
+        for expected_failures in range(1, 6):
+            response = client.post(
+                "/api/auth/login",
+                headers={"Origin": "http://admin.test"},
+                json={
+                    "email": "admin@example.com",
+                    "password": "wrong-password",
+                },
+            )
+
+            assert response.status_code == 401
+            assert response.json() == {"detail": "Invalid email or password"}
+            assert connection.failed_login_attempts == expected_failures
+            if expected_failures < 5:
+                assert connection.locked_until is None
+
+        assert connection.locked_until is not None
+        assert connection.locked_until > datetime.now(timezone.utc)
+
+        locked_response = client.post(
+            "/api/auth/login",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "admin@example.com",
+                "password": "a-correct-horse-battery-staple",
+            },
+        )
+
+    assert locked_response.status_code == 401
+    assert connection.failed_login_attempts == 5
+    assert not any(
+        "INSERT INTO admin_sessions" in query for query, _ in connection.executions
+    )
+
+
+def test_successful_login_after_lock_expiry_resets_failure_state() -> None:
+    connection = FakeConnection()
+    connection.failed_login_attempts = 5
+    connection.locked_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    with make_client(connection) as client:
+        response = client.post(
+            "/api/auth/login",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "admin@example.com",
+                "password": "a-correct-horse-battery-staple",
+            },
+        )
+
+    assert response.status_code == 200
+    assert connection.failed_login_attempts == 0
+    assert connection.locked_until is None
 
 
 def test_login_rejects_cross_site_origins_before_checking_credentials() -> None:

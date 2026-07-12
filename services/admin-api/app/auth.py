@@ -173,6 +173,7 @@ async def login(
     require_allowed_origin(request, settings)
     email = str(body.email).strip().lower()
     now = datetime.now(timezone.utc)
+    login_result = None
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -218,26 +219,31 @@ async def login(
                         failures,
                         lock_until,
                     )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid email or password",
+            else:
+                user_id = str(user["user_id"])
+                projects = await _project_access(conn, user_id)
+
+                await conn.execute(
+                    """
+                    UPDATE admin_users
+                    SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
+                    WHERE user_id = $1
+                    """,
+                    user["user_id"],
                 )
+                session_token, csrf_token = await _start_session(
+                    conn, user["user_id"], settings, now
+                )
+                login_result = (user_id, projects, session_token, csrf_token)
 
-            user_id = str(user["user_id"])
-            projects = await _project_access(conn, user_id)
+    if login_result is None:
+        # Raise only after the transaction commits the failed-attempt update.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
 
-            await conn.execute(
-                """
-                UPDATE admin_users
-                SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
-                WHERE user_id = $1
-                """,
-                user["user_id"],
-            )
-            session_token, csrf_token = await _start_session(
-                conn, user["user_id"], settings, now
-            )
-
+    user_id, projects, session_token, csrf_token = login_result
     set_session_cookies(response, session_token, csrf_token, settings)
     return UserIdentity(
         user_id=user_id,
