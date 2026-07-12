@@ -34,11 +34,8 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
         "x-cache",
     }
 )
-_CODEGEN_CHANGESET = re.compile(
-    r"^/v1/changesets/([^/]+)(?:/(?:merge|abandon|revert|retry))?$"
-)
-_EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 
+_EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 
 async def _service_credential(
     request: Request,
@@ -90,6 +87,9 @@ async def _remove_ephemeral_credential(
             )
     except Exception:
         logger.exception("Failed to remove ephemeral credential %s", credential_id)
+# Match every route rooted at one changeset, including future child resources.
+# Tenant authorization must not depend on maintaining an action allowlist here.
+_CODEGEN_CHANGESET_PATH = re.compile(r"^/v1/changesets/([^/]+)(?:/[^/]+)*$")
 
 
 async def _start_mutation_audit(
@@ -286,7 +286,7 @@ async def _require_codegen_scope(
             path[len(connection_prefix) :].split("/", 1)[0], project_id
         )
         return
-    match = _CODEGEN_CHANGESET.fullmatch(path)
+    match = _CODEGEN_CHANGESET_PATH.fullmatch(path)
     if match is None:
         return
     token = settings.internal_token

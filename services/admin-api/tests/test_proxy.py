@@ -269,3 +269,60 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
         "detail": "Codegen request bodies must use application/json"
     }
     assert not called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changeset_path",
+    [
+        "/v1/changesets/cs_other",
+        "/v1/changesets/cs_other/observations",
+        "/v1/changesets/cs_other/runtime-observations",
+        "/v1/changesets/cs_other/future-child-resource",
+    ],
+)
+async def test_codegen_proxy_hides_every_cross_tenant_changeset_child_route(
+    admin_session: AdminSession,
+    changeset_path: str,
+) -> None:
+    seen_paths: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        return httpx.Response(200, json={"project_id": "other"})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(f"/api/projects/demo/codegen{changeset_path}")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Changeset not found"}
+    assert seen_paths == ["/v1/changesets/cs_other"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "child_path",
+    ["observations", "runtime-observations"],
+)
+async def test_codegen_proxy_forwards_authorized_changeset_child_routes(
+    admin_session: AdminSession,
+    child_path: str,
+) -> None:
+    seen_paths: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path == "/v1/changesets/cs_demo":
+            return httpx.Response(200, json={"project_id": "demo"})
+        return httpx.Response(200, json={"observations": []})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            f"/api/projects/demo/codegen/v1/changesets/cs_demo/{child_path}"
+        )
+
+    assert response.status_code == 200
+    assert seen_paths == [
+        "/v1/changesets/cs_demo",
+        f"/v1/changesets/cs_demo/{child_path}",
+    ]
