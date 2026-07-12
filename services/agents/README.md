@@ -127,7 +127,7 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Model overrides |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query calls |
+| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
 | `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 
 At least one of the four LLM credentials is required.

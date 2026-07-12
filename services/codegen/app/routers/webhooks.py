@@ -7,13 +7,12 @@ import hmac
 import json
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from app.config import github_webhook_secret
 from app.jobs.ci import sync_github_state
 from app.store import changesets as changeset_store
 
-router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _PR_ACTIONS = {
     "opened",
     "ready_for_review",
@@ -27,6 +26,28 @@ _PR_ACTIONS = {
 def _signature_valid(body: bytes, signature: str, secret: str) -> bool:
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature or "")
+
+
+async def _verify_github_signature(request: Request) -> None:
+    """Fail closed unless the request has a configured, valid GitHub HMAC."""
+    secret = github_webhook_secret()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub webhook endpoint is disabled until a secret is configured.",
+        )
+    body = await request.body()
+    if not _signature_valid(
+        body, request.headers.get("X-Hub-Signature-256", ""), secret
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+
+
+router = APIRouter(
+    prefix="/webhooks",
+    tags=["webhooks"],
+    dependencies=[Depends(_verify_github_signature)],
+)
 
 
 def _head_sha(event: str, payload: dict[str, Any]) -> str:
@@ -46,11 +67,6 @@ async def github_webhook(
 ) -> dict[str, str]:
     """Verify a webhook and use it only as a trigger for live GitHub recovery."""
     body = await request.body()
-    secret = github_webhook_secret()
-    if secret and not _signature_valid(
-        body, request.headers.get("X-Hub-Signature-256", ""), secret
-    ):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
     try:
         payload = json.loads(body or b"{}")
     except json.JSONDecodeError:

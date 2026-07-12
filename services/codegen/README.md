@@ -42,8 +42,10 @@ protection metadata, and truncated snapshots are returned as explicit
 
 ## API
 
-All `/v1` endpoints require the `X-APDL-Internal-Token` header when
-`APDL_INTERNAL_TOKEN` is configured (permissive in local dev).
+All `/v1` endpoints require the canonical `X-API-Key`. Codegen derives the
+project and roles from PostgreSQL and independently checks every body, query,
+path, and changeset-owned project. There is no permissive or global internal
+bearer token.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -58,6 +60,11 @@ All `/v1` endpoints require the `X-APDL-Internal-Token` header when
 | POST | `/v1/changesets/{id}/abandon` | Abandon queued pre-PR work |
 | POST | `/webhooks/github` | HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
+
+`/webhooks/github` is the only route outside the project API-key boundary. It
+always requires `X-Hub-Signature-256` verified with `GITHUB_WEBHOOK_SECRET`.
+When the secret is unset, the endpoint returns `503` before parsing or queuing
+the payload; the service, health checks, and CI poller continue to operate.
 
 ## Changeset lifecycle
 
@@ -82,13 +89,12 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 
 ```
 POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
-APDL_INTERNAL_TOKEN=apdl-dev-internal-token
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=            # PEM inline (escaped \n accepted), or…
 GITHUB_APP_PRIVATE_KEY_BASE64=     # …base64 of the .pem (easiest in Docker), or…
 GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the .pem file (~ expanded)
 GITHUB_API_URL=https://api.github.com
-GITHUB_WEBHOOK_SECRET=             # HMAC secret for /webhooks/github
+GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
 CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
@@ -159,7 +165,7 @@ corpus, execute a credential-scrubbed offline/shadow evaluator command, aggregat
 a content-addressed report, and build a rollout bundle from an explicit strict
 policy. Run that command in a separate credential-minimal worker/container: it
 may retain the selected model-provider key, but it must not receive the GitHub
-App key, installation tokens, internal service token, database URL, or SSH agent.
+App key, installation tokens, database URL, or SSH agent.
 Mount the resulting bundle read-only and set its path through
 `CODEGEN_ROLLOUT_AUTHORIZATION_PATH`.
 
@@ -277,9 +283,10 @@ The autonomous loop runs once these external pieces are set up:
    operator bundle before selecting a PR rollout stage. Optionally set each
    repo's test command through connection `policy.test_cmd` (otherwise it is
    auto-detected).
-3. **Add a repo webhook** → `POST /webhooks/github`, secret
-   `GITHUB_WEBHOOK_SECRET`, events `pull_request`, `check_run`, `check_suite`,
-   and `status`. Polling remains the recovery path for missed deliveries.
+3. **Add a repo webhook** → configure a non-empty `GITHUB_WEBHOOK_SECRET`, then
+   point GitHub at `POST /webhooks/github` with events `pull_request`,
+   `check_run`, `check_suite`, and `status`. An unset secret disables the
+   endpoint; polling remains the recovery path for disabled or missed deliveries.
 4. **Enable GitHub branch protection/rulesets** on the default branch (require PR,
    reviews, and green checks). GitHub is the enforcement and merge authority.
 

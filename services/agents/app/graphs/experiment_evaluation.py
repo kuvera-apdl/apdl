@@ -350,7 +350,9 @@ class ExperimentEvaluationAgent(BaseAgent):
                 except Exception as exc:
                     logger.warning("Ledger lookup failed for %s: %s", experiment_id, exc)
             if changeset_id:
-                await _try("reverted", revert_changeset(changeset_id))
+                await _try(
+                    "reverted", revert_changeset(ctx.project_id, changeset_id)
+                )
             actions["applied"] = True
         elif verdict == "iterate":
             await _try("stopped", update_experiment_status(

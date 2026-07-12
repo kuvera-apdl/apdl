@@ -14,6 +14,13 @@ from app.main import app
 from app.routers import webhooks
 from tests.fakes import FakePool
 
+_TEST_WEBHOOK_SECRET = "s3cret"
+
+
+@pytest.fixture(autouse=True)
+def configured_webhook_secret(monkeypatch):
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", _TEST_WEBHOOK_SECRET)
+
 
 def _client() -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -59,9 +66,19 @@ def _seed_open(pool: FakePool, changeset_id: str = "cs-webhook") -> None:
     )
 
 
-async def _post(payload: dict, *, event: str, headers: dict | None = None):
+async def _post(
+    payload: dict,
+    *,
+    event: str,
+    headers: dict | None = None,
+    sign: bool = True,
+):
     body = json.dumps(payload).encode()
     request_headers = {"X-GitHub-Event": event, **(headers or {})}
+    if sign:
+        request_headers.setdefault(
+            "X-Hub-Signature-256", _sign(body, _TEST_WEBHOOK_SECRET)
+        )
     async with _client() as client:
         return await client.post(
             "/webhooks/github",
@@ -70,9 +87,43 @@ async def _post(payload: dict, *, event: str, headers: dict | None = None):
         )
 
 
+def test_every_webhook_route_requires_hmac_dependency():
+    routes = list(webhooks.router.routes)
+    secured_paths = {route.path for route in routes}
+    app_webhook_paths = {
+        path for path in app.openapi()["paths"] if path.startswith("/webhooks/")
+    }
+
+    assert routes
+    assert app_webhook_paths == secured_paths
+    for route in routes:
+        dependency_calls = {
+            dependency.call for dependency in route.dependant.dependencies
+        }
+        assert webhooks._verify_github_signature in dependency_calls
+
+
+@pytest.mark.asyncio
+async def test_rejects_unset_secret_before_routing(monkeypatch):
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET")
+    app.state.pg_pool = FakePool()
+    calls = _patch_sync(monkeypatch)
+
+    response = await _post(
+        {"repository": {"full_name": "acme/widgets"}, "sha": "head-exact"},
+        event="status",
+        sign=False,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "GitHub webhook endpoint is disabled until a secret is configured."
+    )
+    assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_rejects_invalid_signature_before_routing(monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "s3cret")
     app.state.pg_pool = FakePool()
     calls = _patch_sync(monkeypatch)
 
@@ -88,7 +139,6 @@ async def test_rejects_invalid_signature_before_routing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_valid_signature_routes_exact_head_status_event(monkeypatch):
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "s3cret")
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -105,7 +155,7 @@ async def test_valid_signature_routes_exact_head_status_event(monkeypatch):
             content=body,
             headers={
                 "X-GitHub-Event": "status",
-                "X-Hub-Signature-256": _sign(body, "s3cret"),
+                "X-Hub-Signature-256": _sign(body, _TEST_WEBHOOK_SECRET),
             },
         )
 
@@ -121,7 +171,6 @@ async def test_valid_signature_routes_exact_head_status_event(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_check_run_routes_by_exact_head_sha_not_branch(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -147,7 +196,6 @@ async def test_check_run_routes_by_exact_head_sha_not_branch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_same_head_in_another_repository_does_not_route(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -180,7 +228,6 @@ async def test_same_head_in_another_repository_does_not_route(monkeypatch):
 async def test_pull_request_actions_queue_live_observation_by_repo_and_number(
     monkeypatch, action
 ):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -211,7 +258,6 @@ async def test_pull_request_actions_queue_live_observation_by_repo_and_number(
 
 @pytest.mark.asyncio
 async def test_pull_request_event_requires_delivery_identity(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -234,7 +280,6 @@ async def test_pull_request_event_requires_delivery_identity(monkeypatch):
 @pytest.mark.asyncio
 async def test_closed_payload_does_not_directly_merge_or_abandon_changeset(monkeypatch):
     """The event is only a trigger; the subsequent live GitHub read is authoritative."""
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     pool = FakePool()
     _seed_open(pool)
     app.state.pg_pool = pool
@@ -264,7 +309,6 @@ async def test_closed_payload_does_not_directly_merge_or_abandon_changeset(monke
 
 @pytest.mark.asyncio
 async def test_unknown_or_incomplete_event_is_ignored(monkeypatch):
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     app.state.pg_pool = FakePool()
     calls = _patch_sync(monkeypatch)
 

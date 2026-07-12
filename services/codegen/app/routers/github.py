@@ -2,37 +2,42 @@
 
 Read-only views of what the App can reach on github.com, used by the admin
 console to turn "connect a repo" into a picker instead of hand-typed slugs and
-installation ids. Guarded by the internal token like the connection registry.
+installation ids. Access is scoped by the canonical project API key and role.
 """
 
 from __future__ import annotations
 
 import logging
 
+import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.auth import require_internal_token
+from app.auth import require_project
 from app.github.installations import AccessibleRepo, list_accessible_repos
+from app.store import connections as connections_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/v1/github",
     tags=["github"],
-    dependencies=[Depends(require_internal_token)],
 )
 
 
 @router.get("/repos", response_model=list[AccessibleRepo])
-async def get_accessible_repos() -> list[AccessibleRepo]:
-    """Every repository the App is installed on, across all installations.
-
-    An empty list is a valid answer (the App has no installations yet) — the
-    console renders it as "install the App first" guidance, not an error.
-    """
+async def get_accessible_repos(
+    request: Request, project_id: str = Query(...)
+) -> list[AccessibleRepo]:
+    """Return only the repository already bound to the authorized project."""
+    require_project(request, project_id, "agents:read")
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    connection = await connections_store.get_connection(pool, project_id)
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Project has no repository connection.")
     try:
-        return await list_accessible_repos()
+        repositories = await list_accessible_repos()
+        return [repo for repo in repositories if repo.repo == connection.repo]
     except ValueError as exc:
         # build_app_jwt: App ID / private key not configured on this deployment.
         raise HTTPException(status_code=503, detail=str(exc)) from exc

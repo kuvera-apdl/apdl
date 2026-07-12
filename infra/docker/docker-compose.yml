@@ -140,7 +140,6 @@ services:
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -163,7 +162,6 @@ services:
       - "8084:8084"
     environment:
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       # Provide the private key one of three ways (see .env.example). Base64 is
       # the simplest to carry through .env in Docker (no multi-line / no mount).
@@ -171,6 +169,7 @@ services:
       GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
       GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      # Empty disables the webhook endpoint; the CI poller remains available.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
       CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
@@ -243,7 +242,7 @@ services:
         condition: service_healthy
 
   # Admin backend-for-frontend. Human sessions and tenant roles live in
-  # PostgreSQL; service credentials and the codegen token never enter the SPA.
+  # PostgreSQL; project service credentials never enter the SPA.
   admin-api:
     build:
       context: ../../services/admin-api
@@ -257,7 +256,6 @@ services:
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
     depends_on:

@@ -1,8 +1,8 @@
 """Repo connection registry endpoints.
 
 Binds an APDL project to a GitHub App installation + repository. Guarded by the
-internal token — these endpoints are called by operators/onboarding (and the
-agents service, for repo context), not the browser.
+canonical project API key and role checks; browser requests reach them only
+through the session-authenticated Admin API.
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ import logging
 
 import asyncpg
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
-from app.auth import require_internal_token
+from app.auth import require_project
 from app.github.app_auth import mint_token_for_repo, resolve_installation_id
 from app.github.repo_context import fetch_repo_context
 from app.models.connection import Connection, ConnectionCreate
@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/v1/connections",
     tags=["connections"],
-    dependencies=[Depends(require_internal_token)],
 )
 
 
@@ -39,6 +38,7 @@ async def create_connection(body: ConnectionCreate, request: Request) -> Connect
     first changeset dying at token-mint later.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, body.project_id, "agents:manage")
     if body.installation_id is None:
         try:
             live_id = await resolve_installation_id(body.repo)
@@ -67,6 +67,7 @@ async def create_connection(body: ConnectionCreate, request: Request) -> Connect
 async def get_connection(project_id: str, request: Request) -> Connection:
     """Resolve a project's repo binding."""
     pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, project_id, "agents:read")
     connection = await store.get_connection(pool, project_id)
     if connection is None:
         raise HTTPException(
@@ -83,6 +84,7 @@ async def delete_connection(project_id: str, request: Request) -> None:
     github.com and is untouched, as are existing changesets and open PRs.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, project_id, "agents:manage")
     deleted = await store.delete_connection(pool, project_id)
     if not deleted:
         raise HTTPException(
@@ -99,6 +101,7 @@ async def get_repo_context(project_id: str, request: Request) -> RepoProfile:
     :mod:`app.github.repo_context`.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, project_id, "agents:read")
     connection = await store.get_connection(pool, project_id)
     if connection is None:
         raise HTTPException(

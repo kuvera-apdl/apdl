@@ -1,5 +1,5 @@
-// Codegen-service client. The same-origin admin proxy injects the internal
-// service token after authorizing the human session, project, and role.
+// Codegen-service client. The same-origin admin proxy injects a project-scoped
+// API key after authorizing the human session, project, and role.
 import { ApiError, request, type ServiceConnection } from './http'
 import {
   changesetListSchema,

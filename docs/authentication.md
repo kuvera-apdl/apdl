@@ -1,7 +1,7 @@
 # Authentication and tenant authorization
 
-APDL uses one canonical API-key contract across ingestion, config, query, and
-agents. Send the credential in `X-API-Key`:
+APDL uses one canonical API-key contract across ingestion, config, query,
+agents, and codegen. Send the credential in `X-API-Key`:
 
 ```text
 proj_{project_id}_{secret}
@@ -41,9 +41,9 @@ CSRF value. Sessions expire after both an absolute lifetime and an idle window.
 
 The browser calls only `/api/projects/{project_id}/{service}/...`. The Admin API
 checks the human user's project and role, strips caller-supplied credentials,
-selects the project's key from server-side `APDL_SERVICE_API_KEYS`, and proxies
-the request. SSE uses the same cookie-authenticated path, so no key appears in
-the EventSource URL. The codegen internal token likewise remains server-side.
+selects the project's configured key or mints a short-lived project key, and
+proxies the request. SSE uses the same cookie-authenticated path, so no key
+appears in the EventSource URL. Codegen receives the same project-scoped key.
 Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
@@ -118,7 +118,7 @@ printf 'API key (shown once): %s\n' "$api_key"
 Service principals receive only the roles they need. In production, the Admin
 API, internal agents, and the query guardrail monitor read one JSON object from
 `APDL_SERVICE_API_KEYS`, keyed by project, so each automated call uses a
-tenant-scoped credential:
+tenant-scoped credential. Agent-to-Codegen calls use that same project scope:
 
 ```text
 APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 
 import httpx
@@ -74,6 +74,69 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
         if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
     )
     assert removal[1] == (credential_id,)
+
+
+@pytest.mark.asyncio
+async def test_codegen_proxy_uses_project_scoped_service_key(
+    admin_session: AdminSession,
+) -> None:
+    seen: list[tuple[str | None, str | None]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.headers.get("x-api-key"),
+                request.headers.get("x-apdl-internal-token"),
+            )
+        )
+        return httpx.Response(200, json=[])
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/codegen/v1/changesets?project_id=demo"
+        )
+
+    assert response.status_code == 200
+    assert seen == [(TEST_API_KEY, None)]
+
+
+@pytest.mark.asyncio
+async def test_codegen_proxy_reuses_ephemeral_project_key_for_scope_and_forward(
+    admin_session: AdminSession,
+) -> None:
+    seen_keys: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen_keys.append(request.headers["x-api-key"])
+        if request.url.path == "/v1/changesets/cs_demo":
+            return httpx.Response(200, json={"project_id": "demo"})
+        return httpx.Response(200, json={"observations": []})
+
+    settings = make_settings(service_api_keys={})
+    async with proxy_client(
+        httpx.MockTransport(upstream), admin_session, settings
+    ) as client:
+        response = client.get(
+            "/api/projects/demo/codegen/v1/changesets/cs_demo/observations"
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert len(seen_keys) == 2
+    assert seen_keys[0] == seen_keys[1]
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_keys[0])
+    inserts = [
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    ]
+    assert len(inserts) == 1
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (inserts[0][1][0],)
 
 
 @pytest.mark.asyncio
@@ -297,6 +360,23 @@ async def test_codegen_proxy_hides_every_cross_tenant_changeset_child_route(
     assert response.status_code == 404
     assert response.json() == {"detail": "Changeset not found"}
     assert seen_paths == ["/v1/changesets/cs_other"]
+
+
+@pytest.mark.asyncio
+async def test_codegen_proxy_hides_project_forbidden_changeset_as_not_found(
+    admin_session: AdminSession,
+) -> None:
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/changesets/cs_other"
+        return httpx.Response(status_code=403)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/codegen/v1/changesets/cs_other/observations"
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Changeset not found"}
 
 
 @pytest.mark.asyncio

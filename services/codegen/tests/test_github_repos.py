@@ -1,4 +1,4 @@
-"""Tests for the App-wide repo listing (``GET /v1/github/repos``).
+"""Tests for the project-scoped repo view (``GET /v1/github/repos``).
 
 The endpoint is exercised through a monkeypatched listing seam; the listing
 itself (installation walk + pagination) runs against an httpx MockTransport.
@@ -30,12 +30,21 @@ async def test_repos_endpoint_serves_listing(monkeypatch):
                 account="acme",
                 default_branch="main",
                 private=True,
-            )
+            ),
+            AccessibleRepo(
+                repo="other/secret",
+                installation_id=99,
+                account="other",
+                default_branch="main",
+                private=True,
+            ),
         ]
 
     monkeypatch.setattr(github_router, "list_accessible_repos", fake_list)
-    async with _client(FakePool()) as client:
-        resp = await client.get("/v1/github/repos")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    async with _client(pool) as client:
+        resp = await client.get("/v1/github/repos", params={"project_id": "demo"})
     assert resp.status_code == 200
     assert resp.json() == [
         {
@@ -49,6 +58,16 @@ async def test_repos_endpoint_serves_listing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_repos_endpoint_rejects_another_project(authorized_codegen_request):
+    authorized_codegen_request("demo", frozenset({"agents:read"}))
+    async with _client(FakePool()) as client:
+        response = await client.get(
+            "/v1/github/repos", params={"project_id": "other"}
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_repos_endpoint_503_without_credentials(monkeypatch):
     import app.routers.github as github_router
 
@@ -56,8 +75,10 @@ async def test_repos_endpoint_503_without_credentials(monkeypatch):
         raise ValueError("GitHub App ID and private key are required to mint a JWT.")
 
     monkeypatch.setattr(github_router, "list_accessible_repos", fake_list)
-    async with _client(FakePool()) as client:
-        resp = await client.get("/v1/github/repos")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    async with _client(pool) as client:
+        resp = await client.get("/v1/github/repos", params={"project_id": "demo"})
     assert resp.status_code == 503
 
 
@@ -69,8 +90,10 @@ async def test_repos_endpoint_502_on_github_failure(monkeypatch):
         raise httpx.ConnectError("github down")
 
     monkeypatch.setattr(github_router, "list_accessible_repos", fake_list)
-    async with _client(FakePool()) as client:
-        resp = await client.get("/v1/github/repos")
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    async with _client(pool) as client:
+        resp = await client.get("/v1/github/repos", params={"project_id": "demo"})
     assert resp.status_code == 502
 
 

@@ -162,7 +162,8 @@ async def test_rollback_stops_disables_flag_and_reverts_changeset(monkeypatch):
     async def fake_ledger(pool, project_id, experiment_id):
         return {"experiment_id": experiment_id, "changeset_id": "cs-7"}
 
-    async def fake_revert(changeset_id):
+    async def fake_revert(project_id, changeset_id):
+        assert project_id == "apdl"
         calls.append(f"revert:{changeset_id}")
         return {}
 

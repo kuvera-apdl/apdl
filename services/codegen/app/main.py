@@ -17,10 +17,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.auth import PostgresAuthenticator, authenticate_request
 from app.config import (
     codegen_ci_poll_interval,
     codegen_cors_origins,
@@ -140,6 +141,7 @@ async def lifespan(application: FastAPI):
     application.state.codegen_rollout_stage = publication_gate.stage
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
     application.state.pg_pool = pool
+    application.state.authenticator = PostgresAuthenticator(pool)
 
     async with pool.acquire() as conn:
         await assert_schema_ready(conn)
@@ -291,9 +293,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(connections.router)
-app.include_router(changesets.router)
-app.include_router(github.router)
+auth_dependencies = [Depends(authenticate_request)]
+app.include_router(connections.router, dependencies=auth_dependencies)
+app.include_router(changesets.router, dependencies=auth_dependencies)
+app.include_router(github.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
 
 

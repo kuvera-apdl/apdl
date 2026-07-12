@@ -234,7 +234,7 @@ and `curl` examples.
 |---|---|---|
 | `GET` | `/v1/flags` | Flags for a project (SDK bootstrap, Redis-cached) |
 | `GET` | `/v1/stream` | SSE stream for real-time flag updates |
-| `POST` | `/v1/evaluate` | Server-side gate evaluation (internal token) |
+| `POST` | `/v1/evaluate` | Server-side gate evaluation (project-scoped API key) |
 | `GET/POST` | `/v1/admin/flags` | List / create flags |
 | `PUT/DELETE` | `/v1/admin/flags/:key` | Update / archive flag |
 | `GET/POST` | `/v1/admin/experiments` | List / create experiments |

@@ -46,15 +46,37 @@ async def test_delete_connection():
 @pytest.mark.asyncio
 async def test_delete_unknown_connection_404():
     async with _client(FakePool()) as client:
-        resp = await client.delete("/v1/connections/nope")
+        resp = await client.delete("/v1/connections/demo")
     assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_get_unknown_connection_404():
     async with _client(FakePool()) as client:
-        resp = await client.get("/v1/connections/nope")
+        resp = await client.get("/v1/connections/demo")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_connection_routes_reject_another_project(authorized_codegen_request):
+    pool = FakePool()
+    pool.add_connection("other")
+    authorized_codegen_request("demo", frozenset({"agents:read", "agents:manage"}))
+    async with _client(pool) as client:
+        responses = [
+            await client.get("/v1/connections/other"),
+            await client.get("/v1/connections/other/repo-context"),
+            await client.delete("/v1/connections/other"),
+            await client.post(
+                "/v1/connections",
+                json={
+                    "project_id": "other",
+                    "installation_id": 42,
+                    "repo": "acme/widgets",
+                },
+            ),
+        ]
+    assert all(response.status_code == 403 for response in responses)
 
 
 @pytest.mark.asyncio
@@ -191,7 +213,7 @@ async def test_repo_context_endpoint_serves_document(monkeypatch):
 @pytest.mark.asyncio
 async def test_repo_context_endpoint_404_without_connection():
     async with _client(FakePool()) as client:
-        resp = await client.get("/v1/connections/nope/repo-context")
+        resp = await client.get("/v1/connections/demo/repo-context")
     assert resp.status_code == 404
 
 

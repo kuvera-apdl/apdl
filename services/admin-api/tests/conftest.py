@@ -26,7 +26,6 @@ def make_settings(**overrides) -> Settings:
             "codegen": "http://codegen.test",
         },
         "service_api_keys": {"demo": TEST_API_KEY},
-        "internal_token": "internal-test-token",
         "allowed_origins": frozenset({"http://admin.test"}),
         "cookie_secure": False,
         "session_ttl_seconds": 28_800,

@@ -39,15 +39,6 @@ def codegen_cors_origins() -> list[str]:
     return origins or list(_DEFAULT_CORS_ORIGINS)
 
 
-def internal_token() -> str:
-    """Shared internal service token (``X-APDL-Internal-Token``).
-
-    Empty in local dev, in which case the internal-token guard is permissive —
-    matching the posture of the other services.
-    """
-    return os.getenv("APDL_INTERNAL_TOKEN", "")
-
-
 def github_app_id() -> str:
     """The GitHub App's numeric ID (as a string)."""
     return os.getenv("GITHUB_APP_ID", "")
@@ -93,7 +84,7 @@ def github_api_url() -> str:
 
 
 def github_webhook_secret() -> str:
-    """HMAC secret for verifying inbound GitHub webhooks. Empty = permissive dev."""
+    """HMAC secret for inbound GitHub webhooks. Empty disables the endpoint."""
     return os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 

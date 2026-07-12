@@ -37,6 +37,7 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 
+
 async def _service_credential(
     request: Request,
     project_id: str,
@@ -87,6 +88,8 @@ async def _remove_ephemeral_credential(
             )
     except Exception:
         logger.exception("Failed to remove ephemeral credential %s", credential_id)
+
+
 # Match every route rooted at one changeset, including future child resources.
 # Tenant authorization must not depend on maintaining an action allowlist here.
 _CODEGEN_CHANGESET_PATH = re.compile(r"^/v1/changesets/([^/]+)(?:/[^/]+)*$")
@@ -278,6 +281,7 @@ async def _require_codegen_scope(
     request: Request,
     project_id: str,
     path: str,
+    api_key: str,
     settings: Settings,
 ) -> None:
     connection_prefix = "/v1/connections/"
@@ -289,17 +293,11 @@ async def _require_codegen_scope(
     match = _CODEGEN_CHANGESET_PATH.fullmatch(path)
     if match is None:
         return
-    token = settings.internal_token
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Codegen is not configured",
-        )
     response = await request.app.state.http_client.get(
         f"{settings.service_urls['codegen'].rstrip('/')}/v1/changesets/{match.group(1)}",
-        headers={"X-APDL-Internal-Token": token},
+        headers={"X-API-Key": api_key},
     )
-    if response.status_code == 404:
+    if response.status_code in {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND}:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Changeset not found"
         )
@@ -368,27 +366,30 @@ async def proxy_service(
         project_id,
         require_json=service == "codegen",
     )
-    if service == "codegen":
-        await _require_codegen_scope(request, project_id, upstream_path, settings)
+
+    ephemeral_credential_id: str | None = None
+    api_key, ephemeral_credential_id = await _service_credential(
+        request, project_id, roles, settings
+    )
+    try:
+        if service == "codegen":
+            await _require_codegen_scope(
+                request,
+                project_id,
+                upstream_path,
+                api_key,
+                settings,
+            )
+    except Exception:
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
+        raise
 
     headers = {
         name: value
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
-    ephemeral_credential_id: str | None = None
-    if service == "codegen":
-        if not settings.internal_token:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Codegen is not configured",
-            )
-        headers["X-APDL-Internal-Token"] = settings.internal_token
-    else:
-        api_key, ephemeral_credential_id = await _service_credential(
-            request, project_id, roles, settings
-        )
-        headers["X-API-Key"] = api_key
+    headers["X-API-Key"] = api_key
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
     upstream_request = request.app.state.http_client.build_request(
