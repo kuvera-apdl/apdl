@@ -48,15 +48,32 @@ Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
-Provision users through the operator command; there is no public registration
-endpoint:
+`POST /api/auth/register` accepts one strict `{email, password}` contract. It
+creates the user and session in one transaction, but deliberately creates no
+`admin_user_projects` rows. A newly registered user is authenticated with
+`projects: []` and cannot call any project-scoped service route until an
+operator grants membership and roles separately. Registration requires an
+exact allowed `Origin` and is rate-limited with login at the console proxy.
 
-```bash
-make create-admin-user ARGS="--email admin@example.com --project-id acme --roles config:read config:write query:read agents:read"
-```
+An authenticated user can create a canonical project from
+`/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
+the `admin_projects` record and the creator's `admin_user_projects` membership
+in one transaction, and returns the refreshed identity. The creator receives
+the canonical project roles; another user cannot claim an existing project ID.
+Database triggers also register project IDs introduced by operator membership
+or service-credential provisioning, and foreign keys keep both registries tied
+to the canonical project row.
 
-The command prompts for a password. Reprovisioning an existing email rotates
-its password and revokes its active sessions.
+For projects without an operator-configured key in `APDL_SERVICE_API_KEYS`, the
+Admin API mints a random five-minute credential for each proxied request. Only
+the SHA-256 hash is stored in `auth_credentials`; the raw key remains in memory
+for the upstream call and the row is deleted after the response or SSE stream
+closes. This keeps self-created projects usable without exposing a persistent
+service credential to the browser or storing a recoverable key.
+
+`make create-admin-user` remains the operator-only bootstrap and recovery path.
+Reprovisioning an existing email rotates its password and revokes active
+sessions.
 
 ## Roles
 

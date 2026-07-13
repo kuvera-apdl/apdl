@@ -19,6 +19,9 @@ and every proxied request is authorized against a user, project, and role.
 - Registration accepts only an email and password. New accounts start with no
   rows in `admin_user_projects`, so registration cannot grant tenant access or
   service roles.
+- Authenticated users can create a project through `POST /api/projects`. The
+  project record and full creator membership are committed together, and the
+  updated project list is returned to the console.
 - Unsafe requests require an exact allowed `Origin`, a CSRF cookie, a matching
   header, and the session-bound CSRF digest.
 - `/api/projects/{project_id}/{service}/...` is deny-by-default. The proxy
@@ -26,6 +29,10 @@ and every proxied request is authorized against a user, project, and role.
   injecting a server-side API key.
 - Caller-supplied API keys, authorization headers, cookies, internal tokens,
   and project assertions for another tenant are discarded or rejected.
+- Projects without a configured long-lived service key use a random five-minute
+  proxy credential. Only its SHA-256 hash is inserted in PostgreSQL, the raw key
+  exists only for the upstream request, and the credential is deleted when the
+  response or SSE stream closes.
 - Every authorized mutation gets a fail-closed `admin_proxy_audit` attempt row
   with human user, project, role, service, route, and final status. Bodies and
   credentials are deliberately excluded.
@@ -61,7 +68,7 @@ shell history; `--password-stdin` supports secret-manager pipelines.
 | `QUERY_SERVICE_URL` | Private query URL |
 | `AGENTS_SERVICE_URL` | Private agents URL |
 | `CODEGEN_SERVICE_URL` | Private codegen URL |
-| `APDL_ADMIN_ALLOWED_ORIGINS` | JSON array of exact console origins; wildcards are rejected |
+| `APDL_ADMIN_ALLOWED_ORIGINS` | JSON array of exact console origins; local defaults cover ports 5173 and 5174, and wildcards are rejected |
 | `APDL_ADMIN_COOKIE_SECURE` | Must be `true` in HTTPS deployments |
 | `APDL_ADMIN_SESSION_TTL_SECONDS` | Absolute session lifetime; default 8 hours |
 | `APDL_ADMIN_SESSION_IDLE_SECONDS` | Idle expiry; default 30 minutes |

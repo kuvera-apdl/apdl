@@ -93,7 +93,8 @@ make run-admin       # :5173
 
 Open `/register` to create an email/password account. New accounts have zero
 projects and zero roles; project access must be granted separately by an
-operator.
+operator or created from `/settings/workspace`. Creating a project associates
+it with the current profile and grants the creator the canonical project roles.
 
 `scripts/dev.sh up-full` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the
