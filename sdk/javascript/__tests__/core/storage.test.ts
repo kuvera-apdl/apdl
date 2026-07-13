@@ -123,7 +123,7 @@ describe('OfflineStorage', () => {
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       owner_id: 'project:projectA',
       serialized_bytes: serializedBytes(event),
     });
@@ -255,6 +255,25 @@ describe('OfflineStorage', () => {
       stored_at: Date.now() - WEEK_MS - 1,
       serialized_bytes: serializedBytes(expiredEvent),
       data: expiredEvent,
+    });
+
+    expect(await projectA.drain()).toEqual([]);
+    expect(await readRawRecords()).toEqual([]);
+  });
+
+  it('purges current version 1 records that can contain unsafe click text', async () => {
+    const projectA = storageForKey(PROJECT_A_KEY);
+    await projectA.count();
+    const unsafeEvent = createEvent('$click', {
+      text: 'stored-password',
+      tag: 'input',
+    });
+    await addRawRecord({
+      schema_version: 1,
+      owner_id: 'project:projectA',
+      stored_at: Date.now(),
+      serialized_bytes: serializedBytes(unsafeEvent),
+      data: unsafeEvent,
     });
 
     expect(await projectA.drain()).toEqual([]);

@@ -114,6 +114,224 @@ describe('EventQueue', () => {
       expect(queue.length).toBe(0);
     });
 
+    it.each(['$click', '$rage_click'])(
+      'should remove sensitive data from reserved %s events without mutating the source',
+      (eventName) => {
+        const event = createEvent({
+          event: eventName,
+          properties: { text: 'live-password', tag: 'input' },
+          context: {
+            locale: 'en-CA',
+            referrer: 'https://referrer.test/?token=referrer-secret',
+            page: {
+              url: 'https://example.test/account?token=query-secret#fragment-secret',
+              title: 'Password reset secret',
+              path: '/account/secret-path',
+              search: '?token=query-secret',
+            },
+          },
+        });
+
+        queue.enqueue(event);
+
+        expect(queue.getQueue()[0].properties).toEqual({ tag: 'input' });
+        expect(queue.getQueue()[0].context).toEqual({ locale: 'en-CA' });
+        expect(event.properties).toEqual({
+          text: 'live-password',
+          tag: 'input',
+        });
+        expect(event.context).toEqual({
+          locale: 'en-CA',
+          referrer: 'https://referrer.test/?token=referrer-secret',
+          page: {
+            url: 'https://example.test/account?token=query-secret#fragment-secret',
+            title: 'Password reset secret',
+            path: '/account/secret-path',
+            search: '?token=query-secret',
+          },
+        });
+      }
+    );
+
+    it('should enforce reserved-event safety before and after custom scrubbers', async () => {
+      const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue(true);
+      const customScrubber = vi.fn((event: TrackEvent): TrackEvent => ({
+        ...event,
+        properties: {
+          ...event.properties,
+          text: 'reintroduced-secret',
+          tag: 'input?token=reintroduced-secret',
+          x: 'reintroduced-secret',
+        },
+        context: {
+          ...event.context,
+          referrer: 'https://referrer.test/?token=reintroduced-secret',
+          page: {
+            url: 'https://example.test/?token=reintroduced-secret#fragment',
+            title: 'Reintroduced secret title',
+            path: '/reintroduced-secret',
+            search: '?token=reintroduced-secret',
+          },
+        },
+      }));
+      scrubber.addScrubber(customScrubber);
+
+      queue.enqueue(createEvent({
+        event: '$click',
+        properties: { text: 'live-password', tag: 'input' },
+        context: {
+          locale: 'en-CA',
+          referrer: 'https://referrer.test/?token=initial-secret',
+          page: {
+            url: 'https://example.test/?token=initial-secret#fragment',
+            title: 'Initial secret title',
+            path: '/initial-secret',
+            search: '?token=initial-secret',
+          },
+        },
+      }));
+
+      expect(customScrubber.mock.calls[0][0].properties).toEqual({
+        tag: 'input',
+      });
+      expect(customScrubber.mock.calls[0][0].context).toEqual({ locale: 'en-CA' });
+      expect(queue.getQueue()[0]).toMatchObject({
+        properties: {},
+        context: { locale: 'en-CA' },
+      });
+      expect(JSON.stringify(queue.getQueue()[0])).not.toContain('reintroduced-secret');
+
+      await queue.flush();
+
+      const payload = sendSpy.mock.calls[0][1];
+      expect(JSON.stringify(payload)).not.toContain('initial-secret');
+      expect(JSON.stringify(payload)).not.toContain('reintroduced-secret');
+    });
+
+    it('should preserve text on non-reserved events', () => {
+      queue.enqueue(createEvent({
+        event: 'search_submitted',
+        properties: { text: 'product query' },
+      }));
+
+      expect(queue.getQueue()[0].properties).toEqual({
+        text: 'product query',
+      });
+    });
+
+    it('should keep only canonical structural properties on reserved events', () => {
+      queue.enqueue(createEvent({
+        event: '$click',
+        properties: {
+          tag: 'a',
+          href: 'https://example.test/reset?token=secret',
+          id: 'secret-id',
+          classes: 'secret-class',
+          x: 10,
+          y: 20,
+        },
+      }));
+
+      expect(queue.getQueue()[0].properties).toEqual({
+        tag: 'a',
+        x: 10,
+        y: 20,
+      });
+    });
+
+    it('should preserve only canonical bounded values for reserved events', () => {
+      queue.enqueue(createEvent({
+        event: '$click',
+        properties: {
+          tag: 'checkout-button',
+          x: 0,
+          y: 100_000,
+          clickCount: 3,
+        },
+      }));
+      queue.enqueue(createEvent({
+        event: '$rage_click',
+        properties: {
+          tag: `a${'b'.repeat(63)}`,
+          x: 0.5,
+          y: 99_999.5,
+          clickCount: 3,
+        },
+      }));
+      queue.enqueue(createEvent({
+        event: '$rage_click',
+        properties: {
+          tag: 'button',
+          x: 100_000,
+          y: 0,
+          clickCount: 100,
+        },
+      }));
+
+      expect(queue.getQueue().map((event) => event.properties)).toEqual([
+        { tag: 'checkout-button', x: 0, y: 100_000 },
+        {
+          tag: `a${'b'.repeat(63)}`,
+          x: 0.5,
+          y: 99_999.5,
+          clickCount: 3,
+        },
+        {
+          tag: 'button',
+          x: 100_000,
+          y: 0,
+          clickCount: 100,
+        },
+      ]);
+    });
+
+    it('should drop invalid or secret-shaped values from canonical property keys', () => {
+      queue.enqueue(createEvent({
+        event: '$click',
+        properties: {
+          tag: 'input?token=query-secret#fragment-secret',
+          x: 'live-password',
+          y: Number.POSITIVE_INFINITY,
+        },
+      }));
+      queue.enqueue(createEvent({
+        event: '$rage_click',
+        properties: {
+          tag: `secret-${'x'.repeat(58)}`,
+          x: -1,
+          y: 100_000.01,
+          clickCount: 2,
+        },
+      }));
+      queue.enqueue(createEvent({
+        event: '$rage_click',
+        properties: {
+          tag: 'INPUT',
+          x: Number.NaN,
+          y: 'live-password',
+          clickCount: 101,
+        },
+      }));
+      queue.enqueue(createEvent({
+        event: '$rage_click',
+        properties: {
+          tag: '',
+          x: null,
+          y: false,
+          clickCount: 3.14,
+        },
+      }));
+
+      expect(queue.getQueue().map((event) => event.properties)).toEqual([
+        {},
+        {},
+        {},
+        {},
+      ]);
+      expect(JSON.stringify(queue.getQueue())).not.toContain('live-password');
+      expect(JSON.stringify(queue.getQueue())).not.toContain('query-secret');
+    });
+
     it('should respect maxQueueSize', () => {
       const smallConfig = createConfig({ maxQueueSize: 3, batchSize: 100 });
       const smallQueue = new EventQueue(
@@ -170,6 +388,66 @@ describe('EventQueue', () => {
         session_id: 'sess-1',
       });
       expect(payload.events[0]).toHaveProperty('message_id');
+    });
+
+    it('should re-apply reserved-event safety before transport and offline storage', async () => {
+      const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue(false);
+      const storeSpy = vi.spyOn(storage, 'store').mockResolvedValue();
+
+      queue.enqueue(createEvent({
+        event: '$click',
+        properties: { tag: 'input', x: 1, y: 2 },
+        context: {
+          locale: 'en-CA',
+          library: { name: 'apdl-js', version: 'test' },
+        },
+      }));
+      const queued = queue.getQueue()[0];
+      queued.properties = {
+        ...queued.properties,
+        text: 'reintroduced-password',
+        href: 'https://example.test/reset?token=secret',
+        tag: 'input?token=reintroduced-secret#fragment',
+        x: 'reintroduced-password',
+        y: Number.NaN,
+      };
+      queued.context = {
+        ...queued.context,
+        referrer: 'https://referrer.test/?token=reintroduced-secret',
+        page: {
+          url: 'https://example.test/reset?token=reintroduced-secret#fragment',
+          title: 'Reintroduced password',
+          path: '/reset/reintroduced-secret',
+          search: '?token=reintroduced-secret',
+        },
+      };
+
+      await queue.flush();
+
+      const payload = sendSpy.mock.calls[0][1] as {
+        events: Array<{
+          properties?: Record<string, unknown>;
+          context: Record<string, unknown>;
+        }>;
+      };
+      expect(payload.events[0]).toMatchObject({
+        properties: {},
+        context: {
+          locale: 'en-CA',
+          library: { name: 'apdl-js', version: 'test' },
+        },
+      });
+      expect(payload.events[0].context).not.toHaveProperty('page');
+      expect(payload.events[0].context).not.toHaveProperty('referrer');
+      expect(storeSpy.mock.calls[0][0][0]).toMatchObject({
+        properties: {},
+        context: {
+          locale: 'en-CA',
+          library: { name: 'apdl-js', version: 'test' },
+        },
+      });
+      expect(JSON.stringify(payload)).not.toContain('reintroduced');
+      expect(JSON.stringify(storeSpy.mock.calls[0][0])).not.toContain('reintroduced');
     });
 
     it('should normalize SDK camelCase event fields for ingestion', async () => {
@@ -302,6 +580,30 @@ describe('EventQueue', () => {
       expect(queue.length).toBeGreaterThanOrEqual(1);
 
       queue.stop();
+    });
+
+    it('should remove text from legacy auto-capture events before direct requeue', async () => {
+      vi.spyOn(storage, 'drain').mockResolvedValue([
+        createEvent({
+          event: '$click',
+          properties: { text: 'stored-password', tag: 'input' },
+        }),
+        createEvent({
+          event: '$rage_click',
+          properties: {
+            text: 'stored-password',
+            tag: 'input',
+            clickCount: 3,
+          },
+        }),
+      ]);
+
+      await queue.start();
+
+      expect(queue.getQueue().map((event) => event.properties)).toEqual([
+        { tag: 'input' },
+        { tag: 'input', clickCount: 3 },
+      ]);
     });
 
     it('should discard restored events when analytics consent was revoked', async () => {

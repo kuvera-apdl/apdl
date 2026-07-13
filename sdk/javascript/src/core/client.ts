@@ -116,7 +116,7 @@ export class APDLClient implements APDLApi {
       this.config.consent,
       this.config.persistence
     );
-    this.scrubber = new Scrubber(this.config.privacyMode !== 'standard');
+    this.scrubber = new Scrubber();
 
     // Core transport
     this.transport = new Transport(this.config.auth.clientKey, {

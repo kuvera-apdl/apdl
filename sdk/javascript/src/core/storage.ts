@@ -3,7 +3,9 @@ import type { TrackEvent } from './types';
 const DB_NAME = 'apdl-offline';
 const STORE_NAME = 'events';
 const DB_VERSION = 2;
-const RECORD_SCHEMA_VERSION = 1;
+// Version 1 may contain click text captured before the mandatory privacy guard.
+// Reject it rather than replaying potentially sensitive legacy telemetry.
+const RECORD_SCHEMA_VERSION = 2;
 const MAX_RECORD_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 export const MAX_OFFLINE_EVENTS_PER_PROJECT = 1000;

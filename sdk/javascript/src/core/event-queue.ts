@@ -4,6 +4,7 @@ import { Transport } from './transport';
 import { OfflineStorage } from './storage';
 import type { Scrubber } from '../privacy/scrubber';
 import type { ConsentManager } from '../privacy/consent';
+import { sanitizeAutoCaptureEvent } from '../privacy/auto-capture-safety';
 
 interface IngestionEvent {
   event: string;
@@ -66,8 +67,8 @@ export class EventQueue {
       return;
     }
 
-    // Run through scrubber pipeline
-    const scrubbed = this.scrubber.scrub(event);
+    // Mandatory safety rules run outside the configurable scrubber pipeline.
+    const scrubbed = this.scrubber.scrub(sanitizeAutoCaptureEvent(event));
     if (scrubbed === null) {
       if (this.config.debug) {
         console.debug('APDL: Event dropped by scrubber pipeline');
@@ -83,7 +84,9 @@ export class EventQueue {
       this.queue.shift();
     }
 
-    this.queue.push(scrubbed);
+    // Re-apply the mandatory rules in case a custom scrubber reintroduced a
+    // forbidden reserved-event property.
+    this.queue.push(sanitizeAutoCaptureEvent(scrubbed));
 
     // Auto-flush when batch size is reached
     if (this.queue.length >= this.config.batchSize) {
@@ -103,7 +106,9 @@ export class EventQueue {
     this.isFlushing = true;
 
     // Snapshot and clear queue atomically
-    const batch = this.queue.splice(0, this.config.batchSize);
+    const batch = this.queue
+      .splice(0, this.config.batchSize)
+      .map(sanitizeAutoCaptureEvent);
 
     try {
       const payload = {
@@ -138,7 +143,7 @@ export class EventQueue {
   async flushOnUnload(): Promise<void> {
     if (this.queue.length === 0) return;
 
-    const batch = this.queue.splice(0);
+    const batch = this.queue.splice(0).map(sanitizeAutoCaptureEvent);
     const payload = {
       events: batch.map((event) => this.toIngestionEvent(event)),
     };
@@ -198,8 +203,9 @@ export class EventQueue {
         if (this.config.debug) {
           console.debug(`APDL: Drained ${offlineEvents.length} events from offline storage`);
         }
-        // Push directly to queue (already scrubbed and checked against current consent)
-        this.queue.push(...offlineEvents);
+        // Offline events already passed through configurable scrubbers, but
+        // legacy records can predate mandatory auto-capture safety rules.
+        this.queue.push(...offlineEvents.map(sanitizeAutoCaptureEvent));
         if (this.queue.length >= this.config.batchSize) {
           void this.flush();
         }

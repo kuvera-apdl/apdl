@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
 import { SDK_IDENTIFIER } from '../../src/core/constants';
+import type { TrackEvent } from '../../src/core/types';
 import {
   CLIENT_KEY,
   ENDPOINT,
@@ -67,6 +68,34 @@ describe('APDLClient', () => {
       expect(`${url.origin}${url.pathname}`).toBe(`${ENDPOINT}/v1/stream`);
       expect(url.searchParams.get('api_key')).toBe(CLIENT_KEY);
       expect(url.searchParams.has('project_id')).toBe(false);
+    });
+
+    it('should not queue sensitive DOM data with default auto-capture', async () => {
+      const defaultConfig = createTestConfig();
+      delete defaultConfig.autoCapture;
+      const defaultClient = new APDLClient(defaultConfig);
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.value = 'default-client-password';
+      document.body.append(input);
+
+      try {
+        for (let index = 0; index < 3; index += 1) {
+          input.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            composed: true,
+          }));
+        }
+
+        const queued = defaultClient.debug.getQueue() as TrackEvent[];
+        const serialized = JSON.stringify(queued);
+        expect(serialized).not.toContain('default-client-password');
+        expect(queued.map((event) => event.event)).not.toContain('$click');
+        expect(queued.map((event) => event.event)).not.toContain('$rage_click');
+      } finally {
+        input.remove();
+        await defaultClient.shutdown();
+      }
     });
 
     it('should throw on missing endpoint', () => {
@@ -251,6 +280,21 @@ describe('APDLClient', () => {
       const queue = client.debug.getQueue();
       expect(queue[0]).toHaveProperty('sessionId');
       expect(typeof (queue[0] as Record<string, unknown>).sessionId).toBe('string');
+    });
+
+    it('should apply built-in PII scrubbers in standard privacy mode', () => {
+      client.track('pii_event', {
+        email: 'contact alice@example.com',
+        card: '4111 1111 1111 1111',
+        ssn: '123-45-6789',
+      });
+
+      const event = client.debug.getQueue()[0] as TrackEvent;
+      expect(event.properties).toEqual({
+        email: 'contact [REDACTED]',
+        card: '[REDACTED]',
+        ssn: '[REDACTED]',
+      });
     });
   });
 

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request, Response
 
 from app.auth import require_role
 from app.middleware.rate_limit import check_rate_limit
+from app.privacy import sanitize_auto_capture_events
 from app.streaming.redis_producer import publish_event
 from app.validation.schema import validate_event_batch
 
@@ -41,6 +42,8 @@ async def ingest_events(request: Request):
             status_code=400,
             media_type="application/json",
         )
+
+    body = sanitize_auto_capture_events(body)
 
     if not body:
         return Response(

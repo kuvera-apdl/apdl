@@ -111,6 +111,132 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
 
 
 @pytest.mark.asyncio
+async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
+    legacy_sentinel = "live-password-value"
+    # Longer than the normal property limit, proving text is stripped before
+    # validation rather than rejected into an old SDK's retry/offline queue.
+    over_limit_sentinel = "live-password-value-" * 500
+    payload = {
+        "events": [
+            {
+                "event": "$click",
+                "type": "track",
+                "anonymous_id": "anon-sdk-1",
+                "properties": {
+                    "text": legacy_sentinel,
+                    "tag": "input",
+                    "id": "password",
+                    "classes": "account-password",
+                    "x": 12,
+                    "y": 34,
+                },
+                "context": {
+                    "page": {
+                        "url": "https://example.test/reset?token=url-secret",
+                        "title": "Reset title-secret",
+                        "path": "/reset/path-secret",
+                        "search": "?token=search-secret",
+                    },
+                    "referrer": "https://referrer.test/?token=referrer-secret",
+                    "browser": {"name": "Firefox", "version": "128"},
+                },
+            },
+            {
+                "event": "$rage_click",
+                "type": "track",
+                "anonymous_id": "anon-sdk-1",
+                "properties": {
+                    "text": over_limit_sentinel,
+                    "tag": "input",
+                    "id": "password",
+                    "classes": "account-password",
+                    "clickCount": 3,
+                    "x": 12,
+                    "y": 34,
+                },
+                "context": {
+                    "page": {
+                        "url": "https://example.test/rage?token=rage-url-secret",
+                        "title": "Rage title-secret",
+                        "path": "/rage/path-secret",
+                    },
+                    "referrer": "https://referrer.test/rage-secret",
+                    "device_type": "desktop",
+                },
+            },
+            {
+                "event": "$click",
+                "type": "track",
+                "anonymous_id": "anon-sdk-1",
+                "properties": {
+                    "tag": "INPUT-password-secret",
+                    "x": "x-coordinate-secret",
+                    "y": True,
+                },
+                "context": {
+                    "page": {
+                        "url": "https://example.test/?token=malformed-url-secret",
+                        "title": "Malformed title-secret",
+                        "path": "/malformed/path-secret",
+                    },
+                    "referrer": "https://referrer.test/malformed-secret",
+                    "locale": "en-CA",
+                },
+            },
+            {
+                "event": "custom_event",
+                "type": "track",
+                "anonymous_id": "anon-sdk-1",
+                "properties": {"text": "ordinary event text", "source": "test"},
+            },
+        ]
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 202
+    assert resp.json() == {"accepted": 4}
+    assert app.state.redis.xadd.await_count == 4
+
+    published = [
+        json.loads(call.args[1]["event_json"])
+        for call in app.state.redis.xadd.await_args_list
+    ]
+    assert published[0]["properties"] == {"tag": "input", "x": 12, "y": 34}
+    assert published[0]["context"] == {
+        "browser": {"name": "Firefox", "version": "128"}
+    }
+    assert published[1]["properties"] == {
+        "tag": "input",
+        "clickCount": 3,
+        "x": 12,
+        "y": 34,
+    }
+    assert published[1]["context"] == {"device_type": "desktop"}
+    assert published[2]["properties"] == {}
+    assert published[2]["context"] == {"locale": "en-CA"}
+    assert published[3]["properties"] == {
+        "text": "ordinary event text",
+        "source": "test",
+    }
+    serialized = "".join(
+        call.args[1]["event_json"] for call in app.state.redis.xadd.await_args_list
+    )
+    assert legacy_sentinel not in serialized
+    assert over_limit_sentinel not in serialized
+    for sentinel in (
+        "url-secret",
+        "title-secret",
+        "path-secret",
+        "referrer-secret",
+        "coordinate-secret",
+        "INPUT-password-secret",
+        "rage-secret",
+    ):
+        assert sentinel not in serialized
+
+
+@pytest.mark.asyncio
 async def test_feature_flag_exposure_payload_is_published(client):
     payload = {
         "events": [{

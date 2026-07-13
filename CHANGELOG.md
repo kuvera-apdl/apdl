@@ -31,6 +31,11 @@ Releases are cut by pushing a `v*` git tag, which publishes `@apdl-oss/sdk` to n
 - Main README: corrected agents-service routes
   (`/v1/agents/:run_id/status|approve`) and documented the guardrails and
   `/v1/evaluate` endpoints
+- JavaScript click and rage-click auto-capture now emits only strict structural
+  metadata without page or referrer context; sensitive controls are excluded,
+  baseline PII scrubbing is always on, ingestion sanitizes unsafe click data sent
+  by older SDK builds, and version-1 offline queues are discarded so previously
+  captured data cannot replay
 
 ## [0.1.0]
 

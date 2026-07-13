@@ -120,36 +120,46 @@ function scrubObject(
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'string') {
-      result[key] = transform(value);
-    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      result[key] = scrubObject(
-        value as Record<string, unknown>,
-        transform
-      );
-    } else if (Array.isArray(value)) {
-      result[key] = value.map((item) => {
-        if (typeof item === 'string') return transform(item);
-        if (item !== null && typeof item === 'object') {
-          return scrubObject(item as Record<string, unknown>, transform);
-        }
-        return item;
-      });
-    } else {
-      result[key] = value;
-    }
+    result[key] = scrubValue(value, transform);
   }
   return result;
 }
 
+function scrubValue(
+  value: unknown,
+  transform: (value: string) => string
+): unknown {
+  if (typeof value === 'string') {
+    return transform(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubValue(item, transform));
+  }
+  if (isPlainObject(value)) {
+    return scrubObject(value, transform);
+  }
+  return value;
+}
+
 function deepClone<T>(obj: T): T {
   if (obj === null || typeof obj !== 'object') return obj;
+  if (obj instanceof Date) {
+    return new Date(obj.getTime()) as T;
+  }
   if (Array.isArray(obj)) {
     return obj.map((item) => deepClone(item)) as unknown as T;
   }
+  if (!isPlainObject(obj)) return obj;
+
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(obj)) {
     result[key] = deepClone(value);
   }
   return result as T;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }

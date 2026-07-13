@@ -151,6 +151,14 @@ Optional fields include:
 | `maxQueueSize` | Maximum queued events before dropping the oldest event. |
 | `debug` | Enables SDK diagnostics when `true`. |
 
+Automatic click and rage-click events contain structural element metadata only.
+They never include DOM text, form-control values, URLs, IDs, or CSS classes.
+Known credential, one-time-code, file, and payment controls identified from
+native types and semantic hints are excluded entirely. Page and referrer context
+is also omitted from these events so URL parameters, fragments, paths, and page
+titles cannot disclose secrets. Use manual events when an application needs an
+explicitly chosen semantic label.
+
 ## Local Development Endpoints
 
 When running the local APDL services, initialize the SDK with the local
@@ -280,8 +288,9 @@ apdl.privacy.addScrubber(scrubSsn);
 apdl.privacy.removeScrubber(scrubSsn);
 ```
 
-`privacyMode: 'cookieless'` derives a daily-rotating anonymous ID with no
-client-side persistence; `'strict'` additionally enables aggressive scrubbing.
+Baseline email, payment-card, and SSN scrubbers run in every privacy mode.
+`privacyMode: 'cookieless'` additionally derives a daily-rotating anonymous ID
+with no client-side persistence; `'strict'` disables persisted flag caching.
 
 Failed analytics deliveries may be retained in IndexedDB for up to seven days.
 Each record is scoped to the canonical project ID derived from the client key;
