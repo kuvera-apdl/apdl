@@ -89,3 +89,59 @@ test('rejects mismatched passwords without calling registration', async () => {
   expect(await screen.findByText('Passwords do not match')).toBeInTheDocument()
   expect(registrationCalled).toBe(false)
 })
+
+test('creates a project from a zero-project workspace and associates it with the profile', async () => {
+  let submitted: unknown = null
+  let csrfHeader: string | null = null
+  const withProject = {
+    ...IDENTITY,
+    projects: [
+      {
+        project_id: 'firstproject',
+        roles: [
+          'events:write',
+          'config:read',
+          'config:write',
+          'config:evaluate',
+          'query:read',
+          'agents:read',
+          'agents:run',
+          'agents:manage',
+          'agents:approve',
+        ],
+      },
+    ],
+  }
+  document.cookie = 'apdl_admin_csrf=project-csrf; Path=/'
+  server.use(
+    http.get('*/api/auth/me', () => HttpResponse.json(IDENTITY)),
+    http.post('*/api/projects', async ({ request }) => {
+      submitted = await request.json()
+      csrfHeader = request.headers.get('x-csrf-token')
+      return HttpResponse.json(withProject, { status: 201 })
+    }),
+  )
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <WorkspaceProvider>
+          <MemoryRouter initialEntries={['/settings/workspace']}>
+            <Routes>
+              <Route path="/settings/workspace" element={<WorkspaceSettingsPage />} />
+            </Routes>
+          </MemoryRouter>
+        </WorkspaceProvider>
+      </AuthProvider>
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByText('No project access yet')).toBeInTheDocument()
+  await userEvent.type(screen.getByLabelText('Project ID'), 'firstproject')
+  await userEvent.click(screen.getByRole('button', { name: 'Create project' }))
+
+  expect(await screen.findByText('firstproject')).toBeInTheDocument()
+  expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
+  expect(submitted).toEqual({ project_id: 'firstproject' })
+  expect(csrfHeader).toBe('project-csrf')
+})

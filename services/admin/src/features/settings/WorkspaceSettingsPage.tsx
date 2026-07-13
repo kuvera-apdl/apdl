@@ -1,15 +1,51 @@
-import { ShieldCheck } from 'lucide-react'
+import { Loader2, Plus, ShieldCheck } from 'lucide-react'
+import { useState, type FormEvent } from 'react'
+import { toast } from 'sonner'
+import { z } from 'zod'
 
+import { ApiError } from '@/api/http'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
 
 export function WorkspaceSettingsPage() {
-  const { identity } = useAuth()
+  const { identity, createProject } = useAuth()
   const { active, setActive } = useWorkspace()
+  const [projectId, setProjectId] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const onCreateProject = async (event: FormEvent) => {
+    event.preventDefault()
+    const parsed = z
+      .string()
+      .regex(/^[A-Za-z0-9]{1,64}$/, 'Use 1–64 letters or numbers')
+      .safeParse(projectId)
+    if (!parsed.success) {
+      setError(parsed.error.issues[0]?.message ?? 'Invalid project ID')
+      return
+    }
+    setCreating(true)
+    setError(null)
+    try {
+      await createProject(parsed.data)
+      setProjectId('')
+      toast.success(`Project "${parsed.data}" created`)
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError('That project ID already exists.')
+      } else {
+        setError('Unable to create the project. Try again shortly.')
+      }
+    } finally {
+      setCreating(false)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -42,6 +78,42 @@ export function WorkspaceSettingsPage() {
           </CardHeader>
         </Card>
       ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Plus className="h-5 w-5" />
+            Create project
+          </CardTitle>
+          <CardDescription>
+            Create a project and associate it with this account. You receive the project roles
+            needed to configure and operate it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={(event) => void onCreateProject(event)} className="space-y-4" noValidate>
+            <div className="space-y-1.5">
+              <Label htmlFor="new-project-id">Project ID</Label>
+              <Input
+                id="new-project-id"
+                className="font-mono"
+                value={projectId}
+                onChange={(event) => setProjectId(event.target.value)}
+                placeholder="myproject"
+                disabled={creating}
+              />
+              <p className="text-xs text-muted-foreground">
+                1–64 letters or numbers. Project IDs are permanent.
+              </p>
+            </div>
+            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            <Button type="submit" disabled={creating}>
+              {creating ? <Loader2 className="animate-spin" /> : null}
+              Create project
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 md:grid-cols-2">
         {identity?.projects.map((project) => (

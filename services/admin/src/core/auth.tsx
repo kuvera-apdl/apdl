@@ -10,6 +10,7 @@ import {
 } from 'react'
 
 import {
+  createAdminProject,
   getAdminSession,
   loginAdmin,
   logoutAdmin,
@@ -28,6 +29,7 @@ interface AuthContextValue {
   logoutReason: LogoutReason
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string) => Promise<void>
+  createProject: (projectId: string) => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -98,6 +100,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         queryClient.clear()
         setIdentity(next)
         setLogoutReason(null)
+      },
+      createProject: async (projectId) => {
+        const next = await createAdminProject(projectId)
+        queryClient.clear()
+        setIdentity(next)
       },
       logout: async () => {
         try {

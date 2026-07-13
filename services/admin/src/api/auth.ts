@@ -51,6 +51,14 @@ export function registerAdmin(email: string, password: string): Promise<AuthIden
   })
 }
 
+export function createAdminProject(projectId: string): Promise<AuthIdentity> {
+  return request(authConnection, '/api/projects', {
+    method: 'POST',
+    body: { project_id: projectId },
+    schema: authIdentitySchema,
+  })
+}
+
 export function getAdminSession(): Promise<AuthIdentity> {
   return request(authConnection, '/api/auth/me', {
     schema: authIdentitySchema,
