@@ -780,9 +780,13 @@ export const changesetSchema = z
 
 export const changesetListSchema = z.array(changesetSchema)
 
-// Repo connection registry (services/codegen/app/models/connection.py):
-// binds a project to a GitHub App installation + repository.
+// Read-only repository grant projection
+// (services/codegen/app/models/connection.py). Repository authority is an
+// operator-verified grant bound to GitHub's immutable repository id; tenants
+// cannot submit a repo slug or installation id through the Admin surface.
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+export const REPOSITORY_GRANT_ID_PATTERN = /^ghg_[A-Za-z0-9_-]+$/
+export const CODEGEN_PROJECT_ID_PATTERN = /^[A-Za-z0-9]{1,64}$/
 
 const canonicalProtectedPathListSchema = z
   .array(z.string().min(1).max(256))
@@ -851,37 +855,13 @@ export const tenantCodegenConnectionPolicySchema: z.ZodType<{
 
 export const repoConnectionSchema = z
   .object({
-    project_id: z.string(),
-    installation_id: z.number().int(),
-    repo: z.string(),
-    default_base_branch: z.string(),
+    project_id: z.string().regex(CODEGEN_PROJECT_ID_PATTERN),
+    grant_id: z.string().min(5).max(132).regex(REPOSITORY_GRANT_ID_PATTERN),
+    repository_id: z.number().int().positive(),
+    repository_full_name: z.string().min(3).max(201).regex(REPO_SLUG_PATTERN),
+    default_base_branch: z.string().min(1).max(255).regex(/^[^\r\n]+$/),
     tenant_policy: tenantCodegenConnectionPolicySchema,
     created_at: z.string(),
     updated_at: z.string(),
   })
   .strict()
-
-export const repoConnectionCreateSchema = z
-  .object({
-    project_id: z.string().min(1),
-    // Omitted → the codegen service resolves the live installation id from the
-    // repo slug (and 422s cleanly if the App is not installed on it).
-    installation_id: z.number().int().min(1).optional(),
-    repo: z.string().regex(REPO_SLUG_PATTERN, 'Format: owner/name'),
-    default_base_branch: z.string().min(1),
-  })
-  .strict()
-
-// One repository the APDL GitHub App can reach (codegen GET /v1/github/repos —
-// mirrors AccessibleRepo in services/codegen/app/github/installations.py).
-export const accessibleRepoSchema = z
-  .object({
-    repo: z.string(),
-    installation_id: z.number().int(),
-    account: z.string(),
-    default_branch: z.string(),
-    private: z.boolean(),
-  })
-  .strict()
-
-export const accessibleRepoListSchema = z.array(accessibleRepoSchema)

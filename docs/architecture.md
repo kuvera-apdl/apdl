@@ -20,6 +20,7 @@ Autonomous Product Development Loop.
 | Config Service | FastAPI, asyncpg, SSE | 8081 | [README](../services/config/README.md) |
 | Query Service | FastAPI, ClickHouse, SciPy | 8082 | [README](../services/query/README.md) |
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | [README](../services/agents/README.md) |
+| Codegen Service | FastAPI, GitHub App, isolated editor | 8084 (internal) | [README](../services/codegen/README.md) |
 | Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | [README](../services/admin-api/README.md) |
 | Admin Console | React, Vite, nginx | 5173 | [README](../services/admin/README.md) |
 | Pipeline (writer, ETL) | Python, clickhouse-driver | — | [README](../pipeline/README.md) |
@@ -79,6 +80,10 @@ ClickHouse ──→ Query Service ──→ Agents ──(safety gate)──→
   (L1 suggest-only → L4 full-auto); risky actions queue for human approval,
   everything is audit-logged, and a rollback monitor disables an experiment's
   flag if error-rate/latency/primary-metric guardrails breach.
+- Codegen is reachable only through the private service network. A project role
+  cannot choose a GitHub repository: a trusted operator separately grants one
+  immutable repository ID, and each GitHub mutation uses a token restricted to
+  that repository.
 
 ## Storage
 

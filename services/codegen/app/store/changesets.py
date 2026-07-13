@@ -22,6 +22,7 @@ from app.models.changeset import (
     TaskSpec,
     assert_transition,
 )
+from app.models.connection import RepositoryTarget
 from app.models.observations import (
     CIRemediationStatus,
     ExternalCIStatus,
@@ -224,17 +225,24 @@ async def create_changeset(
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
+    repository_target: RepositoryTarget,
     tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
     effective_safety_policy_sha256: str | None = None,
 ) -> Changeset:
-    """Insert a new changeset in the ``queued`` state."""
+    """Insert queued work with an immutable, grant-verified repository target."""
+    if repository_target.project_id != project_id:
+        raise ValueError("Changeset project does not match its repository grant")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO codegen_changesets
                 (changeset_id, project_id, run_id, status, base_branch, task,
-                 tenant_policy_snapshot, effective_safety_policy_sha256)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+                 tenant_policy_snapshot, effective_safety_policy_sha256,
+                 repository_grant_id, repository_id,
+                 repository_installation_id, repository_full_name,
+                 repository_target_quarantined)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8,
+                    $9, $10, $11, $12, false)
             RETURNING *
             """,
             changeset_id,
@@ -249,6 +257,10 @@ async def create_changeset(
                 else None
             ),
             effective_safety_policy_sha256,
+            repository_target.grant_id,
+            repository_target.repository_id,
+            repository_target.installation_id,
+            repository_target.repository_full_name,
         )
     return _row_to_changeset(row)
 
@@ -294,41 +306,52 @@ async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | No
 
 
 async def get_changeset_by_head_sha(
-    pool: asyncpg.Pool, head_sha: str, repo: str
+    pool: asyncpg.Pool,
+    head_sha: str,
+    repository_id: int,
+    installation_id: int,
 ) -> Changeset | None:
-    """Find an open changeset by exact GitHub head SHA and repository."""
+    """Find open work by exact head and immutable GitHub repository identity."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
-            JOIN codegen_connections conn ON conn.project_id = cs.project_id
             WHERE cs.head_sha = $1
-              AND conn.repo = $2
+              AND cs.repository_id = $2
+              AND cs.repository_installation_id = $3
+              AND NOT cs.repository_target_quarantined
               AND cs.status = 'pr_open'
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
             head_sha,
-            repo,
+            repository_id,
+            installation_id,
         )
     return _row_to_changeset(row) if row else None
 
 
 async def get_changeset_by_pr_number(
-    pool: asyncpg.Pool, pr_number: int, repo: str
+    pool: asyncpg.Pool,
+    pr_number: int,
+    repository_id: int,
+    installation_id: int,
 ) -> Changeset | None:
-    """Find the APDL changeset associated with a GitHub pull request."""
+    """Find work by PR number and immutable GitHub repository identity."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
-            JOIN codegen_connections conn ON conn.project_id = cs.project_id
-            WHERE cs.pr_number = $1 AND conn.repo = $2
+            WHERE cs.pr_number = $1
+              AND cs.repository_id = $2
+              AND cs.repository_installation_id = $3
+              AND NOT cs.repository_target_quarantined
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
             pr_number,
-            repo,
+            repository_id,
+            installation_id,
         )
     return _row_to_changeset(row) if row else None
 

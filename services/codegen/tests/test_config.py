@@ -121,18 +121,21 @@ def test_ci_repair_limits_default_and_floor(monkeypatch):
     assert config.codegen_ci_repair_budget_seconds() == 0
 
 
-def test_job_budget_derives_from_the_inner_timeouts(monkeypatch):
+def test_job_budget_caps_derived_pipeline_below_github_token_ttl(monkeypatch):
     monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
     monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
     monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
-    # (1 + retries) × agent + clone/push slack
-    assert config.codegen_job_budget() == 2 * 1800 + 2 * 300
+    assert config.codegen_job_budget() == config.MAX_CODEGEN_JOB_BUDGET_SECONDS
 
 
-def test_job_budget_env_override_wins(monkeypatch):
+def test_job_budget_env_override_can_tighten_but_not_expand_token_bound(monkeypatch):
+    monkeypatch.setenv("CODEGEN_JOB_BUDGET", "2400")
+    assert config.codegen_job_budget() == 2400
+
     monkeypatch.setenv("CODEGEN_JOB_BUDGET", "7200")
-    assert config.codegen_job_budget() == 7200
+    with pytest.raises(ValueError, match="cannot exceed 3000 seconds"):
+        config.codegen_job_budget()
 
 
 def test_stale_sweep_interval_default_and_disable(monkeypatch):

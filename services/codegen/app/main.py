@@ -42,15 +42,15 @@ from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
 from app.evaluations.models import RolloutStage
 from app.evaluations.publication import load_publication_authorizer
-from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_evidence
 from app.github.pulls import get_pull_request, open_pull_request
+from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
-from app.routers import changesets, connections, github, webhooks
+from app.routers import changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
@@ -61,16 +61,6 @@ _ORPHAN_ERROR = (
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def _mint_token(installation_id: int, repo: str) -> str:
-    """Mint a short-lived installation token (string) for the changeset job.
-
-    Delegates to :func:`mint_token_for_repo`, which self-heals a stale (rotated)
-    installation id on a 404 by re-resolving it from the repo.
-    """
-    token = await mint_token_for_repo(installation_id, repo)
-    return token.token
 
 
 def _make_editor(stage: RolloutStage | None = None) -> Editor:
@@ -145,6 +135,8 @@ async def lifespan(application: FastAPI):
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
     application.state.pg_pool = pool
     application.state.authenticator = PostgresAuthenticator(pool)
+    token_broker = GitHubTokenBroker(pool)
+    application.state.github_token_broker = token_broker
 
     async with pool.acquire() as conn:
         await assert_schema_ready(conn)
@@ -187,7 +179,7 @@ async def lifespan(application: FastAPI):
                 pool,
                 observation,
                 editor=editor,
-                mint_token=_mint_token,
+                mint_token=token_broker.write_changeset,
                 publication_gate=publication_gate,
                 platform_safety_policy=platform_safety_policy,
             )
@@ -198,7 +190,7 @@ async def lifespan(application: FastAPI):
     application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
         "editor": editor,
-        "mint_token": _mint_token,
+        "mint_token": token_broker.write_changeset,
         "open_pr": open_pull_request,
         "publication_gate": publication_gate,
         "platform_safety_policy": platform_safety_policy,
@@ -209,12 +201,13 @@ async def lifespan(application: FastAPI):
     # claim transition guarantees a single winner even with a concurrent
     # replica doing the same. (References are held so the tasks aren't GC'd.)
     queued_ids = await changeset_store.list_queued_changeset_ids(pool)
-    application.state.requeued_jobs = [
+    requeued_jobs = [
         asyncio.create_task(
             run_changeset_job(pool, changeset_id, **application.state.job_deps)
         )
         for changeset_id in queued_ids
     ]
+    application.state.requeued_jobs = requeued_jobs
     if queued_ids:
         logger.info(
             "Re-enqueued %d queued changeset(s) from before this boot: %s",
@@ -225,7 +218,7 @@ async def lifespan(application: FastAPI):
     application.state.github_sync_deps = {
         "get_pull_request": get_pull_request,
         "get_ci_evidence": get_ci_evidence,
-        "mint_token": _mint_token,
+        "mint_token": token_broker.read_changeset,
         "repair_failure": _schedule_ci_repair,
         "collect_runtime": collect_runtime_evidence,
     }
@@ -275,6 +268,13 @@ async def lifespan(application: FastAPI):
         task.cancel()
     if repair_jobs:
         await asyncio.gather(*repair_jobs, return_exceptions=True)
+    for task in requeued_jobs:
+        task.cancel()
+    if requeued_jobs:
+        # A requeued editor may still own a GitHub token lease and an isolated
+        # worker. Await cancellation while PostgreSQL and broker dependencies
+        # are alive so its context manager can revoke the credential cleanly.
+        await asyncio.gather(*requeued_jobs, return_exceptions=True)
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -301,7 +301,6 @@ app.add_middleware(
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(connections.router, dependencies=auth_dependencies)
 app.include_router(changesets.router, dependencies=auth_dependencies)
-app.include_router(github.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
 
 

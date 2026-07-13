@@ -46,9 +46,17 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
+async def test_rejects_database_without_repository_authority_migration():
+    with pytest.raises(RuntimeError, match="009_codegen_repository_authority.sql"):
+        await assert_schema_ready(
+            FakeConn(migration_name="008_codegen_safety_policy.sql")
+        )
+
+
+@pytest.mark.asyncio
 async def test_rejects_incomplete_schema_at_startup():
-    columns = REQUIRED_COLUMNS - {("codegen_changesets", "head_sha")}
-    with pytest.raises(RuntimeError, match="codegen_changesets.head_sha"):
+    columns = REQUIRED_COLUMNS - {("github_repository_grants", "repository_id")}
+    with pytest.raises(RuntimeError, match="github_repository_grants.repository_id"):
         await assert_schema_ready(FakeConn(columns=columns))
 
 
@@ -60,3 +68,9 @@ def test_codegen_startup_contains_no_postgres_ddl():
     assert "ALTER TABLE" not in main_source
     assert "CREATE TABLE" not in db_source
     assert "ALTER TABLE" not in db_source
+
+
+def test_shutdown_awaits_requeued_jobs_before_closing_database():
+    main_source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
+    await_requeued = "await asyncio.gather(*requeued_jobs, return_exceptions=True)"
+    assert main_source.index(await_requeued) < main_source.index("await pool.close()")

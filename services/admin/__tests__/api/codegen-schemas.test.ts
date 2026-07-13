@@ -110,8 +110,9 @@ describe('codegen schemas', () => {
   it('rejects legacy connection policy fields and malformed policy provenance', () => {
     const connection = {
       project_id: 'demo',
-      installation_id: 42,
-      repo: 'acme/widgets',
+      grant_id: 'ghg_demo',
+      repository_id: 123456,
+      repository_full_name: 'acme/widgets',
       default_base_branch: 'main',
       tenant_policy: {
         schema_version: 'tenant_codegen_connection_policy@1',
@@ -131,6 +132,18 @@ describe('codegen schemas', () => {
     }
     expect(repoConnectionSchema.safeParse(connection).success).toBe(true)
     expect(repoConnectionSchema.safeParse({ ...connection, policy: {} }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      grant_id: 'tenant-chosen-grant',
+    }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      installation_id: 42,
+    }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      repo: 'acme/widgets',
+    }).success).toBe(false)
     expect(changesetSchema.safeParse({
       ...sample,
       effective_safety_policy_sha256: 'NOT-A-DIGEST',

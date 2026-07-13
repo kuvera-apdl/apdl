@@ -29,9 +29,11 @@ Docker default network.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import uuid
 
 from app.config import codegen_job_budget
 from app.contracts.models import ContractBundle
@@ -116,8 +118,11 @@ class ContainerAiderEditor:
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
+            container_name = f"apdl-codegen-{uuid.uuid4().hex}"
             rc, out, err = await self._run_docker(
-                self._docker_argv(request), self._docker_env(request)
+                self._docker_argv(request, container_name=container_name),
+                self._docker_env(request),
+                container_name=container_name,
             )
             return self._parse_result(rc, out, err, request)
         except Exception as exc:  # an attempt must never raise to the job runner
@@ -128,7 +133,12 @@ class ContainerAiderEditor:
         """Provider keys actually set in our env (only these get forwarded)."""
         return [k for k in _SECRET_ENV_FORWARD if os.environ.get(k)]
 
-    def _docker_argv(self, request: EditRequest) -> list[str]:
+    def _docker_argv(
+        self,
+        request: EditRequest,
+        *,
+        container_name: str | None = None,
+    ) -> list[str]:
         """Assemble the ``docker run`` command. Secrets are passed by name only."""
         argv = [
             self._docker, "run", "--rm",
@@ -142,6 +152,8 @@ class ContainerAiderEditor:
             "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
             "--user", "1000:1000",
         ]
+        if container_name is not None:
+            argv += ["--name", container_name]
         if self._network:
             argv += ["--network", self._network]
         # Non-secret task inputs — safe to pass as values.
@@ -202,13 +214,19 @@ class ContainerAiderEditor:
 
     def _docker_env(self, request: EditRequest) -> dict[str, str]:
         """The environment for the ``docker`` client process (carries the secrets)."""
+        env = self._docker_control_env()
+        env["GH_TOKEN"] = request.token
+        for key in self._present_secret_keys():
+            env[key] = os.environ[key]
+        return env
+
+    @staticmethod
+    def _docker_control_env() -> dict[str, str]:
+        """Docker client environment without repository or provider credentials."""
         env = {"PATH": os.environ.get("PATH", os.defpath)}
         for key in ("HOME", "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
             if key in os.environ:
                 env[key] = os.environ[key]
-        env["GH_TOKEN"] = request.token
-        for key in self._present_secret_keys():
-            env[key] = os.environ[key]
         return env
 
     def _parse_result(
@@ -292,7 +310,11 @@ class ContainerAiderEditor:
         )
 
     async def _run_docker(
-        self, argv: list[str], env: dict[str, str]
+        self,
+        argv: list[str],
+        env: dict[str, str],
+        *,
+        container_name: str,
     ) -> tuple[int, str, str]:
         """Run ``docker run`` keeping stdout (the JSON result) and stderr separate."""
         proc = await asyncio.create_subprocess_exec(
@@ -304,11 +326,97 @@ class ContainerAiderEditor:
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            await self._stop_container_and_client(container_name, proc)
             return 124, "", f"sandbox timed out after {self._timeout}s"
+        except asyncio.CancelledError:
+            await self._stop_container_and_client(container_name, proc)
+            raise
         return (
             proc.returncode or 0,
             (out or b"").decode("utf-8", "replace"),
             (err or b"").decode("utf-8", "replace"),
         )
+
+    async def _stop_container_and_client(
+        self,
+        container_name: str,
+        client_process: asyncio.subprocess.Process,
+    ) -> None:
+        """Reap the creating CLI, then force-remove its named container."""
+        # Stop the creator first. Otherwise an early cancellation can race:
+        # `docker rm` observes no container, then the still-running `docker run`
+        # client creates one after cleanup has already returned.
+        if client_process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                client_process.terminate()
+            try:
+                await asyncio.wait_for(client_process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    client_process.kill()
+                await client_process.wait()
+
+        # With the creator reaped, this final remove cannot race a later start.
+        # Retry once and distinguish an already-absent container from a daemon
+        # failure. Never claim cleanup succeeded while a provider-key-bearing
+        # sandbox is still running.
+        last_detail = ""
+        for attempt in range(2):
+            remove_rc, remove_detail = await self._docker_control_command(
+                "rm", "-f", container_name
+            )
+            if remove_rc == 0:
+                return
+            inspect_rc, inspect_detail = await self._docker_control_command(
+                "inspect", "--type", "container", container_name
+            )
+            combined = f"{remove_detail}\n{inspect_detail}".strip()
+            if inspect_rc not in (None, 0) and self._container_is_absent(combined):
+                return
+            last_detail = combined[-400:]
+            logger.warning(
+                "Codegen sandbox %s removal attempt %d was not verified: %s",
+                container_name,
+                attempt + 1,
+                last_detail,
+            )
+
+        logger.critical(
+            "Credential-bearing Codegen sandbox %s may still be running: %s",
+            container_name,
+            last_detail,
+        )
+        raise RuntimeError(
+            f"Could not verify removal of Codegen sandbox {container_name}"
+        )
+
+    async def _docker_control_command(self, *args: str) -> tuple[int | None, str]:
+        """Run a credential-free Docker control command with bounded output."""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self._docker,
+                *args,
+                env=self._docker_control_env(),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _out, error = await asyncio.wait_for(
+                    process.communicate(), timeout=30
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                _out, error = await process.communicate()
+                return None, "Docker control command timed out"
+            return (
+                process.returncode,
+                (error or b"").decode("utf-8", "replace")[-400:],
+            )
+        except Exception as exc:
+            logger.exception("Docker control command failed: %s", " ".join(args))
+            return None, str(exc)[-400:]
+
+    @staticmethod
+    def _container_is_absent(detail: str) -> bool:
+        normalized = detail.casefold()
+        return "no such container" in normalized or "no such object" in normalized

@@ -48,6 +48,15 @@ Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
+Project authorization does not imply GitHub repository ownership. Codegen
+accepts no tenant-supplied repository or GitHub App installation coordinates.
+A trusted operator must separately activate a grant binding the APDL project to
+GitHub's immutable numeric repository ID. Admin exposes only the read-only grant
+projection (`grant_id`, `repository_id`, and display-only
+`repository_full_name`); the installation ID remains inside the trusted
+Codegen control plane. Every GitHub token lease revalidates that grant and uses
+an operation-specific token restricted to the immutable repository ID.
+
 `POST /api/auth/register` accepts one strict `{email, password}` contract. It
 creates the user and session in one transaction, but deliberately creates no
 `admin_user_projects` rows. A newly registered user is authenticated with

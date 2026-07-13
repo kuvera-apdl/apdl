@@ -15,6 +15,8 @@ from app.routers import webhooks
 from tests.fakes import FakePool
 
 _TEST_WEBHOOK_SECRET = "s3cret"
+_REPOSITORY_ID = 10
+_INSTALLATION_ID = 1
 
 
 @pytest.fixture(autouse=True)
@@ -53,7 +55,12 @@ def _patch_sync(monkeypatch) -> list[dict[str, Any]]:
 
 
 def _seed_open(pool: FakePool, changeset_id: str = "cs-webhook") -> None:
-    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_connection(
+        "demo",
+        repo="acme/widgets",
+        repository_id=_REPOSITORY_ID,
+        installation_id=_INSTALLATION_ID,
+    )
     pool.add_changeset(
         changeset_id,
         "demo",
@@ -110,7 +117,11 @@ async def test_rejects_unset_secret_before_routing(monkeypatch):
     calls = _patch_sync(monkeypatch)
 
     response = await _post(
-        {"repository": {"full_name": "acme/widgets"}, "sha": "head-exact"},
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+            "sha": "head-exact",
+        },
         event="status",
         sign=False,
     )
@@ -128,7 +139,11 @@ async def test_rejects_invalid_signature_before_routing(monkeypatch):
     calls = _patch_sync(monkeypatch)
 
     response = await _post(
-        {"repository": {"full_name": "acme/widgets"}, "sha": "head-exact"},
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+            "sha": "head-exact",
+        },
         event="status",
         headers={"X-Hub-Signature-256": "sha256=bad"},
     )
@@ -144,7 +159,8 @@ async def test_valid_signature_routes_exact_head_status_event(monkeypatch):
     app.state.pg_pool = pool
     calls = _patch_sync(monkeypatch)
     payload = {
-        "repository": {"full_name": "acme/widgets"},
+        "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+        "installation": {"id": _INSTALLATION_ID},
         "sha": "head-exact",
     }
     body = json.dumps(payload).encode()
@@ -185,7 +201,8 @@ async def test_check_run_routes_by_exact_head_sha_not_branch(monkeypatch):
                     "head_sha": "head-exact",
                 },
             },
-            "repository": {"full_name": "acme/widgets"},
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
         },
         event="check_run",
     )
@@ -204,7 +221,10 @@ async def test_same_head_in_another_repository_does_not_route(monkeypatch):
     response = await _post(
         {
             "check_suite": {"head_sha": "head-exact"},
-            "repository": {"full_name": "someone-else/widgets"},
+            # A slug is display metadata; the immutable numeric id controls
+            # routing even when an event supplies the expected name.
+            "repository": {"id": 11, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
         },
         event="check_suite",
     )
@@ -243,7 +263,8 @@ async def test_pull_request_actions_queue_live_observation_by_repo_and_number(
                 # event; live GitHub state is fetched by immutable PR identity.
                 "head": {"ref": "not-the-stored-branch"},
             },
-            "repository": {"full_name": "acme/widgets"},
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
         },
         event="pull_request",
         headers={"X-GitHub-Delivery": f"delivery-{action}"},
@@ -267,7 +288,8 @@ async def test_pull_request_event_requires_delivery_identity(monkeypatch):
         {
             "action": "synchronize",
             "number": 17,
-            "repository": {"full_name": "acme/widgets"},
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
         },
         event="pull_request",
     )
@@ -294,7 +316,8 @@ async def test_closed_payload_does_not_directly_merge_or_abandon_changeset(monke
                 "merged": True,
                 "merge_commit_sha": "untrusted-payload-sha",
             },
-            "repository": {"full_name": "acme/widgets"},
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
         },
         event="pull_request",
         headers={"X-GitHub-Delivery": "delivery-close"},
@@ -313,9 +336,41 @@ async def test_unknown_or_incomplete_event_is_ignored(monkeypatch):
     calls = _patch_sync(monkeypatch)
 
     response = await _post(
-        {"repository": {"full_name": "acme/widgets"}},
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+        },
         event="check_run",
     )
+
+    assert response.json() == {"status": "ignored"}
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "repository": {"full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+            "sha": "head-exact",
+        },
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "sha": "head-exact",
+        },
+    ],
+)
+async def test_event_missing_immutable_repository_identity_is_ignored(
+    monkeypatch, payload
+):
+    pool = FakePool()
+    _seed_open(pool)
+    app.state.pg_pool = pool
+    calls = _patch_sync(monkeypatch)
+
+    response = await _post(payload, event="status")
 
     assert response.json() == {"status": "ignored"}
     assert calls == []

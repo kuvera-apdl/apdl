@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -185,6 +185,12 @@ run-codegen:
 
 build-codegen-sandbox:
 	docker build -f services/codegen/Dockerfile.worker -t apdl-codegen-sandbox:latest services/codegen
+
+grant-codegen-repository:
+	cd services/codegen && .venv/bin/python -m app.github.grant_cli $(ARGS)
+
+revoke-codegen-repository:
+	cd services/codegen && .venv/bin/python -m app.github.revoke_grant_cli $(ARGS)
 
 # ─── Pipeline ────────────────────────────────────────────────
 

@@ -158,8 +158,10 @@ services:
     build:
       context: ../../services/codegen
       dockerfile: Dockerfile
-    ports:
-      - "8084:8084"
+    # Deliberately not published on the host. Agents and the Admin API reach
+    # Codegen by its private Compose service name (`http://codegen:8084`).
+    expose:
+      - "8084"
     environment:
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
@@ -193,6 +195,8 @@ services:
       CODEGEN_REVIEW: ${CODEGEN_REVIEW:-true}
       CODEGEN_HELPER_MODEL: ${CODEGEN_HELPER_MODEL:-}
       CODEGEN_EDIT_RETRIES: ${CODEGEN_EDIT_RETRIES:-1}
+      # May tighten but never exceed the 3000s GitHub write-token safety cap.
+      CODEGEN_JOB_BUDGET: ${CODEGEN_JOB_BUDGET:-3000}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

@@ -22,6 +22,8 @@ dependencies = [
 
 [project.scripts]
 apdl-codegen-eval = "app.evaluations.cli:main"
+apdl-codegen-grant-repository = "app.github.grant_cli:main"
+apdl-codegen-revoke-repository = "app.github.grant_cli:revoke_main"
 
 [project.optional-dependencies]
 dev = [

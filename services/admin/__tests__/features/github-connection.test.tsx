@@ -31,15 +31,16 @@ function renderCard() {
 }
 
 describe('GitHubConnectionCard', () => {
-  test('shows the project repository without exposing the internal token', async () => {
+  test('shows the project repository from its verified grant without exposing installation authority', async () => {
     let internalToken: string | null = null
     server.use(
       http.get('*/api/projects/demo/codegen/v1/connections/demo', ({ request }) => {
         internalToken = request.headers.get('x-apdl-internal-token')
         return HttpResponse.json({
           project_id: 'demo',
-          installation_id: 42,
-          repo: 'acme/widgets',
+          grant_id: 'ghg_demo',
+          repository_id: 123456,
+          repository_full_name: 'acme/widgets',
           default_base_branch: 'main',
           tenant_policy: {
             schema_version: 'tenant_codegen_connection_policy@1',
@@ -63,7 +64,9 @@ describe('GitHubConnectionCard', () => {
     renderCard()
 
     expect(await screen.findByText('acme/widgets')).toBeInTheDocument()
-    expect(screen.getByText('Connected')).toBeInTheDocument()
+    expect(screen.getByText('Verified grant')).toBeInTheDocument()
+    expect(screen.getByText(/repository #123456/)).toBeInTheDocument()
+    expect(screen.queryByText(/installation/i)).not.toBeInTheDocument()
     expect(internalToken).toBeNull()
   })
 
@@ -77,7 +80,7 @@ describe('GitHubConnectionCard', () => {
 
     renderCard()
 
-    expect(await screen.findByText(/server-side codegen operator workflow/)).toBeInTheDocument()
+    expect(await screen.findByText(/operator must authorize the exact GitHub repository ID/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /connect repository/i })).not.toBeInTheDocument()
   })
 })

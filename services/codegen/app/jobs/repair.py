@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
 import asyncpg
@@ -40,7 +41,7 @@ from app.store.observations import (
 from app.store.runtime_evidence import latest_runtime_evidence_observation
 
 logger = logging.getLogger(__name__)
-TokenMinter = Callable[[int, str], Awaitable[str]]
+TokenMinter = Callable[[str], AbstractAsyncContextManager[str]]
 
 _RUNTIME_JOB_LOG_LIMIT = 3
 _RUNTIME_JOB_LOG_BYTES = 2_000
@@ -483,7 +484,9 @@ async def repair_failed_ci(
             runtime_evidence=runtime_evidence,
         )
         return
-    connection = await connections_store.get_connection(pool, changeset.project_id)
+    connection = await connections_store.get_connection_for_changeset(
+        pool, observation.changeset_id
+    )
     if connection is None:
         await _finish_without_repair(
             pool,
@@ -493,7 +496,7 @@ async def repair_failed_ci(
             classification=classification,
             confidence=confidence,
             started_at=started_at,
-            error="Cannot repair CI because the repository connection is unavailable.",
+            error="Cannot repair CI because the repository grant is unavailable or revoked.",
             exhausted=True,
             runtime_evidence=runtime_evidence,
         )
@@ -504,7 +507,7 @@ async def repair_failed_ci(
         )
         authorization = publication_gate.authorize(
             risk=risk,
-            canary_identity=f"{changeset.project_id}:{connection.repo}",
+            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
         await changeset_store.set_publication_authorization(
             pool, observation.changeset_id, authorization
@@ -574,37 +577,39 @@ async def repair_failed_ci(
                 effective_safety_policy.canonical_digest()
             ),
         )
-        token = await mint_token(connection.installation_id, connection.repo)
-        result = await editor.implement(
-            EditRequest(
-                repo=connection.repo,
-                project_scope=changeset.project_id,
-                requirement_ledger=changeset.requirement_ledger,
-                inspection_snapshot=changeset.inspection_snapshot,
-                dependency_slice=changeset.dependency_slice,
-                verification_plan=changeset.verification_plan,
-                verification_coverage=changeset.verification_coverage,
-                runtime_acceptance_plan=changeset.runtime_acceptance_plan,
-                runtime_acceptance_policy=runtime_policy,
-                base_branch=changeset.base_branch or connection.default_base_branch,
-                branch=changeset.branch,
-                token=token,
-                title=f"Repair CI: {changeset.task.title}",
-                spec=_repair_spec(
-                    changeset.task.spec,
-                    observation,
-                    claim.attempt_number,
-                    maximum,
-                    runtime_evidence,
-                ),
-                constraints=changeset.task.constraints,
-                test_cmd=tenant_policy.test_cmd,
-                safety_policy=effective_safety_policy,
-                existing_branch=True,
-                expected_head_sha=observation.head_sha,
-                risk_level=risk.value,
+        async with mint_token(observation.changeset_id) as token:
+            result = await editor.implement(
+                EditRequest(
+                    repo=connection.repository_full_name,
+                    project_scope=changeset.project_id,
+                    requirement_ledger=changeset.requirement_ledger,
+                    inspection_snapshot=changeset.inspection_snapshot,
+                    dependency_slice=changeset.dependency_slice,
+                    verification_plan=changeset.verification_plan,
+                    verification_coverage=changeset.verification_coverage,
+                    runtime_acceptance_plan=changeset.runtime_acceptance_plan,
+                    runtime_acceptance_policy=runtime_policy,
+                    base_branch=(
+                        changeset.base_branch or connection.default_base_branch
+                    ),
+                    branch=changeset.branch,
+                    token=token,
+                    title=f"Repair CI: {changeset.task.title}",
+                    spec=_repair_spec(
+                        changeset.task.spec,
+                        observation,
+                        claim.attempt_number,
+                        maximum,
+                        runtime_evidence,
+                    ),
+                    constraints=changeset.task.constraints,
+                    test_cmd=tenant_policy.test_cmd,
+                    safety_policy=effective_safety_policy,
+                    existing_branch=True,
+                    expected_head_sha=observation.head_sha,
+                    risk_level=risk.value,
+                )
             )
-        )
     except Exception as exc:
         logger.exception(
             "CI remediation editor failed for changeset %s head %s",

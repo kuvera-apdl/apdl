@@ -49,10 +49,9 @@ class FakeConn:
         row = self._rows("changesets").get(changeset_id)
         if row is None:
             return None
-        connected = self._rows("connections").get(row["project_id"])
         return {
             **row,
-            "connected_repository": connected.get("repo") if connected else None,
+            "connected_repository": row.get("repository_full_name"),
         }
 
     def _insert_pr_observation(self, args: tuple[Any, ...]) -> str | None:
@@ -179,6 +178,14 @@ class FakeConn:
         )
 
     async def execute(self, query: str, *args: Any) -> None:
+        if "UPDATE github_repository_grants" in query:
+            project_id = args[0]
+            for grant in self._rows("repository_grants").values():
+                if grant["project_id"] == project_id and grant["status"] == "active":
+                    grant["status"] = "revoked"
+                    grant["revoked_at"] = _T0
+                    grant["updated_at"] = _T0
+            return None
         if "DELETE FROM codegen_runtime_collection_claims" in query:
             self._rows("runtime_collection_claims").pop(
                 (args[0], args[1], args[2]), None
@@ -298,45 +305,158 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchval: {query}")
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        if "INSERT INTO github_repository_grants" in query:
+            row = {
+                "grant_id": args[0],
+                "project_id": args[1],
+                "installation_id": args[2],
+                "repository_id": args[3],
+                "repository_full_name": args[4],
+                "status": "active",
+                "authorization_source": "operator",
+                "authorization_subject": args[5],
+                "verified_at": _T0,
+                "revoked_at": None,
+                "created_at": _T0,
+                "updated_at": _T0,
+            }
+            self._rows("repository_grants")[args[0]] = row
+            return row
+        if "UPDATE github_repository_grants" in query:
+            project_id, grant_id = args
+            row = self._rows("repository_grants").get(grant_id)
+            if (
+                row is None
+                or row["project_id"] != project_id
+                or row["status"] != "active"
+            ):
+                return None
+            row["status"] = "revoked"
+            row["revoked_at"] = _T0
+            row["updated_at"] = _T0
+            return {"grant_id": grant_id}
+        if "FROM github_repository_grants" in query and "SELECT *" in query:
+            project_id, grant_id = args
+            row = self._rows("repository_grants").get(grant_id)
+            if row is None or row["project_id"] != project_id:
+                return None
+            if "status = 'active'" in query and row["status"] != "active":
+                return None
+            return row
         if "INSERT INTO codegen_connections" in query:
+            project_id, grant_id, branch, tenant_policy = args
+            grant = self._rows("repository_grants").get(grant_id)
+            if (
+                grant is None
+                or grant["project_id"] != project_id
+                or grant["status"] != "active"
+            ):
+                return None
             row = self._rows("connections").get(args[0])
             if row is None:
                 row = {
-                    "project_id": args[0],
-                    "installation_id": args[1],
-                    "repo": args[2],
-                    "default_base_branch": args[3],
-                    "tenant_policy": args[4],
+                    "project_id": project_id,
+                    "grant_id": grant_id,
+                    "default_base_branch": branch,
+                    "tenant_policy": tenant_policy,
                     "created_at": _T0,
                     "updated_at": _T0,
                 }
             else:
                 row.update(
-                    installation_id=args[1],
-                    repo=args[2],
-                    default_base_branch=args[3],
+                    grant_id=grant_id,
+                    default_base_branch=branch,
                     updated_at=_T0,
                 )
-            self._rows("connections")[args[0]] = row
-            return row
+            self._rows("connections")[project_id] = row
+            return {"project_id": project_id}
         if "UPDATE codegen_connections" in query and "SET tenant_policy" in query:
             row = self._rows("connections").get(args[0])
-            if row is None:
+            grant = (
+                self._rows("repository_grants").get(row["grant_id"])
+                if row is not None
+                else None
+            )
+            if row is None or grant is None or grant["status"] != "active":
                 return None
             row["tenant_policy"] = args[1]
             row["updated_at"] = _T0
             return {"tenant_policy": row["tenant_policy"]}
         if "SELECT tenant_policy" in query and "FROM codegen_connections" in query:
             row = self._rows("connections").get(args[0])
-            return {"tenant_policy": row["tenant_policy"]} if row else None
+            grant = (
+                self._rows("repository_grants").get(row["grant_id"])
+                if row is not None
+                else None
+            )
+            return (
+                {"tenant_policy": row["tenant_policy"]}
+                if row is not None and grant is not None and grant["status"] == "active"
+                else None
+            )
+        if (
+            "FROM codegen_connections AS connection" in query
+            and "JOIN github_repository_grants AS grant_record" in query
+        ):
+            connection = self._rows("connections").get(args[0])
+            grant = (
+                self._rows("repository_grants").get(connection["grant_id"])
+                if connection is not None
+                else None
+            )
+            if grant is None or grant["status"] != "active":
+                return None
+            return {
+                **connection,
+                "installation_id": grant["installation_id"],
+                "repository_id": grant["repository_id"],
+                "repository_full_name": grant["repository_full_name"],
+            }
         if "SELECT * FROM codegen_connections" in query:
             return self._rows("connections").get(args[0])
         if "DELETE FROM codegen_connections" in query:
             return self._rows("connections").pop(args[0], None)
+        if (
+            "FROM codegen_changesets AS changeset" in query
+            and "JOIN github_repository_grants AS grant_record" in query
+        ):
+            changeset = self._rows("changesets").get(args[0])
+            if changeset is None or changeset.get("repository_target_quarantined"):
+                return None
+            grant = self._rows("repository_grants").get(
+                changeset.get("repository_grant_id")
+            )
+            if (
+                grant is None
+                or grant["project_id"] != changeset["project_id"]
+                or grant["status"] != "active"
+                or grant["repository_id"] != changeset.get("repository_id")
+                or grant["installation_id"]
+                != changeset.get("repository_installation_id")
+                or changeset.get("base_branch") is None
+                or changeset.get("tenant_policy_snapshot") is None
+            ):
+                return None
+            return {
+                "project_id": changeset["project_id"],
+                "grant_id": changeset["repository_grant_id"],
+                "installation_id": changeset["repository_installation_id"],
+                "repository_id": changeset["repository_id"],
+                "repository_full_name": changeset["repository_full_name"],
+                "default_base_branch": changeset["base_branch"],
+                "tenant_policy": changeset["tenant_policy_snapshot"],
+                "created_at": changeset["created_at"],
+                "updated_at": changeset["updated_at"],
+            }
         if "INSERT INTO codegen_changesets" in query:
             row = {
                 "changeset_id": args[0],
                 "project_id": args[1],
+                "repository_grant_id": args[8],
+                "repository_id": args[9],
+                "repository_installation_id": args[10],
+                "repository_full_name": args[11],
+                "repository_target_quarantined": False,
                 "run_id": args[2],
                 "status": args[3],
                 "base_branch": args[4],
@@ -374,32 +494,32 @@ class FakeConn:
             self._rows("changesets")[args[0]] = row
             return row
 
-        if "SELECT cs.*, conn.repo AS connected_repository" in query:
+        if (
+            "SELECT cs.*, cs.repository_full_name AS connected_repository" in query
+        ):
             return self._connected_changeset(args[0])
-        if "JOIN codegen_connections" in query and "cs.head_sha = $1" in query:
-            head_sha, repo = args
+        if "cs.head_sha = $1" in query and "cs.repository_id = $2" in query:
+            head_sha, repository_id, installation_id = args
             values = [
                 row
                 for row in self._rows("changesets").values()
                 if row.get("head_sha") == head_sha
                 and row["status"] == "pr_open"
-                and (
-                    self._rows("connections").get(row["project_id"]) or {}
-                ).get("repo")
-                == repo
+                and row.get("repository_id") == repository_id
+                and row.get("repository_installation_id") == installation_id
+                and not row.get("repository_target_quarantined")
             ]
             values.sort(key=lambda row: row["created_at"], reverse=True)
             return values[0] if values else None
-        if "JOIN codegen_connections" in query and "cs.pr_number = $1" in query:
-            pr_number, repo = args
+        if "cs.pr_number = $1" in query and "cs.repository_id = $2" in query:
+            pr_number, repository_id, installation_id = args
             values = [
                 row
                 for row in self._rows("changesets").values()
                 if row.get("pr_number") == pr_number
-                and (
-                    self._rows("connections").get(row["project_id"]) or {}
-                ).get("repo")
-                == repo
+                and row.get("repository_id") == repository_id
+                and row.get("repository_installation_id") == installation_id
+                and not row.get("repository_target_quarantined")
             ]
             values.sort(key=lambda row: row["created_at"], reverse=True)
             return values[0] if values else None
@@ -622,6 +742,7 @@ class FakePool:
     def __init__(self, store: dict[str, Any] | None = None) -> None:
         self.store = store if store is not None else {}
         for name in (
+            "repository_grants",
             "connections",
             "changesets",
             "pull_request_observations",
@@ -642,6 +763,8 @@ class FakePool:
         project_id: str,
         repo: str = "acme/widgets",
         installation_id: int = 1,
+        repository_id: int = 10,
+        grant_id: str | None = None,
         tenant_policy: str | dict[str, Any] | TenantCodegenConnectionPolicy | None = None,
     ) -> None:
         """Seed a repo connection so changeset creation is permitted."""
@@ -653,10 +776,24 @@ class FakePool:
             stored_policy = json.dumps(tenant_policy.model_dump(mode="json"))
         else:
             stored_policy = tenant_policy
-        self.store["connections"][project_id] = {
+        active_grant_id = grant_id or f"ghg_{project_id}repository"
+        self.store["repository_grants"][active_grant_id] = {
+            "grant_id": active_grant_id,
             "project_id": project_id,
             "installation_id": installation_id,
-            "repo": repo,
+            "repository_id": repository_id,
+            "repository_full_name": repo,
+            "status": "active",
+            "authorization_source": "operator",
+            "authorization_subject": "test-operator",
+            "verified_at": _T0,
+            "revoked_at": None,
+            "created_at": _T0,
+            "updated_at": _T0,
+        }
+        self.store["connections"][project_id] = {
+            "project_id": project_id,
+            "grant_id": active_grant_id,
             "default_base_branch": "main",
             "tenant_policy": stored_policy,
             "created_at": _T0,
@@ -679,9 +816,22 @@ class FakePool:
         merge_sha: str | None = None,
     ) -> None:
         """Seed one canonical lifecycle row for endpoint and job tests."""
+        connection = self.store["connections"].get(project_id)
+        grant = (
+            self.store["repository_grants"].get(connection["grant_id"])
+            if connection is not None
+            else None
+        )
         self.store["changesets"][changeset_id] = {
             "changeset_id": changeset_id,
             "project_id": project_id,
+            "repository_grant_id": grant["grant_id"] if grant else None,
+            "repository_id": grant["repository_id"] if grant else None,
+            "repository_installation_id": (
+                grant["installation_id"] if grant else None
+            ),
+            "repository_full_name": grant["repository_full_name"] if grant else None,
+            "repository_target_quarantined": grant is None,
             "run_id": None,
             "status": status,
             "base_branch": base_branch,
@@ -721,7 +871,9 @@ class FakePool:
             "runtime_acceptance_plan": None,
             "runtime_evidence_assessment": None,
             "publication_authorization": None,
-            "tenant_policy_snapshot": None,
+            "tenant_policy_snapshot": (
+                connection["tenant_policy"] if connection is not None else None
+            ),
             "effective_safety_policy_sha256": None,
             "error": None,
             "created_at": _T0,

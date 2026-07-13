@@ -121,6 +121,7 @@ async def create_changeset(
         run_id=body.run_id,
         base_branch=base_branch,
         task=body.task.model_dump(),
+        repository_target=connection.target,
         tenant_policy_snapshot=tenant_policy,
         effective_safety_policy_sha256=effective_policy_sha256,
     )
@@ -269,6 +270,7 @@ async def revert_changeset(
         run_id=original.run_id,
         base_branch=base,
         task=revert_task,
+        repository_target=connection.target,
         tenant_policy_snapshot=tenant_policy,
         effective_safety_policy_sha256=effective_policy_sha256,
     )
@@ -321,6 +323,7 @@ async def retry_changeset(
         run_id=original.run_id,
         base_branch=original.base_branch,
         task=task,
+        repository_target=connection.target,
         tenant_policy_snapshot=tenant_policy,
         effective_safety_policy_sha256=effective_policy_sha256,
     )

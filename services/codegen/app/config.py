@@ -300,8 +300,11 @@ def codegen_git_timeout() -> int:
 
 
 def codegen_agent_timeout() -> int:
-    """Editing-agent (aider) timeout, seconds — also the per-job pipeline budget."""
+    """Timeout for one editing-agent (aider) invocation, in seconds."""
     return int(os.getenv("CODEGEN_TIMEOUT", "1800"))
+
+
+MAX_CODEGEN_JOB_BUDGET_SECONDS = 3000
 
 
 def codegen_job_budget() -> int:
@@ -312,14 +315,22 @@ def codegen_job_budget() -> int:
     budget is what must bound anything wrapping the pipeline as a unit: the
     sandbox container's ``docker run`` (killing it at the bare agent timeout
     truncates legitimate retry rounds) and the stale-changeset sweep deadline.
-    Override explicitly with ``CODEGEN_JOB_BUDGET`` if the derivation doesn't
-    fit (e.g. a huge clone).
+    GitHub write credentials last at most one hour. Keep the credential-bearing
+    sandbox below 50 minutes so token cleanup has a ten-minute safety window.
+    ``CODEGEN_JOB_BUDGET`` may tighten this bound but cannot expand it.
     """
     override = os.getenv("CODEGEN_JOB_BUDGET", "")
     if override.strip():
-        return max(1, int(override))
+        budget = max(1, int(override))
+        if budget > MAX_CODEGEN_JOB_BUDGET_SECONDS:
+            raise ValueError(
+                "CODEGEN_JOB_BUDGET cannot exceed 3000 seconds while a GitHub "
+                "write token is held"
+            )
+        return budget
     rounds = 1 + codegen_edit_retries()
-    return rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
+    derived = rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
+    return min(derived, MAX_CODEGEN_JOB_BUDGET_SECONDS)
 
 
 def codegen_stale_sweep_interval() -> int:

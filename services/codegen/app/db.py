@@ -6,16 +6,35 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 8
-MIGRATION_NAME = "008_codegen_safety_policy.sql"
+MIGRATION_VERSION = 9
+MIGRATION_NAME = "009_codegen_repository_authority.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
-        ("codegen_connections", "installation_id"),
-        ("codegen_connections", "repo"),
+        ("codegen_connections", "grant_id"),
+        ("codegen_connections", "default_base_branch"),
         ("codegen_connections", "tenant_policy"),
+        ("codegen_connections_legacy_unverified", "project_id"),
+        ("codegen_connections_legacy_unverified", "installation_id"),
+        ("codegen_connections_legacy_unverified", "repo"),
+        ("codegen_connections_legacy_unverified", "quarantined_at"),
+        ("github_repository_grants", "grant_id"),
+        ("github_repository_grants", "project_id"),
+        ("github_repository_grants", "installation_id"),
+        ("github_repository_grants", "repository_id"),
+        ("github_repository_grants", "repository_full_name"),
+        ("github_repository_grants", "status"),
+        ("github_repository_grants", "authorization_source"),
+        ("github_repository_grants", "authorization_subject"),
+        ("github_repository_grants", "verified_at"),
+        ("github_repository_grants", "revoked_at"),
         ("codegen_changesets", "changeset_id"),
         ("codegen_changesets", "project_id"),
+        ("codegen_changesets", "repository_grant_id"),
+        ("codegen_changesets", "repository_id"),
+        ("codegen_changesets", "repository_installation_id"),
+        ("codegen_changesets", "repository_full_name"),
+        ("codegen_changesets", "repository_target_quarantined"),
         ("codegen_changesets", "status"),
         ("codegen_changesets", "head_sha"),
         ("codegen_changesets", "github_pr_status"),

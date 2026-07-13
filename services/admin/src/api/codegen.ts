@@ -84,7 +84,7 @@ export function abandonChangeset(
   })
 }
 
-/** Resolve a project's repo binding; `null` means "not connected" (404). */
+/** Read a project's active verified repository grant; `null` means no grant (404). */
 export async function getRepoConnection(
   conn: ServiceConnection,
   projectId: string,

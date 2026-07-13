@@ -61,6 +61,13 @@ def _head_sha(event: str, payload: dict[str, Any]) -> str:
     return ""
 
 
+def _positive_github_id(value: object) -> int | None:
+    """Parse webhook identities without accepting booleans as integer IDs."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 @router.post("/github")
 async def github_webhook(
     request: Request, background_tasks: BackgroundTasks
@@ -75,8 +82,13 @@ async def github_webhook(
         raise HTTPException(status_code=400, detail="Webhook body must be an object.")
 
     event = request.headers.get("X-GitHub-Event", "")
-    repository = str((payload.get("repository") or {}).get("full_name") or "")
-    if not repository:
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+    if not isinstance(repository, dict) or not isinstance(installation, dict):
+        return {"status": "ignored"}
+    repository_id = _positive_github_id(repository.get("id"))
+    installation_id = _positive_github_id(installation.get("id"))
+    if repository_id is None or installation_id is None:
         return {"status": "ignored"}
     pool = request.app.state.pg_pool
     action = "polled"
@@ -89,7 +101,7 @@ async def github_webhook(
         number = payload.get("number") or (payload.get("pull_request") or {}).get(
             "number"
         )
-        if not isinstance(number, int):
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             return {"status": "ignored"}
         delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
         if not delivery_id:
@@ -98,14 +110,14 @@ async def github_webhook(
                 detail="GitHub pull-request webhook is missing its delivery ID.",
             )
         changeset = await changeset_store.get_changeset_by_pr_number(
-            pool, number, repository
+            pool, number, repository_id, installation_id
         )
     elif event in {"check_run", "check_suite", "status"}:
         head_sha = _head_sha(event, payload)
         if not head_sha:
             return {"status": "ignored"}
         changeset = await changeset_store.get_changeset_by_head_sha(
-            pool, head_sha, repository
+            pool, head_sha, repository_id, installation_id
         )
     else:
         return {"status": "ignored"}

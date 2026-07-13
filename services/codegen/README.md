@@ -1,9 +1,10 @@
 # Codegen Service
 
-FastAPI service (`:8084`) — the autonomous-development "hands" of APDL. It
-connects to customer repositories and produces **changesets** (branch + commits
-+ pull request). GitHub is the sole authority for CI verification, review rules,
-and merge. APDL observes those results and may push bounded repair commits.
+FastAPI service (`:8084`, private service network only) — the
+autonomous-development "hands" of APDL. It works only in operator-granted
+customer repositories and produces **changesets** (branch + commits + pull
+request). GitHub is the sole authority for CI verification, review rules, and
+merge. APDL observes those results and may push bounded repair commits.
 
 Orchestration, autonomy gating, safety validation, and human approvals live in
 the **agents service** (`:8083`), which calls this service over the internal
@@ -25,8 +26,8 @@ publication capability. Reviewed and low-risk-canary deployments must load an
 operator-controlled evaluation bundle for the exact `CODEGEN_MODEL` and
 `CODEGEN_REVISION`; the decision is persisted before any GitHub write token is
 minted and is read-only in Admin. The real model path still needs `aider`, a
-provider key, a connected repository, and an operator-generated rollout
-bundle before it can publish.
+provider key, an active operator-verified repository grant, and an
+operator-generated rollout bundle before it can publish.
 
 ### Canonical repository profiler
 
@@ -45,12 +46,12 @@ protection metadata, and truncated snapshots are returned as explicit
 All `/v1` endpoints require the canonical `X-API-Key`. Codegen derives the
 project and roles from PostgreSQL and independently checks every body, query,
 path, and changeset-owned project. There is no permissive or global internal
-bearer token.
+bearer token. A project-scoped credential is not repository authority: only an
+active operator-verified grant can authorize GitHub access.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/connections` | Register/update a project's repo binding (`installation_id`, `repo`) |
-| GET | `/v1/connections/{project_id}` | Resolve a project's repo binding |
+| GET | `/v1/connections/{project_id}` | Read the active grant projection (`grant_id`, immutable `repository_id`, display-only `repository_full_name`) |
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
@@ -67,6 +68,69 @@ bearer token.
 always requires `X-Hub-Signature-256` verified with `GITHUB_WEBHOOK_SECRET`.
 When the secret is unset, the endpoint returns `503` before parsing or queuing
 the payload; the service, health checks, and CI poller continue to operate.
+
+## Repository authority
+
+Repository onboarding is an operator-only control-plane operation. Tenant API
+keys and Admin browser sessions cannot enumerate repositories reachable by the
+shared GitHub App, submit an installation ID, or activate a grant. The operator
+verifies the exact GitHub repository and records one canonical grant containing:
+
+- the APDL `project_id`;
+- the internal GitHub App `installation_id`;
+- GitHub's immutable numeric `repository_id`;
+- `repository_full_name`, retained only as a display and clone locator;
+- grant status and operator audit metadata.
+
+The tenant API has no connection-creation route. The public read-only connection
+contract contains `grant_id`, `repository_id`, and `repository_full_name`; it
+never exposes `installation_id` and never treats the repository name as
+authority. Repository renames may update the display name only when the numeric
+ID is unchanged. A transfer, deletion, installation change, revocation, or ID
+mismatch fails closed and requires operator reauthorization.
+
+Every changeset snapshots its grant and immutable repository target. Before a
+clone, push, PR mutation, poll, or repair, Codegen checks that the snapshot still
+belongs to the project and that its grant is active. Installation tokens are
+minted for exactly that repository ID with an operation-specific permission
+set; a token response that does not match the requested repository and
+permissions is rejected. Rebinding a project therefore cannot retarget queued
+or open work.
+
+The operator workflow is intentionally local to the trusted Codegen control
+plane rather than exposed as a tenant HTTP endpoint. From the repository root,
+run:
+
+```bash
+make grant-codegen-repository \
+  ARGS='--project-id demo --repository owner/name --authorized-by operator@example.com'
+```
+
+That command performs the complete trusted binding workflow:
+
+1. verify that the GitHub App installation includes the intended repository;
+2. resolve and record the immutable repository ID under the intended APDL
+   project;
+3. activate the audited grant and bind the project to it.
+
+Before removing or transferring a repository, revoke its exact active grant:
+
+```bash
+make revoke-codegen-repository \
+  ARGS='--project-id demo --grant-id ghg_id-returned-by-the-grant-command'
+```
+
+Revocation is terminal and immediately blocks new token leases, repo-context
+reads, CI recovery, repairs, and PR creation for that grant. Codegen attempts to
+revoke each leased GitHub token when an operation exits; cleanup failures are
+logged without erasing a push or PR GitHub already accepted, and the exact-repo
+token remains bounded by GitHub's issued expiry. If immediate cutoff is needed
+while an editor operation is already in flight, suspend or uninstall the GitHub
+App installation on GitHub as well; GitHub controls the validity of a token it
+already issued.
+
+Existing legacy repository/installation rows are not proof of ownership and
+must not be automatically promoted to active grants.
 
 ## Changeset lifecycle
 
@@ -105,6 +169,7 @@ CODEGEN_PLATFORM_SAFETY_POLICY_PATH= # absolute path to operator safety-policy J
 CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
 CODEGEN_SANDBOX_NETWORK=           # required named filtered network for PR stages
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
+CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
 ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
                                    #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
@@ -115,8 +180,13 @@ Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDI
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /
 `CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
 bounded by `codegen_job_budget()`, which also caps the sandbox container and the orphan-sweep
-deadline; override with `CODEGEN_JOB_BUDGET` if the derivation doesn't fit. A
-repo's verification command comes from connection `tenant_policy.test_cmd`; if unset,
+deadline. The derived budget is hard-capped at 3000 seconds so the
+credential-bearing container ends with at least a five-minute token-expiry
+margin; `CODEGEN_JOB_BUDGET` may lower but cannot raise that cap. Timeout or
+shutdown cleanup force-removes the named container before the token lease
+exits; an unverifiable removal is retried, logged as critical, and fails the
+editor operation. A repo's verification command comes from connection
+`tenant_policy.test_cmd`; if unset,
 the editor auto-detects it (pytest / npm / make / …) and gives it to the model as
 test-generation guidance. APDL does not execute it authoritatively; GitHub CI does.
 The pre-push gates run inside the editor on the full diff (a violating branch
@@ -288,13 +358,16 @@ The autonomous loop runs once these external pieces are set up:
 
 1. **Register a GitHub App** (org-level) with minimal permissions — `contents:
    write`, `pull_requests: write`, `checks: read`, `actions: read`, `metadata:
-   read`. `actions: read` is required only to collect exact-head workflow jobs,
+   read`, and `statuses: read`. `actions: read` is required only to collect exact-head workflow jobs,
    bounded failure logs, and runtime artifacts; it does not let APDL approve CI
    or merge. Existing installations must approve the added permission before
    runtime evidence can be collected; until then it remains explicitly
    unverified. Set
    `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`. Customers install it on their
-   repos; record each installation via `POST /v1/connections`.
+   repos; a trusted operator then binds each exact repository with
+   `make grant-codegen-repository` as described in
+   [Repository authority](#repository-authority). Never provision a repository
+   through a tenant API key or an unverified installation ID.
 2. **Provision and evaluate the coding agent.** Make `aider` available where
    the editor runs
    — `uv pip install -e ".[agent]"` on the codegen host for v1, or build the

@@ -1,5 +1,6 @@
 """GitHub PR/CI recovery keeps lifecycle separate and exact-head scoped."""
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
@@ -27,8 +28,9 @@ from app.store.runtime_evidence import list_runtime_evidence_observations
 from tests.fakes import FakePool
 
 
-async def _mint(_installation_id: int, _repo: str) -> str:
-    return "ghs_tok"
+@asynccontextmanager
+async def _mint(_changeset_id: str):
+    yield "ghs_tok"
 
 
 def _live_pr(

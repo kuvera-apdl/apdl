@@ -5,6 +5,7 @@ untested; these cover argv/env assembly, the secrets-off-argv property, result
 parsing, and that an attempt never raises.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -52,6 +53,14 @@ def test_docker_argv_has_hardening_and_image_last():
     assert argv[-1] == "apdl-sandbox:test"  # image is the final arg
 
 
+def test_docker_argv_names_container_for_forced_cleanup():
+    argv = ContainerAiderEditor()._docker_argv(
+        _req(), container_name="apdl-codegen-test"
+    )
+    name_index = argv.index("--name")
+    assert argv[name_index + 1] == "apdl-codegen-test"
+
+
 def test_docker_argv_passes_nonsecret_inputs_as_values():
     argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
     assert "CS_REPO=acme/widgets" in argv
@@ -96,13 +105,13 @@ def test_docker_argv_forwards_editor_config(monkeypatch):
 
 
 def test_container_timeout_covers_the_full_job_budget(monkeypatch):
-    # The container runs the WHOLE pipeline (retry rounds included); capping it
-    # at the bare agent timeout would kill legitimate retries mid-run.
+    # The container runs the whole pipeline, but its credential-bearing wall
+    # time remains below GitHub's one-hour installation-token lifetime.
     monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
     monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
     monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
-    assert ContainerAiderEditor()._timeout == 2 * 1800 + 2 * 300
+    assert ContainerAiderEditor()._timeout == 3000
 
 
 def test_secrets_are_passed_by_name_not_value(monkeypatch):
@@ -213,14 +222,142 @@ async def test_implement_never_raises_on_docker_fault(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_outer_timeout_stops_named_credential_bearing_container(monkeypatch):
+    editor = ContainerAiderEditor()
+    editor._timeout = 0.001
+    events: list[str] = []
+
+    class HangingProcess:
+        def __init__(self):
+            self.returncode = None
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        def terminate(self):
+            events.append("terminate-run-client")
+            self.returncode = -15
+
+        def kill(self):
+            events.append("kill-run-client")
+            self.returncode = -9
+
+        async def wait(self):
+            events.append("reap-run-client")
+            return self.returncode
+
+    class CleanupProcess:
+        def __init__(self):
+            self.returncode = None
+
+        async def communicate(self):
+            events.append("remove-container")
+            self.returncode = 0
+            return b"", b""
+
+        def kill(self):
+            self.returncode = -9
+
+    process = HangingProcess()
+
+    async def spawn(*args, **kwargs):
+        if args[1:3] == ("rm", "-f"):
+            assert args[3] == "apdl-codegen-timeout"
+            events.append("spawn-remove")
+            return CleanupProcess()
+        events.append("spawn-run")
+        return process
+
+    monkeypatch.setattr(
+        "app.editor.container_editor.asyncio.create_subprocess_exec", spawn
+    )
+
+    rc, _out, err = await editor._run_docker(
+        ["docker", "run"],
+        {},
+        container_name="apdl-codegen-timeout",
+    )
+
+    assert rc == 124
+    assert "timed out" in err
+    assert events == [
+        "spawn-run",
+        "terminate-run-client",
+        "reap-run-client",
+        "spawn-remove",
+        "remove-container",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_container_cleanup_treats_verified_absence_as_success(monkeypatch):
+    editor = ContainerAiderEditor()
+    responses = iter(
+        [
+            (1, "remove failed"),
+            (1, "Error: No such object: apdl-codegen-gone"),
+        ]
+    )
+
+    async def control(*args):
+        return next(responses)
+
+    class ExitedClient:
+        returncode = 0
+
+    monkeypatch.setattr(editor, "_docker_control_command", control)
+
+    await editor._stop_container_and_client(
+        "apdl-codegen-gone", ExitedClient()
+    )
+
+
+@pytest.mark.asyncio
+async def test_container_cleanup_raises_if_container_still_exists(monkeypatch, caplog):
+    editor = ContainerAiderEditor()
+    calls: list[tuple[str, ...]] = []
+
+    async def control(*args):
+        calls.append(args)
+        if args[0] == "inspect":
+            return 0, "container still exists"
+        return 1, "Docker daemon refused removal"
+
+    class ExitedClient:
+        returncode = 0
+
+    monkeypatch.setattr(editor, "_docker_control_command", control)
+
+    with pytest.raises(RuntimeError, match="Could not verify removal"):
+        await editor._stop_container_and_client(
+            "apdl-codegen-stuck", ExitedClient()
+        )
+
+    assert calls == [
+        ("rm", "-f", "apdl-codegen-stuck"),
+        ("inspect", "--type", "container", "apdl-codegen-stuck"),
+        ("rm", "-f", "apdl-codegen-stuck"),
+        ("inspect", "--type", "container", "apdl-codegen-stuck"),
+    ]
+    assert "may still be running" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_implement_parses_a_successful_run(monkeypatch):
     editor = ContainerAiderEditor()
     payload = json.dumps({"success": True, "branch": "apdl/x", "diff_stat": {"files": 1}})
+    container_names: list[str] = []
 
-    async def fake_run(_argv, _env):
+    async def fake_run(_argv, _env, *, container_name):
+        container_names.append(container_name)
+        assert ["--name", container_name] == _argv[
+            _argv.index("--name") : _argv.index("--name") + 2
+        ]
         return 0, f"log line\n{payload}\n", "stderr noise"
 
     monkeypatch.setattr(editor, "_run_docker", fake_run)
     res = await editor.implement(_req())
     assert res.success is True
     assert res.diff_stat == {"files": 1}
+    assert len(container_names) == 1
+    assert container_names[0].startswith("apdl-codegen-")

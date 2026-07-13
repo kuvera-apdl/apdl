@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -69,8 +70,9 @@ async def repair_failed_ci(*args, publication_gate=None, **kwargs):
     )
 
 
-async def _mint(_installation_id: int, _repo: str) -> str:
-    return "ghs_tok"
+@asynccontextmanager
+async def _mint(_changeset_id: str):
+    yield "ghs_tok"
 
 
 def _repair_plan() -> RuntimeAcceptancePlan:
@@ -366,11 +368,12 @@ async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
     monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
     pool, failed = await _seed_failed()
     editor = FakeEditor()
-    minted: list[tuple[int, str]] = []
+    minted: list[str] = []
 
-    async def mint(installation_id: int, repo: str) -> str:
-        minted.append((installation_id, repo))
-        return "must-not-be-returned"
+    @asynccontextmanager
+    async def mint(changeset_id: str):
+        minted.append(changeset_id)
+        yield "must-not-be-returned"
 
     await repair_failed_ci(
         pool,
