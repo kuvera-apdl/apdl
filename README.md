@@ -39,9 +39,26 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20+, Python 3.1
 ```bash
 git clone https://github.com/JahaanRawat/apdl.git && cd apdl
 make setup               # venvs + deps for every package, infra containers, migrations, .env
-scripts/dev.sh up-full   # full stack in Docker (detached)
+scripts/dev.sh up-full   # full stack in Docker; delegates to the same path as make dev-all
 scripts/dev.sh smoke     # end-to-end check: ingest event → create flag → query it back
 ```
+
+`scripts/dev.sh up-full` and `make dev-all` use an explicit Codegen development
+overlay. That path builds `apdl-codegen-sandbox:local-development`, resolves and
+mounts the active local Docker Unix socket, creates the dedicated
+`apdl-codegen-development` network, and starts Codegen in `development_pr`.
+This local capability may push a branch and open a **draft PR only**. It is not
+an evaluated rollout, does not create or satisfy publication evidence, and is
+not a production deployment: the mounted Docker socket has host-level authority
+and the development network is deliberately not egress-filtered. The base
+Compose file remains `offline`; evaluated `reviewed_pr` deployment is a separate
+operator workflow described in the [Codegen documentation](services/codegen/README.md).
+
+The full stack can start before external Codegen authority is configured. To run
+an actual development changeset, configure the GitHub App credentials and a
+model-provider key in `.env`, install the App on the target repository, and have
+an operator create the exact project/repository grant with
+`make grant-codegen-repository`.
 
 `scripts/dev.sh` is the master script for everything local:
 
@@ -49,7 +66,7 @@ scripts/dev.sh smoke     # end-to-end check: ingest event → create flag → qu
 |---|---|
 | `scripts/dev.sh setup` | Full local setup (same as `make setup`) |
 | `scripts/dev.sh up` | Start infra deps only (Redis, ClickHouse, PostgreSQL) + migrations |
-| `scripts/dev.sh up-full` | Full stack in Docker (detached) + migrations |
+| `scripts/dev.sh up-full` | Full stack + migrations and the draft-only Codegen development overlay (same as `make dev-all`) |
 | `scripts/dev.sh status` | Container status + service health endpoints |
 | `scripts/dev.sh smoke` | End-to-end smoke test against the running stack |
 | `scripts/dev.sh check` | Lint + test every package in parallel |

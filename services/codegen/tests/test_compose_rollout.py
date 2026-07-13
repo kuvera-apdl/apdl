@@ -11,8 +11,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASE_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.yml"
+DEVELOPMENT_COMPOSE = (
+    REPO_ROOT / "infra/docker/docker-compose.codegen-development.yml"
+)
 ROLLOUT_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.codegen-rollout.yml"
 DOCKER = shutil.which("docker")
+MAKE = shutil.which("make")
 
 
 def _compose_config(*files: Path, environment: dict[str, str]) -> dict:
@@ -37,6 +41,7 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
     environment = os.environ.copy()
     environment.update(
         {
+            "CODEGEN_DEVELOPMENT_MODE": "true",
             "CODEGEN_ROLLOUT_STAGE": "reviewed_pr",
             "CODEGEN_ROLLOUT_AUTHORIZATION_PATH": "/stale/publication-bundle.json",
         }
@@ -47,6 +52,134 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
 
     assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "offline"
     assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == ""
+    assert "CODEGEN_DEVELOPMENT_MODE" not in codegen_environment
+
+
+def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CODEGEN_DEVELOPMENT_DOCKER_GID": "1000",
+            "CODEGEN_DEVELOPMENT_DOCKER_SOCKET": "/var/run/docker.sock",
+            "CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID": "999",
+            "CODEGEN_DEVELOPMENT_DOCKER_UID": "1000",
+            "CODEGEN_DEVELOPMENT_SANDBOX_IMAGE": (
+                "apdl-codegen-sandbox:local-development"
+            ),
+            "CODEGEN_DEVELOPMENT_SANDBOX_NETWORK": "apdl-codegen-development",
+            # Neither stale publication value may alter this explicit local mode.
+            "CODEGEN_ROLLOUT_STAGE": "reviewed_pr",
+            "CODEGEN_ROLLOUT_AUTHORIZATION_PATH": "/stale/bundle.json",
+        }
+    )
+
+    config = _compose_config(
+        BASE_COMPOSE,
+        DEVELOPMENT_COMPOSE,
+        environment=environment,
+    )
+    codegen = config["services"]["codegen"]
+    codegen_environment = codegen["environment"]
+
+    assert codegen["user"] == "1000:1000"
+    assert codegen["group_add"] == ["999"]
+    assert codegen_environment["CODEGEN_DEVELOPMENT_MODE"] == "true"
+    assert codegen_environment["CODEGEN_REVISION"] == "local-development"
+    assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "development_pr"
+    assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == ""
+    assert codegen_environment["CODEGEN_SANDBOX"] == "docker"
+    assert codegen_environment["CODEGEN_SANDBOX_IMAGE"] == (
+        "apdl-codegen-sandbox:local-development"
+    )
+    assert codegen_environment["CODEGEN_SANDBOX_NETWORK"] == (
+        "apdl-codegen-development"
+    )
+    assert codegen_environment["DOCKER_HOST"] == "unix:///var/run/docker.sock"
+    assert {
+        "type": "bind",
+        "source": "/var/run/docker.sock",
+        "target": "/var/run/docker.sock",
+    } in codegen["volumes"]
+    assert all(
+        volume["target"] != "/run/apdl/codegen/publication-bundle.json"
+        for volume in codegen["volumes"]
+    )
+    assert codegen["healthcheck"]["test"] == [
+        "CMD",
+        "curl",
+        "-fsS",
+        "http://127.0.0.1:8084/ready",
+    ]
+
+
+def test_dev_all_builds_the_local_worker_and_starts_detached() -> None:
+    if MAKE is None:
+        pytest.skip("make is required for orchestration contract tests")
+
+    # This is a dry-run contract test: provide resolved operator values so it
+    # does not depend on a live daemon or permission to create a Unix socket.
+    completed = subprocess.run(
+        [
+            MAKE,
+            "-n",
+            "dev-all",
+            "CODEGEN_DEVELOPMENT_DOCKER_SOCKET=/tmp/docker.sock",
+            "CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID=20",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    rendered = completed.stdout
+    assert '--build-arg "CODEGEN_REVISION=local-development"' in rendered
+    assert '-t "apdl-codegen-sandbox:local-development"' in rendered
+    assert "-f infra/docker/docker-compose.codegen-development.yml" in rendered
+    assert "up -d --build --wait --wait-timeout 120" in rendered
+    assert "ingestion config query agents codegen clickhouse-writer" in rendered
+
+
+def test_dev_all_resolves_the_active_unix_docker_host() -> None:
+    if MAKE is None:
+        pytest.skip("make is required for orchestration contract tests")
+
+    environment = os.environ.copy()
+    environment.pop("CODEGEN_DEVELOPMENT_DOCKER_SOCKET", None)
+    environment["DOCKER_HOST"] = "unix:///tmp/custom-docker.sock"
+    completed = subprocess.run(
+        [
+            MAKE,
+            "-s",
+            "-f",
+            str(REPO_ROOT / "Makefile"),
+            "-f",
+            "-",
+            "print-codegen-development-socket",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        input=(
+            "print-codegen-development-socket:\n"
+            "\t@printf '%s\\n' \"$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)\"\n"
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip() == "/tmp/custom-docker.sock"
+
+
+def test_dev_script_delegates_full_stack_lifecycle_to_make() -> None:
+    source = (REPO_ROOT / "scripts/dev.sh").read_text(encoding="utf-8")
+    up_body = source.split("cmd_up_full() {", 1)[1].split("\n}", 1)[0]
+    down_body = source.split("cmd_down() {", 1)[1].split("\n}", 1)[0]
+
+    assert 'make -C "$ROOT_DIR" --no-print-directory dev-all' in up_body
+    assert "dc_full up" not in up_body
+    assert 'make -C "$ROOT_DIR" --no-print-directory dev-down' in down_body
+    assert "dc_full down" not in down_body
 
 
 def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:

@@ -22,8 +22,9 @@ result parsing, the never-raise contract) are unit-tested.
 Hardening applied here via ``docker run`` flags: ``--rm``, a read-only root,
 writable no-exec tmpfs mounts, ``--cap-drop ALL``, ``--security-opt
 no-new-privileges``, and pids/memory/cpu caps; the image runs non-root. PR
-rollout stages additionally require an operator-managed network instead of a
-Docker default network.
+publication stages additionally require a named network instead of a Docker
+default network. Evaluated stages require the operator to enforce the egress
+policy; local development uses a separate development-only bridge.
 """
 
 from __future__ import annotations
@@ -101,18 +102,27 @@ class ContainerAiderEditor:
         # budget — capping at the bare agent timeout kills legitimate retries.
         self._timeout = codegen_job_budget()
 
-    def assert_runtime_ready(self, *, expected_revision: str) -> None:
+    def assert_runtime_ready(
+        self,
+        *,
+        expected_revision: str,
+        require_immutable_image: bool = True,
+    ) -> None:
         """Fail PR-stage startup unless Docker, image, and network are real.
 
-        This check is intentionally limited to the publication-capable startup
-        path. Offline development can boot without a Docker daemon because its
-        changeset endpoints are disabled.
+        Evaluated stages additionally require the exact immutable sandbox image
+        bound into their evidence. Local development may use a rebuilt tag, but
+        it still validates the daemon, image revision label, and isolated named
+        network before the API accepts work. Offline/shadow can boot without a
+        Docker daemon because their changeset endpoints are disabled.
         """
         if not expected_revision or expected_revision == "development-unversioned":
             raise RuntimeError("PR rollout requires an immutable CODEGEN_REVISION")
         if self._network in {"", "bridge", "default", "host", "none"}:
             raise RuntimeError("PR rollout requires a non-built-in sandbox network")
-        if not re.search(r"(?:@|^)sha256:[0-9a-f]{64}$", self._image):
+        if require_immutable_image and not re.search(
+            r"(?:@|^)sha256:[0-9a-f]{64}$", self._image
+        ):
             raise RuntimeError("PR rollout requires an immutable sandbox image digest")
 
         def inspect(*args: str) -> str:

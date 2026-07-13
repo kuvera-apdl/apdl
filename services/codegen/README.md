@@ -18,16 +18,21 @@ The generalized Phase 0–9 pipeline is implemented. A strict repository profile
 exact-version contract evidence, requirement ledger, bounded inspection slices,
 risk-based verification plan, semantic review, and GitHub runtime evidence feed
 one model-agnostic Aider editor. Continuous evaluation gates which exact model
-and orchestration revision may publish. APDL creates PRs and bounded same-branch
-repairs; GitHub owns CI, review policy, and merge.
+and orchestration revision may publish through evaluated rollout stages. APDL
+creates PRs and bounded same-branch repairs; GitHub owns CI, review policy, and
+merge.
 
 Publication is fail-closed. Offline and shadow deployments have no PR
 publication capability. Reviewed and low-risk-canary deployments must load an
 operator-controlled evaluation bundle for the exact `CODEGEN_MODEL` and
 `CODEGEN_REVISION`; the decision is persisted before any GitHub write token is
-minted and is read-only in Admin. The real model path still needs `aider`, a
-provider key, an active operator-verified repository grant, and an
-operator-generated rollout bundle before it can publish.
+minted and is read-only in Admin. The explicit `make dev-all` development
+overlay is a separate capability: it uses `development_pr`, records a distinct
+local-development authorization, and can open draft PRs only. It does not claim
+evaluation evidence and cannot authorize a production rollout. Any real model
+path still needs the packaged `aider` worker, a provider key, GitHub App
+credentials, and an active operator-verified repository grant; evaluated stages
+additionally require the operator-generated rollout bundle.
 
 ### Canonical repository profiler
 
@@ -164,10 +169,12 @@ GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty 
 CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
-CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only operator JSON bundle for PR stages
+                                   # development_pr is owned only by the dev-all overlay
+CODEGEN_DEVELOPMENT_MODE=          # overlay-owned marker; never enable in production
+CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only bundle for evaluated PR stages; blank in development_pr
 CODEGEN_PLATFORM_SAFETY_POLICY_PATH= # absolute path to operator safety-policy JSON
 CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
-CODEGEN_SANDBOX_NETWORK=           # required named filtered network for PR stages
+CODEGEN_SANDBOX_NETWORK=           # required filtered network for evaluated PR stages
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
 ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
@@ -233,6 +240,54 @@ non-APDL-owned content there. Other workflow edits remain protected. GitHub
 executes the generated job and owns its result; absent runs, logs, or required
 artifacts are stored as unverified evidence, never as successful CI.
 
+## Local full-stack development (`development_pr`)
+
+Use either canonical command from the repository root:
+
+```bash
+make dev-all
+# Equivalent wrapper:
+scripts/dev.sh up-full
+```
+
+Both commands run the base Compose file plus
+`infra/docker/docker-compose.codegen-development.yml`. The preparation step
+requires a local Docker context backed by a Unix socket, builds
+`Dockerfile.worker` as `apdl-codegen-sandbox:local-development`, verifies the
+socket and socket-group access, and creates the labeled
+`apdl-codegen-development` bridge. The overlay mounts that socket into Codegen,
+sets the fixed `local-development` revision and
+`CODEGEN_DEVELOPMENT_MODE=true`, selects `development_pr`, and leaves the
+evaluated authorization-bundle path empty. Codegen then preflights the daemon,
+worker revision label, and named network before reporting ready.
+
+`development_pr` is deliberately narrow. Its strict
+`development_publication_authorization@1` may publish a branch and create a pull
+request, but `draft_only` is always true and `ready_for_review` is always false.
+It contains no corpus result, evaluation report, rollout bundle, evaluated image
+identity, or production authority. Migration
+`011_codegen_development_publication.sql` admits this distinct development
+authorization alongside `publication_authorization@2`; it does not reinterpret
+development authorization as evaluated evidence or loosen either schema.
+
+Starting the stack provisions the worker but does not provision external
+authority. An actual changeset also requires:
+
+- the model-provider credential matching `CODEGEN_MODEL`;
+- `GITHUB_APP_ID` and a GitHub App private key available inside Codegen (base64
+  is the simplest Compose setting);
+- installation of that App on the target repository; and
+- an active exact-repository grant created by a trusted operator with
+  `make grant-codegen-repository`.
+
+This overlay is local-development infrastructure, not a production template.
+The Docker socket gives the Codegen controller host-level container authority,
+and `apdl-codegen-development` is intentionally not egress-filtered. The base
+Compose service remains `offline`. For evaluated publication, do not reuse the
+development image, network, marker, or authorization; follow
+[Deploy the evaluated candidate](#deploy-the-evaluated-candidate) with
+`reviewed_pr` and the evaluated rollout overlay.
+
 ## Evaluation and publication rollout
 
 The evaluation corpus covers Node, Python, Go, Rust, JVM, and .NET repositories
@@ -254,6 +309,10 @@ Rollout stages are strict capabilities:
 4. `low_risk_canary` is reserved for promotion evidence from reviewed PRs.
    `rollout_policy@3` deliberately denies it until real GitHub CI/review
    observations are represented by a later policy contract.
+
+`development_pr` is not a step in this evaluated progression. It exists only in
+the explicit local-development overlay described above and cannot produce an
+evaluation bundle or satisfy `reviewed_pr` authorization.
 
 ### Run the real candidate evaluation
 
@@ -403,7 +462,7 @@ The editor sits behind the `Editor` interface; *how/where* it runs is config:
   repository lint, test, shell-suggestion, hook, URL, or browser commands.
 - **Trusted local in-process (`CODEGEN_SANDBOX=in-process`)** — available only
   with `CODEGEN_TRUSTED_REPOS_ONLY=true` while the rollout is `offline` or
-  `shadow`. The service refuses this mode for either PR publication stage.
+  `shadow`. The service refuses this mode for every PR publication stage.
 
 Enable the sandbox:
 
@@ -415,8 +474,10 @@ export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
 # `make codegen-reviewed-up`; it mounts the host's explicit Docker socket path.
 ```
 
-PR stages fail startup unless `CODEGEN_SANDBOX_NETWORK` is a non-default named
-network. The operator must enforce its egress policy: allow only the required
+Every PR stage fails startup unless `CODEGEN_SANDBOX_NETWORK` is a non-default
+named network. The local `development_pr` overlay creates an explicitly
+development-only bridge that is not egress-filtered. For evaluated PR stages,
+the operator must enforce a real egress policy: allow only the required
 GitHub/model endpoints and block APDL/private CIDRs plus `169.254.169.254`.
 Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
 `CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`. Mounting a

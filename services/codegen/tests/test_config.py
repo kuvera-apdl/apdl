@@ -11,10 +11,14 @@ import pytest
 
 from app import config
 from app.editor.environment import codegen_behavior_configuration_sha256
-from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
+from app.evaluations.models import CodegenCandidateIdentity, RiskLevel, RolloutStage
 from app.editor.aider_editor import AiderEditor
 from app.editor.container_editor import ContainerAiderEditor
 from app.main import _make_editor, _make_publication_gate
+from app.publication import (
+    DEVELOPMENT_CODEGEN_REVISION,
+    DevelopmentPublicationAuthorization,
+)
 
 _PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVQIBADAN\n-----END RSA PRIVATE KEY-----\n"
 
@@ -166,6 +170,57 @@ def test_rollout_stage_rejects_unknown_values(monkeypatch):
         config.codegen_rollout_stage()
 
 
+def test_development_mode_requires_explicit_true(monkeypatch):
+    monkeypatch.delenv("CODEGEN_DEVELOPMENT_MODE", raising=False)
+    assert config.codegen_development_mode() is False
+    monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "true")
+    assert config.codegen_development_mode() is True
+    monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "false")
+    assert config.codegen_development_mode() is False
+
+
+def test_development_publication_gate_is_explicit_and_unevaluated(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    monkeypatch.delenv("CODEGEN_DEVELOPMENT_MODE", raising=False)
+
+    with pytest.raises(RuntimeError, match="CODEGEN_DEVELOPMENT_MODE=true"):
+        _make_publication_gate()
+
+    monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "true")
+    gate = _make_publication_gate()
+    authorization = gate.authorize(risk=RiskLevel.low, canary_identity="ignored")
+
+    assert gate.stage is RolloutStage.development_pr
+    assert isinstance(authorization, DevelopmentPublicationAuthorization)
+    assert authorization.request.codegen_revision == DEVELOPMENT_CODEGEN_REVISION
+    assert authorization.decision.ready_for_review is False
+    assert authorization.draft_only is True
+    assert "report_sha256" not in authorization.model_dump(mode="json")
+
+
+def test_development_publication_rejects_bundle_and_non_dev_revision(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
+    monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "true")
+    monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
+    with pytest.raises(RuntimeError, match="must not receive"):
+        _make_publication_gate()
+
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    monkeypatch.setenv("CODEGEN_REVISION", "production-revision")
+    with pytest.raises(ValueError, match="local-development"):
+        _make_publication_gate()
+
+
+def test_development_marker_is_rejected_for_offline_stage(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "offline")
+    monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "true")
+    with pytest.raises(RuntimeError, match="valid only with development_pr"):
+        _make_publication_gate()
+
+
 def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
     monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
@@ -253,6 +308,34 @@ def test_pr_stage_requires_named_filtered_sandbox_network(monkeypatch):
     )
 
 
+def test_development_pr_preflights_mutable_local_worker(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def fake_preflight(
+        self,
+        *,
+        expected_revision: str,
+        require_immutable_image: bool = True,
+    ) -> None:
+        observed.update(
+            expected_revision=expected_revision,
+            require_immutable_image=require_immutable_image,
+        )
+
+    monkeypatch.setenv("CODEGEN_SANDBOX", "docker")
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-development")
+    monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
+    monkeypatch.setattr(ContainerAiderEditor, "assert_runtime_ready", fake_preflight)
+
+    assert isinstance(
+        _make_editor(RolloutStage.development_pr), ContainerAiderEditor
+    )
+    assert observed == {
+        "expected_revision": DEVELOPMENT_CODEGEN_REVISION,
+        "require_immutable_image": False,
+    }
+
+
 def test_in_process_editor_is_explicit_trusted_dev_only(monkeypatch):
     monkeypatch.setenv("CODEGEN_SANDBOX", "in-process")
     monkeypatch.delenv("CODEGEN_TRUSTED_REPOS_ONLY", raising=False)
@@ -261,5 +344,7 @@ def test_in_process_editor_is_explicit_trusted_dev_only(monkeypatch):
 
     monkeypatch.setenv("CODEGEN_TRUSTED_REPOS_ONLY", "true")
     assert isinstance(_make_editor(RolloutStage.shadow), AiderEditor)
+    with pytest.raises(RuntimeError, match="require CODEGEN_SANDBOX=docker"):
+        _make_editor(RolloutStage.development_pr)
     with pytest.raises(RuntimeError, match="require CODEGEN_SANDBOX=docker"):
         _make_editor(RolloutStage.low_risk_canary)

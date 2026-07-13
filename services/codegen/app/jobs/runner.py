@@ -24,10 +24,13 @@ import asyncpg
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
 from app.evaluations.models import RiskLevel
-from app.evaluations.publication import PublicationAuthorization
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.models.observations import ExternalCIStatus, PullRequestObservation
-from app.publication import PublicationGate
+from app.publication import (
+    DevelopmentPublicationAuthorization,
+    PublicationAuthorizationRecord,
+    PublicationGate,
+)
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
 from app.runtime.github_actions import workflow_attestation_is_valid
@@ -80,7 +83,7 @@ def _pr_body(
     coverage: VerificationCoverage | None,
     runtime_plan: RuntimeAcceptancePlan | None,
     review: ReviewVerdict | None,
-    publication: PublicationAuthorization,
+    publication: PublicationAuthorizationRecord,
 ) -> str:
     checks = "\n".join(f"- [ ] {c}" for c in task.constraints)
     if not checks:
@@ -130,15 +133,26 @@ def _pr_body(
         if review is not None
         else "- No semantic-review verdict was produced by this editor."
     )
-    publication_text = (
-        f"- Stage: `{publication.request.requested_stage.value}`\n"
-        f"- Model: `{publication.request.model}`\n"
-        f"- Codegen revision: `{publication.request.codegen_revision}`\n"
-        f"- Evaluation report SHA-256: `{publication.report_sha256}`\n"
-        f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
-        "- This authorizes PR publication only; GitHub CI, review, and merge "
-        "remain authoritative."
-    )
+    if isinstance(publication, DevelopmentPublicationAuthorization):
+        publication_text = (
+            f"- Stage: `{publication.request.requested_stage.value}`\n"
+            f"- Model: `{publication.request.model}`\n"
+            f"- Codegen revision: `{publication.request.codegen_revision}`\n"
+            "- Authority: local development; no evaluation evidence is claimed.\n"
+            f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
+            "- This authorization always creates a draft PR. GitHub CI, review, "
+            "and merge remain authoritative."
+        )
+    else:
+        publication_text = (
+            f"- Stage: `{publication.request.requested_stage.value}`\n"
+            f"- Model: `{publication.request.model}`\n"
+            f"- Codegen revision: `{publication.request.codegen_revision}`\n"
+            f"- Evaluation report SHA-256: `{publication.report_sha256}`\n"
+            f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
+            "- This authorizes PR publication only; GitHub CI, review, and merge "
+            "remain authoritative."
+        )
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"

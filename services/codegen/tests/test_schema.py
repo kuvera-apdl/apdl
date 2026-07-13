@@ -46,10 +46,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_publication_identity_migration():
-    with pytest.raises(RuntimeError, match="010_codegen_publication_identity.sql"):
+async def test_rejects_database_without_development_publication_migration():
+    with pytest.raises(RuntimeError, match="011_codegen_development_publication.sql"):
         await assert_schema_ready(
-            FakeConn(migration_name="009_codegen_repository_authority.sql")
+            FakeConn(migration_name="010_codegen_publication_identity.sql")
         )
 
 

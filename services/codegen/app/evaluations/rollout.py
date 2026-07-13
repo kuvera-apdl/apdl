@@ -64,6 +64,10 @@ def decide_rollout(
     canary_identity: str | None = None,
 ) -> RolloutDecision:
     """Authorize publication from finite metrics with auditable denominators."""
+    if requested_stage is RolloutStage.development_pr:
+        raise ValueError(
+            "development_pr uses the separate development publication contract"
+        )
     resolved = (
         RolloutPolicy.model_validate(policy.model_dump(mode="python"))
         if policy is not None

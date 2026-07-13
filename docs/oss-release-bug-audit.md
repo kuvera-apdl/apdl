@@ -23,7 +23,7 @@ The most important high-severity release blockers are also cross-surface rather 
 - Config experiment/backing-flag mutations are non-atomic, direct flag CRUD can drift an experiment-owned flag, SSE is process-local/racy, and targeting semantics are not byte-for-byte consistent across SDK/server evaluators.
 - Query experiment analysis trusts caller-supplied labels, mishandles all-zero and multi-treatment cases, and can emit non-finite small-sample statistics; autonomous decisions must not rely on it yet.
 - Agents run leasing is improved, but job creation/execution, safety quotas, provider fallback policy, and several action/audit paths remain incomplete or process-local.
-- The default Codegen Compose path cannot execute its Docker worker without an operator-built worker image, Docker control channel, and a real egress-filtered network; publication idempotency, kill-switch coverage, evidence provenance, and live sandbox proof remain incomplete.
+- The canonical `make dev-all` path now has an explicit development overlay that builds and launches the Codegen worker with development-only Docker socket, network, and draft-publication authority. This makes the local path runnable, but the launcher remains unsuitable for production; publication idempotency, kill-switch coverage, evidence provenance, production worker isolation, and live sandbox proof remain incomplete.
 - Public self-registration plus unrestricted self-service project creation has no project/LLM-spend quota. A user can mint new project authority and trigger globally funded Agents work repeatedly.
 - The canonical quick start and examples fail the current strict flag schema and project authority; CI omits tests for four backend services and all Codegen checks; tagged release publishes only npm plus four of the required images.
 
@@ -64,12 +64,12 @@ No live Redis, PostgreSQL, ClickHouse, GitHub App, LLM provider, real Aider, bro
 |---|---|
 | Open criticals verified by this re-audit | None |
 | Resolved prior high/critical findings in code | APDL-AUD-001, 038, 043, 049, 051, 053, 058, 059, 060, 068, 069, 070, 072, 082, 084, 104, 106, 109, 110 |
-| Substantially resolved but still requires live proof | APDL-AUD-048 (isolated Codegen worker default) |
+| Partially/substantially resolved but still requires live or production proof | APDL-AUD-048 (isolated Codegen worker default), APDL-AUD-120 (development Compose sandbox path) |
 | Resolved by deleting unsupported infrastructure | APDL-AUD-088 through 092 |
 
 ### Finding inventory
 
-This document contains 118 detailed findings: 20 resolved in code, 4 partially/substantially resolved, 74 open high-severity findings, 19 open medium-severity findings, and 1 open low/medium finding. There are no verified open critical findings at `d095776`; the unresolved high-severity catalog is still sufficient to block the advertised public release.
+This document contains 118 detailed findings: 20 resolved in code, 5 partially/substantially resolved, 73 open high-severity findings, 19 open medium-severity findings, and 1 open low/medium finding. There are no verified open critical findings at `d095776`; the unresolved high-severity catalog is still sufficient to block the advertised public release.
 
 ## Severity and release criteria
 
@@ -88,7 +88,7 @@ This document contains 118 detailed findings: 20 resolved in code, 4 partially/s
 | Config | Essential control plane | Flags/experiments are substantial; ownership, atomicity, evaluator parity, and multi-replica distribution are incomplete | **No-go** |
 | Query | Essential analytics plane | Broad query/statistics coverage; identity and experiment correctness need work | **No-go** for experiment/autonomous decisions |
 | Agents | Core product differentiator | Extensive workflows/tests; leasing is improved but execution/safety/action persistence remain incomplete | **No-go** for autonomous production use |
-| Codegen | Optional but high-risk differentiator | Strong state/evidence model, verified repository grants, safety-authority separation, and isolated-worker default; deployable worker, publication idempotency, and live proof remain incomplete | **No-go** for PR publication |
+| Codegen | Optional but high-risk differentiator | Strong state/evidence model, verified repository grants, safety-authority separation, isolated-worker default, and an explicit runnable development overlay; production worker isolation, publication idempotency, and live proof remain incomplete | **No-go** for production PR publication |
 | Admin API | Security and tenant boundary | Prior critical route/lockout bugs are fixed; self-service quotas, readiness, and proxy maintenance remain incomplete | Preview only |
 | Admin UI | Primary operator experience | Broad tested UI; degraded-auth, external-link, workspace-state, and bundle issues remain | Preview only |
 | Redis-to-ClickHouse writer | Essential persistence path | Core crash recovery and tenant authority fixed; idempotency, DLQ, health, and schema issues remain | **No-go** for lossless claims |
@@ -96,7 +96,7 @@ This document contains 118 detailed findings: 20 resolved in code, 4 partially/s
 | Kafka/Flink | Optional future scale path | Aspirational scaffolding | Exclude from supported release |
 | SDK gateway | Useful single front door | Suitable for local Compose only | Do not present as production gateway |
 | PostgreSQL/ClickHouse migrations | Essential installation contract | PostgreSQL authority fixed; ClickHouse still lacks an immutable ledger/backfill/rollback contract | **No-go** for upgrades |
-| Docker/local setup | Essential contributor onboarding | Stack is defined; strict smoke/examples and Codegen worker setup are broken | **No-go** for advertised quick start |
+| Docker/local setup | Essential contributor onboarding | Stack and a development-only Codegen worker overlay are defined; strict smoke/examples and clean-checkout end-to-end proof remain incomplete | **No-go** for advertised quick start |
 | Kubernetes / Terraform | Optional production deployment | Deliberately removed from the repository | Unsupported |
 | CI/release | Essential OSS trust and delivery | Partial coverage and partial artifacts | **No-go** |
 | Documentation/governance | Essential OSS usability | Good base documents; current architecture/release claims drifted | Needs release pass |
@@ -653,7 +653,7 @@ Codegen is APDL's implementation arm. Its strongest area is control-plane modeli
 
 **Resolution.** Commit `510b257` made Docker isolation the default, removed Aider from the API image, disabled repository-defined tooling in the worker, and made PR stages fail closed unless Docker plus an operator-named network are configured (`services/codegen/app/main.py:75-104`, `services/codegen/app/editor/container_editor.py:131-207`).
 
-**Remaining boundary.** No live Docker/Aider/GitHub/provider path was exercised, and the default Compose service cannot actually launch its worker (APDL-AUD-120). A production design should replace direct API access to the Docker socket with a separate worker launcher and short-lived brokered credentials.
+**Remaining boundary.** APDL-AUD-120 now provides a runnable `make dev-all` worker path, but only through an explicit development overlay with development-only Docker socket, network, and draft-publication authority. No live Docker/Aider/GitHub/provider path was exercised. A production design should replace direct API access to the Docker socket with a separate worker launcher and short-lived brokered credentials.
 
 ### APDL-AUD-049 — Resolved critical: service authority is project/role scoped
 
@@ -743,13 +743,13 @@ Codegen is APDL's implementation arm. Its strongest area is control-plane modeli
 
 **Solution.** Resolve and validate every pagination URL against the configured GitHub API origin before sending credentials.
 
-### APDL-AUD-120 — High: default Compose Codegen is ready but cannot launch its sandbox
+### APDL-AUD-120 — Partially resolved high: `make dev-all` can launch a development sandbox
 
-**Problem.** Docker is the default editor, but `infra/docker/docker-compose.yml:198-224` neither mounts a Docker control channel nor builds/provisions `apdl-codegen-sandbox:latest`. Startup/readiness validate PostgreSQL only (`services/codegen/app/main.py:75-104,309-325`), not the daemon, image, network, GitHub App, or model credentials.
+**Baseline problem.** Docker is the default editor, but the base Compose stack neither mounted a Docker control channel nor built/provisioned the configured worker image. Startup/readiness validated PostgreSQL only, not the daemon, image, network, GitHub App, or model credentials. The canonical full-stack command could therefore report Codegen ready and accept work that could not run.
 
-**Impact.** The canonical full-stack command can report Codegen ready and accept work that cannot run.
+**Resolution.** The `make dev-all` path now applies an explicit development-only Codegen overlay. It builds the checked-in worker, supplies a local Docker launcher through the host socket, attaches sandboxes to a dedicated development network, and installs development authorization restricted to opening draft PRs. Startup preflight rejects missing or incompatible launcher, socket, worker image, network, and authorization dependencies before Codegen accepts work. Focused tests cover the rendered Compose contract, worker build/identity, preflight failures, and the draft-only authorization boundary.
 
-**Solution.** Provide an explicit development profile that builds the worker and supplies a bounded launcher; use a separate production worker service rather than a raw API-container socket; and expose dependency-specific readiness without leaking exception text.
+**Remaining boundary.** This is a runnable local-development contract, not a production sandbox design. Mounting the Docker socket gives the Codegen controller host-root-equivalent authority, the development network is not evidence of a real egress filter, and development authorization must never authorize non-draft or production rollout. Production still requires a separate constrained launcher/worker service, short-lived brokered credentials, dependency-specific readiness, and live Docker/Aider/GitHub/provider proof.
 
 ---
 
@@ -1073,7 +1073,7 @@ Compose is the most realistic first OSS installation path and should be the high
 
 ### APDL-AUD-086 — High: setup omits Codegen environment and dependency contracts
 
-**Problem.** `scripts/dev.sh:123-130` does not create the Codegen virtual environment although run targets expect it. Several hot-reload commands do not load root `.env`; Compose Agents omits Google/local LLM variables supported by source. The default Codegen sandbox image/launcher is also not provisioned (APDL-AUD-120).
+**Problem.** `scripts/dev.sh:123-130` does not create the Codegen virtual environment although run targets expect it. Several hot-reload commands do not load root `.env`; Compose Agents omits Google/local LLM variables supported by source. APDL-AUD-120 partially resolves the Docker full-stack path with an explicit development worker overlay, but the general setup and environment contracts remain inconsistent.
 
 **Impact.** A successful-looking setup can leave advertised services unrunnable or differently configured inside/outside Compose.
 

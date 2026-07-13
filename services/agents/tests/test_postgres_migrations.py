@@ -14,6 +14,9 @@ CODEGEN_SQL = (POSTGRES_MIGRATIONS / "007_codegen.sql").read_text()
 CODEGEN_PUBLICATION_IDENTITY_SQL = (
     POSTGRES_MIGRATIONS / "010_codegen_publication_identity.sql"
 ).read_text()
+CODEGEN_DEVELOPMENT_PUBLICATION_SQL = (
+    POSTGRES_MIGRATIONS / "011_codegen_development_publication.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -125,6 +128,19 @@ def test_codegen_publication_identity_migration_archives_without_fabrication():
     assert ") IS TRUE" in sql
     assert "publication_authorization@1" in sql
     assert "jsonb_set" not in sql.lower()
+
+
+def test_codegen_development_publication_is_a_separate_draft_only_contract():
+    sql = CODEGEN_DEVELOPMENT_PUBLICATION_SQL
+    assert "publication_authorization@2" in sql
+    assert "development_publication_authorization@1" in sql
+    assert "development_publication_request@1" in sql
+    assert "development_publication_decision@1" in sql
+    assert "local_development" in sql
+    assert "development_pr" in sql
+    assert "local-development" in sql
+    assert "draft_only" in sql
+    assert ") IS TRUE" in sql
 
 
 def test_database_runners_enforce_the_single_engine_authority():

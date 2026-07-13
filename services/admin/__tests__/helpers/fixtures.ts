@@ -13,9 +13,14 @@ import type {
 } from '../../src/api/types/codegen'
 import type { Workspace } from '../../src/core/workspace'
 
+type EvaluatedPublicationAuthorization = Extract<
+  PublicationAuthorization,
+  { schema_version: 'publication_authorization@2' }
+>
+
 export function makePublicationAuthorization(
-  overrides: Partial<PublicationAuthorization> = {},
-): PublicationAuthorization {
+  overrides: Partial<EvaluatedPublicationAuthorization> = {},
+): EvaluatedPublicationAuthorization {
   return {
     schema_version: 'publication_authorization@2',
     request: {
@@ -50,6 +55,33 @@ export function makePublicationAuthorization(
     },
     authorization_sha256: '6'.repeat(64),
     ...overrides,
+  }
+}
+
+export function makeDevelopmentPublicationAuthorization(): PublicationAuthorization {
+  return {
+    schema_version: 'development_publication_authorization@1',
+    authority: 'local_development',
+    request: {
+      schema_version: 'development_publication_request@1',
+      requested_stage: 'development_pr',
+      risk: 'medium',
+      model: 'claude-opus-4-8',
+      codegen_revision: 'local-development',
+    },
+    decision: {
+      schema_version: 'development_publication_decision@1',
+      requested_stage: 'development_pr',
+      risk: 'medium',
+      allowed: true,
+      publish_branch: true,
+      create_pull_request: true,
+      ready_for_review: false,
+      reasons: [],
+      decision_sha256: '8'.repeat(64),
+    },
+    draft_only: true,
+    authorization_sha256: '9'.repeat(64),
   }
 }
 

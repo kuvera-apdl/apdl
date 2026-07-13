@@ -170,22 +170,16 @@ cmd_up() {
 }
 
 cmd_up_full() {
-    info "Starting full stack in Docker (detached)"
-    dc_full up -d --build redis clickhouse postgres
-    wait_healthy "$FULL_COMPOSE" 3
-    CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
-    ok "ClickHouse schema initialized"
-    POSTGRES_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-postgres.sh"
-    ok "PostgreSQL schema initialized"
-    dc_full up -d --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
-    ok "Application services starting"
-    sleep 3
+    info "Starting the end-to-end development stack in Docker (detached)"
+    # Keep one canonical full-stack path. `make dev-all` also provisions the
+    # local Codegen worker/socket/network overlay before it starts services.
+    make -C "$ROOT_DIR" --no-print-directory dev-all
+    ok "Application services ready"
     cmd_status
 }
 
 cmd_down() {
-    dc_full down
-    docker compose -f "$DEPS_COMPOSE" down
+    make -C "$ROOT_DIR" --no-print-directory dev-down
     ok "All containers stopped"
 }
 
@@ -197,6 +191,7 @@ cmd_reset() {
     fi
     dc_full down -v
     docker compose -f "$DEPS_COMPOSE" down -v
+    docker network rm apdl-codegen-development >/dev/null 2>&1 || true
     ok "Containers stopped and volumes removed"
 }
 
@@ -222,6 +217,16 @@ check_health() {
     fi
 }
 
+check_compose_health() {
+    local name="$1" service="$2" url="$3"
+    if dc_full exec -T "$service" curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+        ok "$name ($service → $url)"
+        return 0
+    fi
+    echo -e "${RED}  ✗${NC} $name not healthy inside the $service container"
+    return 1
+}
+
 cmd_status() {
     info "Containers"
     dc_full ps 2>/dev/null || true
@@ -233,6 +238,7 @@ cmd_status() {
     check_health "Config"    "http://localhost:8081/health" || failures=$((failures+1))
     check_health "Query"     "http://localhost:8082/health" || failures=$((failures+1))
     check_health "Agents"    "http://localhost:8083/health" optional || true
+    check_compose_health "Codegen" "codegen" "http://127.0.0.1:8084/ready" || failures=$((failures+1))
     check_health "Admin API" "http://localhost:5173/api/health" optional || true
     [ "$failures" -eq 0 ] || warn "$failures service(s) unhealthy — are they running? (scripts/dev.sh up-full)"
 }

@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-runtime evaluate-codegen codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-runtime evaluate-codegen codegen-development-prepare codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -30,6 +30,22 @@ CODEGEN_DOCKER_SOCKET ?= $(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME
 CODEGEN_DOCKER_UID ?= $(shell id -u)
 CODEGEN_DOCKER_GID ?= $(shell id -g)
 CODEGEN_DOCKER_SOCKET_GID ?= $(shell stat -c '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || stat -f '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || echo 0)
+
+# `dev-all` is an explicit local operator action, distinct from an evaluated
+# reviewed rollout. It builds a revision-labelled worker and gives Codegen a
+# dedicated development bridge plus the active local Docker unix socket. The
+# bridge is intentionally named as development-only; it is not egress-filtered
+# and must never be reused by `codegen-reviewed-up`.
+CODEGEN_DEVELOPMENT_REVISION := local-development
+CODEGEN_DEVELOPMENT_SANDBOX_IMAGE := apdl-codegen-sandbox:$(CODEGEN_DEVELOPMENT_REVISION)
+CODEGEN_DEVELOPMENT_SANDBOX_NETWORK := apdl-codegen-development
+CODEGEN_DEVELOPMENT_COMPOSE_FILE := infra/docker/docker-compose.codegen-development.yml
+CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT := $(or $(strip $(DOCKER_HOST)),$(shell docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null))
+CODEGEN_DEVELOPMENT_CONTEXT_SOCKET := $(patsubst unix://%,%,$(filter unix://%,$(CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT)))
+CODEGEN_DEVELOPMENT_DOCKER_SOCKET ?= $(if $(CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT),$(CODEGEN_DEVELOPMENT_CONTEXT_SOCKET),$(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME)/.docker/run/docker.sock,/var/run/docker.sock))
+CODEGEN_DEVELOPMENT_DOCKER_UID := $(shell id -u)
+CODEGEN_DEVELOPMENT_DOCKER_GID := $(shell id -g)
+CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID = $(shell stat -c '%g' "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" 2>/dev/null || stat -f '%g' "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" 2>/dev/null)
 
 setup:
 	@bash scripts/setup.sh
@@ -222,6 +238,32 @@ build-codegen-sandbox:
 
 build-codegen-runtime: build-codegen-controller build-codegen-sandbox
 
+codegen-development-prepare:
+	@test -n "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "The active Docker context is not a local unix socket; make dev-all requires local Docker." >&2; exit 1)
+	@case "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" in /*) ;; *) echo "Docker unix socket path must be absolute: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1;; esac
+	@test -S "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "Docker unix socket not found: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1)
+	@test -n "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" || (echo "Could not determine Docker socket group: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1)
+	@if docker network inspect "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null 2>&1; then \
+		scope="$$(docker network inspect --format '{{ index .Labels "dev.apdl.codegen.scope" }}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		driver="$$(docker network inspect --format '{{.Driver}}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		internal="$$(docker network inspect --format '{{.Internal}}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		test "$$scope" = "local-development" || (echo "Docker network $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) exists but is not APDL's development sandbox network." >&2; exit 1); \
+		test "$$driver" = "bridge" -a "$$internal" = "false" || (echo "Docker network $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) must be a non-internal bridge for local GitHub/model access." >&2; exit 1); \
+	else \
+		docker network create --driver bridge --label dev.apdl.codegen.scope=local-development "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null; \
+	fi
+	@echo "==> Codegen sandbox network: $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) (development-only; not egress-filtered)"
+	@$(MAKE) --no-print-directory build-codegen-sandbox \
+		CODEGEN_REVISION="$(CODEGEN_DEVELOPMENT_REVISION)" \
+		CODEGEN_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)"
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" \
+	CODEGEN_DEVELOPMENT_DOCKER_UID="$(CODEGEN_DEVELOPMENT_DOCKER_UID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_GID="$(CODEGEN_DEVELOPMENT_DOCKER_GID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_NETWORK="$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" \
+	$(COMPOSE) -f $(CODEGEN_DEVELOPMENT_COMPOSE_FILE) config --quiet
+
 evaluate-codegen:
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
 	CODEGEN_MODEL="$(CODEGEN_MODEL)" \
@@ -315,15 +357,24 @@ dev:
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
-dev-all:
+dev-all: codegen-development-prepare
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
 	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
-	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" \
+	CODEGEN_DEVELOPMENT_DOCKER_UID="$(CODEGEN_DEVELOPMENT_DOCKER_UID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_GID="$(CODEGEN_DEVELOPMENT_DOCKER_GID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_NETWORK="$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" \
+	$(COMPOSE) -f $(CODEGEN_DEVELOPMENT_COMPOSE_FILE) up -d --build --wait --wait-timeout 120 \
+		ingestion config query agents codegen clickhouse-writer admin-api admin gateway
+	@echo "==> Full development stack is ready (Codegen publication stage: development_pr)"
 
 dev-down:
 	$(COMPOSE) down
 	docker compose -f infra/docker/docker-compose.deps.yml down
+	@docker network rm "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null 2>&1 || true
 
 # Container status + service health endpoints.
 status:
