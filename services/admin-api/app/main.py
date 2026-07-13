@@ -8,7 +8,7 @@ import asyncpg
 import httpx
 from fastapi import FastAPI, Request
 
-from app import auth, proxy
+from app import auth, projects, proxy
 from app.config import Settings
 
 
@@ -50,6 +50,7 @@ async def security_headers(request: Request, call_next):
 
 
 app.include_router(auth.router)
+app.include_router(projects.router)
 app.include_router(proxy.router)
 
 

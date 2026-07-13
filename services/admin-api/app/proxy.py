@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import secrets
 import uuid
 from collections.abc import Mapping
 
@@ -34,6 +36,59 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 _CODEGEN_CHANGESET = re.compile(
     r"^/v1/changesets/([^/]+)(?:/(?:merge|abandon|revert|retry))?$"
 )
+_EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
+
+
+async def _service_credential(
+    request: Request,
+    project_id: str,
+    roles: frozenset[str],
+    settings: Settings,
+) -> tuple[str, str | None]:
+    configured = settings.service_api_keys.get(project_id)
+    if configured is not None:
+        return configured, None
+
+    raw_key = f"proj_{project_id}_{secrets.token_hex(24)}"
+    credential_id = f"adminproxy-{uuid.uuid4().hex}"
+    digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                DELETE FROM auth_credentials
+                WHERE credential_id LIKE 'adminproxy-%'
+                  AND expires_at <= NOW()
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO auth_credentials (
+                    credential_id, project_id, key_hash, roles, expires_at
+                ) VALUES ($1, $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'))
+                """,
+                credential_id,
+                project_id,
+                digest,
+                sorted(roles),
+                _EPHEMERAL_CREDENTIAL_TTL_SECONDS,
+            )
+    return raw_key, credential_id
+
+
+async def _remove_ephemeral_credential(
+    request: Request, credential_id: str | None
+) -> None:
+    if credential_id is None:
+        return
+    try:
+        async with request.app.state.pg_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM auth_credentials WHERE credential_id = $1",
+                credential_id,
+            )
+    except Exception:
+        logger.exception("Failed to remove ephemeral credential %s", credential_id)
 
 
 async def _start_mutation_audit(
@@ -114,7 +169,9 @@ async def _session_is_active(
         )
 
 
-async def _authorized_sse(response, request, session, settings):
+async def _authorized_sse(
+    response, request, session, settings, credential_id: str | None
+):
     try:
         async for chunk in response.aiter_raw():
             if not await _session_is_active(request, session, settings):
@@ -123,6 +180,7 @@ async def _authorized_sse(response, request, session, settings):
             yield chunk
     finally:
         await response.aclose()
+        await _remove_ephemeral_credential(request, credential_id)
 
 
 def required_role(service: str, method: str, path: str) -> str | None:
@@ -302,6 +360,7 @@ async def proxy_service(
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
+    ephemeral_credential_id: str | None = None
     if service == "codegen":
         if not settings.internal_token:
             raise HTTPException(
@@ -310,12 +369,9 @@ async def proxy_service(
             )
         headers["X-APDL-Internal-Token"] = settings.internal_token
     else:
-        api_key = settings.service_api_keys.get(project_id)
-        if api_key is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No service credential configured for project",
-            )
+        api_key, ephemeral_credential_id = await _service_credential(
+            request, project_id, roles, settings
+        )
         headers["X-API-Key"] = api_key
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
@@ -326,19 +382,24 @@ async def proxy_service(
         headers=headers,
         content=body,
     )
-    audit_id = await _start_mutation_audit(
-        request,
-        session,
-        project_id,
-        role or "authenticated",
-        service,
-        upstream_path,
-    )
+    try:
+        audit_id = await _start_mutation_audit(
+            request,
+            session,
+            project_id,
+            role or "authenticated",
+            service,
+            upstream_path,
+        )
+    except Exception:
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
+        raise
     try:
         response = await request.app.state.http_client.send(
             upstream_request, stream=True
         )
     except httpx.RequestError as exc:
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
         await _finish_mutation_audit(request, audit_id, status.HTTP_502_BAD_GATEWAY)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream unavailable"
@@ -353,12 +414,21 @@ async def proxy_service(
     }
     if response.headers.get("content-type", "").startswith("text/event-stream"):
         return StreamingResponse(
-            _authorized_sse(response, request, session, settings),
+            _authorized_sse(
+                response,
+                request,
+                session,
+                settings,
+                ephemeral_credential_id,
+            ),
             status_code=response.status_code,
             headers=response_headers,
         )
-    content = await response.aread()
-    await response.aclose()
+    try:
+        content = await response.aread()
+    finally:
+        await response.aclose()
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
     return Response(
         content=content, status_code=response.status_code, headers=response_headers
     )

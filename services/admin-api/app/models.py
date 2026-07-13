@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 EMAIL_PATTERN = r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+PROJECT_ID_PATTERN = r"^[A-Za-z0-9]{1,64}$"
 
 
 class LoginRequest(BaseModel):
@@ -19,10 +20,16 @@ class RegistrationRequest(BaseModel):
     password: str = Field(min_length=12, max_length=1024)
 
 
+class ProjectCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+
+
 class ProjectAccess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
     roles: list[str]
 
 

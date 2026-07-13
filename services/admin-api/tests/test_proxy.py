@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 
 import httpx
 import pytest
 
 from app.auth import AdminSession
 from app.security import token_hash
-from conftest import TEST_API_KEY, proxy_client
+from conftest import TEST_API_KEY, make_settings, proxy_client
 
 
 @pytest.mark.asyncio
@@ -34,6 +36,44 @@ async def test_proxy_injects_server_key_and_discards_caller_credentials(
 
     assert response.status_code == 200
     assert seen == {"key": TEST_API_KEY, "cookie": None, "authorization": None}
+
+
+@pytest.mark.asyncio
+async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
+    admin_session: AdminSession,
+) -> None:
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(200, json={"flags": []})
+
+    settings = make_settings(service_api_keys={})
+    async with proxy_client(
+        httpx.MockTransport(upstream), admin_session, settings
+    ) as client:
+        response = client.get("/api/projects/demo/config/v1/flags")
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_key)
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    credential_id = insert[1][0]
+    assert insert[1][1] == "demo"
+    assert insert[1][2] == hashlib.sha256(seen_key.encode()).hexdigest()
+    assert insert[1][3] == sorted(admin_session.projects["demo"])
+    assert insert[1][4] == 300
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (credential_id,)
 
 
 @pytest.mark.asyncio
