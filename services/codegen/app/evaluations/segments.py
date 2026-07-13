@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Literal
 
@@ -171,6 +172,10 @@ def build_segmented_report(
         "overall_report_sha256": overall.report_sha256,
         "segments": [segment.model_dump(mode="json") for segment in segments],
     }
-    return SegmentedEvaluationReport.model_validate(
-        {**payload, "segmented_report_sha256": canonical_sha256(payload)}
+    return SegmentedEvaluationReport.model_validate_json(
+        json.dumps(
+            {**payload, "segmented_report_sha256": canonical_sha256(payload)},
+            allow_nan=False,
+            separators=(",", ":"),
+        )
     )

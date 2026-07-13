@@ -12,11 +12,12 @@ export const rolloutStageSchema = z.enum([
 
 export const publicationRequestSchema = z
   .object({
-    schema_version: z.literal('publication_request@1'),
+    schema_version: z.literal('publication_request@2'),
     requested_stage: rolloutStageSchema,
     risk: codegenRiskLevelSchema,
     model: z.string().min(1),
     codegen_revision: z.string().min(1),
+    candidate_identity_sha256: sha256Schema,
     canary_identity: z.string().min(1).max(500).nullable(),
   })
   .strict()
@@ -119,10 +120,11 @@ export const rolloutDecisionSchema = z
 
 export const publicationAuthorizationSchema = z
   .object({
-    schema_version: z.literal('publication_authorization@1'),
+    schema_version: z.literal('publication_authorization@2'),
     request: publicationRequestSchema,
     expected_model: z.string().min(1),
     expected_codegen_revision: z.string().min(1),
+    expected_candidate_identity_sha256: sha256Schema,
     report_sha256: sha256Schema,
     bundle_sha256: sha256Schema,
     policy_sha256: sha256Schema,
@@ -141,6 +143,15 @@ export const publicationAuthorizationSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'publication request revision does not match expected_codegen_revision',
+      })
+    }
+    if (
+      authorization.request.candidate_identity_sha256 !==
+      authorization.expected_candidate_identity_sha256
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'publication request candidate identity does not match expected identity',
       })
     }
     if (authorization.decision.requested_stage !== authorization.request.requested_stage) {

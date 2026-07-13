@@ -236,7 +236,7 @@ describe('codegen schemas', () => {
     expect(parsed.publication_authorization?.decision.allowed).toBe(false)
   })
 
-  it('rejects a publication decision for a different stage or policy', () => {
+  it('rejects publication authorization for a different stage, policy, or candidate', () => {
     const authorization = makePublicationAuthorization()
     const mismatchedStage = {
       ...authorization,
@@ -246,6 +246,10 @@ describe('codegen schemas', () => {
       ...authorization,
       decision: { ...authorization.decision, policy_sha256: '9'.repeat(64) },
     }
+    const mismatchedCandidate = {
+      ...authorization,
+      expected_candidate_identity_sha256: '8'.repeat(64),
+    }
 
     expect(changesetSchema.safeParse({
       ...sample,
@@ -254,6 +258,10 @@ describe('codegen schemas', () => {
     expect(changesetSchema.safeParse({
       ...sample,
       publication_authorization: mismatchedPolicy,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: mismatchedCandidate,
     }).success).toBe(false)
   })
 

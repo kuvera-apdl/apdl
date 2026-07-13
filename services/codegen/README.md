@@ -236,12 +236,14 @@ artifacts are stored as unverified evidence, never as successful CI.
 ## Evaluation and publication rollout
 
 The evaluation corpus covers Node, Python, Go, Rust, JVM, and .NET repositories
-with digest-bound synthetic defects. Executor invocations receive only an
-opaque invocation identity, public task, and isolated mutated workspace;
-evaluator oracles, mutation labels, GitHub credentials, and publication controls
-remain outside the executor boundary. Metrics are finite, evidence-backed, and
-retain explicit numerators, denominators, exclusions, and
-model/ecosystem/task/risk slices.
+with digest-bound synthetic defects. A sealed controller owns the corpus,
+mutation labels, harness, rollout policy, and oracles. It launches the exact
+production sandbox image once per case through Docker. That candidate image
+contains the real Aider editor but deliberately excludes the sealed corpus,
+fixtures, and oracle files; it receives only an opaque invocation identity,
+public task, isolated mutated workspace, behavior configuration, and matching
+model-provider credential. Neither side receives GitHub, PostgreSQL, APDL, or
+SSH credentials during evaluation.
 
 Rollout stages are strict capabilities:
 
@@ -249,46 +251,115 @@ Rollout stages are strict capabilities:
    publication endpoints are disabled.
 2. `shadow` runs generation without branch or PR capability.
 3. `reviewed_pr` requires a valid operator bundle and always opens a draft PR.
-4. `low_risk_canary` additionally requires stable cohort eligibility and may
-   mark only an otherwise verified low-risk PR ready for review.
+4. `low_risk_canary` is reserved for promotion evidence from reviewed PRs.
+   `rollout_policy@3` deliberately denies it until real GitHub CI/review
+   observations are represented by a later policy contract.
 
-Use `python -m app.evaluations.cli --help` from `services/codegen` to validate a
-corpus, execute a credential-scrubbed offline/shadow evaluator command, aggregate
-a content-addressed report, and build a rollout bundle from an explicit strict
-policy. Run that command in a separate credential-minimal worker/container: it
-may retain the selected model-provider key, but it must not receive the GitHub
-App key, installation tokens, database URL, or SSH agent.
-Mount the resulting bundle read-only and set its path through
-`CODEGEN_ROLLOUT_AUTHORIZATION_PATH`.
+### Run the real candidate evaluation
 
-`CODEGEN_REVISION` identifies the complete evaluated orchestration candidate,
-not merely a source commit. Change it whenever prompts, helper-model routing,
-contract/review toggles, retry policy, or any other behavior-affecting deployment
-setting changes; otherwise the deployment no longer matches its evaluation.
+Run the operator workflow from the repository root. Export only the provider
+credential matching the selected model; do not pass the repository `.env` into
+the evaluation container:
 
 ```bash
-apdl-codegen-eval \
-  --executor /opt/apdl/bin/evaluate-candidate \
-  --model "$CODEGEN_MODEL" \
-  --codegen-revision "$CODEGEN_REVISION" \
-  --run-output /artifacts/evaluation-run.json \
-  --report-output /artifacts/evaluation-report.json \
-  --segmented-output /artifacts/evaluation-segments.json
+export CODEGEN_MODEL=claude-opus-4-8
+export ANTHROPIC_API_KEY=... # use your secret manager or current shell
 
-apdl-codegen-eval \
-  --results /artifacts/evaluation-run.json \
-  --rollout-policy /artifacts/rollout-policy.json \
-  --bundle-output /artifacts/publication-bundle.json
+# Optional. Defaults to the current Git commit only for a clean worktree. A
+# dirty tree must be committed or given a distinct tag-safe revision.
+export CODEGEN_REVISION="$(git rev-parse HEAD)"
+
+# Optional but recommended: a named network with operator-enforced egress rules.
+export CODEGEN_EVALUATION_NETWORK=codegen-egress-filtered
+
+make evaluate-codegen
 ```
 
-The executor is an argv path, not a shell command. It receives one strict public
-invocation on stdin, edits the current fixture workspace, and must return one
-strict `evaluation_execution@2` JSON object on stdout. Use repeated
-`--executor-arg` options for arguments.
+This command:
 
-The included corpus is intentionally smaller than the default production
-minimum sample size. It cannot silently unlock PR publication: expand the corpus
-or create an explicit operator policy with justified migration thresholds.
+1. builds the API image as the sealed evaluation controller;
+2. builds `Dockerfile.worker` as the production candidate, labels it with the
+   exact revision, and verifies that it contains no corpus/oracle assets;
+3. resolves both images to immutable local `sha256:...` image IDs and uses
+   those IDs for the evaluation itself;
+4. gives only the controller the Docker socket and a host/container same-path
+   temporary bind, so sibling candidate mounts resolve through the host daemon;
+5. forwards only an explicit model-provider and behavior-setting allowlist; and
+6. evaluates and builds the publication bundle in one trusted invocation using
+   the checked-in strict `rollout_policy_v3.json`.
+
+The run and bundle content-address the exact controller image ID, candidate
+image ID, revision, and normalized non-secret behavior configuration. Provider
+credentials are excluded, but model/helper routing, Aider path, prompt/review
+toggles, retries, contract settings, timeouts, and provider endpoints are bound.
+Changing any bound value makes the service reject the old bundle at startup.
+
+It never builds publication authority from `--results`. Existing result files
+may be inspected or re-aggregated, but only a just-completed trusted Docker run
+may emit `publication-bundle.json`.
+
+Artifacts default to
+`local-files/codegen-rollouts/$CODEGEN_REVISION/` (already ignored by Git):
+
+```text
+controller-image-id.txt
+candidate-image-id.txt
+rollout-policy.json
+evaluation-run.json
+evaluation-report.json
+evaluation-segments.json
+publication-bundle.json
+```
+
+Override that absolute destination with `CODEGEN_EVALUATION_ARTIFACT_DIR`. The
+controller image retains sealed evaluation material, so treat it as an operator
+artifact. The production candidate image is the only image that may run model
+work against a fixture or customer repository.
+
+`CODEGEN_REVISION` names the evaluated orchestration candidate; the strict
+candidate identity additionally binds the exact images and effective behavior.
+Use a new revision whenever source or behavior changes so artifacts remain
+separate and auditable. Even if an old revision is reused accidentally, the
+identity digest prevents its bundle from authorizing different behavior.
+
+The checked-in `rollout_policy@3` gates reviewed draft-PR publication only on
+metrics the sealed offline harness can honestly measure. GitHub CI, human
+review, merge, revert, and post-merge outcomes remain unavailable during this
+run and are never fabricated. Those external observations are required for
+later canary/expansion decisions, not for opening a mandatory-review draft.
+
+### Deploy the evaluated candidate
+
+Review the report and bundle, provision a genuinely egress-filtered Docker
+network, keep the model-provider and behavior variables identical to the
+evaluated values, then use the rollout Compose overlay:
+
+```bash
+export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
+make migrate-postgres
+make codegen-reviewed-config
+make codegen-reviewed-up
+```
+
+The Make target reads both image-ID files, verifies their revision and role
+labels, mounts `publication-bundle.json` read-only at
+`/run/apdl/codegen/publication-bundle.json`, and recreates Codegen with
+`reviewed_pr` without rebuilding or pulling. The exact evaluated controller ID
+runs the API and the exact evaluated candidate ID runs each production sandbox.
+The overlay derives the current user's UID/GID and Docker socket group, which
+supports both Linux Docker hosts and Docker Desktop's user-owned socket.
+
+Migration `010_codegen_publication_identity.sql` archives any persisted v1
+authorization JSON and clears it from the active authority column; it never
+fabricates the image/config identity that old rows did not record. New writes
+are constrained to the strict v2 authorization contract.
+
+The overlay mounts a Docker control socket into the credential-bearing Codegen
+API. That is sufficient for a single-operator self-hosted machine but grants
+host-root-equivalent container authority. Production deployments should replace
+it with a dedicated rootless or policy-constrained worker launcher. Merely
+naming a bridge network `codegen-egress-filtered` does not filter traffic: the
+operator must enforce the allowlist and block APDL/private/metadata destinations.
 
 Two auxiliary LLM passes bracket the edit. Low-risk work may skip them when the
 model is unavailable; medium/high-risk work fails closed. `CODEGEN_BRIEF` compiles the
@@ -337,11 +408,11 @@ The editor sits behind the `Editor` interface; *how/where* it runs is config:
 Enable the sandbox:
 
 ```bash
-make build-codegen-sandbox        # build apdl-codegen-sandbox:latest
+make build-codegen-sandbox        # revision-labeled production candidate
 export CODEGEN_SANDBOX=docker
 export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
-# If codegen itself runs in a container, mount /var/run/docker.sock (see compose)
-# so it can launch the sandbox (Docker-out-of-Docker); on a Docker host it just works.
+# For Compose deployment use docker-compose.codegen-rollout.yml via
+# `make codegen-reviewed-up`; it mounts the host's explicit Docker socket path.
 ```
 
 PR stages fail startup unless `CODEGEN_SANDBOX_NETWORK` is a non-default named

@@ -13,13 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+DockerImageId = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
 CaseId = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")]
 InvocationId = Annotated[str, Field(pattern=r"^eval_inv_[0-9a-f]{32}$")]
 EvaluationNote = Annotated[str, Field(min_length=1, max_length=4000)]
 
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Canonical evaluation boundary: reject aliases, extras, and coercion."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 def canonical_sha256(value: BaseModel | dict | list) -> str:
@@ -360,8 +363,52 @@ class EvaluationOutcome(StrictModel):
         return self
 
 
+class CodegenCandidateIdentity(StrictModel):
+    """Content identity of the controller, candidate, and effective behavior."""
+
+    schema_version: Literal["codegen_candidate_identity@1"] = (
+        "codegen_candidate_identity@1"
+    )
+    controller_image_id: DockerImageId
+    candidate_image_id: DockerImageId
+    codegen_revision: str = Field(min_length=1)
+    behavior_configuration_sha256: Sha256
+    identity_sha256: Sha256
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        controller_image_id: str,
+        candidate_image_id: str,
+        codegen_revision: str,
+        behavior_configuration_sha256: str,
+    ) -> CodegenCandidateIdentity:
+        payload = {
+            "schema_version": "codegen_candidate_identity@1",
+            "controller_image_id": controller_image_id,
+            "candidate_image_id": candidate_image_id,
+            "codegen_revision": codegen_revision,
+            "behavior_configuration_sha256": behavior_configuration_sha256,
+        }
+        return cls.model_validate(
+            {**payload, "identity_sha256": canonical_sha256(payload)}
+        )
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> CodegenCandidateIdentity:
+        if self.codegen_revision != self.codegen_revision.strip():
+            raise ValueError("candidate codegen_revision must be normalized")
+        expected = canonical_sha256(
+            self.model_dump(mode="json", exclude={"identity_sha256"})
+        )
+        if self.identity_sha256 != expected:
+            raise ValueError("candidate identity_sha256 does not match its contents")
+        return self
+
+
 class EvaluationRun(StrictModel):
-    schema_version: Literal["evaluation_run@2"] = "evaluation_run@2"
+    schema_version: Literal["evaluation_run@3"] = "evaluation_run@3"
     run_id: str = Field(min_length=1)
     corpus_id: str = Field(min_length=1)
     corpus_sha256: Sha256
@@ -370,6 +417,7 @@ class EvaluationRun(StrictModel):
     stage: RolloutStage
     model: str = Field(min_length=1)
     codegen_revision: str = Field(min_length=1)
+    candidate_identity: CodegenCandidateIdentity | None
     started_at: datetime
     finished_at: datetime
     outcomes: list[EvaluationOutcome] = Field(min_length=1)
@@ -378,6 +426,13 @@ class EvaluationRun(StrictModel):
     def validate_provenance(self) -> EvaluationRun:
         if self.finished_at < self.started_at:
             raise ValueError("finished_at cannot precede started_at")
+        if (
+            self.candidate_identity is not None
+            and self.candidate_identity.codegen_revision != self.codegen_revision
+        ):
+            raise ValueError(
+                "candidate identity revision must match the evaluation run"
+            )
         outcome_ids = [outcome.case_id for outcome in self.outcomes]
         if len(outcome_ids) != len(set(outcome_ids)):
             raise ValueError("evaluation run outcome case ids must be unique")
@@ -533,7 +588,7 @@ class EvaluationSummary(StrictModel):
 
 
 class EvaluationReport(StrictModel):
-    schema_version: Literal["evaluation_report@1"] = "evaluation_report@1"
+    schema_version: Literal["evaluation_report@2"] = "evaluation_report@2"
     run: EvaluationRun
     summary: EvaluationSummary
     report_sha256: Sha256
@@ -557,32 +612,25 @@ class EvaluationReport(StrictModel):
 
 
 class RolloutPolicy(StrictModel):
-    schema_version: Literal["rollout_policy@2"] = "rollout_policy@2"
-    minimum_sample_size: int = Field(default=20, ge=1)
-    minimum_metric_denominator: int = Field(default=10, ge=1)
+    """Pre-publication policy for opening a draft, GitHub-reviewed PR.
+
+    Only measurements produced by the sealed offline fixture harness may gate
+    this transition.  GitHub CI, repair, reviewer calibration, human edits, and
+    post-merge outcomes remain reported metrics, but they cannot be required
+    before the first draft PR exists.
+    """
+
+    schema_version: Literal["rollout_policy@3"] = "rollout_policy@3"
+    minimum_sample_size: int = Field(default=8, ge=1)
+    minimum_metric_denominator: int = Field(default=8, ge=1)
     maximum_escaped_defect_rate: float = Field(
-        default=0.02, ge=0, le=1, allow_inf_nan=False
+        default=0.0, ge=0, le=1, allow_inf_nan=False
     )
     minimum_requirement_coverage: float = Field(
-        default=0.95, ge=0, le=1, allow_inf_nan=False
-    )
-    minimum_build_pass_rate: float = Field(
-        default=0.95, ge=0, le=1, allow_inf_nan=False
-    )
-    minimum_test_pass_rate: float = Field(
-        default=0.95, ge=0, le=1, allow_inf_nan=False
+        default=1.0, ge=0, le=1, allow_inf_nan=False
     )
     minimum_behavioral_acceptance_rate: float = Field(
-        default=0.95, ge=0, le=1, allow_inf_nan=False
-    )
-    minimum_first_pass_ci_success_rate: float = Field(
-        default=0.70, ge=0, le=1, allow_inf_nan=False
-    )
-    minimum_reviewer_precision: float = Field(
-        default=0.90, ge=0, le=1, allow_inf_nan=False
-    )
-    minimum_reviewer_recall: float = Field(
-        default=0.90, ge=0, le=1, allow_inf_nan=False
+        default=1.0, ge=0, le=1, allow_inf_nan=False
     )
     canary_percent: int = Field(default=10, ge=0, le=100)
 

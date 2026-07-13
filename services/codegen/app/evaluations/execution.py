@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Literal
@@ -11,6 +12,7 @@ from pydantic import model_validator
 from app.evaluations.corpus import load_oracle_set, validate_corpus_oracles
 from app.evaluations.metrics import build_evaluation_report
 from app.evaluations.models import (
+    CodegenCandidateIdentity,
     EvaluationCorpus,
     EvaluationReport,
     EvaluationRun,
@@ -27,7 +29,7 @@ from app.evaluations.segments import (
 
 
 class CompletedEvaluation(StrictModel):
-    schema_version: Literal["completed_evaluation@1"] = "completed_evaluation@1"
+    schema_version: Literal["completed_evaluation@2"] = "completed_evaluation@2"
     run: EvaluationRun
     report: EvaluationReport
     segmented_report: SegmentedEvaluationReport
@@ -56,6 +58,7 @@ async def execute_evaluation_run(
     executor: EvaluationExecutor,
     model: str,
     codegen_revision: str,
+    candidate_identity: CodegenCandidateIdentity | None,
     run_id: str | None = None,
 ) -> CompletedEvaluation:
     """Execute the entire canonical corpus and build overall plus sliced reports."""
@@ -79,6 +82,7 @@ async def execute_evaluation_run(
         stage=stage,
         model=model,
         codegen_revision=codegen_revision,
+        candidate_identity=candidate_identity,
         started_at=started_at,
         finished_at=finished_at,
         outcomes=outcomes,
@@ -86,11 +90,15 @@ async def execute_evaluation_run(
     report = build_evaluation_report(run)
     segmented_report = build_segmented_report(run, corpus)
     payload = {
-        "schema_version": "completed_evaluation@1",
+        "schema_version": "completed_evaluation@2",
         "run": run.model_dump(mode="json"),
         "report": report.model_dump(mode="json"),
         "segmented_report": segmented_report.model_dump(mode="json"),
     }
-    return CompletedEvaluation.model_validate(
-        {**payload, "completed_evaluation_sha256": canonical_sha256(payload)}
+    return CompletedEvaluation.model_validate_json(
+        json.dumps(
+            {**payload, "completed_evaluation_sha256": canonical_sha256(payload)},
+            allow_nan=False,
+            separators=(",", ":"),
+        )
     )

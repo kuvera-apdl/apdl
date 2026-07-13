@@ -10,7 +10,8 @@ import base64
 import pytest
 
 from app import config
-from app.evaluations.models import RolloutStage
+from app.editor.environment import codegen_behavior_configuration_sha256
+from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.editor.aider_editor import AiderEditor
 from app.editor.container_editor import ContainerAiderEditor
 from app.main import _make_editor, _make_publication_gate
@@ -181,6 +182,53 @@ def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
     assert gate.provider is None
 
 
+def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch):
+    controller = "sha256:" + "a" * 64
+    candidate = "sha256:" + "b" * 64
+    captured: dict[str, str] = {}
+    provider = object()
+
+    def fake_loader(_path, **kwargs):
+        captured.update(kwargs)
+        return provider
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
+    monkeypatch.setenv("CODEGEN_MODEL", "test-model@1")
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "test-helper@1")
+    monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
+    monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", controller)
+    monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", candidate)
+    monkeypatch.setattr("app.main.load_publication_authorizer", fake_loader)
+
+    gate = _make_publication_gate()
+    identity = CodegenCandidateIdentity.build(
+        controller_image_id=controller,
+        candidate_image_id=candidate,
+        codegen_revision="evaluated-revision",
+        behavior_configuration_sha256=codegen_behavior_configuration_sha256(),
+    )
+
+    assert captured == {
+        "expected_model": "test-model@1",
+        "expected_codegen_revision": "evaluated-revision",
+        "expected_candidate_identity_sha256": identity.identity_sha256,
+    }
+    assert gate.provider is provider
+    assert gate.candidate_identity_sha256 == identity.identity_sha256
+
+
+def test_publication_gate_rejects_mutable_image_identity(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
+    monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
+    monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", "controller:latest")
+    monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", "candidate:latest")
+
+    with pytest.raises(ValueError, match="validation errors"):
+        _make_publication_gate()
+
+
 def test_editor_defaults_to_isolated_container(monkeypatch):
     monkeypatch.delenv("CODEGEN_SANDBOX", raising=False)
     editor = _make_editor(RolloutStage.offline)
@@ -189,7 +237,12 @@ def test_editor_defaults_to_isolated_container(monkeypatch):
 
 def test_pr_stage_requires_named_filtered_sandbox_network(monkeypatch):
     monkeypatch.setenv("CODEGEN_SANDBOX", "docker")
-    for network in ("", "bridge", "default", "host"):
+    monkeypatch.setattr(
+        ContainerAiderEditor,
+        "assert_runtime_ready",
+        lambda self, *, expected_revision: None,
+    )
+    for network in ("", "bridge", "default", "host", "none"):
         monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
         with pytest.raises(RuntimeError, match="SANDBOX_NETWORK"):
             _make_editor(RolloutStage.reviewed_pr)

@@ -33,11 +33,14 @@ import contextlib
 import json
 import logging
 import os
+import re
+import subprocess
 import uuid
 
 from app.config import codegen_job_budget
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
+from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
@@ -56,33 +59,15 @@ _ERR_TAIL = 800
 # our process env), so their VALUES never appear on the docker argv / process
 # list. The GitHub App private key, Postgres DSN, and internal token are
 # deliberately absent — the sandbox must not receive them.
-_SECRET_ENV_FORWARD: tuple[str, ...] = (
-    "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_BASE_URL",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-    "GOOGLE_API_KEY", "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
-    "COHERE_API_KEY", "TOGETHERAI_API_KEY", "FIREWORKS_API_KEY", "XAI_API_KEY",
-    "OLLAMA_API_BASE", "AZURE_API_KEY", "AZURE_API_BASE", "AZURE_API_VERSION",
-)
+_SECRET_ENV_FORWARD: tuple[str, ...] = MODEL_PROVIDER_ENV
 
 # Editor knobs (non-secret) forwarded into the sandbox so the AiderEditor
 # inside behaves EXACTLY like the in-process one — an operator's timeouts,
 # fail-closed posture, and auxiliary-pass toggles must not silently revert to
 # defaults just because CODEGEN_SANDBOX=docker. Unset values fall back to the
 # same defaults in both places.
-_CONFIG_ENV_FORWARD: tuple[str, ...] = (
-    "CODEGEN_BRIEF",
-    "CODEGEN_REVIEW",
-    "CODEGEN_HELPER_MODEL",
-    "CODEGEN_EDIT_RETRIES",
-    "CODEGEN_REQUIRE_VERIFY",
-    "CODEGEN_CACHE_PROMPTS",
-    "CODEGEN_CONVENTIONS",
-    "CODEGEN_CONTRACTS",
-    "CODEGEN_CONTRACT_INSTALL_TIMEOUT",
-    "CODEGEN_TIMEOUT",
-    "CODEGEN_GIT_TIMEOUT",
-    "CODEGEN_LLM_TIMEOUT",
+_CONFIG_ENV_FORWARD: tuple[str, ...] = tuple(
+    key for key in CODEGEN_BEHAVIOR_ENV if key not in {"CODEGEN_MODEL"}
 )
 
 
@@ -115,6 +100,50 @@ class ContainerAiderEditor:
         # aider + verify + push), so its wall-clock cap is the derived job
         # budget — capping at the bare agent timeout kills legitimate retries.
         self._timeout = codegen_job_budget()
+
+    def assert_runtime_ready(self, *, expected_revision: str) -> None:
+        """Fail PR-stage startup unless Docker, image, and network are real.
+
+        This check is intentionally limited to the publication-capable startup
+        path. Offline development can boot without a Docker daemon because its
+        changeset endpoints are disabled.
+        """
+        if not expected_revision or expected_revision == "development-unversioned":
+            raise RuntimeError("PR rollout requires an immutable CODEGEN_REVISION")
+        if self._network in {"", "bridge", "default", "host", "none"}:
+            raise RuntimeError("PR rollout requires a non-built-in sandbox network")
+        if not re.search(r"(?:@|^)sha256:[0-9a-f]{64}$", self._image):
+            raise RuntimeError("PR rollout requires an immutable sandbox image digest")
+
+        def inspect(*args: str) -> str:
+            try:
+                completed = subprocess.run(
+                    [self._docker, *args],
+                    env=self._docker_control_env(),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("Codegen Docker runtime preflight failed") from exc
+            if completed.returncode != 0:
+                raise RuntimeError("Codegen Docker runtime preflight failed")
+            return completed.stdout.strip()
+
+        inspect("version", "--format", "{{.Server.Version}}")
+        observed_revision = inspect(
+            "image",
+            "inspect",
+            "--format",
+            '{{ index .Config.Labels "dev.apdl.codegen.revision" }}',
+            self._image,
+        )
+        if observed_revision != expected_revision:
+            raise RuntimeError(
+                "Codegen sandbox image revision does not match CODEGEN_REVISION"
+            )
+        inspect("network", "inspect", self._network)
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:

@@ -122,6 +122,37 @@ jobs:
       - run: ruff check app/
         working-directory: services/config
 
+  codegen-service:
+    name: Codegen Service and Candidate Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+        working-directory: services/codegen
+      - run: ruff check app/ tests/
+        working-directory: services/codegen
+      - run: python -m pytest -q
+        working-directory: services/codegen
+      - run: docker build -t apdl-codegen-controller:ci services/codegen
+      - run: >-
+          docker build
+          --build-arg CODEGEN_REVISION=${{ github.sha }}
+          -f services/codegen/Dockerfile.worker
+          -t apdl-codegen-candidate:ci
+          services/codegen
+      - name: Verify candidate packaging boundary
+        run: |
+          docker run --rm --entrypoint sh apdl-codegen-candidate:ci -ec '
+            command -v apdl-codegen-evaluate-candidate >/dev/null
+            root="$(python -c "from pathlib import Path; import app.evaluations; print(Path(app.evaluations.__file__).parent)")"
+            test ! -e "$root/oracles_v1.json"
+            test ! -e "$root/corpus_v2.json"
+            test ! -e "$root/fixtures"
+          '
+
   clickhouse-writer:
     name: ClickHouse Writer
     runs-on: ubuntu-latest

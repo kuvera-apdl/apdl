@@ -1,0 +1,59 @@
+services:
+  # Reviewed-PR deployment overlay. Keep the base Compose stack fail-closed in
+  # offline mode; add this file only after a trusted evaluation produced the
+  # exact model/revision bundle mounted below.
+  codegen:
+    image: ${CODEGEN_CONTROLLER_IMAGE:?set the evaluated controller image ID}
+    pull_policy: never
+    user: "${CODEGEN_DOCKER_UID:?set CODEGEN_DOCKER_UID}:${CODEGEN_DOCKER_GID:?set CODEGEN_DOCKER_GID}"
+    group_add:
+      - "${CODEGEN_DOCKER_SOCKET_GID:?set CODEGEN_DOCKER_SOCKET_GID}"
+    environment:
+      CODEGEN_REVISION: ${CODEGEN_REVISION:?set the evaluated CODEGEN_REVISION}
+      CODEGEN_CONTROLLER_IMAGE_ID: ${CODEGEN_CONTROLLER_IMAGE:?set the evaluated controller image ID}
+      CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-reviewed_pr}
+      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: /run/apdl/codegen/publication-bundle.json
+      CODEGEN_SANDBOX: docker
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:?set the evaluated candidate image}
+      CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:?set an egress-filtered Docker network}
+      DOCKER_HOST: unix:///var/run/docker.sock
+      # Preserve every behavior-affecting setting admitted by the candidate's
+      # canonical environment contract. Defaults mirror app.config; explicit
+      # values must be the same ones used for evaluation under this revision.
+      CODEGEN_AIDER_BIN: ${CODEGEN_AIDER_BIN:-aider}
+      CODEGEN_REQUIRE_VERIFY: ${CODEGEN_REQUIRE_VERIFY:-false}
+      CODEGEN_CONVENTIONS: ${CODEGEN_CONVENTIONS:-true}
+      CODEGEN_SDK_REFERENCE: ${CODEGEN_SDK_REFERENCE:-}
+      CODEGEN_CONTRACTS: ${CODEGEN_CONTRACTS:-true}
+      CODEGEN_CONTRACT_INSTALL_TIMEOUT: ${CODEGEN_CONTRACT_INSTALL_TIMEOUT:-600}
+      CODEGEN_TIMEOUT: ${CODEGEN_TIMEOUT:-1800}
+      CODEGEN_GIT_TIMEOUT: ${CODEGEN_GIT_TIMEOUT:-300}
+      CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
+      # The base stack carries the primary providers. These additional LiteLLM
+      # variables keep reviewed deployment aligned with the evaluation allowlist.
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VERTEXAI_PROJECT: ${VERTEXAI_PROJECT:-}
+      VERTEXAI_LOCATION: ${VERTEXAI_LOCATION:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      TOGETHERAI_API_KEY: ${TOGETHERAI_API_KEY:-}
+      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-}
+      AZURE_API_KEY: ${AZURE_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_API_BASE:-}
+      AZURE_API_VERSION: ${AZURE_API_VERSION:-}
+    volumes:
+      - type: bind
+        source: ${CODEGEN_DOCKER_SOCKET:?set the absolute Docker socket path}
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${CODEGEN_ROLLOUT_BUNDLE_PATH:?set the absolute publication bundle path}
+        target: /run/apdl/codegen/publication-bundle.json
+        read_only: true

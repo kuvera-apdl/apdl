@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.config import (
     codegen_ci_poll_interval,
+    codegen_controller_image_id,
     codegen_cors_origins,
     codegen_job_budget,
     codegen_model,
@@ -31,6 +32,7 @@ from app.config import (
     codegen_rollout_authorization_path,
     codegen_rollout_stage,
     codegen_sandbox_mode,
+    codegen_sandbox_image,
     codegen_sandbox_network,
     codegen_stale_sweep_interval,
     codegen_trusted_repos_only,
@@ -40,7 +42,8 @@ from app.db import assert_schema_ready
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
-from app.evaluations.models import RolloutStage
+from app.editor.environment import codegen_behavior_configuration_sha256
+from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
 from app.github.checks import get_ci_evidence
 from app.github.pulls import get_pull_request, open_pull_request
@@ -77,13 +80,22 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
     }
     if mode == "docker":
         network = codegen_sandbox_network()
-        if publication_stage and network in {"", "bridge", "default", "host"}:
+        if publication_stage and network in {
+            "",
+            "bridge",
+            "default",
+            "host",
+            "none",
+        }:
             raise RuntimeError(
                 "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
                 "operator-managed egress-filtered network"
             )
         logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
-        return ContainerAiderEditor()
+        editor = ContainerAiderEditor()
+        if publication_stage:
+            editor.assert_runtime_ready(expected_revision=codegen_revision())
+        return editor
     if publication_stage:
         raise RuntimeError("PR rollout stages require CODEGEN_SANDBOX=docker")
     if not codegen_trusted_repos_only():
@@ -101,6 +113,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
     model = codegen_model()
     revision = codegen_revision()
     provider = None
+    candidate_identity = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
         raw_path = codegen_rollout_authorization_path()
         if not raw_path:
@@ -112,15 +125,29 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             raise RuntimeError(
                 "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
             )
+        candidate_identity = CodegenCandidateIdentity.build(
+            controller_image_id=codegen_controller_image_id(),
+            candidate_image_id=codegen_sandbox_image(),
+            codegen_revision=revision,
+            behavior_configuration_sha256=(
+                codegen_behavior_configuration_sha256()
+            ),
+        )
         provider = load_publication_authorizer(
             artifact_path,
             expected_model=model,
             expected_codegen_revision=revision,
+            expected_candidate_identity_sha256=candidate_identity.identity_sha256,
         )
     return ConfiguredPublicationGate(
         stage=stage,
         model=model,
         codegen_revision=revision,
+        candidate_identity_sha256=(
+            candidate_identity.identity_sha256
+            if candidate_identity is not None
+            else None
+        ),
         provider=provider,
     )
 

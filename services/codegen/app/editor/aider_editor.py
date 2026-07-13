@@ -575,12 +575,79 @@ class AiderEditor:
             logger.exception("Aider edit failed for %s", request.repo)
             return EditResult(success=False, branch=request.branch, error=str(exc))
 
-    async def _run(self, request: EditRequest) -> EditResult:
+    async def implement_workspace(
+        self,
+        request: EditRequest,
+        workspace: Path,
+    ) -> EditResult:
+        """Run the production editing pipeline in an existing evaluation checkout.
+
+        This is the credential-free execution seam used by the offline/shadow
+        evaluator.  The caller owns a clean, already-materialized git workspace;
+        this method edits that checkout in place and deliberately performs no
+        clone, branch creation, fetch, or push.  Everything between repository
+        preparation and publication remains identical to :meth:`implement`:
+        profiling, requirement compilation, exact-contract resolution, the
+        configured brief/Aider/review loop, verification coverage, and the full
+        deterministic safety gate all still run.
+
+        Evaluation workspaces cannot represent an existing-PR repair or remote
+        revert because either operation requires GitHub state and credentials.
+        Ordinary candidate failures follow the Editor contract and are returned
+        as ``EditResult(success=False)`` rather than raised.
+        """
+        try:
+            return await self._run(request, workspace=workspace)
+        except Exception as exc:  # keep the same never-raise attempt contract
+            # The evaluator's stderr crosses a trust boundary.  Do not log the
+            # raw exception or candidate-controlled repository text here; the
+            # typed result remains available to the in-process caller.
+            logger.error("Aider workspace edit failed with an internal error")
+            return EditResult(success=False, branch=request.branch, error=str(exc))
+
+    async def _run(
+        self,
+        request: EditRequest,
+        *,
+        workspace: Path | None = None,
+    ) -> EditResult:
         keep = config.codegen_keep_workdir()
-        work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
-        repo_dir = work / "repo"
-        header = _basic_auth_header(request.token)
-        clone_url = f"https://github.com/{request.repo}.git"
+        workspace_mode = workspace is not None
+        if workspace_mode:
+            assert workspace is not None
+            repo_dir = workspace.expanduser().resolve()
+            # Evaluation context/config files must remain outside the candidate
+            # repository even if CODEGEN_WORKDIR was accidentally pointed at the
+            # mounted checkout. Try the configured base first, then safe local
+            # fallbacks, accepting only a directory outside the resolved repo.
+            work: Path | None = None
+            for candidate in (
+                Path(self._workdir_base),
+                Path(tempfile.gettempdir()),
+                repo_dir.parent,
+            ):
+                scratch_base = candidate.expanduser().resolve()
+                if scratch_base == repo_dir or repo_dir in scratch_base.parents:
+                    continue
+                try:
+                    work = Path(
+                        tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base)
+                    )
+                except OSError:
+                    continue
+                break
+            if work is None:
+                raise RuntimeError(
+                    "Workspace evaluation requires a writable scratch directory "
+                    "outside the git worktree."
+                )
+        else:
+            work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
+            repo_dir = work / "repo"
+        # A workspace evaluation never even derives an auth header, so an empty
+        # token is a valid input and no credential can reach git accidentally.
+        header = None if workspace_mode else _basic_auth_header(request.token)
+        clone_url = None if workspace_mode else f"https://github.com/{request.repo}.git"
         # Prompt transcript for the operator UI (see EditResult.prompts). Every
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
@@ -663,26 +730,64 @@ class AiderEditor:
             return True, None
 
         try:
-            # 1. Clone with one-shot auth. Repairs clone the existing PR branch;
-            #    initial runs clone base and cut a new branch.
-            clone_branch = (
-                request.branch if request.existing_branch else request.base_branch
-            )
-            rc, out = await self._git(
-                None,
-                [
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    clone_branch,
-                    clone_url,
-                    str(repo_dir),
-                ],
-                auth_header=header,
-            )
-            if rc != 0:
-                return fail(f"clone failed: {_tail(out)}")
+            # 1. Production clones with one-shot auth.  Offline/shadow evaluation
+            #    instead receives one clean, mutation-materialized checkout and
+            #    must never gain a remote repository capability.
+            if workspace_mode:
+                if request.revert_sha or request.existing_branch or request.expected_head_sha:
+                    return fail(
+                        "Workspace evaluation does not support remote revert or "
+                        "existing-branch repair inputs."
+                    )
+                if not repo_dir.is_dir():
+                    return fail("Workspace evaluation requires an existing directory.")
+                rc, out = await self._git(
+                    repo_dir, ["rev-parse", "--is-inside-work-tree"]
+                )
+                if rc != 0 or out.strip() != "true":
+                    return fail("Workspace evaluation requires a git worktree.")
+                rc, out = await self._git(repo_dir, ["rev-parse", "--show-toplevel"])
+                if rc != 0:
+                    return fail("Workspace evaluation could not resolve its git root.")
+                try:
+                    git_root = Path(out.strip()).expanduser().resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return fail("Workspace evaluation could not resolve its git root.")
+                if git_root != repo_dir:
+                    return fail(
+                        "Workspace evaluation directory must be the git worktree root."
+                    )
+                rc, out = await self._git(
+                    repo_dir, ["status", "--porcelain", "--untracked-files=all"]
+                )
+                if rc != 0:
+                    return fail(
+                        "Workspace evaluation could not inspect checkout state: "
+                        + _tail(out)
+                    )
+                if out.strip():
+                    return fail("Workspace evaluation requires a clean git worktree.")
+            else:
+                # Repairs clone the existing PR branch; initial runs clone base
+                # and cut a new branch exactly as before.
+                clone_branch = (
+                    request.branch if request.existing_branch else request.base_branch
+                )
+                rc, out = await self._git(
+                    None,
+                    [
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        clone_branch,
+                        clone_url,
+                        str(repo_dir),
+                    ],
+                    auth_header=header,
+                )
+                if rc != 0:
+                    return fail(f"clone failed: {_tail(out)}")
             rc, baseline = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
@@ -692,7 +797,7 @@ class AiderEditor:
                     "Repair refused because the PR head changed from "
                     f"{request.expected_head_sha} to {baseline}."
                 )
-            if not request.existing_branch:
+            if not workspace_mode and not request.existing_branch:
                 rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
                 if rc != 0:
                     return fail(f"branch failed: {_tail(out)}")
@@ -972,6 +1077,7 @@ class AiderEditor:
             #     prose.
             agent_pending = True
             if request.revert_sha:
+                assert header is not None  # workspace mode rejects remote reverts above
                 revert_error = await self._revert_commit(
                     repo_dir, request.revert_sha, header
                 )
@@ -1353,24 +1459,29 @@ class AiderEditor:
                     + "; ".join(gate.violations)
                 )
 
-            # 6. Push the branch from the orchestrator (token via one-shot header).
-            push_args = ["push"]
-            if request.expected_head_sha:
-                push_args.append(
-                    "--force-with-lease="
-                    f"refs/heads/{request.branch}:{request.expected_head_sha}"
+            # 6. Production publishes the gated branch.  Evaluation deliberately
+            #    leaves the resulting commit only in its materialized workspace;
+            #    the sealed outer harness inspects that tree after this returns.
+            if not workspace_mode:
+                push_args = ["push"]
+                if request.expected_head_sha:
+                    push_args.append(
+                        "--force-with-lease="
+                        f"refs/heads/{request.branch}:{request.expected_head_sha}"
+                    )
+                push_args += ["origin", f"{request.branch}:{request.branch}"]
+                assert header is not None
+                rc, out = await self._git(
+                    repo_dir,
+                    push_args,
+                    auth_header=header,
                 )
-            push_args += ["origin", f"{request.branch}:{request.branch}"]
-            rc, out = await self._git(
-                repo_dir,
-                push_args,
-                auth_header=header,
-            )
-            if rc != 0:
-                return fail(f"push failed: {_tail(out)}")
+                if rc != 0:
+                    return fail(f"push failed: {_tail(out)}")
             rc, head_sha = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
-                return fail(f"could not resolve pushed head: {_tail(head_sha)}")
+                label = "workspace" if workspace_mode else "pushed"
+                return fail(f"could not resolve {label} head: {_tail(head_sha)}")
 
             return EditResult(
                 success=True,

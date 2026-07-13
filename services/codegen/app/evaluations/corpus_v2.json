@@ -7,7 +7,7 @@
       "case_id": "node-async-readiness",
       "ecosystem": "node",
       "fixture_repo": "fixtures/node-async-readiness",
-      "fixture_sha256": "99e343b0daceb1fd06f050cbc09ab220d0efd5998b86a8e2fee36d65918793f8",
+      "fixture_sha256": "51a6810362f054250856a1f57e1b103283fad9f24fe1926414a66b0dd2b3c17b",
       "mutation": "asynchronous_readiness",
       "task": {
         "title": "Wait for the client before tracking",
@@ -49,7 +49,7 @@
       "case_id": "go-absent-metrics",
       "ecosystem": "go",
       "fixture_repo": "fixtures/go-absent-metrics",
-      "fixture_sha256": "66cec70fb0adddf1dd62721bf892d3611a2a736f48380d22f8c73935ba0b8208",
+      "fixture_sha256": "4c233482df5c0cb83f443597ad2d2ba3cf35ce121eb3b2c5d3ec9e1566892637",
       "mutation": "absent_metrics",
       "task": {
         "title": "Record successful jobs",
@@ -63,7 +63,7 @@
       "case_id": "rust-missing-route",
       "ecosystem": "rust",
       "fixture_repo": "fixtures/rust-missing-route",
-      "fixture_sha256": "d90effa3aa5aec4ffa081af219dd6928c15195a6d04894d455e6ae47e0077414",
+      "fixture_sha256": "df0fbdc3969664f48094a543ce1ffc6a3787becd6c8971620c0c6434cf5fb429",
       "mutation": "missing_route",
       "task": {
         "title": "Expose the health handler",
@@ -109,7 +109,7 @@
       "mutation": "flaky_infrastructure",
       "task": {
         "title": "Classify an infrastructure timeout",
-        "spec": "Observe a CI timeout caused by unavailable infrastructure without changing product code.",
+        "spec": "Restore the timeout classifier so unavailable runner infrastructure requests a GitHub-native rerun instead of a product-code repair.",
         "constraints": ["The failure is classified for a GitHub-native rerun."],
         "risk": "low"
       }

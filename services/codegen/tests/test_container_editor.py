@@ -7,6 +7,7 @@ parsing, and that an attempt never raises.
 
 import asyncio
 import json
+import subprocess
 
 import pytest
 
@@ -112,6 +113,74 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
     monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
     assert ContainerAiderEditor()._timeout == 3000
+
+
+def test_pr_runtime_preflight_accepts_exact_image_revision_and_network(monkeypatch):
+    revision = "evaluated-revision"
+    image = "sha256:" + "a" * 64
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+    calls: list[list[str]] = []
+    responses = iter(["27.5.1", revision, "[]"])
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs["check"] is False
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == 20
+        return subprocess.CompletedProcess(argv, 0, next(responses), "")
+
+    monkeypatch.setattr("app.editor.container_editor.subprocess.run", fake_run)
+
+    ContainerAiderEditor(image=image).assert_runtime_ready(
+        expected_revision=revision
+    )
+
+    assert calls == [
+        ["docker", "version", "--format", "{{.Server.Version}}"],
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            '{{ index .Config.Labels "dev.apdl.codegen.revision" }}',
+            image,
+        ],
+        ["docker", "network", "inspect", "codegen-egress"],
+    ]
+
+
+@pytest.mark.parametrize("network", ["", "bridge", "default", "host", "none"])
+def test_pr_runtime_preflight_rejects_builtin_networks(monkeypatch, network):
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
+    editor = ContainerAiderEditor(image="sha256:" + "a" * 64)
+
+    with pytest.raises(RuntimeError, match="non-built-in sandbox network"):
+        editor.assert_runtime_ready(expected_revision="evaluated-revision")
+
+
+def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+
+    with pytest.raises(RuntimeError, match="immutable sandbox image digest"):
+        ContainerAiderEditor(image="apdl-codegen-sandbox:latest").assert_runtime_ready(
+            expected_revision="evaluated-revision"
+        )
+
+
+def test_pr_runtime_preflight_rejects_mismatched_image_revision(monkeypatch):
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+    responses = iter(["27.5.1", "different-revision"])
+
+    def fake_run(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, next(responses), "")
+
+    monkeypatch.setattr("app.editor.container_editor.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="does not match CODEGEN_REVISION"):
+        ContainerAiderEditor(image="sha256:" + "a" * 64).assert_runtime_ready(
+            expected_revision="evaluated-revision"
+        )
 
 
 def test_secrets_are_passed_by_name_not_value(monkeypatch):

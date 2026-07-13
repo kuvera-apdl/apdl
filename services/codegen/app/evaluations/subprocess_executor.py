@@ -25,45 +25,12 @@ from app.evaluations.models import (
     StrictModel,
 )
 from app.evaluations.runner import EvaluationInvocation
+from app.editor.environment import EVALUATION_ENV, MODEL_PROVIDER_ENV
 
 
-_ENV_PASSTHROUGH = frozenset(
-    {
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "TZ",
-        "SSL_CERT_FILE",
-        "REQUESTS_CA_BUNDLE",
-        "CODEGEN_MODEL",
-        "CODEGEN_HELPER_MODEL",
-        "OPENAI_API_KEY",
-        "OPENAI_API_BASE",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-        "GOOGLE_API_KEY",
-        "GEMINI_API_KEY",
-        "VERTEXAI_PROJECT",
-        "VERTEXAI_LOCATION",
-        "OPENROUTER_API_KEY",
-        "MISTRAL_API_KEY",
-        "GROQ_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "COHERE_API_KEY",
-        "TOGETHERAI_API_KEY",
-        "FIREWORKS_API_KEY",
-        "XAI_API_KEY",
-        "OLLAMA_API_BASE",
-        "AZURE_API_KEY",
-        "AZURE_API_BASE",
-        "AZURE_API_VERSION",
-    }
-)
+_ENV_PASSTHROUGH = frozenset(EVALUATION_ENV)
 
-_MODEL_SECRET_ENV = frozenset(
-    key for key in _ENV_PASSTHROUGH if key.endswith("_API_KEY")
-)
+_MODEL_SECRET_ENV = frozenset(MODEL_PROVIDER_ENV)
 _GENERIC_SECRET_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
@@ -239,7 +206,7 @@ class SubprocessEvaluationExecutor:
                 raise EvaluationExecutorError(
                     "evaluation executor output contained protected secret material"
                 )
-            result = EvaluationExecution.model_validate(decoded_payload)
+            result = EvaluationExecution.model_validate_json(decoded)
         except EvaluationExecutorError:
             raise
         except (UnicodeDecodeError, ValueError):

@@ -225,6 +225,16 @@ def codegen_sandbox_network() -> str:
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
 
 
+def codegen_controller_image_id() -> str:
+    """Immutable controller image ID used by publication evidence binding."""
+    return os.getenv("CODEGEN_CONTROLLER_IMAGE_ID", "").strip()
+
+
+def codegen_sandbox_image() -> str:
+    """Configured production candidate image reference."""
+    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-sandbox:latest").strip()
+
+
 def codegen_trusted_repos_only() -> bool:
     """Explicit acknowledgement required for trusted local in-process edits."""
     return os.getenv("CODEGEN_TRUSTED_REPOS_ONLY", "").strip().lower() == "true"

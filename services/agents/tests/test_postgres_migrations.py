@@ -11,6 +11,9 @@ AGENTS_CORE_SQL = (POSTGRES_MIGRATIONS / "004_agents_core.sql").read_text()
 OBSERVABILITY_SQL = (POSTGRES_MIGRATIONS / "005_agent_observability.sql").read_text()
 CONFIG_SQL = (POSTGRES_MIGRATIONS / "006_config.sql").read_text()
 CODEGEN_SQL = (POSTGRES_MIGRATIONS / "007_codegen.sql").read_text()
+CODEGEN_PUBLICATION_IDENTITY_SQL = (
+    POSTGRES_MIGRATIONS / "010_codegen_publication_identity.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -111,6 +114,17 @@ def test_config_and_codegen_have_canonical_migrations():
         CODEGEN_SQL
     )
     assert "codegen_runtime_evidence_observations_legacy_unbound" in CODEGEN_SQL
+
+
+def test_codegen_publication_identity_migration_archives_without_fabrication():
+    sql = CODEGEN_PUBLICATION_IDENTITY_SQL
+    assert "publication_authorization_legacy" in sql
+    assert "publication_authorization = NULL" in sql
+    assert "IS DISTINCT FROM 'publication_authorization@2'" in sql
+    assert "= 'publication_authorization@2'" in sql
+    assert ") IS TRUE" in sql
+    assert "publication_authorization@1" in sql
+    assert "jsonb_set" not in sql.lower()
 
 
 def test_database_runners_enforce_the_single_engine_authority():
