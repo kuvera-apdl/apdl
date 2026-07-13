@@ -25,6 +25,7 @@ from app.models.changeset import (
 )
 from app.models.observations import ChangesetObservationHistory
 from app.runtime.models import RuntimeEvidenceObservation
+from app.safety.policy import resolve_effective_policy
 from app.store import changesets as store
 from app.store import connections as connections_store
 from app.store import observations as observation_store
@@ -65,6 +66,24 @@ def _maybe_enqueue(app: Any, background_tasks: BackgroundTasks, changeset_id: st
     background_tasks.add_task(run_changeset_job, app.state.pg_pool, changeset_id, **deps)
 
 
+def _policy_provenance(app: Any, connection: Any) -> tuple[Any, str]:
+    """Capture tenant preferences and the effective policy active at enqueue time."""
+    platform = getattr(app.state, "platform_codegen_safety_policy", None)
+    tenant = connection.tenant_policy
+    effective = resolve_effective_policy(tenant, platform)
+    return tenant, effective.canonical_digest()
+
+
+async def _current_connection(pool: asyncpg.Pool, project_id: str) -> Any:
+    connection = await connections_store.get_connection(pool, project_id)
+    if connection is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project '{project_id}' has no connected repository.",
+        )
+    return connection
+
+
 async def _authorized_changeset(
     pool: asyncpg.Pool,
     request: Request,
@@ -88,12 +107,10 @@ async def create_changeset(
     require_project(request, body.project_id, "agents:manage")
     _require_publication_stage(request.app)
 
-    connection = await connections_store.get_connection(pool, body.project_id)
-    if connection is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Project '{body.project_id}' has no connected repository.",
-        )
+    connection = await _current_connection(pool, body.project_id)
+    tenant_policy, effective_policy_sha256 = _policy_provenance(
+        request.app, connection
+    )
 
     changeset_id = f"cs_{uuid.uuid4().hex[:24]}"
     base_branch = body.base_branch or connection.default_base_branch
@@ -104,6 +121,8 @@ async def create_changeset(
         run_id=body.run_id,
         base_branch=base_branch,
         task=body.task.model_dump(),
+        tenant_policy_snapshot=tenant_policy,
+        effective_safety_policy_sha256=effective_policy_sha256,
     )
     _maybe_enqueue(request.app, background_tasks, changeset_id)
     return changeset
@@ -239,6 +258,10 @@ async def revert_changeset(
         "context": context,
         "constraints": ["All existing tests must pass."],
     }
+    connection = await _current_connection(pool, original.project_id)
+    tenant_policy, effective_policy_sha256 = _policy_provenance(
+        request.app, connection
+    )
     new_changeset = await store.create_changeset(
         pool,
         changeset_id=new_id,
@@ -246,6 +269,8 @@ async def revert_changeset(
         run_id=original.run_id,
         base_branch=base,
         task=revert_task,
+        tenant_policy_snapshot=tenant_policy,
+        effective_safety_policy_sha256=effective_policy_sha256,
     )
     _maybe_enqueue(request.app, background_tasks, new_id)
     return new_changeset
@@ -285,6 +310,10 @@ async def retry_changeset(
     # context so the new changeset's lineage back to the failed run is traceable.
     task = original.task.model_dump()
     task["context"] = {**task.get("context", {}), "retry_of": changeset_id}
+    connection = await _current_connection(pool, original.project_id)
+    tenant_policy, effective_policy_sha256 = _policy_provenance(
+        request.app, connection
+    )
     new_changeset = await store.create_changeset(
         pool,
         changeset_id=new_id,
@@ -292,6 +321,8 @@ async def retry_changeset(
         run_id=original.run_id,
         base_branch=original.base_branch,
         task=task,
+        tenant_policy_snapshot=tenant_policy,
+        effective_safety_policy_sha256=effective_policy_sha256,
     )
     _maybe_enqueue(request.app, background_tasks, new_id)
     return new_changeset

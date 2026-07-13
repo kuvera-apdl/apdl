@@ -19,6 +19,12 @@ from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
     RuntimeAcceptancePlan,
 )
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    TenantCodegenConnectionPolicy,
+    TenantCodegenGatesPolicy,
+    resolve_effective_policy,
+)
 from app.semantic_review import assemble_review_verdict
 from app.verification import build_verification_plan, evaluate_verification_coverage
 
@@ -61,10 +67,21 @@ def test_docker_argv_omits_test_cmd_when_unset():
     assert "CS_TEST_CMD" not in argv
 
 
-def test_docker_argv_passes_gates_policy_and_revert_sha():
-    req = _req(gates_policy={"max_files": 5}, revert_sha="cafebabe")
+def test_docker_argv_passes_effective_safety_policy_and_revert_sha():
+    safety_policy = resolve_effective_policy(
+        TenantCodegenConnectionPolicy(
+            gates=TenantCodegenGatesPolicy(max_files=5)
+        ),
+        PlatformCodegenSafetyPolicy(),
+    )
+    req = _req(safety_policy=safety_policy, revert_sha="cafebabe")
     argv = " ".join(ContainerAiderEditor()._docker_argv(req))
-    assert 'CS_GATES_POLICY={"max_files": 5}' in argv
+    assert (
+        "CS_SAFETY_POLICY="
+        + json.dumps(safety_policy.model_dump(mode="json"))
+    ) in argv
+    assert f"CS_SAFETY_POLICY_SHA256={safety_policy.canonical_digest()}" in argv
+    assert "CS_GATES_POLICY" not in argv
     assert "CS_REVERT_SHA=cafebabe" in argv
 
 

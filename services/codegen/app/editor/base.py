@@ -19,8 +19,21 @@ from app.runtime.models import (
     RuntimeAcceptancePlan,
     RuntimeAcceptancePolicy,
 )
+from app.safety.policy import (
+    EffectiveCodegenSafetyPolicy,
+    PlatformCodegenSafetyPolicy,
+    TenantCodegenConnectionPolicy,
+    resolve_effective_policy,
+)
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
+
+
+def _default_effective_safety_policy() -> EffectiveCodegenSafetyPolicy:
+    """Safe constructor for direct/custom editor callers and tests."""
+    return resolve_effective_policy(
+        TenantCodegenConnectionPolicy(), PlatformCodegenSafetyPolicy()
+    )
 
 
 @dataclass
@@ -51,10 +64,12 @@ class EditRequest:
     #: Repo verification command exposed as guidance so the generated change
     #: includes compatible tests. GitHub CI, not APDL, executes it authoritatively.
     test_cmd: str | None = None
-    #: Connection-policy overrides for the pre-push gates (``policy["gates"]``).
-    #: The engine evaluates the gates on the FULL diff before it pushes, so a
-    #: violating branch never reaches the remote.
-    gates_policy: dict[str, Any] | None = None
+    #: Trusted, authority-resolved safety policy. Tenant JSON never crosses the
+    #: editor boundary. The engine evaluates this policy on the FULL diff before
+    #: it pushes, so a violating branch never reaches the remote.
+    safety_policy: EffectiveCodegenSafetyPolicy = field(
+        default_factory=_default_effective_safety_policy
+    )
     #: Merge-commit SHA to revert deterministically (``git revert``) instead of
     #: asking the agent to reconstruct the revert from prose. The agent is still
     #: invoked afterwards if verification fails on the reverted tree.

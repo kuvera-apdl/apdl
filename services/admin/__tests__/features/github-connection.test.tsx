@@ -41,7 +41,19 @@ describe('GitHubConnectionCard', () => {
           installation_id: 42,
           repo: 'acme/widgets',
           default_base_branch: 'main',
-          policy: {},
+          tenant_policy: {
+            schema_version: 'tenant_codegen_connection_policy@1',
+            test_cmd: null,
+            gates: {
+              max_files: null,
+              max_lines: null,
+              additional_protected_paths: [],
+            },
+            runtime_acceptance: {
+              schema_version: 'runtime_acceptance_request@1',
+              enabled: false,
+            },
+          },
           created_at: '2026-07-01T10:00:00+00:00',
           updated_at: '2026-07-01T10:00:00+00:00',
         })

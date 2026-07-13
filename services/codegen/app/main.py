@@ -52,6 +52,7 @@ from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
 from app.routers import changesets, connections, github, webhooks
 from app.runtime.collector import collect_runtime_evidence
+from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -137,6 +138,8 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
+    platform_safety_policy = load_platform_safety_policy()
+    application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
     application.state.codegen_rollout_stage = publication_gate.stage
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
@@ -186,6 +189,7 @@ async def lifespan(application: FastAPI):
                 editor=editor,
                 mint_token=_mint_token,
                 publication_gate=publication_gate,
+                platform_safety_policy=platform_safety_policy,
             )
         )
         repair_jobs.add(task)
@@ -197,6 +201,7 @@ async def lifespan(application: FastAPI):
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
         "publication_gate": publication_gate,
+        "platform_safety_policy": platform_safety_policy,
     }
 
     # Re-enqueue work a restart orphaned before it began: a queued row produced

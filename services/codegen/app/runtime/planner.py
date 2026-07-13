@@ -10,6 +10,7 @@ from app.models.observations import ExternalCIStatus
 from app.profiling.models import CommandKind, RepoCommand, RepoProfile
 from app.runtime.models import (
     GeneratedRuntimeWorkflowExpectation,
+    RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
     RequirementRuntimeEvidence,
     RuntimeAcceptancePlan,
     RuntimeAcceptancePolicy,
@@ -363,7 +364,7 @@ def build_runtime_acceptance_plan(
         source_ledger_sha256=verification_plan.source_ledger_sha256,
         verification_plan_sha256=_canonical_sha256(verification_plan),
     )
-    if policy is None or not policy.workflow_changes_authorized or not plan.checks:
+    if policy is None or not policy.enabled or not plan.checks:
         return plan
 
     # Import lazily to keep the planner/model layer independently importable.
@@ -373,7 +374,7 @@ def build_runtime_acceptance_plan(
 
     rendered = render_github_actions_workflow(plan, profile, policy=policy)
     expectation = GeneratedRuntimeWorkflowExpectation(
-        path=policy.generated_workflow_path,
+        path=RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
         content_sha256=hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
     )
     return RuntimeAcceptancePlan.model_validate(

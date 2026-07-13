@@ -23,6 +23,7 @@ from app.models.observations import (
 )
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
+from app.safety.policy import TenantCodegenConnectionPolicy
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
@@ -165,6 +166,16 @@ class Changeset(BaseModel):
     runtime_evidence_assessment: RuntimeEvidenceAssessment | None = None
     review_verdict: ReviewVerdict | None = None
     publication_authorization: PublicationAuthorization | None = None
+    #: Immutable tenant preference snapshot captured when this changeset was
+    #: queued. Platform safety floors are deliberately not stored here: every
+    #: execution reapplies the currently loaded operator policy so emergency
+    #: tightening takes effect immediately.
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None
+    #: Canonical effective-policy digest used by the most recent generation or
+    #: repair attempt. Legacy rows are nullable until they execute again.
+    effective_safety_policy_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     error: str | None = None
     created_at: datetime
     updated_at: datetime

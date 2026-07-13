@@ -178,6 +178,7 @@ services:
       CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
       CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-offline}
       CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ${CODEGEN_ROLLOUT_AUTHORIZATION_PATH:-}
+      CODEGEN_PLATFORM_SAFETY_POLICY_PATH: ${CODEGEN_PLATFORM_SAFETY_POLICY_PATH:-}
       # Aider prompt caching (default on): caches the static prefix (system + repo
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
       # "false" to disable.
@@ -219,6 +220,8 @@ services:
     #    CODEGEN_SANDBOX=docker). SECURITY: grants host-root-equivalent access.
     #  * Rollout bundle: mount CODEGEN_ROLLOUT_AUTHORIZATION_PATH read-only for
     #    reviewed_pr or low_risk_canary; offline/shadow need no bundle.
+    #  * Platform safety policy: mount CODEGEN_PLATFORM_SAFETY_POLICY_PATH
+    #    read-only at the same absolute path when overriding built-in defaults.
     # volumes:
     #   - ${GITHUB_APP_PRIVATE_KEY_PATH}:${GITHUB_APP_PRIVATE_KEY_PATH}:ro
     #   - /var/run/docker.sock:/var/run/docker.sock

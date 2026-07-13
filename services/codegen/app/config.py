@@ -12,6 +12,10 @@ import os
 import tempfile
 
 from app.evaluations.models import RolloutStage
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    load_platform_safety_policy,
+)
 
 _DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -127,6 +131,16 @@ def codegen_rollout_stage() -> RolloutStage:
 def codegen_rollout_authorization_path() -> str:
     """Operator-mounted rollout authorization artifact used for PR stages."""
     return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
+
+
+def codegen_platform_safety_policy() -> PlatformCodegenSafetyPolicy:
+    """Return the operator-owned Codegen safety policy.
+
+    The loader uses safe built-in defaults when no policy file is configured
+    and raises on any invalid configured file, preventing a malformed operator
+    policy from silently weakening the pre-push gates.
+    """
+    return load_platform_safety_policy()
 
 
 def codegen_aider_bin() -> str:

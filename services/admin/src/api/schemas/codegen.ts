@@ -770,6 +770,8 @@ export const changesetSchema = z
     runtime_evidence_assessment: runtimeEvidenceAssessmentSchema.nullable(),
     review_verdict: reviewVerdictSchema.nullable(),
     publication_authorization: publicationAuthorizationSchema.nullable(),
+    tenant_policy_snapshot: z.lazy(() => tenantCodegenConnectionPolicySchema).nullable(),
+    effective_safety_policy_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),
@@ -782,13 +784,78 @@ export const changesetListSchema = z.array(changesetSchema)
 // binds a project to a GitHub App installation + repository.
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
+const canonicalProtectedPathListSchema = z
+  .array(z.string().min(1).max(256))
+  .max(64)
+  .superRefine((paths, context) => {
+    for (const [index, path] of paths.entries()) {
+      if (
+        path.startsWith('/') ||
+        path.startsWith('./') ||
+        path.includes('\\') ||
+        path.includes('\0') ||
+        path.includes('\r') ||
+        path.includes('\n') ||
+        path.split('/').includes('..')
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Protected paths must be canonical repository-relative patterns',
+          path: [index],
+        })
+      }
+    }
+    const canonical = [...new Set(paths)].sort()
+    if (canonical.length !== paths.length || canonical.some((path, index) => path !== paths[index])) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Protected paths must be sorted and unique',
+      })
+    }
+  })
+
+export const tenantCodegenGatesPolicySchema = z
+  .object({
+    max_files: z.number().int().min(1).nullable(),
+    max_lines: z.number().int().min(1).nullable(),
+    additional_protected_paths: canonicalProtectedPathListSchema,
+  })
+  .strict()
+
+export const runtimeAcceptanceRequestSchema = z
+  .object({
+    schema_version: z.literal('runtime_acceptance_request@1'),
+    enabled: z.boolean(),
+  })
+  .strict()
+
+export const tenantCodegenConnectionPolicySchema: z.ZodType<{
+  schema_version: 'tenant_codegen_connection_policy@1'
+  test_cmd: string | null
+  gates: z.infer<typeof tenantCodegenGatesPolicySchema>
+  runtime_acceptance: z.infer<typeof runtimeAcceptanceRequestSchema>
+}> = z
+  .object({
+    schema_version: z.literal('tenant_codegen_connection_policy@1'),
+    test_cmd: z
+      .string()
+      .min(1)
+      .max(1000)
+      .regex(/^[^\r\n\0]*$/)
+      .refine((command) => command.trim().length > 0, 'Command must not be blank')
+      .nullable(),
+    gates: tenantCodegenGatesPolicySchema,
+    runtime_acceptance: runtimeAcceptanceRequestSchema,
+  })
+  .strict()
+
 export const repoConnectionSchema = z
   .object({
     project_id: z.string(),
     installation_id: z.number().int(),
     repo: z.string(),
     default_base_branch: z.string(),
-    policy: z.record(z.unknown()),
+    tenant_policy: tenantCodegenConnectionPolicySchema,
     created_at: z.string(),
     updated_at: z.string(),
   })

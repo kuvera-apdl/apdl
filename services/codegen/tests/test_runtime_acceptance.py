@@ -26,8 +26,10 @@ from app.runtime.github_actions import (
 )
 from app.runtime.models import (
     ArtifactFileEvidence,
+    RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
     RuntimeAcceptancePlan,
     RuntimeAcceptancePolicy,
+    RuntimeAcceptanceRequest,
     RuntimeArtifactExpectation,
     RuntimeArtifactObservation,
     RuntimeCommand,
@@ -404,7 +406,7 @@ def test_generated_workflow_installs_locked_dependencies_and_orchestrates_compos
     workflow = render_github_actions_workflow(
         plan,
         profile,
-        policy=RuntimeAcceptancePolicy(workflow_changes_authorized=True),
+        policy=RuntimeAcceptancePolicy(enabled=True),
     )
 
     assert 'run: "npm ci"' in workflow
@@ -428,7 +430,7 @@ def test_workflow_policy_and_yaml_scalars_are_explicit_safe_and_deterministic():
             policy=RuntimeAcceptancePolicy(),
         )
 
-    policy = RuntimeAcceptancePolicy(workflow_changes_authorized=True)
+    policy = RuntimeAcceptancePolicy(enabled=True)
     first = render_github_actions_workflow(plan, profile, policy=policy)
     assert first == render_github_actions_workflow(plan, profile, policy=policy)
     assert '"on":' in first
@@ -444,20 +446,29 @@ def test_workflow_policy_and_yaml_scalars_are_explicit_safe_and_deterministic():
         in first
     )
 
-    with pytest.raises(ValidationError, match="generated runtime workflows"):
-        RuntimeAcceptancePolicy(generated_workflow_path="ci.yml")
-    with pytest.raises(ValidationError, match="must be canonical"):
-        RuntimeAcceptancePolicy(
-            generated_workflow_path="./.github/workflows/apdl-runtime.yml"
-        )
     with pytest.raises(ValidationError):
-        RuntimeAcceptancePolicy(workflow_changes_authorized=1)
+        RuntimeAcceptancePolicy(enabled=1)
+
+    request = RuntimeAcceptanceRequest(enabled=True)
+    assert request.enabled is True
+    with pytest.raises(ValidationError):
+        RuntimeAcceptanceRequest(workflow_changes_authorized=True)
+    with pytest.raises(ValidationError):
+        RuntimeAcceptanceRequest(generated_workflow_path=".github/workflows/ci.yml")
+    with pytest.raises(ValidationError):
+        RuntimeAcceptancePolicy(generated_workflow_path=".github/workflows/ci.yml")
+
+    generated = build_runtime_acceptance_plan(
+        profile, _verification_plan(), policy=policy
+    )
+    assert generated.generated_workflow is not None
+    assert generated.generated_workflow.path == RUNTIME_ACCEPTANCE_WORKFLOW_PATH
 
 
 def test_workflow_rejects_non_test_commands_and_mismatched_repository_identity():
     profile = _profile()
     plan = _runtime_plan(profile, _requirements())
-    policy = RuntimeAcceptancePolicy(workflow_changes_authorized=True)
+    policy = RuntimeAcceptancePolicy(enabled=True)
 
     tampered = plan.model_copy(deep=True)
     tampered.checks[0].command = RuntimeCommand(

@@ -78,14 +78,19 @@ from app.requirements import (
     render_requirement_ledger,
 )
 from app.requirements.models import ImplementationStatus, RequirementLedger
-from app.runtime.github_actions import render_github_actions_workflow
+from app.runtime.github_actions import (
+    render_github_actions_workflow,
+    workflow_content_is_apdl_owned,
+)
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
+    RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
     RuntimeAcceptancePlan,
 )
 from app.runtime.planner import build_runtime_acceptance_plan
 from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
+from app.safety.policy import VerifiedProtectedPathExemption
 from app.semantic_review import (
     ModelResponseStatus,
     ReviewDecision,
@@ -592,7 +597,7 @@ class AiderEditor:
         )
         generated_runtime_workflow: GeneratedRuntimeWorkflowAttestation | None = None
         review_verdict: ReviewVerdict | None = None
-        gates_policy = dict(request.gates_policy or {})
+        verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -615,25 +620,27 @@ class AiderEditor:
             profile: RepoProfile,
             plan: RuntimeAcceptancePlan,
         ) -> tuple[bool, str | None]:
-            """Write only the policy-authorized generated workflow when needed."""
-            if (
-                not request.runtime_acceptance_policy.workflow_changes_authorized
-                or not plan.checks
-            ):
+            """Write only the effectively granted, APDL-owned workflow."""
+            if not request.runtime_acceptance_policy.enabled or not plan.checks:
                 return False, None
-            workflow_relative = (
-                request.runtime_acceptance_policy.generated_workflow_path
-            )
+            workflow_relative = RUNTIME_ACCEPTANCE_WORKFLOW_PATH
             workflow_path = repo_dir / workflow_relative
             desired = render_github_actions_workflow(
                 plan,
                 profile,
                 policy=request.runtime_acceptance_policy,
             )
-            if workflow_path.exists() and workflow_path.read_text(
-                encoding="utf-8"
-            ) == desired:
-                return False, None
+            if workflow_path.exists():
+                current = workflow_path.read_text(encoding="utf-8")
+                if current == desired:
+                    return False, None
+                if not workflow_content_is_apdl_owned(current):
+                    return (
+                        False,
+                        "runtime workflow generation refused: the reserved path "
+                        f"{workflow_relative} already contains non-APDL-owned "
+                        "content",
+                    )
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
             workflow_path.write_text(desired, encoding="utf-8")
             rc, out = await self._git(repo_dir, ["add", "--", workflow_relative])
@@ -867,7 +874,7 @@ class AiderEditor:
                 f"{task_text.rstrip()}\n\n"
                 f"{render_requirement_ledger(requirement_ledger)}\n\n"
                 f"{render_verification_plan(verification_plan)}\n\n"
-                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.workflow_changes_authorized)}"
+                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.enabled)}"
             )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
@@ -933,7 +940,7 @@ class AiderEditor:
                     render_runtime_acceptance_plan(
                         runtime_acceptance_plan,
                         workflow_changes_authorized=(
-                            request.runtime_acceptance_policy.workflow_changes_authorized
+                            request.runtime_acceptance_policy.enabled
                         ),
                     ),
                     encoding="utf-8",
@@ -1091,9 +1098,9 @@ class AiderEditor:
                     verification_plan,
                     changed_paths=changed_paths,
                     policy_authorized_workflow_paths=(
-                        [request.runtime_acceptance_policy.generated_workflow_path]
-                        if request.runtime_acceptance_policy.workflow_changes_authorized
-                        and request.runtime_acceptance_policy.generated_workflow_path
+                        [RUNTIME_ACCEPTANCE_WORKFLOW_PATH]
+                        if request.runtime_acceptance_policy.enabled
+                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                         in changed_paths
                         else []
                     ),
@@ -1242,8 +1249,8 @@ class AiderEditor:
                 break
 
             generated_path = (
-                request.runtime_acceptance_policy.generated_workflow_path
-                if request.runtime_acceptance_policy.workflow_changes_authorized
+                RUNTIME_ACCEPTANCE_WORKFLOW_PATH
+                if request.runtime_acceptance_policy.enabled
                 else None
             )
             material_changed_paths = [
@@ -1289,13 +1296,13 @@ class AiderEditor:
                     )
 
             if (
-                request.runtime_acceptance_policy.workflow_changes_authorized
+                request.runtime_acceptance_policy.enabled
                 and runtime_acceptance_plan is not None
                 and runtime_acceptance_plan.checks
             ):
                 workflow_path = (
                     repo_dir
-                    / request.runtime_acceptance_policy.generated_workflow_path
+                    / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                 )
                 expected_workflow = render_github_actions_workflow(
                     runtime_acceptance_plan,
@@ -1312,7 +1319,7 @@ class AiderEditor:
                         "the deterministic renderer; branch NOT pushed."
                     )
                 generated_runtime_workflow = GeneratedRuntimeWorkflowAttestation(
-                    path=request.runtime_acceptance_policy.generated_workflow_path,
+                    path=RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
                     content_sha256=hashlib.sha256(
                         expected_workflow.encode("utf-8")
                     ).hexdigest(),
@@ -1320,9 +1327,14 @@ class AiderEditor:
                         runtime_acceptance_plan.evidence_hash()
                     ),
                 )
-                allowed = set(gates_policy.get("allowed_protected_paths") or [])
-                allowed.add(generated_runtime_workflow.path)
-                gates_policy["allowed_protected_paths"] = sorted(allowed)
+                verified_exemptions = (
+                    VerifiedProtectedPathExemption(
+                        content_sha256=generated_runtime_workflow.content_sha256,
+                        runtime_acceptance_plan_sha256=(
+                            generated_runtime_workflow.runtime_acceptance_plan_sha256
+                        ),
+                    ),
+                )
 
             # Deterministic pre-push gates on the FULL diff, before anything
             # reaches the remote: a secret-bearing or protected-path change must
@@ -1332,7 +1344,8 @@ class AiderEditor:
                 diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text,
-                policy=gates_policy,
+                policy=request.safety_policy,
+                verified_exemptions=verified_exemptions,
             )
             if not gate.passed:
                 return fail(

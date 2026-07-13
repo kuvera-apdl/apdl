@@ -7,6 +7,7 @@ import json
 import asyncpg
 
 from app.models.connection import Connection, ConnectionCreate
+from app.safety.policy import TenantCodegenConnectionPolicy
 from app.store.jsonb import loads_jsonb
 
 
@@ -16,25 +17,31 @@ def _row_to_connection(row: asyncpg.Record) -> Connection:
         installation_id=row["installation_id"],
         repo=row["repo"],
         default_base_branch=row["default_base_branch"],
-        policy=loads_jsonb(row["policy"]),
+        tenant_policy=TenantCodegenConnectionPolicy.model_validate(
+            loads_jsonb(row["tenant_policy"])
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
 
 
 async def upsert_connection(pool: asyncpg.Pool, payload: ConnectionCreate) -> Connection:
-    """Create or update the repo binding for a project (one binding per project)."""
+    """Create or update only the repo binding for a project.
+
+    Tenant policy has a separate authority-checked endpoint. On conflict this
+    upsert deliberately leaves the existing policy untouched.
+    """
+    default_policy = TenantCodegenConnectionPolicy().model_dump(mode="json")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO codegen_connections
-                (project_id, installation_id, repo, default_base_branch, policy)
+                (project_id, installation_id, repo, default_base_branch, tenant_policy)
             VALUES ($1, $2, $3, $4, $5::jsonb)
             ON CONFLICT (project_id) DO UPDATE SET
                 installation_id = EXCLUDED.installation_id,
                 repo = EXCLUDED.repo,
                 default_base_branch = EXCLUDED.default_base_branch,
-                policy = EXCLUDED.policy,
                 updated_at = now()
             RETURNING *
             """,
@@ -42,9 +49,53 @@ async def upsert_connection(pool: asyncpg.Pool, payload: ConnectionCreate) -> Co
             payload.installation_id,
             payload.repo,
             payload.default_base_branch,
-            json.dumps(payload.policy),
+            json.dumps(default_policy),
         )
     return _row_to_connection(row)
+
+
+async def get_tenant_policy(
+    pool: asyncpg.Pool, project_id: str
+) -> TenantCodegenConnectionPolicy | None:
+    """Return a project's strict tenant policy, or ``None`` if unconnected."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT tenant_policy
+            FROM codegen_connections
+            WHERE project_id = $1
+            """,
+            project_id,
+        )
+    if row is None:
+        return None
+    return TenantCodegenConnectionPolicy.model_validate(
+        loads_jsonb(row["tenant_policy"])
+    )
+
+
+async def replace_tenant_policy(
+    pool: asyncpg.Pool,
+    project_id: str,
+    policy: TenantCodegenConnectionPolicy,
+) -> TenantCodegenConnectionPolicy | None:
+    """Completely replace a project's tenant-owned policy document."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE codegen_connections
+            SET tenant_policy = $2::jsonb, updated_at = now()
+            WHERE project_id = $1
+            RETURNING tenant_policy
+            """,
+            project_id,
+            json.dumps(policy.model_dump(mode="json")),
+        )
+    if row is None:
+        return None
+    return TenantCodegenConnectionPolicy.model_validate(
+        loads_jsonb(row["tenant_policy"])
+    )
 
 
 async def get_connection(pool: asyncpg.Pool, project_id: str) -> Connection | None:

@@ -12,6 +12,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.safety.policy import TenantCodegenConnectionPolicy
+
 _T0 = datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc)
 
 
@@ -297,17 +299,36 @@ class FakeConn:
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         if "INSERT INTO codegen_connections" in query:
-            row = {
-                "project_id": args[0],
-                "installation_id": args[1],
-                "repo": args[2],
-                "default_base_branch": args[3],
-                "policy": args[4],
-                "created_at": _T0,
-                "updated_at": _T0,
-            }
+            row = self._rows("connections").get(args[0])
+            if row is None:
+                row = {
+                    "project_id": args[0],
+                    "installation_id": args[1],
+                    "repo": args[2],
+                    "default_base_branch": args[3],
+                    "tenant_policy": args[4],
+                    "created_at": _T0,
+                    "updated_at": _T0,
+                }
+            else:
+                row.update(
+                    installation_id=args[1],
+                    repo=args[2],
+                    default_base_branch=args[3],
+                    updated_at=_T0,
+                )
             self._rows("connections")[args[0]] = row
             return row
+        if "UPDATE codegen_connections" in query and "SET tenant_policy" in query:
+            row = self._rows("connections").get(args[0])
+            if row is None:
+                return None
+            row["tenant_policy"] = args[1]
+            row["updated_at"] = _T0
+            return {"tenant_policy": row["tenant_policy"]}
+        if "SELECT tenant_policy" in query and "FROM codegen_connections" in query:
+            row = self._rows("connections").get(args[0])
+            return {"tenant_policy": row["tenant_policy"]} if row else None
         if "SELECT * FROM codegen_connections" in query:
             return self._rows("connections").get(args[0])
         if "DELETE FROM codegen_connections" in query:
@@ -344,6 +365,8 @@ class FakeConn:
                 "runtime_acceptance_plan": None,
                 "runtime_evidence_assessment": None,
                 "publication_authorization": None,
+                "tenant_policy_snapshot": args[6],
+                "effective_safety_policy_sha256": args[7],
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -401,7 +424,11 @@ class FakeConn:
             if row is None:
                 return None
 
-            if "SET status = 'pr_open', branch = $2" in query:
+            if "SET tenant_policy_snapshot = COALESCE" in query:
+                if row.get("tenant_policy_snapshot") is None:
+                    row["tenant_policy_snapshot"] = args[1]
+                row["effective_safety_policy_sha256"] = args[2]
+            elif "SET status = 'pr_open', branch = $2" in query:
                 row.update(
                     status="pr_open",
                     branch=args[1],
@@ -615,15 +642,23 @@ class FakePool:
         project_id: str,
         repo: str = "acme/widgets",
         installation_id: int = 1,
-        policy: str = "{}",
+        tenant_policy: str | dict[str, Any] | TenantCodegenConnectionPolicy | None = None,
     ) -> None:
         """Seed a repo connection so changeset creation is permitted."""
+        if tenant_policy is None:
+            stored_policy: str | dict[str, Any] = json.dumps(
+                TenantCodegenConnectionPolicy().model_dump(mode="json")
+            )
+        elif isinstance(tenant_policy, TenantCodegenConnectionPolicy):
+            stored_policy = json.dumps(tenant_policy.model_dump(mode="json"))
+        else:
+            stored_policy = tenant_policy
         self.store["connections"][project_id] = {
             "project_id": project_id,
             "installation_id": installation_id,
             "repo": repo,
             "default_base_branch": "main",
-            "policy": policy,
+            "tenant_policy": stored_policy,
             "created_at": _T0,
             "updated_at": _T0,
         }
@@ -686,6 +721,8 @@ class FakePool:
             "runtime_acceptance_plan": None,
             "runtime_evidence_assessment": None,
             "publication_authorization": None,
+            "tenant_policy_snapshot": None,
+            "effective_safety_policy_sha256": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

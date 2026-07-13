@@ -9,9 +9,10 @@ long-lived credential is stored here.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.safety.policy import TenantCodegenConnectionPolicy
 
 
 class ConnectionCreate(BaseModel):
@@ -26,7 +27,6 @@ class ConnectionCreate(BaseModel):
     #: ``owner/name`` slug of the target repository.
     repo: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     default_base_branch: str = "main"
-    policy: dict[str, Any] = Field(default_factory=dict)
 
 
 class Connection(BaseModel):
@@ -38,6 +38,6 @@ class Connection(BaseModel):
     installation_id: int
     repo: str
     default_base_branch: str
-    policy: dict[str, Any] = Field(default_factory=dict)
+    tenant_policy: TenantCodegenConnectionPolicy
     created_at: datetime
     updated_at: datetime

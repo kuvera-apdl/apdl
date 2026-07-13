@@ -33,6 +33,11 @@ from app.runtime.github_actions import workflow_attestation_is_valid
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    VerifiedProtectedPathExemption,
+    resolve_effective_policy,
+)
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
@@ -155,6 +160,7 @@ async def run_changeset_job(
     mint_token: TokenMinter,
     open_pr: PROpener,
     publication_gate: PublicationGate,
+    platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
 ) -> None:
     """Run one changeset, gated by the concurrency slot.
 
@@ -169,6 +175,7 @@ async def run_changeset_job(
             mint_token=mint_token,
             open_pr=open_pr,
             publication_gate=publication_gate,
+            platform_safety_policy=platform_safety_policy,
         )
 
 
@@ -180,6 +187,7 @@ async def _execute_changeset_job(
     mint_token: TokenMinter,
     open_pr: PROpener,
     publication_gate: PublicationGate,
+    platform_safety_policy: PlatformCodegenSafetyPolicy | None,
 ) -> None:
     """Execute one changeset end-to-end (edit → push → open draft PR)."""
     changeset = await store.get_changeset(pool, changeset_id)
@@ -205,6 +213,14 @@ async def _execute_changeset_job(
             )
             return
 
+        tenant_policy = changeset.tenant_policy_snapshot or connection.tenant_policy
+        effective_safety_policy = resolve_effective_policy(
+            tenant_policy,
+            platform_safety_policy,
+        )
+        runtime_policy = RuntimeAcceptancePolicy(
+            enabled=effective_safety_policy.runtime_workflow_generation_enabled
+        )
         base_branch = changeset.base_branch or connection.default_base_branch
         # The queued → cloning transition doubles as the job's claim: it is
         # row-locked and state-machine-checked, so exactly one worker wins.
@@ -218,6 +234,14 @@ async def _execute_changeset_job(
                 changeset_id,
             )
             return
+        await store.set_safety_policy_provenance(
+            pool,
+            changeset_id,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=(
+                effective_safety_policy.canonical_digest()
+            ),
+        )
         try:
             risk = RiskLevel(
                 str(changeset.task.context.get("risk_level") or "low").lower()
@@ -254,11 +278,6 @@ async def _execute_changeset_job(
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
-        policy = connection.policy if isinstance(connection.policy, dict) else {}
-        runtime_policy = RuntimeAcceptancePolicy.model_validate(
-            policy.get("runtime_acceptance") or {}
-        )
-        gates_policy = dict(policy.get("gates") or {})
         revert_sha = changeset.task.context.get("revert_sha")
         result = await editor.implement(
             EditRequest(
@@ -270,8 +289,8 @@ async def _execute_changeset_job(
                 title=changeset.task.title,
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
-                test_cmd=policy.get("test_cmd"),
-                gates_policy=gates_policy,
+                test_cmd=tenant_policy.test_cmd,
+                safety_policy=effective_safety_policy,
                 runtime_acceptance_policy=runtime_policy,
                 revert_sha=revert_sha if isinstance(revert_sha, str) else None,
                 risk_level=risk.value,
@@ -286,7 +305,7 @@ async def _execute_changeset_job(
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
                 risk=str(changeset.task.context.get("risk_level") or "low").lower(),
-                verification_command=policy.get("test_cmd"),
+                verification_command=tenant_policy.test_cmd,
             )
             if result.success:
                 compiled = map_implementation_evidence(
@@ -372,20 +391,26 @@ async def _execute_changeset_job(
         # Backstop only: the editor already ran these gates on the FULL diff
         # before pushing. This re-check (on the possibly capped diff_text)
         # guards editors that don't gate themselves (e.g. a fake/custom Editor).
-        backstop_policy = dict(gates_policy)
+        verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
         if workflow_attestation_is_valid(
             result.generated_runtime_workflow,
             plan=result.runtime_acceptance_plan,
             policy=runtime_policy,
         ):
-            allowed = set(backstop_policy.get("allowed_protected_paths") or [])
-            allowed.add(result.generated_runtime_workflow.path)
-            backstop_policy["allowed_protected_paths"] = sorted(allowed)
+            verified_exemptions = (
+                VerifiedProtectedPathExemption(
+                    content_sha256=result.generated_runtime_workflow.content_sha256,
+                    runtime_acceptance_plan_sha256=(
+                        result.generated_runtime_workflow.runtime_acceptance_plan_sha256
+                    ),
+                ),
+            )
         gate = evaluate_pre_push(
             diff_stat=result.diff_stat,
             changed_paths=result.changed_paths,
             diff_text=result.diff_text,
-            policy=backstop_policy,
+            policy=effective_safety_policy,
+            verified_exemptions=verified_exemptions,
         )
         if not gate.passed:
             await store.transition_changeset(

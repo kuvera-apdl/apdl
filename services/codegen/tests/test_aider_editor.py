@@ -37,7 +37,16 @@ from app.profiling.models import (
     RepoProfile,
     TestFacility as ProfileTestFacility,
 )
-from app.runtime.models import RuntimeAcceptancePolicy
+from app.runtime.models import (
+    RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
+    RuntimeAcceptancePolicy,
+)
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    TenantCodegenConnectionPolicy,
+    TenantCodegenGatesPolicy,
+    resolve_effective_policy,
+)
 from app.verification import CoverageDisposition, PlanDisposition
 
 
@@ -416,6 +425,18 @@ def _request(test_cmd: str | None = "make test") -> EditRequest:
     )
 
 
+def _enable_runtime_workflow(request: EditRequest) -> None:
+    request.safety_policy = resolve_effective_policy(
+        TenantCodegenConnectionPolicy.model_validate(
+            {"runtime_acceptance": {"enabled": True}}
+        ),
+        PlatformCodegenSafetyPolicy(runtime_workflow_generation_enabled=True),
+    )
+    request.runtime_acceptance_policy = RuntimeAcceptancePolicy(
+        enabled=request.safety_policy.runtime_workflow_generation_enabled
+    )
+
+
 class _Pipeline:
     """Scripted git/aider/test doubles that drive implement() end-to-end."""
 
@@ -671,9 +692,7 @@ async def test_authorized_runtime_workflow_is_generated_and_remains_policy_scope
         },
     )
     request = _request(test_cmd="npm run test:old")
-    request.runtime_acceptance_policy = RuntimeAcceptancePolicy(
-        workflow_changes_authorized=True
-    )
+    _enable_runtime_workflow(request)
 
     result = await editor.implement(request)
 
@@ -701,6 +720,69 @@ async def test_authorized_runtime_workflow_is_generated_and_remains_policy_scope
     assert pipeline.git_calls.count(
         ["commit", "-m", "chore(ci): add runtime acceptance evidence"]
     ) == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_workflow_refuses_non_apdl_owned_path_collision(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    profile = RepoProfile(
+        package_managers=[
+            PackageManager(
+                name="npm",
+                manifest_path="package.json",
+                lockfile_path="package-lock.json",
+            )
+        ],
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm test",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd="npm test",
+            has_test_runner=True,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor,
+        monkeypatch,
+        repo_files={
+            "package.json": '{"scripts":{"test":"vitest run"}}',
+            "package-lock.json": '{"lockfileVersion":3,"packages":{}}',
+            RUNTIME_ACCEPTANCE_WORKFLOW_PATH: (
+                "name: Existing repository workflow\n"
+                "on: [pull_request]\n"
+                "jobs: {}\n"
+            ),
+        },
+    )
+    request = _request(test_cmd="npm test")
+    _enable_runtime_workflow(request)
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert "already contains non-APDL-owned content" in (result.error or "")
+    assert pipeline.aider_messages == []
+    assert pipeline.pushed is False
+    assert ["add", "--", RUNTIME_ACCEPTANCE_WORKFLOW_PATH] not in pipeline.git_calls
 
 
 @pytest.mark.asyncio
@@ -751,9 +833,7 @@ async def test_generated_workflow_cannot_mask_an_agent_no_op(monkeypatch, tmp_pa
         },
     )
     request = _request(test_cmd="npm test")
-    request.runtime_acceptance_policy = RuntimeAcceptancePolicy(
-        workflow_changes_authorized=True
-    )
+    _enable_runtime_workflow(request)
 
     result = await editor.implement(request)
 
@@ -967,7 +1047,12 @@ async def test_gates_honor_the_connection_policy(monkeypatch, tmp_path):
     pipeline = _Pipeline(editor, monkeypatch)  # numstat reports 6 changed lines
 
     request = _request()
-    request.gates_policy = {"max_lines": 5}
+    request.safety_policy = resolve_effective_policy(
+        TenantCodegenConnectionPolicy(
+            gates=TenantCodegenGatesPolicy(max_lines=5)
+        ),
+        PlatformCodegenSafetyPolicy(),
+    )
     result = await editor.implement(request)
 
     assert result.success is False

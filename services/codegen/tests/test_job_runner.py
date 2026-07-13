@@ -1,6 +1,7 @@
 """Tests for the changeset job runner (fake editor + fake pool, no network)."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -32,6 +33,13 @@ from app.runtime.models import (
     RuntimeCommand,
     RuntimeEvidenceKind,
     RuntimeSurface,
+    RuntimeAcceptanceRequest,
+)
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    TenantCodegenConnectionPolicy,
+    TenantCodegenGatesPolicy,
+    resolve_effective_policy,
 )
 from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
@@ -161,7 +169,7 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     editor = FakeEditor(
         EditResult(
             success=True,
-            diff_stat={"files": 3},
+            diff_stat={"files": 3, "additions": 10, "deletions": 0},
             changed_paths=["src/theme.ts"],
             requirement_ledger=ledger,
             verification_plan=build_verification_plan(
@@ -185,7 +193,7 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert final.github_pr_status is GitHubPRStatus.open
     assert final.external_ci_status is ExternalCIStatus.pending
     assert final.branch.startswith("apdl/add-dark-mode-")
-    assert final.diff_stat == {"files": 3}
+    assert final.diff_stat == {"files": 3, "additions": 10, "deletions": 0}
     assert final.requirement_ledger is not None
     assert final.requirement_ledger.ready_for_pull_request()
     assert final.publication_authorization is not None
@@ -359,7 +367,11 @@ async def test_job_blocks_on_pre_push_gate_violation():
     await _seed(pool, "cs_secret01")
 
     editor = FakeEditor(
-        EditResult(success=True, diff_stat={"files": 1}, diff_text="AKIAIOSFODNN7EXAMPLE")
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+            diff_text="AKIAIOSFODNN7EXAMPLE",
+        )
     )
     opened: list = []
 
@@ -380,10 +392,8 @@ async def test_policy_alone_cannot_bypass_workflow_gate_without_attestation():
     pool = FakePool()
     pool.add_connection(
         "demo",
-        policy=(
-            '{"runtime_acceptance":{"workflow_changes_authorized":true,'
-            '"generated_workflow_path":".github/workflows/'
-            'apdl-runtime-acceptance.yml"}}'
+        tenant_policy=TenantCodegenConnectionPolicy(
+            runtime_acceptance=RuntimeAcceptanceRequest(enabled=True)
         ),
     )
     await _seed(pool, "cs_workflow_guard")
@@ -391,7 +401,7 @@ async def test_policy_alone_cannot_bypass_workflow_gate_without_attestation():
     editor = FakeEditor(
         EditResult(
             success=True,
-            diff_stat={"files": 1, "additions": 5},
+            diff_stat={"files": 1, "additions": 5, "deletions": 0},
             changed_paths=[workflow],
             diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
         )
@@ -423,10 +433,8 @@ async def test_forged_workflow_content_attestation_cannot_bypass_runner_gate():
     pool = FakePool()
     pool.add_connection(
         "demo",
-        policy=(
-            '{"runtime_acceptance":{"workflow_changes_authorized":true,'
-            '"generated_workflow_path":".github/workflows/'
-            'apdl-runtime-acceptance.yml"}}'
+        tenant_policy=TenantCodegenConnectionPolicy(
+            runtime_acceptance=RuntimeAcceptanceRequest(enabled=True)
         ),
     )
     await _seed(pool, "cs_workflow_forgery")
@@ -435,7 +443,7 @@ async def test_forged_workflow_content_attestation_cannot_bypass_runner_gate():
     editor = FakeEditor(
         EditResult(
             success=True,
-            diff_stat={"files": 1, "additions": 1},
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
             changed_paths=[workflow],
             diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
             requirement_ledger=_implemented_ledger([workflow]),
@@ -459,6 +467,9 @@ async def test_forged_workflow_content_attestation_cannot_bypass_runner_gate():
         editor=editor,
         mint_token=_mint,
         open_pr=open_pr,
+        platform_safety_policy=PlatformCodegenSafetyPolicy(
+            runtime_workflow_generation_enabled=True
+        ),
     )
 
     final = await store.get_changeset(pool, "cs_workflow_forgery")
@@ -495,7 +506,11 @@ async def test_job_backs_off_when_already_claimed():
 async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
     pool = FakePool()
     pool.add_connection(
-        "demo", policy='{"test_cmd": "make ci", "gates": {"max_files": 5}}'
+        "demo",
+        tenant_policy=TenantCodegenConnectionPolicy(
+            test_cmd="make ci",
+            gates=TenantCodegenGatesPolicy(max_files=5),
+        ),
     )
     task = {**_TASK, "context": {"revert_sha": "cafebabe"}}
     await store.create_changeset(
@@ -503,7 +518,12 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
         run_id=None, base_branch=None, task=task,
     )
 
-    editor = FakeEditor(EditResult(success=True, diff_stat={"files": 1}))
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+        )
+    )
 
     async def open_pr(**kwargs) -> PullRequest:
         return _pr(2)
@@ -513,8 +533,146 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
     )
 
     assert editor.last_request.test_cmd == "make ci"
-    assert editor.last_request.gates_policy == {"max_files": 5}
+    assert editor.last_request.safety_policy.max_files == 5
     assert editor.last_request.revert_sha == "cafebabe"
+
+
+@pytest.mark.asyncio
+async def test_job_uses_queued_tenant_policy_snapshot_after_connection_is_weakened():
+    pool = FakePool()
+    strict_snapshot = TenantCodegenConnectionPolicy(
+        gates=TenantCodegenGatesPolicy(max_files=5)
+    )
+    pool.add_connection(
+        "demo",
+        tenant_policy=TenantCodegenConnectionPolicy(
+            gates=TenantCodegenGatesPolicy(max_files=50)
+        ),
+    )
+    await store.create_changeset(
+        pool,
+        changeset_id="cs_snapshot1",
+        project_id="demo",
+        run_id=None,
+        base_branch="main",
+        task=_TASK,
+        tenant_policy_snapshot=strict_snapshot,
+    )
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 6, "additions": 6, "deletions": 0},
+            changed_paths=[f"src/file-{index}.py" for index in range(6)],
+        )
+    )
+    opened: list[dict] = []
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.append(kwargs)
+        return _pr(2)
+
+    await run_changeset_job(
+        pool,
+        "cs_snapshot1",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_snapshot1")
+    assert final.status is ChangesetStatus.error
+    assert "5-file limit" in (final.error or "")
+    assert editor.last_request is not None
+    assert editor.last_request.safety_policy.max_files == 5
+    assert final.tenant_policy_snapshot == strict_snapshot
+    assert final.effective_safety_policy_sha256 == resolve_effective_policy(
+        strict_snapshot, PlatformCodegenSafetyPolicy()
+    ).canonical_digest()
+    assert opened == []
+
+
+@pytest.mark.asyncio
+async def test_job_loads_configured_platform_policy_when_not_injected(
+    monkeypatch,
+    tmp_path,
+):
+    policy_path = tmp_path / "platform-safety.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "platform_codegen_safety_policy@1",
+                "max_files": 1,
+                "max_lines": 2000,
+                "additional_protected_paths": [],
+                "runtime_workflow_generation_enabled": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEGEN_PLATFORM_SAFETY_POLICY_PATH", str(policy_path))
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_platform")
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 2, "additions": 2, "deletions": 0},
+            changed_paths=["src/one.py", "src/two.py"],
+        )
+    )
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool,
+        "cs_platform",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_platform")
+    assert final.status is ChangesetStatus.error
+    assert "1-file limit" in (final.error or "")
+    assert editor.last_request is not None
+    assert editor.last_request.safety_policy.max_files == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_stored_tenant_policy_fails_before_token_minting():
+    pool = FakePool()
+    pool.add_connection(
+        "demo",
+        tenant_policy={
+            "schema_version": "tenant_codegen_connection_policy@1",
+            "gates": {"protected_paths": []},
+        },
+    )
+    await _seed(pool, "cs_badpolicy")
+    minted: list[tuple[int, str]] = []
+    editor = FakeEditor()
+
+    async def mint(installation_id: int, repo: str) -> str:
+        minted.append((installation_id, repo))
+        return "must-not-be-returned"
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool,
+        "cs_badpolicy",
+        editor=editor,
+        mint_token=mint,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_badpolicy")
+    assert final.status is ChangesetStatus.error
+    assert "protected_paths" in (final.error or "")
+    assert minted == []
+    assert editor.last_request is None
 
 
 @pytest.mark.asyncio
@@ -550,7 +708,7 @@ class _BlockingEditor:
         return EditResult(
             success=True,
             branch=request.branch,
-            diff_stat={"files": 1},
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
             head_sha="fake-head-sha",
         )
 
@@ -612,7 +770,13 @@ async def test_job_persists_prompt_transcript_on_success_and_failure():
     await _seed(pool, "cs_prompt_ok")
     await _seed(pool, "cs_prompt_ko")
 
-    editor = FakeEditor(EditResult(success=True, prompts=transcript))
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+            prompts=transcript,
+        )
+    )
     await run_changeset_job(pool, "cs_prompt_ok", editor=editor, mint_token=_mint, open_pr=open_pr)
     ok = await store.get_changeset(pool, "cs_prompt_ok")
     assert ok.status == ChangesetStatus.pr_open
@@ -638,7 +802,13 @@ async def test_job_persists_contract_evidence_without_changing_ci_status():
     await run_changeset_job(
         pool,
         "cs_contracts",
-        editor=FakeEditor(EditResult(success=True, contract_bundle=bundle)),
+        editor=FakeEditor(
+            EditResult(
+                success=True,
+                diff_stat={"files": 1, "additions": 1, "deletions": 0},
+                contract_bundle=bundle,
+            )
+        ),
         mint_token=_mint,
         open_pr=open_pr,
     )
@@ -666,6 +836,7 @@ async def test_job_persists_repository_inspection_evidence():
         editor=FakeEditor(
             EditResult(
                 success=True,
+                diff_stat={"files": 1, "additions": 1, "deletions": 0},
                 inspection_snapshot=snapshot,
                 dependency_slice=dependency_slice,
             )
@@ -712,6 +883,7 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
         editor=FakeEditor(
             EditResult(
                 success=True,
+                diff_stat={"files": 2, "additions": 2, "deletions": 0},
                 changed_paths=["src/theme.ts", "tests/theme.test.ts"],
                 requirement_ledger=ledger,
                 verification_plan=plan,
@@ -788,6 +960,7 @@ async def test_job_opens_draft_and_records_unverified_when_repo_has_no_ci():
         editor=FakeEditor(
             EditResult(
                 success=True,
+                diff_stat={"files": 1, "additions": 1, "deletions": 0},
                 changed_paths=["src/theme.ts"],
                 requirement_ledger=ledger,
                 verification_plan=plan,

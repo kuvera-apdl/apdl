@@ -14,10 +14,15 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 
 from app.auth import require_project
+from app.config import codegen_platform_safety_policy
 from app.github.app_auth import mint_token_for_repo, resolve_installation_id
 from app.github.repo_context import fetch_repo_context
 from app.models.connection import Connection, ConnectionCreate
 from app.profiling import RepoProfile
+from app.safety.policy import (
+    TenantCodegenConnectionPolicy,
+    validate_tenant_policy_against_platform,
+)
 from app.store import connections as store
 
 logger = logging.getLogger(__name__)
@@ -74,6 +79,51 @@ async def get_connection(project_id: str, request: Request) -> Connection:
             status_code=404, detail=f"No repo connection for project '{project_id}'."
         )
     return connection
+
+
+@router.get(
+    "/{project_id}/tenant-policy", response_model=TenantCodegenConnectionPolicy
+)
+async def get_tenant_policy(
+    project_id: str, request: Request
+) -> TenantCodegenConnectionPolicy:
+    """Return the tenant-owned Codegen preferences for a repo binding."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, project_id, "agents:read")
+    policy = await store.get_tenant_policy(pool, project_id)
+    if policy is None:
+        raise HTTPException(
+            status_code=404, detail=f"No repo connection for project '{project_id}'."
+        )
+    return policy
+
+
+@router.put(
+    "/{project_id}/tenant-policy", response_model=TenantCodegenConnectionPolicy
+)
+async def replace_tenant_policy(
+    project_id: str,
+    body: TenantCodegenConnectionPolicy,
+    request: Request,
+) -> TenantCodegenConnectionPolicy:
+    """Completely replace tenant preferences without mutating platform safety."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    require_project(request, project_id, "agents:manage")
+    platform_policy = getattr(
+        request.app.state,
+        "platform_codegen_safety_policy",
+        None,
+    ) or codegen_platform_safety_policy()
+    try:
+        validate_tenant_policy_against_platform(body, platform_policy)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    policy = await store.replace_tenant_policy(pool, project_id, body)
+    if policy is None:
+        raise HTTPException(
+            status_code=404, detail=f"No repo connection for project '{project_id}'."
+        )
+    return policy
 
 
 @router.delete("/{project_id}", status_code=204)

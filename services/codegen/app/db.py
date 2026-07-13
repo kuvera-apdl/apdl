@@ -6,13 +6,14 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 7
-MIGRATION_NAME = "007_codegen.sql"
+MIGRATION_VERSION = 8
+MIGRATION_NAME = "008_codegen_safety_policy.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
         ("codegen_connections", "installation_id"),
         ("codegen_connections", "repo"),
+        ("codegen_connections", "tenant_policy"),
         ("codegen_changesets", "changeset_id"),
         ("codegen_changesets", "project_id"),
         ("codegen_changesets", "status"),
@@ -31,6 +32,8 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "runtime_evidence_assessment"),
         ("codegen_changesets", "review_verdict"),
         ("codegen_changesets", "publication_authorization"),
+        ("codegen_changesets", "tenant_policy_snapshot"),
+        ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),
         ("codegen_changesets", "ci_retry_count"),
         ("codegen_changesets", "ci_remediation_status"),

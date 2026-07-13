@@ -51,6 +51,8 @@ bearer token.
 |---|---|---|
 | POST | `/v1/connections` | Register/update a project's repo binding (`installation_id`, `repo`) |
 | GET | `/v1/connections/{project_id}` | Resolve a project's repo binding |
+| GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
+| PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
 | POST | `/v1/changesets` | Enqueue a changeset during a PR publication stage |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
@@ -99,6 +101,7 @@ CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
 CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only operator JSON bundle for PR stages
+CODEGEN_PLATFORM_SAFETY_POLICY_PATH= # absolute path to operator safety-policy JSON
 CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
 CODEGEN_SANDBOX_NETWORK=           # required named filtered network for PR stages
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
@@ -113,33 +116,52 @@ Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDI
 `CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
 bounded by `codegen_job_budget()`, which also caps the sandbox container and the orphan-sweep
 deadline; override with `CODEGEN_JOB_BUDGET` if the derivation doesn't fit. A
-repo's verification command comes from connection `policy.test_cmd`; if unset,
+repo's verification command comes from connection `tenant_policy.test_cmd`; if unset,
 the editor auto-detects it (pytest / npm / make / …) and gives it to the model as
 test-generation guidance. APDL does not execute it authoritatively; GitHub CI does.
-The pre-push gates run inside
-the editor on the full diff (a violating branch never reaches GitHub), with the
-connection `policy.gates` overrides; the job runner re-checks them as a backstop
-before opening the PR. Orphan recovery: queued changesets are re-enqueued at
+The pre-push gates run inside the editor on the full diff (a violating branch
+never reaches GitHub), and the job runner re-checks the same resolved policy as
+a backstop before opening the PR. Orphan recovery: queued changesets are re-enqueued at
 startup (the queued → cloning transition is the dedup claim); active-state
 orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
 (default 300s) once older than twice the job budget.
 
-Runtime workflow generation is opt-in per repository. The only policy shape is:
+Tenant connection preferences use one strict, versioned contract. Unknown
+fields are rejected. Tenant limits can only lower the operator limits, and
+tenant protected paths are added to—never substituted for—the built-in and
+operator-owned protections. Each additional-path list is capped at 64 entries:
 
 ```json
 {
+  "schema_version": "tenant_codegen_connection_policy@1",
+  "test_cmd": null,
+  "gates": {
+    "max_files": null,
+    "max_lines": null,
+    "additional_protected_paths": []
+  },
   "runtime_acceptance": {
-    "schema_version": "runtime_acceptance_policy@1",
-    "workflow_changes_authorized": true,
-    "generated_workflow_path": ".github/workflows/apdl-runtime-acceptance.yml"
+    "schema_version": "runtime_acceptance_request@1",
+    "enabled": false
   }
 }
 ```
 
-When authorized, only that exact workflow path is exempted from the general
-protected-path gate. Other workflow edits remain protected. GitHub executes the
-generated job and owns its result; absent runs, logs, or required artifacts are
-stored as unverified evidence, never as successful CI.
+The operator may mount a strict `platform_codegen_safety_policy@1` JSON file and
+set its absolute path with `CODEGEN_PLATFORM_SAFETY_POLICY_PATH`. The built-in
+defaults are 50 files, 2,000 changed lines, protected workflow/key/environment
+paths, and runtime workflow generation disabled. The effective limits use
+`min(operator, tenant)` and protected paths use a union. Each changeset snapshots
+the tenant policy and records the effective-policy SHA-256 before GitHub
+credentials are minted, so later connection edits cannot change an in-flight
+job's safety boundary.
+
+Runtime workflow generation requires both the operator capability and the
+tenant request. Its only exemptible path is the fixed
+`.github/workflows/apdl-runtime-acceptance.yml`; the editor refuses to overwrite
+non-APDL-owned content there. Other workflow edits remain protected. GitHub
+executes the generated job and owns its result; absent runs, logs, or required
+artifacts are stored as unverified evidence, never as successful CI.
 
 ## Evaluation and publication rollout
 
@@ -281,7 +303,7 @@ The autonomous loop runs once these external pieces are set up:
    `ANTHROPIC_API_KEY`). Run the offline/shadow corpus for the exact model and
    immutable `CODEGEN_REVISION`, review the report, and mount the resulting
    operator bundle before selecting a PR rollout stage. Optionally set each
-   repo's test command through connection `policy.test_cmd` (otherwise it is
+   repo's test command through connection `tenant_policy.test_cmd` (otherwise it is
    auto-detected).
 3. **Add a repo webhook** → configure a non-empty `GITHUB_WEBHOOK_SECRET`, then
    point GitHub at `POST /webhooks/github` with events `pull_request`,

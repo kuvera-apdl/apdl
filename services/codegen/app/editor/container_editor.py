@@ -160,8 +160,13 @@ class ContainerAiderEditor:
         ]
         if request.test_cmd:
             argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
-        if request.gates_policy is not None:
-            argv += ["-e", f"CS_GATES_POLICY={json.dumps(request.gates_policy)}"]
+        argv += [
+            "-e",
+            "CS_SAFETY_POLICY="
+            + json.dumps(request.safety_policy.model_dump(mode="json")),
+            "-e",
+            f"CS_SAFETY_POLICY_SHA256={request.safety_policy.canonical_digest()}",
+        ]
         if request.revert_sha:
             argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
         if request.existing_branch:

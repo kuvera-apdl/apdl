@@ -25,6 +25,19 @@ async def test_create_and_get_connection():
         assert body["project_id"] == "demo"
         assert body["repo"] == "acme/widgets"
         assert body["default_base_branch"] == "main"
+        assert body["tenant_policy"] == {
+            "schema_version": "tenant_codegen_connection_policy@1",
+            "test_cmd": None,
+            "gates": {
+                "max_files": None,
+                "max_lines": None,
+                "additional_protected_paths": [],
+            },
+            "runtime_acceptance": {
+                "schema_version": "runtime_acceptance_request@1",
+                "enabled": False,
+            },
+        }
 
         got = await client.get("/v1/connections/demo")
         assert got.status_code == 200
@@ -65,6 +78,8 @@ async def test_connection_routes_reject_another_project(authorized_codegen_reque
     async with _client(pool) as client:
         responses = [
             await client.get("/v1/connections/other"),
+            await client.get("/v1/connections/other/tenant-policy"),
+            await client.put("/v1/connections/other/tenant-policy", json={}),
             await client.get("/v1/connections/other/repo-context"),
             await client.delete("/v1/connections/other"),
             await client.post(
@@ -102,6 +117,132 @@ async def test_create_connection_rejects_unknown_field():
             },
         )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["policy", "tenant_policy"])
+async def test_binding_write_rejects_policy_fields(field):
+    async with _client(FakePool()) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={
+                "project_id": "demo",
+                "installation_id": 1,
+                "repo": "acme/widgets",
+                field: {},
+            },
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_and_replace_tenant_policy():
+    pool = FakePool()
+    pool.add_connection("demo")
+    replacement = {
+        "schema_version": "tenant_codegen_connection_policy@1",
+        "test_cmd": "make ci",
+        "gates": {
+            "max_files": 5,
+            "max_lines": 300,
+            "additional_protected_paths": ["infra/**"],
+        },
+        "runtime_acceptance": {
+            "schema_version": "runtime_acceptance_request@1",
+            "enabled": True,
+        },
+    }
+    async with _client(pool) as client:
+        replaced = await client.put(
+            "/v1/connections/demo/tenant-policy", json=replacement
+        )
+        got = await client.get("/v1/connections/demo/tenant-policy")
+
+    assert replaced.status_code == 200
+    assert replaced.json() == replacement
+    assert got.status_code == 200
+    assert got.json() == replacement
+
+
+@pytest.mark.asyncio
+async def test_replace_tenant_policy_is_strict_and_rejects_legacy_bypass_fields():
+    pool = FakePool()
+    pool.add_connection("demo")
+    async with _client(pool) as client:
+        resp = await client.put(
+            "/v1/connections/demo/tenant-policy",
+            json={
+                "schema_version": "tenant_codegen_connection_policy@1",
+                "gates": {
+                    "max_files": 10_000_000,
+                    "max_lines": 10_000_000,
+                    "protected_paths": [],
+                    "allowed_protected_paths": [".env"],
+                },
+            },
+        )
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_binding_upsert_does_not_overwrite_tenant_policy():
+    pool = FakePool()
+    pool.add_connection(
+        "demo",
+        tenant_policy={
+            "schema_version": "tenant_codegen_connection_policy@1",
+            "test_cmd": "make ci",
+            "gates": {
+                "max_files": 5,
+                "max_lines": 300,
+                "additional_protected_paths": ["infra/**"],
+            },
+            "runtime_acceptance": {
+                "schema_version": "runtime_acceptance_request@1",
+                "enabled": False,
+            },
+        },
+    )
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={
+                "project_id": "demo",
+                "installation_id": 99,
+                "repo": "acme/renamed",
+            },
+        )
+
+    assert resp.status_code == 201
+    assert resp.json()["repo"] == "acme/renamed"
+    assert resp.json()["tenant_policy"]["test_cmd"] == "make ci"
+    assert resp.json()["tenant_policy"]["gates"]["max_files"] == 5
+
+
+@pytest.mark.asyncio
+async def test_tenant_policy_routes_404_without_connection():
+    async with _client(FakePool()) as client:
+        got = await client.get("/v1/connections/demo/tenant-policy")
+        replaced = await client.put("/v1/connections/demo/tenant-policy", json={})
+    assert got.status_code == 404
+    assert replaced.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_tenant_policy_roles_are_read_and_manage(
+    authorized_codegen_request,
+):
+    pool = FakePool()
+    pool.add_connection("demo")
+    authorized_codegen_request("demo", frozenset({"agents:read"}))
+    async with _client(pool) as client:
+        got = await client.get("/v1/connections/demo/tenant-policy")
+        denied_write = await client.put(
+            "/v1/connections/demo/tenant-policy", json={}
+        )
+    assert got.status_code == 200
+    assert denied_write.status_code == 403
 
 
 @pytest.mark.asyncio

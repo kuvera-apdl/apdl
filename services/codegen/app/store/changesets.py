@@ -30,6 +30,7 @@ from app.models.observations import (
 )
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
+from app.safety.policy import TenantCodegenConnectionPolicy
 from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
 from app.verification.models import VerificationCoverage, VerificationPlan
@@ -159,6 +160,16 @@ def _publication_authorization_from_row(
     return PublicationAuthorization.model_validate_json(raw)
 
 
+def _tenant_policy_snapshot_from_row(
+    row: asyncpg.Record,
+) -> TenantCodegenConnectionPolicy | None:
+    value = _optional_column(row, "tenant_policy_snapshot")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return TenantCodegenConnectionPolicy.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -195,6 +206,10 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         runtime_evidence_assessment=_runtime_evidence_assessment_from_row(row),
         review_verdict=_review_verdict_from_row(row),
         publication_authorization=_publication_authorization_from_row(row),
+        tenant_policy_snapshot=_tenant_policy_snapshot_from_row(row),
+        effective_safety_policy_sha256=_optional_column(
+            row, "effective_safety_policy_sha256"
+        ),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -209,14 +224,17 @@ async def create_changeset(
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
+    effective_safety_policy_sha256: str | None = None,
 ) -> Changeset:
     """Insert a new changeset in the ``queued`` state."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO codegen_changesets
-                (changeset_id, project_id, run_id, status, base_branch, task)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                (changeset_id, project_id, run_id, status, base_branch, task,
+                 tenant_policy_snapshot, effective_safety_policy_sha256)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
             RETURNING *
             """,
             changeset_id,
@@ -225,8 +243,45 @@ async def create_changeset(
             ChangesetStatus.queued.value,
             base_branch,
             json.dumps(task),
+            (
+                tenant_policy_snapshot.model_dump_json()
+                if tenant_policy_snapshot is not None
+                else None
+            ),
+            effective_safety_policy_sha256,
         )
     return _row_to_changeset(row)
+
+
+async def set_safety_policy_provenance(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy,
+    effective_safety_policy_sha256: str,
+) -> Changeset | None:
+    """Persist the immutable tenant snapshot and latest effective-policy digest.
+
+    A legacy row may not have a tenant snapshot yet, so the first safe execution
+    fills it. Once present it is never replaced by a later connection update.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE codegen_changesets
+            SET tenant_policy_snapshot = COALESCE(
+                    tenant_policy_snapshot, $2::jsonb
+                ),
+                effective_safety_policy_sha256 = $3,
+                updated_at = now()
+            WHERE changeset_id = $1
+            RETURNING *
+            """,
+            changeset_id,
+            tenant_policy_snapshot.model_dump_json(),
+            effective_safety_policy_sha256,
+        )
+    return _row_to_changeset(row) if row else None
 
 
 async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | None:
