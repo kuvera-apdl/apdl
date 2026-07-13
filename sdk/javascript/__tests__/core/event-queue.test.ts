@@ -482,9 +482,8 @@ describe('EventQueue', () => {
         message_id: 'msg-1',
         traits: { plan: 'pro' },
         context: {
-          browser: 'Chrome',
-          browser_version: '123',
-          device_type: 'desktop',
+          browser: { name: 'Chrome', version: '123' },
+          device: { type: 'desktop' },
         },
       });
     });

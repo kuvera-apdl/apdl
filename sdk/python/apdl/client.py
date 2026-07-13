@@ -108,7 +108,7 @@ class APDLClient:
         anonymous_id: str | None = None,
     ) -> None:
         """Associates traits with a user identity."""
-        self._enqueue("identify", event="$identify", traits=traits,
+        self._enqueue("identify", event="identify", traits=traits,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     def group(
@@ -120,7 +120,7 @@ class APDLClient:
         anonymous_id: str | None = None,
     ) -> None:
         """Associates a user with a group/account."""
-        self._enqueue("group", event="$group", group_id=group_id, traits=traits,
+        self._enqueue("group", event="group", group_id=group_id, traits=traits,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     def page(
@@ -135,7 +135,7 @@ class APDLClient:
         props = dict(properties or {})
         if name is not None:
             props.setdefault("name", name)
-        self._enqueue("page", event="$page", properties=props or None,
+        self._enqueue("page", event="page", properties=props or None,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     # ── Feature flags ─────────────────────────────────────────────

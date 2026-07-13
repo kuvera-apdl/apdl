@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SDK_VERSION = "0.1.0"
 SDK_IDENTIFIER = f"python/{SDK_VERSION}"
@@ -46,6 +46,23 @@ class IngestionEvent(BaseModel):
     timestamp: str = Field(default_factory=utc_now_iso)
     message_id: str = Field(default_factory=generate_id)
     session_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_canonical_event(self) -> "IngestionEvent":
+        if not self.user_id and not self.anonymous_id:
+            raise ValueError("event requires user_id or anonymous_id")
+        expected_name = {
+            "identify": "identify",
+            "group": "group",
+            "page": "page",
+        }.get(self.type)
+        if expected_name is not None and self.event != expected_name:
+            raise ValueError(f"{self.type} events require event={expected_name!r}")
+        if self.type == "identify" and not self.user_id:
+            raise ValueError("identify events require user_id")
+        if self.type == "group" and not self.group_id:
+            raise ValueError("group events require group_id")
+        return self
 
     def to_payload(self) -> dict[str, Any]:
         """Serializes to a dict, omitting unset/``None`` optional fields."""

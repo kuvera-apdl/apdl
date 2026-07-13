@@ -18,11 +18,14 @@ Each `POST /v1/events` request goes through four stages:
 2. **Rate limit** — in-memory token bucket per project (capacity 1000,
    refill 100 tokens/s). Exhausted buckets → `429 {"error": "rate_limited"}`
    with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers.
-3. **Validation** — the batch must be `{"events": [...]}` with 1–500 events.
-   Each event needs an `event` name or a `type` (one of `track`, `identify`,
-   `group`, `page`, `screen`, `alias`) plus a `user_id`/`userId` or
-   `anonymous_id`/`anonymousId`. Limits: event name ≤ 256 chars, property
-   keys ≤ 256 chars, string property values ≤ 8192 chars. Reserved events
+3. **Validation** — the batch must be exactly `{"events": [...]}` with 1–100
+   events. Every event requires `event`, `type`, an RFC3339 UTC `timestamp`,
+   nested `context`, a stable `message_id`, and at least one of `user_id` or
+   `anonymous_id`. Types are `track`, `identify`, `group`, and `page` only;
+   lifecycle events use the canonical event names `identify`, `group`, and
+   `page`. Camel-case aliases and unknown fields are rejected. Limits: event
+   name ≤ 256 chars, property keys ≤ 256 chars, string property values ≤ 8192
+   chars. Reserved events
    (`$feature_flag_exposure`, `$frontend_error`, `$web_vital`) get strict
    envelope/property checks. Failures → `400 {"error": "validation_failed",
    "errors": [{"field", "message"}, ...]}` with every error collected, not
@@ -52,13 +55,26 @@ curl -X POST http://localhost:8080/v1/events \
         "type": "track",
         "user_id": "u_123",
         "timestamp": "2026-06-09T12:00:00.000Z",
+        "message_id": "8e03c6fd-5923-4a08-acbc-02915ed0ab5a",
         "properties": {"total": 42.0, "currency": "USD"},
-        "context": {"page": "/checkout"}
+        "context": {
+          "library": {"name": "example", "version": "1.0.0"},
+          "page": {
+            "url": "https://example.test/checkout",
+            "title": "Checkout",
+            "path": "/checkout",
+            "search": ""
+          }
+        }
       },
       {
+        "event": "identify",
         "type": "identify",
         "user_id": "u_123",
-        "traits": {"plan": "pro"}
+        "timestamp": "2026-06-09T12:00:01.000Z",
+        "message_id": "053fa345-8a0c-4bac-9df5-ce973cb0dcd3",
+        "traits": {"plan": "pro"},
+        "context": {"library": {"name": "example", "version": "1.0.0"}}
       }
     ]
   }'
@@ -89,6 +105,7 @@ Or run the whole stack: `make dev-all`.
 ```bash
 make test-ingestion   # pytest
 make lint-ingestion   # ruff
+make test-packed-sdk-contract  # installed npm tarball → real validator
 
 # single test file
 cd services/ingestion && .venv/bin/python -m pytest tests/test_events.py -v

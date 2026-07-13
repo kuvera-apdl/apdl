@@ -87,6 +87,9 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     assert published["type"] == "track"
     assert published["user_id"] == "user_123"
     assert published["session_id"].startswith("server:")
+    assert published["context"] == {
+        "library": {"name": "apdl-config", "version": "server"}
+    }
     assert published["properties"] == {
         "flag_key": "checkout",
         "variant": response_json["variant"],

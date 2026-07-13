@@ -1,5 +1,5 @@
 import type { ResolvedConfig } from './config';
-import type { TrackEvent } from './types';
+import type { EventContext, TrackEvent } from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
 import type { Scrubber } from '../privacy/scrubber';
@@ -14,7 +14,7 @@ interface IngestionEvent {
   group_id?: string;
   properties?: Record<string, unknown>;
   traits?: Record<string, unknown>;
-  context: Record<string, unknown>;
+  context: EventContext;
   timestamp: string;
   message_id: string;
   session_id: string;
@@ -283,14 +283,11 @@ export class EventQueue {
     return normalized;
   }
 
-  private toIngestionContext(event: TrackEvent): Record<string, unknown> {
-    return {
-      ...event.context,
-      browser: event.context.browser?.name ?? '',
-      browser_version: event.context.browser?.version ?? '',
-      os: event.context.os?.name ?? '',
-      os_version: event.context.os?.version ?? '',
-      device_type: event.context.device?.type ?? '',
-    };
+  private toIngestionContext(event: TrackEvent): EventContext {
+    return structuredCloneContext(event.context);
   }
+}
+
+function structuredCloneContext(context: EventContext): EventContext {
+  return JSON.parse(JSON.stringify(context)) as EventContext;
 }

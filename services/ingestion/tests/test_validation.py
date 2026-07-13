@@ -1,10 +1,34 @@
-"""Port of C++ test_schema_validation.cpp to Python/pytest.
+"""Canonical public event-contract validation tests.
 
 Tests validate_event_batch() and validate_single_event() directly,
 covering all 24+ test cases from the C++ test suite.
 """
 
+import json
+from pathlib import Path
+
 from app.validation.schema import validate_event_batch, validate_single_event
+
+CONTRACT_FIXTURE = (
+    Path(__file__).resolve().parents[3] / "fixtures" / "events" / "canonical.json"
+)
+
+
+def canonical_event(
+    event: str = "test_event",
+    event_type: str = "track",
+    **overrides,
+):
+    value = {
+        "event": event,
+        "type": event_type,
+        "anonymous_id": "anon_test",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-test",
+    }
+    value.update(overrides)
+    return value
 
 
 # =====================================================================
@@ -17,7 +41,7 @@ class TestBatchValidation:
 
     def test_valid_minimal_batch(self):
         """ValidMinimalBatch"""
-        body = {"events": [{"event": "click", "user_id": "u1"}]}
+        body = {"events": [canonical_event("click", user_id="u1")]}
         result = validate_event_batch(body)
         assert result["valid"] is True
         assert len(result["errors"]) == 0
@@ -46,8 +70,8 @@ class TestBatchValidation:
         assert result["valid"] is False
 
     def test_batch_exceeds_max_size(self):
-        """BatchExceedsMaxSize -- 501 events should be rejected."""
-        events = [{"event": "e", "user_id": "u"} for _ in range(501)]
+        """BatchExceedsMaxSize -- 101 events should be rejected."""
+        events = [canonical_event(message_id=f"message-{i}") for i in range(101)]
         body = {"events": events}
         result = validate_event_batch(body)
         assert result["valid"] is False
@@ -57,8 +81,8 @@ class TestBatchValidation:
         assert found_size_error
 
     def test_batch_at_max_size(self):
-        """BatchAtMaxSize -- exactly 500 events should be valid."""
-        events = [{"event": "e", "user_id": "u"} for _ in range(500)]
+        """BatchAtMaxSize -- exactly 100 events should be valid."""
+        events = [canonical_event(message_id=f"message-{i}") for i in range(100)]
         body = {"events": events}
         result = validate_event_batch(body)
         assert result["valid"] is True
@@ -69,6 +93,15 @@ class TestBatchValidation:
         assert result["valid"] is False
         assert len(result["errors"]) >= 1
         assert result["errors"][0]["field"] == "body"
+
+    def test_shared_contract_fixture(self):
+        fixture = json.loads(CONTRACT_FIXTURE.read_text())
+        for event in fixture["valid"]:
+            result = validate_single_event(event)
+            assert result["valid"] is True, result["errors"]
+        for case in fixture["invalid"]:
+            result = validate_single_event(case["event"])
+            assert result["valid"] is False, case["name"]
 
     def test_non_object_body_list(self):
         """NonObjectBody variant -- a list is not a dict."""
@@ -88,13 +121,12 @@ class TestSingleEventValidation:
 
     def test_valid_track_event(self):
         """ValidTrackEvent"""
-        event = {
-            "event": "purchase",
-            "type": "track",
-            "user_id": "usr_42",
-            "properties": {"amount": 99.99, "currency": "USD"},
-            "timestamp": "2025-06-15T10:30:00.000Z",
-        }
+        event = canonical_event(
+            "purchase",
+            user_id="usr_42",
+            properties={"amount": 99.99, "currency": "USD"},
+            timestamp="2025-06-15T10:30:00.000Z",
+        )
         result = validate_single_event(event)
         assert result["valid"] is True
 
@@ -269,45 +301,52 @@ class TestSingleEventValidation:
 
     def test_valid_identify_event(self):
         """ValidIdentifyEvent"""
-        event = {
-            "type": "identify",
-            "user_id": "usr_42",
-            "traits": {"name": "Alice", "plan": "pro"},
-        }
+        event = canonical_event(
+            "identify",
+            "identify",
+            user_id="usr_42",
+            anonymous_id=None,
+            traits={"name": "Alice", "plan": "pro"},
+        )
         result = validate_single_event(event)
         assert result["valid"] is True
 
     def test_valid_page_event(self):
         """ValidPageEvent"""
-        event = {
-            "type": "page",
-            "anonymous_id": "anon_xyz",
-            "properties": {"url": "/pricing", "title": "Pricing"},
-        }
+        event = canonical_event(
+            "page",
+            "page",
+            anonymous_id="anon_xyz",
+            properties={"url": "/pricing", "title": "Pricing"},
+        )
         result = validate_single_event(event)
         assert result["valid"] is True
 
     def test_valid_group_event(self):
         """ValidGroupEvent"""
-        event = {
-            "type": "group",
-            "user_id": "usr_1",
-            "properties": {"company": "Acme Inc"},
-        }
+        event = canonical_event(
+            "group",
+            "group",
+            user_id="usr_1",
+            group_id="group_1",
+            traits={"company": "Acme Inc"},
+        )
         result = validate_single_event(event)
         assert result["valid"] is True
 
     def test_event_with_only_anonymous_id(self):
         """EventWithOnlyAnonymousId"""
-        event = {"event": "page_view", "anonymous_id": "anon_abc"}
+        event = canonical_event("page_view", anonymous_id="anon_abc")
         result = validate_single_event(event)
         assert result["valid"] is True
 
-    def test_event_with_only_camel_case_anonymous_id(self):
-        """EventWithOnlyCamelCaseAnonymousId"""
-        event = {"event": "page_view", "anonymousId": "anon_abc"}
+    def test_event_rejects_camel_case_anonymous_id(self):
+        event = canonical_event("page_view")
+        event.pop("anonymous_id")
+        event["anonymousId"] = "anon_abc"
         result = validate_single_event(event)
-        assert result["valid"] is True
+        assert result["valid"] is False
+        assert any(error["field"] == "anonymousId" for error in result["errors"])
 
     def test_event_missing_name_and_type(self):
         """EventMissingNameAndType"""
@@ -347,10 +386,17 @@ class TestSingleEventValidation:
 
     def test_event_all_valid_types(self):
         """EventAllValidTypes"""
-        for event_type in ("track", "identify", "group", "page", "screen", "alias"):
-            event = {"type": event_type, "user_id": "u1"}
+        for event_type in ("track", "identify", "group", "page"):
+            name = event_type if event_type != "track" else "custom"
+            event = canonical_event(name, event_type, user_id="u1")
+            if event_type == "group":
+                event["group_id"] = "g1"
             result = validate_single_event(event)
             assert result["valid"] is True, f"Type '{event_type}' should be valid"
+
+        for event_type in ("screen", "alias"):
+            event = canonical_event("custom", event_type, user_id="u1")
+            assert validate_single_event(event)["valid"] is False
 
     def test_event_properties_not_object(self):
         """EventPropertiesNotObject"""
@@ -442,22 +488,14 @@ class TestSingleEventValidation:
     def test_property_key_at_max_length_is_valid(self):
         """Property key of exactly 256 chars should be accepted."""
         key = "k" * 256
-        event = {
-            "event": "test",
-            "user_id": "u1",
-            "properties": {key: "value"},
-        }
+        event = canonical_event("test", user_id="u1", properties={key: "value"})
         result = validate_single_event(event)
         assert result["valid"] is True
 
     def test_string_property_value_at_max_length_is_valid(self):
         """String property value of exactly 8192 chars should be accepted."""
         val = "v" * 8192
-        event = {
-            "event": "test",
-            "user_id": "u1",
-            "properties": {"key": val},
-        }
+        event = canonical_event("test", user_id="u1", properties={"key": val})
         result = validate_single_event(event)
         assert result["valid"] is True
 
@@ -475,7 +513,7 @@ class TestSingleEventValidation:
     def test_event_name_at_max_length_is_valid(self):
         """Event name of exactly 256 chars should be accepted."""
         name = "e" * 256
-        event = {"event": name, "user_id": "u1"}
+        event = canonical_event(name, user_id="u1")
         result = validate_single_event(event)
         assert result["valid"] is True
 
@@ -489,6 +527,7 @@ def feature_flag_exposure_event():
         "session_id": "sess_42",
         "message_id": "msg_42",
         "timestamp": "2026-05-26T02:26:53.455Z",
+        "context": {},
         "properties": {
             "flag_key": "checkout-gate",
             "variant": "treatment",
@@ -515,6 +554,7 @@ def frontend_error_event():
         "session_id": "sess_42",
         "message_id": "msg_42",
         "timestamp": "2026-05-26T02:26:53.455Z",
+        "context": {},
         "properties": {
             "error_type": "javascript_error",
             "message": "Checkout exploded",
@@ -540,6 +580,7 @@ def web_vital_event():
         "session_id": "sess_42",
         "message_id": "msg_42",
         "timestamp": "2026-05-26T02:26:53.455Z",
+        "context": {},
         "properties": {
             "metric": "LCP",
             "value": 2410.5,

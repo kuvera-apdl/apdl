@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS events_v2 (
     -- ---------- envelope ----------
     _id                UUID,
     _schema            LowCardinality(String),     -- e.g. 'track@1', 'page@1'
-    _project_id        UInt32,
+    _project_id        String,
     _idempotency_key   String,                     -- = SDK messageId
     _correlation_id    UUID,                       -- causal chain across services
     _source            LowCardinality(String),     -- e.g. 'sdk-js@2.4.1'
@@ -73,7 +73,7 @@ ALTER TABLE events_v2 ADD COLUMN IF NOT EXISTS plan LowCardinality(String)
 -- Dead-letter table for envelope-validation failures. Same envelope shape so
 -- analysts can investigate bad data without leaving SQL. Short TTL.
 CREATE TABLE IF NOT EXISTS events_dlq_v2 (
-    _project_id        UInt32,
+    _project_id        String,
     _received_at       DateTime64(3) DEFAULT now64(3),
     _source            LowCardinality(String) DEFAULT '',
     error              String,

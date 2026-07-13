@@ -480,7 +480,6 @@ export class APDLClient implements APDLApi {
     }
 
     this.featureFlagExposureKeys.add(dedupeKey);
-    const exposureContext = this.experimentExposureContext();
     this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
       flag_key: result.key,
       variant: result.variant,
@@ -494,7 +493,6 @@ export class APDLClient implements APDLApi {
       source: result.source,
       page,
       component,
-      ...(exposureContext ? { experiment_context: exposureContext } : {}),
     });
   }
 
@@ -633,15 +631,6 @@ export class APDLClient implements APDLApi {
     return {
       attributes: this.cloneExperimentAttributes(context.attributes),
     };
-  }
-
-  private experimentExposureContext(): ExperimentContext | null {
-    const attributes = this.stringifyAttributes(this.experimentContext.attributes);
-    if (Object.keys(attributes).length === 0) {
-      return null;
-    }
-
-    return { attributes };
   }
 
   private shouldPersistFlagCache(): boolean {

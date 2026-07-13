@@ -34,17 +34,14 @@ def make_client(transport: RecordingTransport, **cfg) -> APDLClient:
 
 
 def _ingestion_validator():
-    """The real ingestion validator, or None if the service is not importable."""
+    """Import the real monorepo Ingestion validator for wire-contract tests."""
     root = Path(__file__).resolve().parents[3]
     ingestion = str(root / "services" / "ingestion")
     if ingestion not in sys.path:
         sys.path.insert(0, ingestion)
-    try:
-        from app.validation.schema import validate_single_event
+    from app.validation.schema import validate_single_event
 
-        return validate_single_event
-    except Exception:  # pragma: no cover - only when run outside the monorepo
-        return None
+    return validate_single_event
 
 
 # ── Event tracking ────────────────────────────────────────────
@@ -154,8 +151,6 @@ def test_exposure_carries_page_and_component():
 
 def test_exposure_passes_real_ingestion_validator():
     validate = _ingestion_validator()
-    if validate is None:
-        pytest.skip("ingestion service not importable in isolation")
 
     transport = RecordingTransport()
     client = make_client(transport, log_exposures=True)

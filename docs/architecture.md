@@ -36,13 +36,14 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 - Ingestion verifies API keys against the hashed credential registry, derives
   project/role authority server-side, rate-limits per project (token bucket:
   1000 capacity, 100/s refill), validates batches
-  (1–500 events), and appends to `events:raw:{project_id}` (`MAXLEN ~1M`).
+  (1–100 strict canonical events), and appends to
+  `events:raw:{project_id}` (`MAXLEN ~1M`).
 - The ClickHouse writer consumes via a consumer group and flushes batches of
-  1000 events or every 5 s, retrying up to 5 times before dropping a batch.
-- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) handles
-  custom-event records on a canonical envelope (`_schema` discriminator) into
-  the v2 tables (`events_v2`, `decisions_v2`, `feeds_v2`) — the same transforms
-  run for live traffic, backfills, and replays.
+  1000 events or every 5 s. Redis deliveries are acknowledged only after a
+  durable ClickHouse insert or bounded DLQ record.
+- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) and its
+  v2 tables are experimental and are not part of the live developer-preview
+  event path.
 
 ### 2. Flags & experiments (config path)
 

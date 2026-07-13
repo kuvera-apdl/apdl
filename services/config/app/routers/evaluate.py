@@ -72,6 +72,12 @@ async def _publish_exposure(
         "timestamp": timestamp,
         "message_id": message_id,
         "session_id": session_id,
+        "context": {
+            "library": {
+                "name": "apdl-config",
+                "version": "server",
+            },
+        },
         "properties": {
             "flag_key": result.key,
             "variant": result.variant,

@@ -1,6 +1,7 @@
 -- Migration 007: Frontend health event projection
 CREATE TABLE IF NOT EXISTS frontend_health_events (
     project_id             String,
+    message_id             String,
     event_name             LowCardinality(String),
     user_id                String,
     anonymous_id           String,
@@ -28,6 +29,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS frontend_health_events_mv
 TO frontend_health_events
 AS SELECT
     project_id,
+    message_id,
     event_name,
     user_id,
     anonymous_id,

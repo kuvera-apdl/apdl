@@ -1,6 +1,7 @@
 -- Migration 006: Feature flag exposure projection
 CREATE TABLE IF NOT EXISTS feature_flag_exposures (
     project_id           String,
+    message_id           String,
     flag_key             String,
     user_id              String,
     anonymous_id         String,
@@ -35,6 +36,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS feature_flag_exposures_mv
 TO feature_flag_exposures
 AS SELECT
     project_id,
+    message_id,
     JSONExtractString(properties, 'flag_key') AS flag_key,
     user_id,
     anonymous_id,

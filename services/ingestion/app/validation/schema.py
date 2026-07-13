@@ -2,10 +2,8 @@
 
 Returns the format: ``{"valid": bool, "errors": [{"field": str, "message": str}]}``.
 
-Cross-field checks (event-name-or-type, user/anon identifier, batch size) live
-here rather than as model validators so that each failure is attributed to the
-specific field a client would expect, and so that multiple errors per event are
-collected in a single response instead of short-circuiting on the first.
+The Pydantic event model owns the canonical envelope and cross-field rules;
+this module adds batch limits and strict reserved-event property contracts.
 """
 
 import math
@@ -107,6 +105,16 @@ def validate_event_batch(body: object) -> dict:
     if "events" not in body:
         return _error("events", "Missing required field 'events'")
 
+    unknown_keys = sorted(set(body) - {"events"})
+    if unknown_keys:
+        return {
+            "valid": False,
+            "errors": [
+                {"field": key, "message": "Unknown batch field"}
+                for key in unknown_keys
+            ],
+        }
+
     events = body["events"]
     if not isinstance(events, list):
         return _error("events", "Field 'events' must be an array")
@@ -139,27 +147,11 @@ def _validate_event(event: object, prefix: str) -> list[dict]:
         return [{"field": prefix or "event", "message": "Event must be an object"}]
 
     errors: list[dict] = []
-
-    has_event_name = isinstance(event.get("event"), str) and bool(event["event"])
-    has_type = isinstance(event.get("type"), str) and bool(event["type"])
-    if not has_event_name and not has_type:
-        errors.append(
-            {
-                "field": _join(prefix, "event"),
-                "message": "Event must have either 'event' (name) or 'type' field",
-            }
-        )
-
-    has_user = bool(event.get("user_id")) or bool(event.get("userId"))
-    has_anon = bool(event.get("anonymous_id")) or bool(event.get("anonymousId"))
-    if not has_user and not has_anon:
-        errors.append(
-            {
-                "field": _join(prefix, "user_id"),
-                "message": "Event must have either 'user_id'/'userId' or 'anonymous_id'/'anonymousId'",
-            }
-        )
-
+    if not event.get("user_id") and not event.get("anonymous_id"):
+        errors.append({
+            "field": _join(prefix, "user_id"),
+            "message": "Event requires user_id or anonymous_id",
+        })
     try:
         Event.model_validate(event)
     except ValidationError as exc:

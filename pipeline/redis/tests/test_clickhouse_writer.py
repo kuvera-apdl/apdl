@@ -1,10 +1,15 @@
 import asyncio
 import json
+from pathlib import Path
 
 import clickhouse_writer as writer_module
 import pytest
 from clickhouse_driver.errors import ServerException, TypeMismatchError
 from clickhouse_writer import BufferedEvent, ClickHouseWriter
+
+CONTRACT_FIXTURE = (
+    Path(__file__).resolve().parents[3] / "fixtures" / "events" / "canonical.json"
+)
 
 
 class FakeRedis:
@@ -96,10 +101,23 @@ def buffered_event(message_id="1-0"):
     )
 
 
+def canonical_event(event="signup", **overrides):
+    value = {
+        "event": event,
+        "type": "track",
+        "anonymous_id": "anon-test",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": f"message-{event}",
+    }
+    value.update(overrides)
+    return value
+
+
 def stream_message(message_id="1-0"):
     return (
         "events:raw:demo",
-        [(message_id, {"event_json": json.dumps({"event": "signup"})})],
+        [(message_id, {"event_json": json.dumps(canonical_event())})],
     )
 
 
@@ -241,10 +259,7 @@ def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
 def test_project_authority_is_derived_from_validated_stream_key(monkeypatch):
     async def scenario():
         writer, redis_client, ch_client = make_writer(monkeypatch, buffer_size=1)
-        event_json = {
-            "event": "signup",
-            "project_id": "demo",
-        }
+        event_json = canonical_event(project_id="demo")
         results = [
             (
                 "events:raw:demo",
@@ -279,7 +294,7 @@ def test_conflicting_project_assertions_are_rejected_without_ack(monkeypatch):
                         {
                             "project_id": "victim",
                             "event_json": json.dumps(
-                                {"event": "signup", "project_id": "demo"}
+                                canonical_event(project_id="demo")
                             ),
                         },
                     ),
@@ -287,7 +302,7 @@ def test_conflicting_project_assertions_are_rejected_without_ack(monkeypatch):
                         "2-0",
                         {
                             "event_json": json.dumps(
-                                {"event": "signup", "project_id": "victim"}
+                                canonical_event(project_id="victim")
                             )
                         },
                     ),
@@ -320,29 +335,48 @@ def test_invalid_stream_project_is_rejected(monkeypatch):
             raise AssertionError(f"accepted invalid stream key {stream_key!r}")
 
 
-def test_type_only_nullable_legacy_event_projects_to_canonical_row(monkeypatch):
+def test_writer_uses_shared_canonical_contract_fixture(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    fixture = json.loads(CONTRACT_FIXTURE.read_text())
+
+    rows = []
+    for event in fixture["valid"]:
+        row = writer._parse_event({"event_json": json.dumps(event)}, "demo")
+        assert row["message_id"] == event["message_id"]
+        assert row["event_type"] == event["type"]
+        rows.append(row)
+
+    assert json.loads(rows[0]["context"])["browser"]["name"] == "Firefox"
+    assert rows[0]["browser"] == "Firefox"
+    assert json.loads(rows[1]["traits"]) == {"plan": "pro"}
+    assert rows[2]["group_id"] == "account-7"
+
+    for case in fixture["invalid"]:
+        with pytest.raises((TypeError, ValueError)):
+            writer._parse_event(
+                {"event_json": json.dumps(case["event"])},
+                "demo",
+            )
+
+
+def test_legacy_alias_event_is_rejected(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 
-    row = writer._parse_event(
-        {
-            "event_json": json.dumps(
-                {
+    with pytest.raises(ValueError, match="unknown fields"):
+        writer._parse_event(
+            {
+                "event_json": json.dumps({
+                    "event": "identify",
                     "type": "identify",
                     "userId": "user-1",
                     "anonymousId": "anon-1",
-                    "properties": None,
-                    "context": None,
-                }
-            )
-        },
-        "demo",
-    )
-
-    assert row["event_name"] == "identify"
-    assert row["user_id"] == "user-1"
-    assert row["anonymous_id"] == "anon-1"
-    assert row["properties"] == "{}"
-    assert row["device_type"] == ""
+                    "timestamp": "2026-07-13T12:00:00.000Z",
+                    "context": {},
+                    "message_id": "message-alias",
+                })
+            },
+            "demo",
+        )
 
 
 def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
@@ -351,7 +385,7 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
         results = [
             (
                 "events:raw:demo",
-                [("1-0", {"event_json": json.dumps({"event": ["bad"]})})],
+                [("1-0", {"event_json": json.dumps(canonical_event(["bad"]))})],
             )
         ]
 
@@ -391,8 +425,8 @@ def test_dlq_failure_leaves_reject_pending_while_valid_event_flushes(monkeypatch
             (
                 "events:raw:demo",
                 [
-                    ("1-0", {"event_json": json.dumps({"event": ["bad"]})}),
-                    ("2-0", {"event_json": json.dumps({"event": "signup"})}),
+                    ("1-0", {"event_json": json.dumps(canonical_event(["bad"]))}),
+                    ("2-0", {"event_json": json.dumps(canonical_event())}),
                 ],
             )
         ]
@@ -423,11 +457,11 @@ def test_insert_poison_isolated_without_blocking_valid_row(monkeypatch):
         results = [
             (
                 "events:raw:demo",
-                [("1-0", {"event_json": json.dumps({"event": "signup"})})],
+                [("1-0", {"event_json": json.dumps(canonical_event())})],
             ),
             (
                 "events:raw:other",
-                [("2-0", {"event_json": json.dumps({"event": "poison"})})],
+                [("2-0", {"event_json": json.dumps(canonical_event("poison"))})],
             ),
         ]
 
@@ -496,7 +530,7 @@ def test_multistream_overdelivery_never_exceeds_global_buffer(monkeypatch):
             stream_message("1-0"),
             (
                 "events:raw:other",
-                [("2-0", {"event_json": json.dumps({"event": "purchase"})})],
+                [("2-0", {"event_json": json.dumps(canonical_event("purchase"))})],
             ),
         ]
 

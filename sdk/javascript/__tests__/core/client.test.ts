@@ -343,7 +343,8 @@ describe('APDLClient', () => {
       expect(queue.length).toBe(1);
       expect(queue[0]).toMatchObject({
         type: 'page',
-        event: 'Home',
+        event: 'page',
+        properties: { name: 'Home' },
       });
     });
 
@@ -490,7 +491,7 @@ describe('APDLClient', () => {
       await experimentClient.shutdown();
     });
 
-    it('should include stable experiment context metadata on exposure events', async () => {
+    it('should not leak targeting context into exposure events', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -518,13 +519,8 @@ describe('APDLClient', () => {
       expect(exposures).toHaveLength(1);
       expect(exposures[0].properties).toMatchObject({
         flag_key: 'context-exposure-flag',
-        experiment_context: {
-          attributes: {
-            plan: 'pro',
-            region: 'us',
-          },
-        },
       });
+      expect(exposures[0].properties).not.toHaveProperty('experiment_context');
 
       await experimentClient.shutdown();
     });

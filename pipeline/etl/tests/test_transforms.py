@@ -122,7 +122,7 @@ def test_feed_reads_source_pointer_from_ctx_extra():
     from tests.conftest import RECEIVED_AT
 
     ctx = EtlContext(
-        project_id=7,
+        project_id="project7",
         received_at=RECEIVED_AT,
         source="edi-adapter@1.0",
         extra={"source_uri": "s3://bucket/x.csv", "source_sha256": "a" * 64, "source_bytes": 2048},
@@ -132,7 +132,7 @@ def test_feed_reads_source_pointer_from_ctx_extra():
         "receiver_id": "APDL",
         "control_number": "000123",
         "parse_warnings": ["col 9 empty"],
-    }, _project_id=7)
+    }, _project_id="project7")
     row = get_transform("partner.shipments.csv@1").process(raw, ctx).rows[0]
     assert row["source_uri"] == "s3://bucket/x.csv"
     assert row["source_bytes"] == 2048

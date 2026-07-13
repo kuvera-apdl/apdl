@@ -20,6 +20,23 @@ HEADERS = {"X-API-Key": API_KEY}
 URL = "/v1/events"
 
 
+def canonical_event(
+    event: str = "test_event",
+    event_type: str = "track",
+    **overrides,
+):
+    value = {
+        "event": event,
+        "type": event_type,
+        "anonymous_id": "anon-test",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-test",
+    }
+    value.update(overrides)
+    return value
+
+
 @pytest.fixture(autouse=True)
 def _setup_mock_redis():
     """Inject a mock Redis into app.state before each test."""
@@ -46,15 +63,12 @@ async def client():
 @pytest.mark.asyncio
 async def test_valid_batch_with_track_event(client):
     """ValidBatchWithTrackEvent"""
-    payload = {
-        "events": [{
-            "event": "button_click",
-            "type": "track",
-            "user_id": "usr_123",
-            "properties": {"button": "signup"},
-            "timestamp": "2025-01-01T00:00:00.000Z",
-        }],
-    }
+    payload = {"events": [canonical_event(
+        "button_click",
+        user_id="usr_123",
+        properties={"button": "signup"},
+        timestamp="2025-01-01T00:00:00.000Z",
+    )]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 202
     body = resp.json()
@@ -74,9 +88,8 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
             "timestamp": "2026-05-26T02:26:53.455Z",
             "properties": {"source": "sdk-contract-test"},
             "context": {
-                "browser": "Chrome",
-                "browser_version": "123",
-                "device_type": "desktop",
+                "browser": {"name": "Chrome", "version": "123"},
+                "device": {"type": "desktop"},
             },
         }],
     }
@@ -100,8 +113,8 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
     assert published["session_id"] == "sess-sdk-1"
     assert published["message_id"] == "msg-sdk-1"
     assert published["properties"] == {"source": "sdk-contract-test"}
-    assert published["context"]["browser"] == "Chrome"
-    assert published["context"]["device_type"] == "desktop"
+    assert published["context"]["browser"] == {"name": "Chrome", "version": "123"}
+    assert published["context"]["device"] == {"type": "desktop"}
     assert published["project_id"] == "testproj"
     assert "server_timestamp" in published
     assert "ip" in published
@@ -161,7 +174,7 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
                         "path": "/rage/path-secret",
                     },
                     "referrer": "https://referrer.test/rage-secret",
-                    "device_type": "desktop",
+                        "device": {"type": "desktop"},
                 },
             },
             {
@@ -191,6 +204,11 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
             },
         ]
     }
+    for index, event in enumerate(payload["events"]):
+        event.setdefault("timestamp", "2026-07-13T12:00:00.000Z")
+        event.setdefault("context", {})
+        event.setdefault("message_id", f"message-auto-{index}")
+        event.setdefault("session_id", "session-auto")
 
     resp = await client.post(URL, json=payload, headers=HEADERS)
 
@@ -212,7 +230,7 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
         "x": 12,
         "y": 34,
     }
-    assert published[1]["context"] == {"device_type": "desktop"}
+    assert published[1]["context"] == {"device": {"type": "desktop"}}
     assert published[2]["properties"] == {}
     assert published[2]["context"] == {"locale": "en-CA"}
     assert published[3]["properties"] == {
@@ -246,6 +264,7 @@ async def test_feature_flag_exposure_payload_is_published(client):
             "session_id": "sess-sdk-1",
             "message_id": "msg-sdk-1",
             "timestamp": "2026-05-26T02:26:53.455Z",
+            "context": {},
             "properties": {
                 "flag_key": "checkout-gate",
                 "variant": "treatment",
@@ -354,13 +373,11 @@ async def test_feature_flag_exposure_rejects_boolean_value_payload(client):
 @pytest.mark.asyncio
 async def test_valid_batch_with_anonymous_id(client):
     """ValidBatchWithAnonymousId"""
-    payload = {
-        "events": [{
-            "event": "page_view",
-            "anonymous_id": "anon_abc123",
-            "properties": {"url": "/home"},
-        }],
-    }
+    payload = {"events": [canonical_event(
+        "page_view",
+        anonymous_id="anon_abc123",
+        properties={"url": "/home"},
+    )]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 202
     body = resp.json()
@@ -368,20 +385,23 @@ async def test_valid_batch_with_anonymous_id(client):
 
 
 @pytest.mark.asyncio
-async def test_valid_batch_with_camel_case_ids(client):
-    """ValidBatchWithCamelCaseIds"""
+async def test_reject_batch_with_camel_case_ids(client):
     payload = {
         "events": [{
-            "event": "page_view",
+            "event": "page",
             "type": "page",
             "anonymousId": "anon_abc123",
             "userId": "user_456",
+            "timestamp": "2026-07-13T12:00:00.000Z",
+            "context": {},
+            "message_id": "message-alias",
         }],
     }
     resp = await client.post(URL, json=payload, headers=HEADERS)
-    assert resp.status_code == 202
-    body = resp.json()
-    assert body["accepted"] == 1
+    assert resp.status_code == 400
+    fields = {error["field"] for error in resp.json()["errors"]}
+    assert "events[0].anonymousId" in fields
+    assert "events[0].userId" in fields
 
 
 @pytest.mark.asyncio
@@ -500,13 +520,13 @@ async def test_multiple_mixed_valid_and_invalid_events(client):
 @pytest.mark.asyncio
 async def test_valid_identify_event(client):
     """ValidIdentifyEvent"""
-    payload = {
-        "events": [{
-            "type": "identify",
-            "user_id": "usr_123",
-            "traits": {"name": "Jane Doe", "email": "jane@example.com"},
-        }],
-    }
+    payload = {"events": [canonical_event(
+        "identify",
+        "identify",
+        user_id="usr_123",
+        anonymous_id=None,
+        traits={"name": "Jane Doe", "email": "jane@example.com"},
+    )]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 202
     body = resp.json()
@@ -538,7 +558,7 @@ async def test_unauthorized_without_api_key(client):
 
     app.dependency_overrides.pop(authenticate_request, None)
     app.state.authenticator = RejectingAuthenticator()
-    payload = {"events": [{"event": "test", "user_id": "u1"}]}
+    payload = {"events": [canonical_event("test", user_id="u1")]}
     resp = await client.post(URL, json=payload)
     assert resp.status_code == 401
     body = resp.json()
@@ -586,7 +606,7 @@ async def test_events_require_write_role(client):
 async def test_redis_failure_returns_503(client):
     """When Redis publish fails, endpoint returns 503."""
     app.state.redis.xadd = AsyncMock(side_effect=ConnectionError("Redis down"))
-    payload = {"events": [{"event": "test", "user_id": "u1"}]}
+    payload = {"events": [canonical_event("test", user_id="u1")]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 503
     body = resp.json()
@@ -608,9 +628,9 @@ async def test_partial_redis_failure(client):
     app.state.redis.xadd = flaky_xadd
     payload = {
         "events": [
-            {"event": "e1", "user_id": "u1"},
-            {"event": "e2", "user_id": "u2"},
-            {"event": "e3", "user_id": "u3"},
+            canonical_event("e1", user_id="u1", message_id="message-1"),
+            canonical_event("e2", user_id="u2", message_id="message-2"),
+            canonical_event("e3", user_id="u3", message_id="message-3"),
         ],
     }
     resp = await client.post(URL, json=payload, headers=HEADERS)

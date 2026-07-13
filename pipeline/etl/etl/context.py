@@ -36,7 +36,7 @@ class EtlContext:
     subclass the context.
     """
 
-    project_id: int
+    project_id: str
     received_at: datetime
     ingested_at: datetime | None = None
     ip: str = ""
@@ -52,7 +52,7 @@ class DlqEntry:
     SQL without leaving the warehouse.
     """
 
-    project_id: int
+    project_id: str
     source: str
     error: str
     raw_payload: str
