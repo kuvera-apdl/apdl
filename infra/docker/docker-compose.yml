@@ -178,8 +178,11 @@ services:
       # Fail-closed rollout gate. Production PR stages require a read-only
       # operator evidence bundle bound to this exact model + revision.
       CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
-      CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-offline}
-      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ${CODEGEN_ROLLOUT_AUTHORIZATION_PATH:-}
+      # The base stack is evaluation-only even if an old host .env still carries
+      # publication settings. PR stages are enabled exclusively by the reviewed
+      # rollout overlay, which also requires immutable evaluated image IDs.
+      CODEGEN_ROLLOUT_STAGE: offline
+      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ""
       CODEGEN_PLATFORM_SAFETY_POLICY_PATH: ${CODEGEN_PLATFORM_SAFETY_POLICY_PATH:-}
       # Aider prompt caching (default on): caches the static prefix (system + repo
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
