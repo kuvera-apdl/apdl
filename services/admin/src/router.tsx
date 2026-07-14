@@ -32,6 +32,7 @@ import { OverviewPage } from '@/features/overview/OverviewPage'
 import { WorkspaceSettingsPage } from '@/features/settings/WorkspaceSettingsPage'
 import { HealthPage } from '@/features/system/HealthPage'
 import { LoginPage } from '@/features/auth/LoginPage'
+import { RegisterPage } from '@/features/auth/RegisterPage'
 
 export function RequireAuth() {
   const { authenticated, initializing } = useAuth()
@@ -51,6 +52,7 @@ function NotFoundPage() {
 export function createRouter() {
   return createBrowserRouter([
     { path: '/login', element: <LoginPage /> },
+    { path: '/register', element: <RegisterPage /> },
     {
       element: <RequireAuth />,
       children: [

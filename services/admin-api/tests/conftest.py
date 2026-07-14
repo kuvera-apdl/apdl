@@ -43,6 +43,10 @@ class AuditConnection:
     def __init__(self, statements: list[tuple[str, tuple[object, ...]]]) -> None:
         self.statements = statements
 
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
     async def execute(self, query: str, *args):
         self.statements.append((query, args))
         return "OK"

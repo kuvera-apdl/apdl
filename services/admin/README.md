@@ -83,15 +83,18 @@ npm run lint       # tsc --noEmit for src + tests          (make lint-admin)
 npm run build      # typecheck + production bundle to dist/ (make build-admin)
 ```
 
-For local development, migrate PostgreSQL, provision a human user, then run the
-backend and SPA:
+For local development, migrate PostgreSQL, then run the backend and SPA:
 
 ```bash
 make migrate-postgres
-make create-admin-user ARGS="--email admin@example.com --project-id apdl --roles config:read config:write query:read agents:read"
 make run-admin-api   # :8085, Vite proxies /api here
 make run-admin       # :5173
 ```
+
+Open `/register` to create an email/password account. New accounts have zero
+projects and zero roles; project access must be granted separately by an
+operator or created from `/settings/workspace`. Creating a project associates
+it with the current profile and grants the creator the canonical project roles.
 
 `scripts/dev.sh up-full` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the

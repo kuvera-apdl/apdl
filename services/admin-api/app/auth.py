@@ -10,13 +10,19 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.config import Settings
-from app.models import LoginRequest, ProjectAccess, UserIdentity
+from app.models import (
+    LoginRequest,
+    ProjectAccess,
+    RegistrationRequest,
+    UserIdentity,
+)
 from app.security import (
     CSRF_COOKIE,
     CSRF_HEADER,
     DUMMY_PASSWORD_HASH,
     SESSION_COOKIE,
     clear_session_cookies,
+    hash_password,
     new_token,
     require_allowed_origin,
     set_session_cookies,
@@ -67,6 +73,38 @@ async def _project_access(conn, user_id: str) -> dict[str, frozenset[str]]:
     }
 
 
+async def _start_session(
+    conn,
+    user_id: uuid.UUID,
+    settings: Settings,
+    now: datetime,
+) -> tuple[str, str]:
+    await conn.execute(
+        """
+        DELETE FROM admin_sessions
+        WHERE expires_at <= NOW()
+           OR last_seen_at <= NOW() - ($1 * INTERVAL '1 second')
+           OR revoked_at IS NOT NULL
+        """,
+        settings.session_idle_seconds,
+    )
+    session_token = new_token()
+    csrf_token = new_token()
+    await conn.execute(
+        """
+        INSERT INTO admin_sessions (
+            session_id, user_id, token_hash, csrf_hash, expires_at
+        ) VALUES ($1, $2, $3, $4, $5)
+        """,
+        uuid.uuid4(),
+        user_id,
+        token_hash(session_token),
+        token_hash(csrf_token),
+        now + timedelta(seconds=settings.session_ttl_seconds),
+    )
+    return session_token, csrf_token
+
+
 async def require_session(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -103,10 +141,6 @@ async def require_session(
         )
         projects = await _project_access(conn, str(row["user_id"]))
 
-    if not projects:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="No project access"
-        )
     return AdminSession(
         session_id=str(row["session_id"]),
         token_hash=str(row["token_hash"]),
@@ -188,11 +222,6 @@ async def login(
             else:
                 user_id = str(user["user_id"])
                 projects = await _project_access(conn, user_id)
-                if not projects:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="No project access",
-                    )
 
                 await conn.execute(
                     """
@@ -202,29 +231,8 @@ async def login(
                     """,
                     user["user_id"],
                 )
-                await conn.execute(
-                    """
-                    DELETE FROM admin_sessions
-                    WHERE expires_at <= NOW()
-                       OR last_seen_at <= NOW() - ($1 * INTERVAL '1 second')
-                       OR revoked_at IS NOT NULL
-                    """,
-                    settings.session_idle_seconds,
-                )
-                session_token = new_token()
-                csrf_token = new_token()
-                session_id = uuid.uuid4()
-                await conn.execute(
-                    """
-                    INSERT INTO admin_sessions (
-                        session_id, user_id, token_hash, csrf_hash, expires_at
-                    ) VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    session_id,
-                    user["user_id"],
-                    token_hash(session_token),
-                    token_hash(csrf_token),
-                    now + timedelta(seconds=settings.session_ttl_seconds),
+                session_token, csrf_token = await _start_session(
+                    conn, user["user_id"], settings, now
                 )
                 login_result = (user_id, projects, session_token, csrf_token)
 
@@ -244,6 +252,49 @@ async def login(
             ProjectAccess(project_id=project_id, roles=sorted(roles))
             for project_id, roles in sorted(projects.items())
         ],
+    )
+
+
+@router.post(
+    "/register",
+    response_model=UserIdentity,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register(
+    body: RegistrationRequest, request: Request, response: Response
+) -> UserIdentity:
+    settings: Settings = request.app.state.settings
+    require_allowed_origin(request, settings)
+    email = str(body.email).strip().lower()
+    now = datetime.now(timezone.utc)
+
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO admin_users (user_id, email, password_hash)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (email) DO NOTHING
+                RETURNING user_id
+                """,
+                uuid.uuid4(),
+                email,
+                hash_password(body.password),
+            )
+            if user_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="An account already exists for this email",
+                )
+            session_token, csrf_token = await _start_session(
+                conn, user_id, settings, now
+            )
+
+    set_session_cookies(response, session_token, csrf_token, settings)
+    return UserIdentity(
+        user_id=str(user_id),
+        email=email,
+        projects=[],
     )
 
 

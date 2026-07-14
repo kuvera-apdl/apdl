@@ -42,3 +42,15 @@ def test_settings_reject_wildcard_origins(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="Invalid admin origin"):
         Settings.from_env()
+
+
+def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.delenv("APDL_ADMIN_ALLOWED_ORIGINS", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.allowed_origins == frozenset(
+        {"http://localhost:5173", "http://localhost:5174"}
+    )

@@ -1,6 +1,6 @@
-import { Loader2, LockKeyhole } from 'lucide-react'
+import { Loader2, UserPlus } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
-import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
 import { ApiError } from '@/api/http'
@@ -10,25 +10,24 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 
-const loginSchema = z
+const registrationSchema = z
   .object({
     email: z.string().email('Enter a valid email address'),
-    password: z.string().min(1, 'Enter your password'),
+    password: z.string().min(12, 'Use at least 12 characters').max(1024),
+    confirmation: z.string(),
   })
   .strict()
+  .refine((value) => value.password === value.confirmation, {
+    message: 'Passwords do not match',
+    path: ['confirmation'],
+  })
 
-function safeReturnPath(value: unknown): string {
-  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//')
-    ? value
-    : '/'
-}
-
-export function LoginPage() {
-  const { authenticated, initializing, login, logoutReason } = useAuth()
-  const location = useLocation()
+export function RegisterPage() {
+  const { authenticated, initializing, register } = useAuth()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -36,20 +35,21 @@ export function LoginPage() {
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault()
-    const parsed = loginSchema.safeParse({ email, password })
+    const parsed = registrationSchema.safeParse({ email, password, confirmation })
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? 'Invalid login')
+      setError(parsed.error.issues[0]?.message ?? 'Invalid registration')
       return
     }
     setSubmitting(true)
     setError(null)
     try {
-      await login(parsed.data.email, parsed.data.password)
-      const state = location.state as { from?: unknown } | null
-      navigate(safeReturnPath(state?.from), { replace: true })
+      await register(parsed.data.email, parsed.data.password)
+      navigate('/settings/workspace', { replace: true })
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
-        setError('Invalid email or password.')
+      if (caught instanceof ApiError && caught.status === 409) {
+        setError('An account already exists for this email. Sign in instead.')
+      } else if (caught instanceof ApiError && caught.status === 429) {
+        setError('Too many attempts. Wait a minute and try again.')
       } else {
         setError('The admin service is unavailable. Try again shortly.')
       }
@@ -63,26 +63,21 @@ export function LoginPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <LockKeyhole className="h-5 w-5" />
+            <UserPlus className="h-5 w-5" />
           </div>
           <div>
-            <CardTitle>Sign in to APDL Admin</CardTitle>
+            <CardTitle>Create your APDL account</CardTitle>
             <CardDescription className="mt-1.5">
-              Use your administrator account. Service credentials remain on the server.
+              Register with an email and password. New accounts start with no project access.
             </CardDescription>
           </div>
         </CardHeader>
         <CardContent>
-          {logoutReason === 'unauthorized' ? (
-            <p className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-              Your session expired or was revoked. Sign in again.
-            </p>
-          ) : null}
           <form onSubmit={(event) => void onSubmit(event)} className="space-y-4" noValidate>
             <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="register-email">Email</Label>
               <Input
-                id="email"
+                id="register-email"
                 type="email"
                 autoComplete="username"
                 value={email}
@@ -92,26 +87,38 @@ export function LoginPage() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="new-password">Password</Label>
               <Input
-                id="password"
+                id="new-password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete="new-password"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
+                disabled={submitting}
+              />
+              <p className="text-xs text-muted-foreground">At least 12 characters.</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="confirm-password">Confirm password</Label>
+              <Input
+                id="confirm-password"
+                type="password"
+                autoComplete="new-password"
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
                 disabled={submitting}
               />
             </div>
             {error ? <p className="text-sm text-destructive">{error}</p> : null}
             <Button className="w-full" type="submit" disabled={submitting || initializing}>
               {submitting ? <Loader2 className="animate-spin" /> : null}
-              Sign in
+              Create account
             </Button>
           </form>
           <p className="mt-5 text-center text-sm text-muted-foreground">
-            Have an invitation?{' '}
-            <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/register">
-              Create your account
+            Already registered?{' '}
+            <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/login">
+              Sign in
             </Link>
           </p>
         </CardContent>
