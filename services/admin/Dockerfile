@@ -1,19 +1,7 @@
 # ─── Build stage ─────────────────────────────────────────────
-# Vite bakes VITE_* at build time. These are the *defaults* the workspace
-# setup screen pre-fills; they must be URLs the BROWSER can reach (the SPA
-# calls the services directly), so never use Docker service names here.
-# Override per-deployment via compose build args. End users can also change
-# them at runtime in the console's Workspace Settings (persisted client-side).
+# The bundle contains no service URLs or credentials. Every API call stays
+# same-origin and nginx forwards it to the authenticated admin backend.
 FROM node:20-alpine AS build
-
-ARG VITE_INGESTION_URL=http://localhost:8080
-ARG VITE_CONFIG_URL=http://localhost:8081
-ARG VITE_QUERY_URL=http://localhost:8082
-ARG VITE_AGENTS_URL=http://localhost:8083
-ENV VITE_INGESTION_URL=$VITE_INGESTION_URL \
-    VITE_CONFIG_URL=$VITE_CONFIG_URL \
-    VITE_QUERY_URL=$VITE_QUERY_URL \
-    VITE_AGENTS_URL=$VITE_AGENTS_URL
 
 WORKDIR /app
 COPY package.json package-lock.json ./

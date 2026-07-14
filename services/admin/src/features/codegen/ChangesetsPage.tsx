@@ -24,7 +24,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
-import { projectIdFromKey, serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
+import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
 import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
 import { GitHubConnectionCard } from '@/features/codegen/GitHubConnectionCard'
 
@@ -34,16 +34,16 @@ const TERMINAL = new Set(['merged', 'abandoned', 'tests_failed', 'error'])
 export function ChangesetsPage() {
   const { active } = useWorkspace()
   const queryClient = useQueryClient()
-  // This route is behind RequireWorkspace, so `active` is non-null when rendered.
+  // This route is behind RequireAuth, so `active` is non-null when rendered.
   const ws = active as Workspace
-  const projectId = active ? (projectIdFromKey(active.apiKey) ?? '') : ''
+  const projectId = active?.projectId ?? ''
 
   const query = useQuery({
     queryKey: active ? queryKeys.changesets(active.id) : ['none', 'changesets'],
     enabled: active !== null && projectId !== '',
     refetchInterval: REFETCH_MS,
     queryFn: () =>
-      listChangesets(serviceConnection(ws, 'codegen'), ws.internalToken, { projectId }),
+      listChangesets(serviceConnection(ws, 'codegen'), { projectId }),
   })
 
   const invalidate = () => {
@@ -54,7 +54,7 @@ export function ChangesetsPage() {
 
   const merge = useMutation({
     mutationFn: (id: string) =>
-      mergeChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+      mergeChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Merge requested')
       invalidate()
@@ -63,7 +63,7 @@ export function ChangesetsPage() {
   })
   const abandon = useMutation({
     mutationFn: (id: string) =>
-      abandonChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+      abandonChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Changeset abandoned')
       invalidate()
@@ -72,7 +72,7 @@ export function ChangesetsPage() {
   })
   const revert = useMutation({
     mutationFn: (id: string) =>
-      revertChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+      revertChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Revert PR requested')
       invalidate()
@@ -81,7 +81,7 @@ export function ChangesetsPage() {
   })
   const retry = useMutation({
     mutationFn: (id: string) =>
-      retryChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+      retryChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
       toast.success('Retry started')
       invalidate()

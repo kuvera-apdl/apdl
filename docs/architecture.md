@@ -20,6 +20,8 @@ Autonomous Product Development Loop.
 | Config Service | FastAPI, asyncpg, SSE | 8081 | [README](../services/config/README.md) |
 | Query Service | FastAPI, ClickHouse, SciPy | 8082 | [README](../services/query/README.md) |
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | [README](../services/agents/README.md) |
+| Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | [README](../services/admin-api/README.md) |
+| Admin Console | React, Vite, nginx | 5173 | [README](../services/admin/README.md) |
 | Pipeline (writer, ETL) | Python, clickhouse-driver | — | [README](../pipeline/README.md) |
 
 ## The three flows
@@ -30,8 +32,9 @@ Autonomous Product Development Loop.
 SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams ──XREAD──→ ClickHouse Writer ──→ ClickHouse
 ```
 
-- Ingestion authenticates (`proj_{project_id}_{secret}` API keys), rate-limits
-  per project (token bucket: 1000 capacity, 100/s refill), validates batches
+- Ingestion verifies API keys against the hashed credential registry, derives
+  project/role authority server-side, rate-limits per project (token bucket:
+  1000 capacity, 100/s refill), validates batches
   (1–500 events), and appends to `events:raw:{project_id}` (`MAXLEN ~1M`).
 - The ClickHouse writer consumes via a consumer group and flushes batches of
   1000 events or every 5 s, retrying up to 5 times before dropping a batch.
@@ -43,7 +46,8 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 ### 2. Flags & experiments (config path)
 
 ```
-Admin / Agents ──CRUD──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache) ──SSE / poll──→ SDKs
+Admin Browser ──HttpOnly session──→ Admin API ──service key──→ Config / Query / Agents / Codegen
+Agents ──service key──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache) ──SSE / poll──→ SDKs
 ```
 
 - PostgreSQL stores canonical flag configs: targeting rules, rollouts,

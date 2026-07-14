@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_feature_flag_frontend_error_guardrail_query
 from app.models.schemas import (
@@ -29,6 +30,7 @@ async def evaluate_guardrail_endpoint(
     request: Request,
 ) -> GuardrailEvaluateResponse:
     """Evaluate one configured feature-flag guardrail without mutating config."""
+    require_project(request, body.project_id, "query:read")
     return await evaluate_guardrail(
         _get_client(request),
         project_id=body.project_id,
@@ -138,14 +140,10 @@ def _variant_guardrail_result(
     default_failures = _as_int(row.get("default_failures"))
 
     variant_rate = (
-        variant_failure_sessions / variant_sessions
-        if variant_sessions > 0
-        else 0.0
+        variant_failure_sessions / variant_sessions if variant_sessions > 0 else 0.0
     )
     default_rate = (
-        default_failure_sessions / default_sessions
-        if default_sessions > 0
-        else 0.0
+        default_failure_sessions / default_sessions if default_sessions > 0 else 0.0
     )
 
     if guardrail.metric == GuardrailMetric.frontend_error_count:

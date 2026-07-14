@@ -74,21 +74,15 @@ export function makeAuditEntry(overrides: Partial<FlagAuditEntry> = {}): FlagAud
 
 export function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
-    id: 'ws-test',
-    name: 'Test',
-    ingestionUrl: 'http://localhost:8080',
-    configUrl: 'http://localhost:8081',
-    queryUrl: 'http://localhost:8082',
-    agentsUrl: 'http://localhost:8083',
-    apiKey: 'proj_demo_0123456789abcdef',
-    actor: 'tester',
-    internalToken: '',
+    id: 'demo',
+    name: 'demo',
+    projectId: 'demo',
+    actor: 'tester@example.com',
     ...overrides,
   }
 }
 
 export function seedWorkspace(workspace: Workspace = makeWorkspace()): Workspace {
-  localStorage.setItem('apdl-admin:workspaces', JSON.stringify([workspace]))
-  localStorage.setItem('apdl-admin:active-workspace', workspace.id)
+  localStorage.setItem('apdl-admin:active-project', workspace.id)
   return workspace
 }

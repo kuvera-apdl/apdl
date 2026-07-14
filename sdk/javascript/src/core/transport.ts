@@ -1,6 +1,5 @@
 import {
   API_KEY_HEADER,
-  API_KEY_QUERY_PARAM,
   SDK_IDENTIFIER,
   SDK_IDENTIFIER_HEADER,
 } from './constants';
@@ -96,25 +95,20 @@ export class Transport {
     return false;
   }
 
-  /**
-   * Sends a payload using navigator.sendBeacon for page unload scenarios.
-   * Returns true if the browser accepted the beacon, false otherwise.
-   */
-  sendBeacon(url: string, payload: unknown): boolean {
-    if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') {
-      return false;
-    }
-
+  /** Sends one header-authenticated request that may outlive page unload. */
+  async sendKeepalive(url: string, payload: unknown): Promise<boolean> {
     try {
-      const blob = new Blob([JSON.stringify(payload)], {
-        type: 'application/json',
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [API_KEY_HEADER]: this.clientKey,
+          [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
+        },
+        body: JSON.stringify(payload),
+        keepalive: true,
       });
-
-      // sendBeacon cannot set headers, so use the backend's query auth parameter.
-      const separator = url.includes('?') ? '&' : '?';
-      const beaconUrl = `${url}${separator}${API_KEY_QUERY_PARAM}=${encodeURIComponent(this.clientKey)}`;
-
-      return navigator.sendBeacon(beaconUrl, blob);
+      return response.ok;
     } catch {
       return false;
     }

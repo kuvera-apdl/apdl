@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Response
 
-from app.middleware.auth import extract_project_id
+from app.auth import require_role
 from app.middleware.rate_limit import check_rate_limit
 from app.streaming.redis_producer import publish_event
 from app.validation.schema import validate_event_batch
@@ -21,20 +21,8 @@ router = APIRouter()
 
 @router.post("/v1/events", status_code=202)
 async def ingest_events(request: Request):
-    # Check auth
-    api_key = request.headers.get("x-api-key") or request.query_params.get(
-        "api_key", ""
-    )
-    project_id = extract_project_id(api_key)
-    if not project_id:
-        return Response(
-            content=json.dumps({
-                "error": "unauthorized",
-                "message": "Valid API key required. Format: proj_{project_id}_{secret}",
-            }),
-            status_code=401,
-            media_type="application/json",
-        )
+    principal = require_role(request, "events:write")
+    project_id = principal.project_id
 
     # Rate limit
     rate_result = await check_rate_limit(project_id, request)

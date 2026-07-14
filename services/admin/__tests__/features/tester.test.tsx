@@ -30,7 +30,7 @@ const flag = makeFlag({
 function renderTester() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <TesterTab flag={flag} />

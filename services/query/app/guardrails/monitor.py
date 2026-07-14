@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app.clickhouse.client import ClickHouseClient
 from app.models.schemas import GuardrailConfig, GuardrailVariantContext
 from app.routers.guardrails import evaluate_guardrail
+from app.service_auth import service_headers
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ async def evaluate_project(
     response = await config_client.get(
         "/v1/admin/flags",
         params={"project_id": project_id},
+        headers=service_headers(project_id),
     )
     response.raise_for_status()
 
@@ -73,10 +75,12 @@ async def evaluate_project(
         for raw_guardrail in flag.get("guardrails", []):
             try:
                 guardrail = GuardrailConfig.model_validate(raw_guardrail)
-                variant_context = GuardrailVariantContext.model_validate({
-                    "default_variant": flag.get("default_variant"),
-                    "variants": flag.get("variants"),
-                })
+                variant_context = GuardrailVariantContext.model_validate(
+                    {
+                        "default_variant": flag.get("default_variant"),
+                        "variants": flag.get("variants"),
+                    }
+                )
             except ValidationError as exc:
                 logger.warning(
                     "Skipping invalid guardrail context for flag %s: %s",
@@ -120,6 +124,7 @@ async def disable_flag(
             "source": "system",
             "evidence": evidence,
         },
+        headers=service_headers(project_id),
     )
     response.raise_for_status()
     logger.warning("Auto-disabled flag %s for project %s", flag_key, project_id)

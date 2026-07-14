@@ -6,12 +6,9 @@ import re
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-# Canonical API-key format, byte-for-byte identical to the pattern enforced by
-# the ingestion service (services/ingestion/app/middleware/auth.py), the config
-# service (services/config/app/utils.py), and the JS SDK: proj_{project_id}_{secret}
-# where the secret is at least 16 alphanumeric characters. Validating here means a
-# misconfigured key fails fast at init() instead of as 401s on the first flush.
-_KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$")
+# Canonical API-key wire format. The project segment is a client-side hint;
+# services derive tenant authority only from the verified database record.
+_KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$")
 
 DEFAULT_ENDPOINT = "https://api.apdl.dev"
 DEFAULT_BATCH_SIZE = 20
@@ -67,7 +64,7 @@ class APDLConfig(BaseModel):
 
     @property
     def project_id(self) -> str:
-        """The project id embedded in ``api_key`` (the validated middle segment)."""
+        """Return the project hint used for local SDK project-scoped state."""
         match = _KEY_PATTERN.match(self.api_key)
         assert match is not None  # guaranteed by _validate_api_key
         return match.group(1)

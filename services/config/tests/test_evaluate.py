@@ -4,13 +4,19 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import authenticate_request
 from app.main import app
 from app.routers import evaluate
 
 
 @pytest.mark.asyncio
-async def test_evaluate_requires_internal_token(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
+async def test_evaluate_requires_api_key():
+    class RejectingAuthenticator:
+        async def authenticate(self, api_key):
+            return None
+
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = RejectingAuthenticator()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -24,12 +30,11 @@ async def test_evaluate_requires_internal_token(monkeypatch):
         )
 
     assert response.status_code == 401
-    assert response.json()["error"] == "unauthorized"
+    assert response.json()["detail"] == "Valid API key required"
 
 
 @pytest.mark.asyncio
 async def test_evaluate_server_gate_logs_exposure(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
     monkeypatch.setattr(
         evaluate.pg_store,
         "get_flag",
@@ -44,7 +49,6 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/evaluate",
-            headers={"X-APDL-Internal-Token": "secret"},
             json={
                 "project_id": "apdl",
                 "key": "checkout",
@@ -101,7 +105,6 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
     monkeypatch.setattr(
         evaluate.pg_store,
         "get_flag",
@@ -116,7 +119,6 @@ async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypa
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/evaluate",
-            headers={"X-APDL-Internal-Token": "secret"},
             json={
                 "project_id": "apdl",
                 "key": "checkout",
@@ -142,7 +144,6 @@ async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypa
 
 @pytest.mark.asyncio
 async def test_evaluate_rejects_client_only_gate(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "secret")
     monkeypatch.setattr(
         evaluate.pg_store,
         "get_flag",
@@ -157,7 +158,6 @@ async def test_evaluate_rejects_client_only_gate(monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/evaluate",
-            headers={"X-APDL-Internal-Token": "secret"},
             json={
                 "project_id": "apdl",
                 "key": "checkout",

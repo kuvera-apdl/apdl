@@ -2,14 +2,13 @@
 
 import json
 import logging
-import os
-import secrets
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.auth import require_project
 from app.flags.evaluator import evaluate as evaluate_gate
 from app.models.schemas import GateEvaluateRequest, GateEvaluateResponse
 from app.store import postgres as pg_store
@@ -23,24 +22,10 @@ SERVER_EXPOSURE_SOURCE = "server"
 STREAM_MAXLEN = 1000000
 
 
-def _unauthorized() -> JSONResponse:
-    return JSONResponse(
-        status_code=401,
-        content={"error": "unauthorized", "message": "Valid internal token required"},
-    )
-
-
-def _is_trusted_request(request: Request) -> bool:
-    expected = os.environ.get("APDL_INTERNAL_TOKEN", "")
-    provided = request.headers.get("x-apdl-internal-token", "")
-    return bool(expected) and secrets.compare_digest(provided, expected)
-
-
 @router.post("/v1/evaluate", response_model=GateEvaluateResponse)
 async def evaluate(body: GateEvaluateRequest, request: Request):
     """Evaluate a server-side flag without exposing rules to browser clients."""
-    if not _is_trusted_request(request):
-        return _unauthorized()
+    require_project(request, body.project_id, "config:evaluate")
 
     flag = await pg_store.get_flag(
         request.app.state.pg_pool,

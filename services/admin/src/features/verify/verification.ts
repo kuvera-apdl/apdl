@@ -3,7 +3,7 @@
 // flag bootstrap round-trip (X-Cache behavior) → live SSE. Mirrors
 // scripts/dev.sh smoke, including the one re-send at attempt 5.
 import { checkService, healthLevel, SERVICE_DESCRIPTORS } from '@/api/health'
-import { normalizeBaseUrl, request } from '@/api/http'
+import { notifyUnauthorized, request } from '@/api/http'
 import { countEvents } from '@/api/query'
 import { flagCollectionSchema } from '@/api/schemas/flags'
 import type { StreamStatus } from '@/api/sse'
@@ -77,7 +77,6 @@ export async function runVerification(options: VerificationOptions): Promise<boo
         checkService({
           service,
           baseUrl: serviceBaseUrl(workspace, service),
-          apiKey: workspace.apiKey,
         }),
       ),
     ),
@@ -208,9 +207,10 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   // Step 4 — flag bootstrap round-trip with X-Cache observation.
   update('flags', { status: 'running', detail: 'GET /v1/flags ×2…' })
   try {
-    const url = `${normalizeBaseUrl(workspace.configUrl)}/v1/flags`
+    const url = `${serviceBaseUrl(workspace, 'config')}/v1/flags`
     const fetchOnce = async () => {
-      const response = await fetch(url, { headers: { 'X-API-Key': workspace.apiKey } })
+      const response = await fetch(url, { credentials: 'same-origin' })
+      notifyUnauthorized(response)
       const cache = response.headers.get('x-cache') ?? 'n/a'
       const body: unknown = await response.json()
       return { ok: response.ok, cache, body }
@@ -258,7 +258,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
     update('sse', {
       status: 'fail',
       detail: `Stream ${live.status}${live.hasServedFlags ? '' : ', no config snapshot yet'}`,
-      hint: 'The server heartbeats every 35s — check the config service and the workspace API key.',
+      hint: 'The server heartbeats every 35s — check the config service and your project access.',
     })
     return false
   }

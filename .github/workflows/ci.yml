@@ -40,6 +40,21 @@ jobs:
       - run: npm run build
         working-directory: services/admin
 
+  admin-api:
+    name: Admin API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+        working-directory: services/admin-api
+      - run: ruff check app/ scripts/ tests/
+        working-directory: services/admin-api
+      - run: python -m pytest -q
+        working-directory: services/admin-api
+
   python-sdk:
     name: Python SDK
     runs-on: ubuntu-latest

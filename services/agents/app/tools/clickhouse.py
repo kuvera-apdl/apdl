@@ -7,6 +7,8 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
 import httpx
 
+from app.service_auth import service_headers
+
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 _TIMEOUT = 30.0
 
@@ -41,7 +43,11 @@ class EventSelectorPayload(TypedDict):
 async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """POST to the query service and return the JSON response."""
     async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(path, json=payload)
+        resp = await client.post(
+            path,
+            json=payload,
+            headers=service_headers(str(payload["project_id"])),
+        )
         resp.raise_for_status()
         return resp.json()
 

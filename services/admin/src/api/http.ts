@@ -4,10 +4,10 @@
 import type { ZodType } from 'zod'
 
 import type { CurlSpec } from '@/lib/curl'
+import { AUTH_UNAUTHORIZED_EVENT } from '@/core/auth-events'
 
 export interface ServiceConnection {
   baseUrl: string
-  apiKey: string
   actor: string
 }
 
@@ -20,8 +20,10 @@ export interface RequestOptions<T> {
   query?: QueryParams
   body?: unknown
   signal?: AbortSignal
-  /** Extra headers (e.g. x-apdl-internal-token); win over the canonical set. */
+  /** Additional non-credential headers for the proxied service request. */
   headers?: Record<string, string>
+  /** Login probes throw 401 locally; normal requests terminate the console session. */
+  redirectOnUnauthorized?: boolean
   /** Canonical response mirror; a mismatch throws ApiError(code: "schema_mismatch"). */
   schema?: ZodType<T>
 }
@@ -70,9 +72,10 @@ export function apiCurl(
   path: string,
   options: { query?: QueryParams; body?: unknown } = {},
 ): CurlSpec {
-  const headers: Record<string, string> = {}
-  if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
-  if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
+  const headers: Record<string, string> = {
+    Cookie: 'apdl_admin_session=<session-cookie>',
+  }
+  if (method !== 'GET') headers['X-CSRF-Token'] = '<csrf-token>'
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
   return {
     method,
@@ -108,6 +111,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+export function csrfToken(): string | null {
+  if (typeof document === 'undefined') return null
+  const prefix = 'apdl_admin_csrf='
+  const cookie = document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix))
+  if (!cookie) return null
+  try {
+    return decodeURIComponent(cookie.slice(prefix.length))
+  } catch {
+    return null
+  }
+}
+
+export function notifyUnauthorized(response: Response): void {
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT))
+  }
+}
+
 export async function request<T>(
   conn: ServiceConnection,
   path: string,
@@ -117,9 +141,11 @@ export async function request<T>(
   const url = buildUrl(conn.baseUrl, path, options.query)
 
   const headers: Record<string, string> = {}
-  if (conn.apiKey) headers['X-API-Key'] = conn.apiKey
-  if (method !== 'GET' && conn.actor) headers['x-apdl-actor'] = conn.actor
   if (options.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (method !== 'GET') {
+    const csrf = csrfToken()
+    if (csrf) headers['X-CSRF-Token'] = csrf
+  }
   Object.assign(headers, options.headers)
 
   const maxAttempts = method === 'GET' ? GET_RETRIES + 1 : 1
@@ -133,6 +159,7 @@ export async function request<T>(
       response = await fetch(url, {
         method,
         headers,
+        credentials: 'same-origin',
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
         signal: options.signal ?? null,
       })
@@ -154,6 +181,13 @@ export async function request<T>(
 
     if (!response.ok) {
       const apiError = errorFromResponse(response.status, data, response.statusText)
+      if (
+        response.status === 401 &&
+        options.redirectOnUnauthorized !== false &&
+        typeof window !== 'undefined'
+      ) {
+        notifyUnauthorized(response)
+      }
       if (response.status >= 500 && attempt < maxAttempts - 1) {
         lastError = apiError
         continue

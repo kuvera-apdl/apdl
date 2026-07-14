@@ -15,7 +15,7 @@ import { seedWorkspace } from '../helpers/fixtures'
 const requests: { path: string; body: unknown }[] = []
 
 const server = setupServer(
-  http.post('http://localhost:8082/v1/query/events/count', async ({ request }) => {
+  http.post('*/api/projects/demo/query/v1/query/events/count', async ({ request }) => {
     requests.push({ path: 'count', body: await request.json() })
     return HttpResponse.json({
       results: [
@@ -25,7 +25,7 @@ const server = setupServer(
       total_users: 48,
     })
   }),
-  http.post('http://localhost:8082/v1/query/funnel', async ({ request }) => {
+  http.post('*/api/projects/demo/query/v1/query/funnel', async ({ request }) => {
     requests.push({ path: 'funnel', body: await request.json() })
     return HttpResponse.json({
       steps: [
@@ -49,7 +49,7 @@ const server = setupServer(
       overall_conversion: 25,
     })
   }),
-  http.post('http://localhost:8082/v1/query/events/names', async () => {
+  http.post('*/api/projects/demo/query/v1/query/events/names', async () => {
     return HttpResponse.json({
       events: [
         { event_name: 'page', event_count: 76, unique_users: 11 },
@@ -73,7 +73,7 @@ beforeEach(() => {
 function renderPage(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter>{ui}</MemoryRouter>

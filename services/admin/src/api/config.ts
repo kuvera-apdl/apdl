@@ -133,13 +133,11 @@ export function cleanupFlag(
  */
 export function evaluateFlagOnServer(
   conn: ServiceConnection,
-  internalToken: string,
   body: GateEvaluateRequest,
 ): Promise<GateEvaluateResponse> {
   return request(conn, '/v1/evaluate', {
     method: 'POST',
     body,
-    headers: { 'x-apdl-internal-token': internalToken },
     schema: gateEvaluateResponseSchema,
   })
 }
@@ -148,7 +146,7 @@ function adminCurl(conn: ServiceConnection, path: string, query?: Record<string,
   return {
     method: 'GET',
     url: buildUrl(conn.baseUrl, path, query),
-    headers: { 'X-API-Key': conn.apiKey },
+    headers: { Cookie: 'apdl_admin_session=<session-cookie>' },
   }
 }
 
@@ -171,8 +169,8 @@ export function writeCurl(
   body?: unknown,
 ): CurlSpec {
   const headers: Record<string, string> = {
-    'X-API-Key': conn.apiKey,
-    'x-apdl-actor': conn.actor,
+    Cookie: 'apdl_admin_session=<session-cookie>',
+    'X-CSRF-Token': '<csrf-token>',
   }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   return { method, url: buildUrl(conn.baseUrl, path), headers, ...(body !== undefined ? { body } : {}) }
@@ -204,8 +202,8 @@ export function createFlagExampleCurl(conn: ServiceConnection): CurlSpec {
     method: 'POST',
     url: buildUrl(conn.baseUrl, '/v1/admin/flags'),
     headers: {
-      'X-API-Key': conn.apiKey,
-      'x-apdl-actor': conn.actor,
+      Cookie: 'apdl_admin_session=<session-cookie>',
+      'X-CSRF-Token': '<csrf-token>',
       'Content-Type': 'application/json',
     },
     body: {

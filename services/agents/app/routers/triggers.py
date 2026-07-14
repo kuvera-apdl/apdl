@@ -11,6 +11,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.auth import require_project
 from app.framework.registry import is_registered, registered_agents
 from app.graphs.supervisor import run_supervisor
 from app.store.custom_agents import fetch_active_by_slugs
@@ -67,6 +68,7 @@ async def trigger_agent_run(
     Creates a run record in PostgreSQL and launches the supervisor graph
     as a background task.
     """
+    require_project(request, body.project_id, "agents:run")
     pool: asyncpg.Pool = request.app.state.pg_pool
 
     # Names not in the built-in registry may still be the project's custom

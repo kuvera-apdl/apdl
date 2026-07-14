@@ -242,8 +242,7 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
           ) : null}
           <CurlPreview spec={content.curl} />
           <p className="text-xs text-muted-foreground">
-            Recorded actor: <span className="font-medium text-foreground">{active?.actor}</span> ·
-            optimistic lock v{flag.version}
+            Audit identity comes from the authenticated API key · optimistic lock v{flag.version}
           </p>
           {error ? (
             <p className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-sm text-destructive">

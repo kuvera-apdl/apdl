@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_cohort_query
 from app.clickhouse.selectors import selector_label
@@ -29,6 +30,7 @@ async def cohort_comparison(body: CohortRequest, request: Request) -> CohortResp
     event properties.  The response contains per-day event counts and
     unique users for each cohort.
     """
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     params: dict[str, Any] = {

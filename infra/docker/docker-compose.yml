@@ -55,9 +55,12 @@ services:
       - "8080:8080"
     environment:
       REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       LOG_LEVEL: info
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   config:
@@ -69,7 +72,6 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       LOG_LEVEL: info
     depends_on:
       redis:
@@ -90,13 +92,17 @@ services:
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       CONFIG_SERVICE_URL: http://config:8081
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
+      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       GUARDRAIL_MONITOR_ENABLED: ${GUARDRAIL_MONITOR_ENABLED:-true}
       GUARDRAIL_PROJECT_IDS: ${GUARDRAIL_PROJECT_IDS:-apdl}
       GUARDRAIL_MONITOR_INTERVAL_SECONDS: ${GUARDRAIL_MONITOR_INTERVAL_SECONDS:-60}
     depends_on:
       clickhouse:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   agents:
@@ -113,6 +119,8 @@ services:
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
+      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     depends_on:
@@ -204,22 +212,48 @@ services:
       clickhouse:
         condition: service_healthy
 
-  # Admin console — static SPA served by nginx. The browser calls config/query/
-  # agents directly, so the baked VITE_* URLs must be browser-reachable (NOT
-  # Docker service names). Defaults suit an SSH tunnel (localhost:<port>);
-  # override via ADMIN_*_URL for public-IP access, or change them in-app under
-  # Workspace Settings. No depends_on: it serves files, it doesn't call services.
+  # Admin backend-for-frontend. Human sessions and tenant roles live in
+  # PostgreSQL; service credentials and the codegen token never enter the SPA.
+  admin-api:
+    build:
+      context: ../../services/admin-api
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      INGESTION_SERVICE_URL: http://ingestion:8080
+      CONFIG_SERVICE_URL: http://config:8081
+      QUERY_SERVICE_URL: http://query:8082
+      AGENTS_SERVICE_URL: http://agents:8083
+      CODEGEN_SERVICE_URL: http://codegen:8084
+      APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
+      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
+      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
+      APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173"]}'
+      APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ingestion:
+        condition: service_started
+      config:
+        condition: service_started
+      query:
+        condition: service_started
+      agents:
+        condition: service_started
+      codegen:
+        condition: service_started
+
+  # Admin console — static SPA served by nginx. Only /api is dynamic, and it is
+  # forwarded to admin-api on the private Compose network.
   admin:
     build:
       context: ../../services/admin
       dockerfile: Dockerfile
-      args:
-        VITE_INGESTION_URL: ${ADMIN_INGESTION_URL:-http://localhost:8080}
-        VITE_CONFIG_URL: ${ADMIN_CONFIG_URL:-http://localhost:8081}
-        VITE_QUERY_URL: ${ADMIN_QUERY_URL:-http://localhost:8082}
-        VITE_AGENTS_URL: ${ADMIN_AGENTS_URL:-http://localhost:8083}
     ports:
       - "5173:80"
+    depends_on:
+      - admin-api
 
   # Gateway — single SDK front door. Routes /v1/events to ingestion and
   # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`

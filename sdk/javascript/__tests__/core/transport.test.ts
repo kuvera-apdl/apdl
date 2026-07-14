@@ -176,30 +176,31 @@ describe('Transport', () => {
     });
   });
 
-  describe('sendBeacon()', () => {
-    it('should call navigator.sendBeacon with blob', () => {
-      const sendBeaconMock = vi.fn().mockReturnValue(true);
-      vi.stubGlobal('navigator', { sendBeacon: sendBeaconMock });
+  describe('sendKeepalive()', () => {
+    it('should send a header-authenticated keepalive request', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+      vi.stubGlobal('fetch', fetchMock);
 
-      const result = transport.sendBeacon(
+      const result = await transport.sendKeepalive(
         'https://api.test.dev/v1/events',
         { test: true }
       );
 
       expect(result).toBe(true);
-      expect(sendBeaconMock).toHaveBeenCalledTimes(1);
-
-      const url = sendBeaconMock.mock.calls[0][0] as string;
-      expect(url).toContain(`api_key=${CLIENT_KEY}`);
-
-      const blob = sendBeaconMock.mock.calls[0][1] as Blob;
-      expect(blob).toBeInstanceOf(Blob);
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.test.dev/v1/events',
+        expect.objectContaining({
+          method: 'POST',
+          keepalive: true,
+          headers: expect.objectContaining({ 'X-API-Key': CLIENT_KEY }),
+        })
+      );
     });
 
-    it('should return false when sendBeacon is not available', () => {
-      vi.stubGlobal('navigator', {});
+    it('should return false when the server rejects the request', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
 
-      const result = transport.sendBeacon(
+      const result = await transport.sendKeepalive(
         'https://api.test.dev/v1/events',
         {}
       );
@@ -207,11 +208,10 @@ describe('Transport', () => {
       expect(result).toBe(false);
     });
 
-    it('should return false when sendBeacon rejects', () => {
-      const sendBeaconMock = vi.fn().mockReturnValue(false);
-      vi.stubGlobal('navigator', { sendBeacon: sendBeaconMock });
+    it('should return false on a network error', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 
-      const result = transport.sendBeacon(
+      const result = await transport.sendKeepalive(
         'https://api.test.dev/v1/events',
         {}
       );

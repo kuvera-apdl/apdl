@@ -16,6 +16,7 @@ import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.auth import require_project, require_role
 from app.routers.status import RUN_STATUS_COLUMNS, RunStatus, row_to_status
 from app.safety.audit import AuditLogger
 
@@ -62,6 +63,7 @@ async def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
 ) -> RunListResponse:
     """List agent runs for a project, newest first (gap G1)."""
+    require_project(request, project_id, "agents:read")
     pool: asyncpg.Pool = request.app.state.pg_pool
 
     base = f"SELECT {RUN_STATUS_COLUMNS} FROM agent_runs WHERE project_id = $1"
@@ -84,9 +86,13 @@ async def list_runs(
     return RunListResponse(runs=runs, count=len(runs))
 
 
-async def _require_run(pool: asyncpg.Pool, run_id: str) -> None:
+async def _require_run(pool: asyncpg.Pool, run_id: str, project_id: str) -> None:
     async with pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT 1 FROM agent_runs WHERE run_id = $1", run_id)
+        exists = await conn.fetchval(
+            "SELECT 1 FROM agent_runs WHERE run_id = $1 AND project_id = $2",
+            run_id,
+            project_id,
+        )
     if exists is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -99,7 +105,8 @@ async def get_run_results(run_id: str, request: Request) -> RunResults:
     predates result persistence) are empty lists.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
-    await _require_run(pool, run_id)
+    principal = require_role(request, "agents:read")
+    await _require_run(pool, run_id, principal.project_id)
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -116,7 +123,9 @@ async def get_run_results(run_id: str, request: Request) -> RunResults:
             try:
                 output = json.loads(output)
             except (json.JSONDecodeError, ValueError):
-                logger.error("[%s] Skipping malformed %s result row", run_id, row["produces"])
+                logger.error(
+                    "[%s] Skipping malformed %s result row", run_id, row["produces"]
+                )
                 continue
         if not isinstance(output, list):
             continue
@@ -140,7 +149,8 @@ async def get_run_audit(
 ) -> RunAuditResponse:
     """The run's audit trail over HTTP, newest first (gap G2)."""
     pool: asyncpg.Pool = request.app.state.pg_pool
-    await _require_run(pool, run_id)
+    principal = require_role(request, "agents:read")
+    await _require_run(pool, run_id, principal.project_id)
 
     entries = await AuditLogger(pool).get_run_audit_trail(run_id, limit=limit)
     return RunAuditResponse(run_id=run_id, audit=entries, count=len(entries))

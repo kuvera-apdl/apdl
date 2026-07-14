@@ -28,7 +28,9 @@ def _run_row(run_id: str, project_id: str = "demo", status: str = "completed") -
         "updated_at": datetime(2026, 6, 10, 12, 5, tzinfo=timezone.utc),
         "trigger_type": "manual",
         "autonomy_level": 2,
-        "config": json.dumps({"analysis_types": ["behavior_analysis", "experiment_design"]}),
+        "config": json.dumps(
+            {"analysis_types": ["behavior_analysis", "experiment_design"]}
+        ),
     }
 
 
@@ -51,7 +53,14 @@ class FakeConn:
 
     async def fetchval(self, query: str, *args):
         if "SELECT 1 FROM agent_runs" in query:
-            return 1 if any(r["run_id"] == args[0] for r in self.store["runs"]) else None
+            return (
+                1
+                if any(
+                    r["run_id"] == args[0] and r["project_id"] == args[1]
+                    for r in self.store["runs"]
+                )
+                else None
+            )
         raise AssertionError(f"Unexpected fetchval: {query}")
 
     async def execute(self, query: str, *args):
@@ -92,7 +101,9 @@ STORE = {
         {
             "run_id": "run-1",
             "produces": "insights",
-            "output": json.dumps([{"title": "Drop-off on checkout", "severity": "high"}]),
+            "output": json.dumps(
+                [{"title": "Drop-off on checkout", "severity": "high"}]
+            ),
         },
         {
             "run_id": "run-1",
@@ -138,7 +149,10 @@ async def test_list_runs_filters_by_project_and_status():
         assert [r["run_id"] for r in body["runs"]] == ["run-1", "run-2"]
         assert body["runs"][0]["started_at"] == "2026-06-10T12:00:00+00:00"
         # Requested agents surface from config so clients need no local record.
-        assert body["runs"][0]["analysis_types"] == ["behavior_analysis", "experiment_design"]
+        assert body["runs"][0]["analysis_types"] == [
+            "behavior_analysis",
+            "experiment_design",
+        ]
         assert body["runs"][0]["autonomy_level"] == 2
 
         filtered = await client.get(
@@ -161,18 +175,29 @@ async def test_run_results_aggregates_by_produces_with_empty_defaults():
         assert resp.status_code == 200
         body = resp.json()
         assert body["run_id"] == "run-1"
-        assert body["insights"] == [{"title": "Drop-off on checkout", "severity": "high"}]
+        assert body["insights"] == [
+            {"title": "Drop-off on checkout", "severity": "high"}
+        ]
         assert body["experiment_designs"] == [{"hypothesis": "Bigger CTA converts"}]
         assert body["personalizations"] == []
         assert body["feature_proposals"] == []
         # A custom agent's produces key is surfaced, not silently dropped.
-        assert body["custom_outputs"] == {"churn_signals": [{"signal": "activation drop"}]}
+        assert body["custom_outputs"] == {
+            "churn_signals": [{"signal": "activation drop"}]
+        }
 
 
 @pytest.mark.asyncio
 async def test_run_results_404_for_unknown_run():
     async with _client(STORE) as client:
         resp = await client.get("/v1/agents/nope/results")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_results_hide_other_tenant_run():
+    async with _client(STORE) as client:
+        resp = await client.get("/v1/agents/run-other/results")
     assert resp.status_code == 404
 
 

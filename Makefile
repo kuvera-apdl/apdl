@@ -1,10 +1,11 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user
 
 # ─── Top-Level ───────────────────────────────────────────────
 
 all: build
 
 CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
+POSTGRES_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
 # Full-stack Compose command. `-f infra/docker/docker-compose.yml` makes Compose
 # use that folder as its project dir (and its default `.env` lookup), so the
@@ -30,6 +31,8 @@ deps:
 	cd sdk/javascript && npm install
 	@echo "==> Installing Admin Console dependencies"
 	cd services/admin && npm install
+	@echo "==> Setting up Admin API"
+	cd services/admin-api && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Ingestion service"
 	cd services/ingestion && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Config service"
@@ -49,9 +52,9 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-etl test-admin
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-etl test-admin-api test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl lint-admin-api lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -102,6 +105,20 @@ lint-admin:
 
 clean-admin:
 	rm -rf services/admin/dist services/admin/node_modules
+
+# ─── Admin API (Python) ─────────────────────────────────────
+
+run-admin-api:
+	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/uvicorn app.main:app --reload --port 8085 --env-file ../../.env
+
+test-admin-api:
+	cd services/admin-api && .venv/bin/python -m pytest -v
+
+lint-admin-api:
+	cd services/admin-api && .venv/bin/ruff check app/ scripts/ tests/
+
+create-admin-user:
+	cd services/admin-api && .venv/bin/python scripts/create_admin_user.py $(ARGS)
 
 # ─── SDK (Python) ────────────────────────────────────────────
 
@@ -186,18 +203,23 @@ new-transform:
 migrate-clickhouse:
 	@CLICKHOUSE_COMPOSE_FILE="$(CLICKHOUSE_COMPOSE_FILE)" scripts/init-clickhouse.sh
 
+migrate-postgres:
+	@POSTGRES_COMPOSE_FILE="$(POSTGRES_COMPOSE_FILE)" scripts/init-postgres.sh
+
 # ─── Docker ──────────────────────────────────────────────────
 
 dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
+	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
 dev-all:
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
-	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin gateway
+	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
+	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
 
 dev-down:
 	$(COMPOSE) down
@@ -213,4 +235,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl test-etl lint-admin test-admin
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl test-etl lint-admin-api test-admin-api lint-admin test-admin

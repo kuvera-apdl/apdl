@@ -24,6 +24,7 @@ PY_PACKAGES=(
   "services/config|app/ tests/"
   "services/query|app/ tests/"
   "services/agents|app/ tests/"
+  "services/admin-api|app/ scripts/ tests/"
   "pipeline/etl|etl/ scripts/ tests/"
 )
 

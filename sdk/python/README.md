@@ -26,10 +26,10 @@ cd sdk/python && uv pip install -e ".[dev]"
 ```python
 from apdl import APDL
 
-client = APDL.init(api_key="proj_<project>_<secret>")  # secret: 16+ alphanumeric chars
+client = APDL.init(api_key="proj_<project>_<secret>")  # secret: 16-128 alphanumeric chars
 # The key format is validated at init (same regex as the ingestion/config
 # services); a malformed key raises immediately instead of 401-ing on first send.
-# client.project_id  -> "<project>" (parsed from the key)
+# client.project_id  -> "<project>" (client hint; servers verify authority)
 
 # Track events (identity is explicit per call — servers handle many users)
 client.track("order_completed", {"total": 42.0}, user_id="u_123")

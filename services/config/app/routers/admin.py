@@ -9,6 +9,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from app.auth import authorized_project
 from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentCreate,
@@ -24,7 +25,7 @@ from app.models.schemas import (
 )
 from app.store import postgres as pg_store
 from app.store import redis_cache
-from app.utils import extract_project_id, serialize_client_flag, serialize_flag
+from app.utils import serialize_client_flag, serialize_flag
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,9 @@ router = APIRouter(prefix="/v1/admin")
 STALE_STATE_AGE_DAYS = 90
 
 
-def _unauthorized():
-    return JSONResponse(
-        status_code=401,
-        content={"error": "unauthorized", "message": "API key or project_id required"},
-    )
-
 
 def _actor(request: Request) -> str:
-    return request.headers.get("x-apdl-actor", "admin")
+    return f"credential:{request.state.principal.credential_id}"
 
 
 def _enabled_for_state(state: str) -> bool:
@@ -179,9 +174,7 @@ async def list_flags(
     include_archived: bool = False,
 ):
     """List all flags for a project."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     flags = await pg_store.get_flags(
         request.app.state.pg_pool,
@@ -198,9 +191,7 @@ async def list_stale_flags(
     older_than_days: int = Query(default=STALE_STATE_AGE_DAYS, ge=1, le=3650),
 ):
     """Report flags that need owner review or rollout cleanup."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     today = date.today()
     flags = await pg_store.get_flags(request.app.state.pg_pool, project_id)
@@ -225,9 +216,7 @@ async def list_stale_flags(
 @router.post("/flags", status_code=201)
 async def create_flag(body: FlagCreate, request: Request):
     """Create a new flag. Returns 409 on duplicate, 201 on success."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
 
@@ -271,9 +260,7 @@ async def create_flag(body: FlagCreate, request: Request):
 @router.put("/flags/{key}")
 async def update_flag(key: str, body: FlagUpdate, request: Request):
     """Update an existing flag (partial update). Returns 404 if not found."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     existing = await pg_store.get_flag(pool, project_id, key)
@@ -343,9 +330,7 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
 @router.post("/flags/{key}/disable")
 async def disable_flag(key: str, body: FlagDisable, request: Request):
     """Disable a flag through the canonical rollback path."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     existing = await pg_store.get_flag(pool, project_id, key)
@@ -411,9 +396,7 @@ async def disable_flag(key: str, body: FlagDisable, request: Request):
 @router.delete("/flags/{key}")
 async def delete_flag(key: str, request: Request):
     """Delete a flag. Returns 404 if not found."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     existing = await pg_store.get_flag(pool, project_id, key)
@@ -450,9 +433,7 @@ async def delete_flag(key: str, request: Request):
 @router.post("/flags/{key}/cleanup")
 async def cleanup_flag(key: str, body: FlagCleanup, request: Request):
     """Archive a fully rolled out flag through the cleanup workflow."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     existing = await pg_store.get_flag(pool, project_id, key)
@@ -531,9 +512,7 @@ async def get_flag_audit(
     limit: int = Query(default=50, ge=1, le=200),
 ):
     """Return the retained audit history for a flag."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     existing = await pg_store.get_flag(pool, project_id, key, include_archived=True)
@@ -723,9 +702,7 @@ async def _broadcast_experiment_change(
 @router.get("/experiments")
 async def list_experiments(request: Request):
     """List all experiments for a project."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     experiments = await pg_store.get_experiments(request.app.state.pg_pool, project_id)
     result = [_experiment_to_response(e) for e in experiments]
@@ -738,9 +715,7 @@ async def create_experiment(body: ExperimentCreate, request: Request):
 
     Returns 409 if the experiment key or the backing flag key already exists.
     """
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     actor = _actor(request)
@@ -821,9 +796,7 @@ async def create_experiment(body: ExperimentCreate, request: Request):
 @router.put("/experiments/{key}")
 async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
     """Update an experiment and resync its backing flag. Returns 404 if missing."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     actor = _actor(request)
@@ -944,9 +917,7 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
 @router.delete("/experiments/{key}")
 async def delete_experiment(key: str, request: Request):
     """Delete an experiment and archive its backing flag. Returns 404 if missing."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return _unauthorized()
+    project_id = authorized_project(request, "config:write")
 
     pool = request.app.state.pg_pool
     actor = _actor(request)

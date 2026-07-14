@@ -6,8 +6,10 @@ import json
 from typing import Any
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import Principal, authenticate_request
 from app.main import app
 from app.routers import triggers
 
@@ -54,6 +56,42 @@ def _client(pool: _FakePool) -> AsyncClient:
     app.state.pg_pool = pool
     app.state.vector_store = object()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.mark.asyncio
+async def test_trigger_denies_cross_tenant_project():
+    pool = _FakePool()
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "other", "trigger_type": "manual"},
+        )
+
+    assert response.status_code == 403
+    assert pool.conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_requires_agents_run_role():
+    async def authenticate_reader(request: Request):
+        principal = Principal(
+            credential_id="reader",
+            project_id="demo",
+            roles=frozenset({"agents:read"}),
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_reader
+    pool = _FakePool()
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "demo", "trigger_type": "manual"},
+        )
+
+    assert response.status_code == 403
+    assert pool.conn.executed == []
 
 
 @pytest.mark.asyncio
