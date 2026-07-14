@@ -13,16 +13,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
-from typing import Any
+from typing import Any, Sequence
 
-#: Paths an autonomous change must never touch (CI config, keys, env files).
-DEFAULT_PROTECTED_PATTERNS: tuple[str, ...] = (
-    ".github/workflows/*",
-    "*.pem",
-    "*.key",
-    "id_rsa*",
-    ".env",
-    ".env.*",
+from app.safety.policy import (
+    DEFAULT_PROTECTED_PATTERNS,
+    EffectiveCodegenSafetyPolicy,
+    VerifiedProtectedPathExemption,
 )
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -52,12 +48,20 @@ def scan_secrets(diff_text: str) -> list[str]:
 def protected_path_violations(
     paths: list[str],
     protected: tuple[str, ...] = DEFAULT_PROTECTED_PATTERNS,
-    allowed: tuple[str, ...] = (),
+    verified_exemptions: Sequence[VerifiedProtectedPathExemption] = (),
 ) -> list[str]:
     """Return a message for each changed path that matches a protected pattern."""
+    if any(
+        not isinstance(exemption, VerifiedProtectedPathExemption)
+        for exemption in verified_exemptions
+    ):
+        raise TypeError(
+            "protected-path exemptions must be VerifiedProtectedPathExemption values"
+        )
+    exempt_paths = {exemption.path for exemption in verified_exemptions}
     out: list[str] = []
     for path in paths:
-        if path in allowed:
+        if path in exempt_paths:
             continue
         for pattern in protected:
             if fnmatch(path, pattern) or fnmatch(path, f"*/{pattern}"):
@@ -69,11 +73,25 @@ def protected_path_violations(
 def diff_too_large(
     diff_stat: dict[str, Any], *, max_files: int = 50, max_lines: int = 2000
 ) -> str | None:
-    """Return a message if the diff exceeds the file/line blast-radius limits."""
+    """Return a violation for malformed or over-limit diff statistics."""
     if not isinstance(diff_stat, dict):
-        return None
-    files = diff_stat.get("files", 0)
-    lines = diff_stat.get("additions", 0) + diff_stat.get("deletions", 0)
+        return "Diff statistics are malformed: expected an object."
+    required = ("files", "additions", "deletions")
+    missing = [name for name in required if name not in diff_stat]
+    if missing:
+        return (
+            "Diff statistics are malformed: missing " + ", ".join(missing) + "."
+        )
+    for name in required:
+        value = diff_stat[name]
+        if type(value) is not int or value < 0:
+            return (
+                "Diff statistics are malformed: "
+                f"{name} must be a non-negative integer."
+            )
+
+    files = diff_stat["files"]
+    lines = diff_stat["additions"] + diff_stat["deletions"]
     if files > max_files:
         return f"Diff touches {files} files, exceeding the {max_files}-file limit."
     if lines > max_lines:
@@ -85,28 +103,57 @@ def evaluate_pre_push(
     *,
     diff_stat: dict[str, Any],
     changed_paths: list[str],
+    policy: EffectiveCodegenSafetyPolicy,
     diff_text: str = "",
-    policy: dict[str, Any] | None = None,
+    verified_exemptions: Sequence[VerifiedProtectedPathExemption] = (),
 ) -> GateResult:
-    """Run every pre-push gate and aggregate the violations.
-
-    ``policy`` (from the repo connection) may override ``protected_paths``,
-    ``max_files``, and ``max_lines``.
-    """
-    policy = policy or {}
-    protected = tuple(policy.get("protected_paths", DEFAULT_PROTECTED_PATTERNS))
-    allowed = tuple(policy.get("allowed_protected_paths", ()))
+    """Run every gate using only the trusted, resolved effective policy."""
+    if not isinstance(policy, EffectiveCodegenSafetyPolicy):
+        raise TypeError("policy must be an EffectiveCodegenSafetyPolicy")
+    if any(
+        not isinstance(exemption, VerifiedProtectedPathExemption)
+        for exemption in verified_exemptions
+    ):
+        raise TypeError(
+            "protected-path exemptions must be VerifiedProtectedPathExemption values"
+        )
     violations: list[str] = []
+    active_exemptions = verified_exemptions
+    if verified_exemptions and not policy.runtime_workflow_generation_enabled:
+        violations.append(
+            "Protected-path exemption rejected: runtime workflow generation "
+            "is not enabled by the effective policy."
+        )
+        active_exemptions = ()
 
     size = diff_too_large(
         diff_stat,
-        max_files=policy.get("max_files", 50),
-        max_lines=policy.get("max_lines", 2000),
+        max_files=policy.max_files,
+        max_lines=policy.max_lines,
     )
     if size:
         violations.append(size)
-    violations.extend(protected_path_violations(changed_paths, protected, allowed))
-    if diff_text:
+
+    if not isinstance(changed_paths, list) or any(
+        not isinstance(path, str) for path in changed_paths
+    ):
+        violations.append(
+            "Changed paths are malformed: expected a list of path strings."
+        )
+    else:
+        violations.extend(
+            protected_path_violations(
+                changed_paths,
+                policy.protected_paths,
+                active_exemptions,
+            )
+        )
+
+    # Secret scanning is never tenant-configurable and always runs when the diff
+    # text has the required type (including for an empty string).
+    if isinstance(diff_text, str):
         violations.extend(scan_secrets(diff_text))
+    else:
+        violations.append("Diff text is malformed: expected a string.")
 
     return GateResult(passed=not violations, violations=violations)

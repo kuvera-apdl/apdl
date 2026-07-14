@@ -96,6 +96,9 @@ renaming, editing, deleting, or inserting an older file fails closed.
 - `005_agent_observability.sql` -- agent envelope metadata and `llm_calls`
 - `006_config.sql` -- flags, flag audit history, and Config experiments
 - `007_codegen.sql` -- connections, changesets, GitHub/CI observations, and claims
+- `008_codegen_safety_policy.sql` -- strict tenant preferences and effective safety-policy provenance
+- `009_codegen_repository_authority.sql` -- operator-verified repository grants, legacy binding quarantine, and immutable changeset targets
+- `010_codegen_publication_identity.sql` -- v1 publication audit archive and strict image/config-bound v2 authority
 
 Config, Agents, and Codegen never create or alter tables at process startup.
 They verify the required ledger entry and schema columns, then fail with a

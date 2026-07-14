@@ -12,15 +12,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml .
-# Install the service deps + the coding agent (aider) so the DEFAULT in-process
-# editor works out of the box — `make dev-all` needs no extra setup. With
-# CODEGEN_SANDBOX=docker the edit runs in the sandbox image instead and this
-# bundled aider is simply unused.
-RUN pip install --no-cache-dir ".[agent]"
+# The API orchestrates isolated workers; it deliberately does not carry Aider or
+# execute customer repositories in this credential-bearing process.
+RUN pip install --no-cache-dir .
 COPY app/ app/
-# Run the API as a non-root user. With CODEGEN_SANDBOX=docker, untrusted code runs
-# in the ephemeral sandbox container (Dockerfile.worker); by default the in-process
-# editor runs it here in a throwaway workdir (fine for trusted/dev repos).
+# Run the API as a non-root user. Untrusted edits run in Dockerfile.worker.
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser /app
 USER appuser
 EXPOSE 8084

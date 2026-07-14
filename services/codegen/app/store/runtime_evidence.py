@@ -130,9 +130,8 @@ async def apply_runtime_evidence_observation(
                 return ApplyObservationResult(True, False, "superseded_observation")
             row = await conn.fetchrow(
                 """
-                SELECT cs.*, conn.repo AS connected_repository
+                SELECT cs.*, cs.repository_full_name AS connected_repository
                 FROM codegen_changesets cs
-                JOIN codegen_connections conn ON conn.project_id = cs.project_id
                 WHERE cs.changeset_id = $1 FOR UPDATE OF cs
                 """,
                 observation.changeset_id,

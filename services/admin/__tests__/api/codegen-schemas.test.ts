@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   changesetListSchema,
   changesetSchema,
+  repoConnectionSchema,
+  tenantCodegenConnectionPolicySchema,
 } from '@/api/schemas/codegen'
 import {
   makeReviewVerdict,
@@ -52,6 +54,8 @@ const sample = {
   runtime_evidence_assessment: null,
   review_verdict: null,
   publication_authorization: null,
+  tenant_policy_snapshot: null,
+  effective_safety_policy_sha256: null,
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',
@@ -68,6 +72,82 @@ describe('codegen schemas', () => {
 
   it('rejects unknown fields (strict)', () => {
     expect(changesetSchema.safeParse({ ...sample, extra: true }).success).toBe(false)
+  })
+
+  it('parses strict tenant policy provenance', () => {
+    const tenantPolicy = {
+      schema_version: 'tenant_codegen_connection_policy@1' as const,
+      test_cmd: 'make ci',
+      gates: {
+        max_files: 5,
+        max_lines: 300,
+        additional_protected_paths: ['infra/**'],
+      },
+      runtime_acceptance: {
+        schema_version: 'runtime_acceptance_request@1' as const,
+        enabled: false,
+      },
+    }
+    expect(tenantCodegenConnectionPolicySchema.parse(tenantPolicy)).toEqual(tenantPolicy)
+    expect(tenantCodegenConnectionPolicySchema.safeParse({
+      ...tenantPolicy,
+      test_cmd: '   ',
+    }).success).toBe(false)
+    expect(tenantCodegenConnectionPolicySchema.safeParse({
+      ...tenantPolicy,
+      gates: {
+        ...tenantPolicy.gates,
+        additional_protected_paths: Array.from({ length: 65 }, (_, index) => `p/${index}/**`),
+      },
+    }).success).toBe(false)
+    expect(changesetSchema.parse({
+      ...sample,
+      tenant_policy_snapshot: tenantPolicy,
+      effective_safety_policy_sha256: 'a'.repeat(64),
+    }).tenant_policy_snapshot).toEqual(tenantPolicy)
+  })
+
+  it('rejects legacy connection policy fields and malformed policy provenance', () => {
+    const connection = {
+      project_id: 'demo',
+      grant_id: 'ghg_demo',
+      repository_id: 123456,
+      repository_full_name: 'acme/widgets',
+      default_base_branch: 'main',
+      tenant_policy: {
+        schema_version: 'tenant_codegen_connection_policy@1',
+        test_cmd: null,
+        gates: {
+          max_files: null,
+          max_lines: null,
+          additional_protected_paths: [],
+        },
+        runtime_acceptance: {
+          schema_version: 'runtime_acceptance_request@1',
+          enabled: false,
+        },
+      },
+      created_at: '2026-07-01T10:00:00+00:00',
+      updated_at: '2026-07-01T10:00:00+00:00',
+    }
+    expect(repoConnectionSchema.safeParse(connection).success).toBe(true)
+    expect(repoConnectionSchema.safeParse({ ...connection, policy: {} }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      grant_id: 'tenant-chosen-grant',
+    }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      installation_id: 42,
+    }).success).toBe(false)
+    expect(repoConnectionSchema.safeParse({
+      ...connection,
+      repo: 'acme/widgets',
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      effective_safety_policy_sha256: 'NOT-A-DIGEST',
+    }).success).toBe(false)
   })
 
   it('rejects CI or review values as lifecycle statuses', () => {
@@ -156,7 +236,7 @@ describe('codegen schemas', () => {
     expect(parsed.publication_authorization?.decision.allowed).toBe(false)
   })
 
-  it('rejects a publication decision for a different stage or policy', () => {
+  it('rejects publication authorization for a different stage, policy, or candidate', () => {
     const authorization = makePublicationAuthorization()
     const mismatchedStage = {
       ...authorization,
@@ -166,6 +246,10 @@ describe('codegen schemas', () => {
       ...authorization,
       decision: { ...authorization.decision, policy_sha256: '9'.repeat(64) },
     }
+    const mismatchedCandidate = {
+      ...authorization,
+      expected_candidate_identity_sha256: '8'.repeat(64),
+    }
 
     expect(changesetSchema.safeParse({
       ...sample,
@@ -174,6 +258,10 @@ describe('codegen schemas', () => {
     expect(changesetSchema.safeParse({
       ...sample,
       publication_authorization: mismatchedPolicy,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: mismatchedCandidate,
     }).success).toBe(false)
   })
 

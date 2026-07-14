@@ -12,6 +12,10 @@ import os
 import tempfile
 
 from app.evaluations.models import RolloutStage
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    load_platform_safety_policy,
+)
 
 _DEFAULT_MODEL = "claude-opus-4-8"
 
@@ -37,15 +41,6 @@ def codegen_cors_origins() -> list[str]:
     raw = os.getenv("CODEGEN_CORS_ORIGINS", "")
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     return origins or list(_DEFAULT_CORS_ORIGINS)
-
-
-def internal_token() -> str:
-    """Shared internal service token (``X-APDL-Internal-Token``).
-
-    Empty in local dev, in which case the internal-token guard is permissive —
-    matching the posture of the other services.
-    """
-    return os.getenv("APDL_INTERNAL_TOKEN", "")
 
 
 def github_app_id() -> str:
@@ -93,7 +88,7 @@ def github_api_url() -> str:
 
 
 def github_webhook_secret() -> str:
-    """HMAC secret for verifying inbound GitHub webhooks. Empty = permissive dev."""
+    """HMAC secret for inbound GitHub webhooks. Empty disables the endpoint."""
     return os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 
@@ -136,6 +131,16 @@ def codegen_rollout_stage() -> RolloutStage:
 def codegen_rollout_authorization_path() -> str:
     """Operator-mounted rollout authorization artifact used for PR stages."""
     return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
+
+
+def codegen_platform_safety_policy() -> PlatformCodegenSafetyPolicy:
+    """Return the operator-owned Codegen safety policy.
+
+    The loader uses safe built-in defaults when no policy file is configured
+    and raises on any invalid configured file, preventing a malformed operator
+    policy from silently weakening the pre-push gates.
+    """
+    return load_platform_safety_policy()
 
 
 def codegen_aider_bin() -> str:
@@ -200,6 +205,39 @@ def codegen_contract_install_timeout() -> int:
 def codegen_isolated_worker() -> bool:
     """Whether this process is the credential-minimal per-change worker."""
     return os.getenv("APDL_CODEGEN_ISOLATED_WORKER") == "true"
+
+
+def codegen_sandbox_mode() -> str:
+    """Editor isolation mode.
+
+    Docker is the fail-closed default. The in-process editor exists only for
+    explicitly trusted local repositories and is never valid for a PR rollout
+    stage.
+    """
+    mode = os.getenv("CODEGEN_SANDBOX", "docker").strip().lower() or "docker"
+    if mode not in {"docker", "in-process"}:
+        raise ValueError("CODEGEN_SANDBOX must be 'docker' or 'in-process'")
+    return mode
+
+
+def codegen_sandbox_network() -> str:
+    """Named, operator-managed network used by the isolated worker."""
+    return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
+
+
+def codegen_controller_image_id() -> str:
+    """Immutable controller image ID used by publication evidence binding."""
+    return os.getenv("CODEGEN_CONTROLLER_IMAGE_ID", "").strip()
+
+
+def codegen_sandbox_image() -> str:
+    """Configured production candidate image reference."""
+    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-sandbox:latest").strip()
+
+
+def codegen_trusted_repos_only() -> bool:
+    """Explicit acknowledgement required for trusted local in-process edits."""
+    return os.getenv("CODEGEN_TRUSTED_REPOS_ONLY", "").strip().lower() == "true"
 
 
 def codegen_helper_model() -> str:
@@ -272,8 +310,11 @@ def codegen_git_timeout() -> int:
 
 
 def codegen_agent_timeout() -> int:
-    """Editing-agent (aider) timeout, seconds — also the per-job pipeline budget."""
+    """Timeout for one editing-agent (aider) invocation, in seconds."""
     return int(os.getenv("CODEGEN_TIMEOUT", "1800"))
+
+
+MAX_CODEGEN_JOB_BUDGET_SECONDS = 3000
 
 
 def codegen_job_budget() -> int:
@@ -284,14 +325,22 @@ def codegen_job_budget() -> int:
     budget is what must bound anything wrapping the pipeline as a unit: the
     sandbox container's ``docker run`` (killing it at the bare agent timeout
     truncates legitimate retry rounds) and the stale-changeset sweep deadline.
-    Override explicitly with ``CODEGEN_JOB_BUDGET`` if the derivation doesn't
-    fit (e.g. a huge clone).
+    GitHub write credentials last at most one hour. Keep the credential-bearing
+    sandbox below 50 minutes so token cleanup has a ten-minute safety window.
+    ``CODEGEN_JOB_BUDGET`` may tighten this bound but cannot expand it.
     """
     override = os.getenv("CODEGEN_JOB_BUDGET", "")
     if override.strip():
-        return max(1, int(override))
+        budget = max(1, int(override))
+        if budget > MAX_CODEGEN_JOB_BUDGET_SECONDS:
+            raise ValueError(
+                "CODEGEN_JOB_BUDGET cannot exceed 3000 seconds while a GitHub "
+                "write token is held"
+            )
+        return budget
     rounds = 1 + codegen_edit_retries()
-    return rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
+    derived = rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
+    return min(derived, MAX_CODEGEN_JOB_BUDGET_SECONDS)
 
 
 def codegen_stale_sweep_interval() -> int:

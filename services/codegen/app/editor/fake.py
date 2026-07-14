@@ -26,7 +26,9 @@ class FakeEditor:
 
     def __init__(self, result: EditResult | None = None) -> None:
         self._result = result or EditResult(
-            success=True, branch=None, diff_stat={"files": 1, "additions": 10}
+            success=True,
+            branch=None,
+            diff_stat={"files": 1, "additions": 10, "deletions": 0},
         )
         self.last_request: EditRequest | None = None
 

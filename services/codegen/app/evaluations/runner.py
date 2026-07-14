@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,11 +86,11 @@ def _score_execution(
     )
     measurements = OutcomeMeasurements.model_validate(
         {
-            **execution.measurements.model_dump(mode="json"),
+            **execution.measurements.model_dump(mode="python"),
             "behavioral_acceptance": MetricValue(
                 value=float(harness.passed),
                 evidence=[harness_evidence],
-            ).model_dump(mode="json"),
+            ).model_dump(mode="python"),
         }
     )
     return EvaluationOutcome(
@@ -101,6 +102,40 @@ def _score_execution(
         harness=harness,
         oracle_case_sha256=canonical_sha256(oracle),
         notes=notes,
+    )
+
+
+def _unavailable_outcome(
+    *,
+    case_id: str,
+    oracle: EvaluationOracle,
+    reason: str,
+) -> EvaluationOutcome:
+    unavailable = lambda metric: MetricValue(  # noqa: E731 - compact strict record
+        value=None,
+        unavailable_reason=f"{metric} unavailable because {reason}",
+    )
+    return EvaluationOutcome(
+        case_id=case_id,
+        status=OutcomeStatus.unavailable,
+        measurements=OutcomeMeasurements(
+            requirement_coverage=unavailable("requirement coverage"),
+            build_success=unavailable("build result"),
+            lint_success=unavailable("lint result"),
+            test_success=unavailable("test result"),
+            first_pass_ci_success=unavailable("first-pass CI result"),
+            ci_repair_success=unavailable("CI repair result"),
+            failure_classification_correct=unavailable("failure classification"),
+            reverted=unavailable("revert observation"),
+            human_correction_lines=unavailable("human correction observation"),
+            retries=unavailable("retry count"),
+            latency_seconds=unavailable("latency"),
+            cost_usd=unavailable("cost"),
+            behavioral_acceptance=unavailable("sealed harness result"),
+        ),
+        harness=None,
+        oracle_case_sha256=canonical_sha256(oracle),
+        unavailable_reason=reason,
     )
 
 
@@ -118,23 +153,47 @@ async def run_corpus(
     validate_corpus_oracles(corpus, oracle_set)
     oracle_by_case = {oracle.case_id: oracle for oracle in oracle_set.oracles}
 
+    configured_root = os.getenv("APDL_EVALUATION_WORKSPACE_ROOT", "").strip()
+    workspace_root = Path(configured_root).resolve() if configured_root else None
+    if workspace_root is not None:
+        if not workspace_root.is_absolute() or not workspace_root.is_dir():
+            raise ValueError(
+                "APDL_EVALUATION_WORKSPACE_ROOT must name an existing absolute directory"
+            )
+
     outcomes: list[EvaluationOutcome] = []
     for case in corpus.cases:
         invocation_id = f"eval_inv_{secrets.token_hex(16)}"
-        with TemporaryDirectory(prefix="apdl-eval-workspace-") as temp_dir:
+        with TemporaryDirectory(
+            prefix="apdl-eval-workspace-",
+            dir=workspace_root,
+        ) as temp_dir:
             materialized, manifest = materialize_fixture(
                 case,
                 Path(temp_dir) / "checkout",
                 fixture_root=fixture_root,
             )
-            execution = await executor.execute(
-                EvaluationInvocation(
-                    invocation_id=invocation_id,
-                    ecosystem=case.ecosystem,
-                    task=case.task,
-                    workspace=materialized.workspace,
+            try:
+                execution = await executor.execute(
+                    EvaluationInvocation(
+                        invocation_id=invocation_id,
+                        ecosystem=case.ecosystem,
+                        task=case.task,
+                        workspace=materialized.workspace,
+                    )
                 )
-            )
+            except Exception as exc:
+                # A single model/provider/container failure must not discard the
+                # other cases.  It becomes explicit denominator/exclusion data;
+                # no candidate-controlled exception text enters the artifact.
+                outcomes.append(
+                    _unavailable_outcome(
+                        case_id=case.case_id,
+                        oracle=oracle_by_case[case.case_id],
+                        reason=f"evaluation executor failed ({type(exc).__name__})",
+                    )
+                )
+                continue
             if execution.invocation_id != invocation_id:
                 raise ValueError("executor returned a result for a different invocation")
             harness = run_fixture_harness(materialized, manifest)

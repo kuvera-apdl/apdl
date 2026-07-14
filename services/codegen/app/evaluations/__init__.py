@@ -2,6 +2,7 @@
 
 from app.evaluations.corpus import load_corpus, load_oracle_set
 from app.evaluations.execution import CompletedEvaluation, execute_evaluation_run
+from app.evaluations.docker_executor import DockerEvaluationExecutor
 from app.evaluations.metrics import aggregate_metrics, build_evaluation_report
 from app.evaluations.models import (
     AggregateMetric,
@@ -39,6 +40,7 @@ from app.evaluations.rollout import decide_rollout, in_canary_cohort
 __all__ = [
     "AggregateMetric",
     "CompletedEvaluation",
+    "DockerEvaluationExecutor",
     "EvaluationCase",
     "EvaluationCorpus",
     "EvaluationExecution",

@@ -82,6 +82,38 @@ def fixture_sha256(fixture_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def _workspace_tree_sha256(workspace: Path) -> str:
+    """Hash every candidate-tree entry without following untrusted symlinks."""
+    digest = hashlib.sha256()
+    entries = sorted(
+        path
+        for path in workspace.rglob("*")
+        if ".git" not in path.relative_to(workspace).parts
+        and "__pycache__" not in path.relative_to(workspace).parts
+    )
+    for path in entries:
+        relative = path.relative_to(workspace).as_posix().encode()
+        if path.is_symlink():
+            kind = b"symlink"
+            payload = os.readlink(path).encode("utf-8", errors="surrogateescape")
+        elif path.is_file():
+            kind = b"file"
+            payload = path.read_bytes()
+        elif path.is_dir():
+            kind = b"directory"
+            payload = b""
+        else:
+            kind = b"special"
+            payload = b""
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(kind).to_bytes(8, "big"))
+        digest.update(kind)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
 def _assertion_results(
     workspace: Path,
     manifest: FixtureManifest,
@@ -89,12 +121,20 @@ def _assertion_results(
     results: list[tuple[str, bool]] = []
     resolved_workspace = workspace.resolve()
     for assertion in manifest.assertions:
-        target = (workspace / assertion.path).resolve()
+        try:
+            target = (workspace / assertion.path).resolve()
+        except (OSError, RuntimeError):
+            results.append((assertion.assertion_id, False))
+            continue
         if target != resolved_workspace and resolved_workspace not in target.parents:
-            raise ValueError("fixture assertion escaped the materialized workspace")
-        passed = target.is_file() and assertion.contains in target.read_text(
-            encoding="utf-8"
-        )
+            results.append((assertion.assertion_id, False))
+            continue
+        try:
+            passed = target.is_file() and assertion.contains in target.read_text(
+                encoding="utf-8"
+            )
+        except (OSError, UnicodeDecodeError):
+            passed = False
         results.append((assertion.assertion_id, passed))
     return results
 
@@ -104,11 +144,21 @@ def run_fixture_harness(
     manifest: FixtureManifest,
 ) -> HarnessObservation:
     results = _assertion_results(materialized.workspace, manifest)
+    # The visible assertions explain the intended repair.  This sealed tree
+    # identity is the actual acceptance boundary: comments containing the
+    # expected snippet, unrelated edits, or generated files cannot satisfy it.
+    # The baseline digest never crosses into the candidate invocation/image.
+    final_tree_sha256 = _workspace_tree_sha256(materialized.workspace)
+    results.append(
+        ("sealed-baseline-tree", final_tree_sha256 == materialized.baseline_tree_sha256)
+    )
     failing = [assertion_id for assertion_id, passed in results if not passed]
     evidence_sha = canonical_sha256(
         {
             "fixture_id": materialized.fixture_id,
             "fixture_sha256": materialized.fixture_sha256,
+            "expected_tree_sha256": materialized.baseline_tree_sha256,
+            "observed_tree_sha256": final_tree_sha256,
             "results": [
                 {"assertion_id": assertion_id, "passed": passed}
                 for assertion_id, passed in results
@@ -157,7 +207,7 @@ def materialize_fixture(
         raise ValueError("fixture bytes do not match the corpus digest")
 
     shutil.copytree(fixture_dir / manifest.baseline_path, destination)
-    baseline_tree_sha = fixture_sha256(destination)
+    baseline_tree_sha = _workspace_tree_sha256(destination)
     provisional = MaterializedFixture(
         fixture_id=manifest.fixture_id,
         fixture_sha256=actual_digest,

@@ -38,6 +38,7 @@ class ConfiguredPublicationGate:
     stage: RolloutStage
     model: str
     codegen_revision: str
+    candidate_identity_sha256: str | None = None
     provider: PublicationAuthorizationProvider | None = None
 
     def __post_init__(self) -> None:
@@ -54,6 +55,11 @@ class ConfiguredPublicationGate:
                 "PR rollout stages require one trusted publication provider; "
                 "offline and shadow stages must not receive one"
             )
+        if publication_stage != (self.candidate_identity_sha256 is not None):
+            raise ValueError(
+                "PR rollout stages require the evaluated candidate identity; "
+                "offline and shadow stages must not receive one"
+            )
 
     def authorize(
         self,
@@ -67,11 +73,14 @@ class ConfiguredPublicationGate:
             )
         if self.provider is None:  # guarded by __post_init__; fail closed anyway
             raise PublicationGateError("no trusted publication evidence is configured")
+        if self.candidate_identity_sha256 is None:  # guarded by __post_init__
+            raise PublicationGateError("no evaluated candidate identity is configured")
         request = PublicationRequest(
             requested_stage=self.stage,
             risk=risk,
             model=self.model,
             codegen_revision=self.codegen_revision,
+            candidate_identity_sha256=self.candidate_identity_sha256,
             canary_identity=(
                 canary_identity
                 if self.stage is RolloutStage.low_risk_canary

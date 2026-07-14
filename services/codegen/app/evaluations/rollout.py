@@ -132,34 +132,9 @@ def decide_rollout(
                 "requirement coverage",
             ),
             (
-                summary.build_pass_rate,
-                resolved.minimum_build_pass_rate,
-                "build pass rate",
-            ),
-            (
-                summary.test_pass_rate,
-                resolved.minimum_test_pass_rate,
-                "test pass rate",
-            ),
-            (
                 summary.behavioral_acceptance_rate,
                 resolved.minimum_behavioral_acceptance_rate,
                 "behavioral acceptance rate",
-            ),
-            (
-                summary.first_pass_ci_success_rate,
-                resolved.minimum_first_pass_ci_success_rate,
-                "first-pass CI success rate",
-            ),
-            (
-                summary.reviewer_precision,
-                resolved.minimum_reviewer_precision,
-                "reviewer precision",
-            ),
-            (
-                summary.reviewer_recall,
-                resolved.minimum_reviewer_recall,
-                "reviewer recall",
             ),
         )
         for metric, minimum, label in gates:
@@ -172,6 +147,10 @@ def decide_rollout(
             )
 
     if requested_stage is RolloutStage.low_risk_canary:
+        reasons.append(
+            "low-risk canary requires observed reviewed-PR CI evidence; "
+            "rollout_policy@3 authorizes draft reviewed_pr publication only"
+        )
         if risk is not RiskLevel.low:
             reasons.append("only low-risk changes may enter the canary stage")
         if not canary_identity:

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 
 import asyncpg
@@ -24,6 +25,11 @@ from app.publication import PublicationGate
 from app.runtime.github_actions import workflow_attestation_is_valid
 from app.runtime.models import RuntimeAcceptancePolicy, RuntimeEvidenceObservation
 from app.safety.gates import evaluate_pre_push
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    VerifiedProtectedPathExemption,
+    resolve_effective_policy,
+)
 from app.store import changesets as changeset_store
 from app.store import connections as connections_store
 from app.store.observations import (
@@ -35,7 +41,7 @@ from app.store.observations import (
 from app.store.runtime_evidence import latest_runtime_evidence_observation
 
 logger = logging.getLogger(__name__)
-TokenMinter = Callable[[int, str], Awaitable[str]]
+TokenMinter = Callable[[str], AbstractAsyncContextManager[str]]
 
 _RUNTIME_JOB_LOG_LIMIT = 3
 _RUNTIME_JOB_LOG_BYTES = 2_000
@@ -357,6 +363,7 @@ async def repair_failed_ci(
     editor: Editor,
     mint_token: TokenMinter,
     publication_gate: PublicationGate,
+    platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
 ) -> None:
     """Repair one persisted exact-head failure or leave immutable diagnostics."""
     scopes = observation.remediation_claim_scopes()
@@ -477,7 +484,9 @@ async def repair_failed_ci(
             runtime_evidence=runtime_evidence,
         )
         return
-    connection = await connections_store.get_connection(pool, changeset.project_id)
+    connection = await connections_store.get_connection_for_changeset(
+        pool, observation.changeset_id
+    )
     if connection is None:
         await _finish_without_repair(
             pool,
@@ -487,7 +496,7 @@ async def repair_failed_ci(
             classification=classification,
             confidence=confidence,
             started_at=started_at,
-            error="Cannot repair CI because the repository connection is unavailable.",
+            error="Cannot repair CI because the repository grant is unavailable or revoked.",
             exhausted=True,
             runtime_evidence=runtime_evidence,
         )
@@ -498,7 +507,7 @@ async def repair_failed_ci(
         )
         authorization = publication_gate.authorize(
             risk=risk,
-            canary_identity=f"{changeset.project_id}:{connection.repo}",
+            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
         await changeset_store.set_publication_authorization(
             pool, observation.changeset_id, authorization
@@ -551,43 +560,56 @@ async def repair_failed_ci(
             runtime_evidence=runtime_evidence,
         )
         return
-    policy = connection.policy if isinstance(connection.policy, dict) else {}
     try:
-        runtime_policy = RuntimeAcceptancePolicy.model_validate(
-            policy.get("runtime_acceptance") or {}
+        tenant_policy = changeset.tenant_policy_snapshot or connection.tenant_policy
+        effective_safety_policy = resolve_effective_policy(
+            tenant_policy,
+            platform_safety_policy,
         )
-        gates_policy = dict(policy.get("gates") or {})
-        token = await mint_token(connection.installation_id, connection.repo)
-        result = await editor.implement(
-            EditRequest(
-                repo=connection.repo,
-                project_scope=changeset.project_id,
-                requirement_ledger=changeset.requirement_ledger,
-                inspection_snapshot=changeset.inspection_snapshot,
-                dependency_slice=changeset.dependency_slice,
-                verification_plan=changeset.verification_plan,
-                verification_coverage=changeset.verification_coverage,
-                runtime_acceptance_plan=changeset.runtime_acceptance_plan,
-                runtime_acceptance_policy=runtime_policy,
-                base_branch=changeset.base_branch or connection.default_base_branch,
-                branch=changeset.branch,
-                token=token,
-                title=f"Repair CI: {changeset.task.title}",
-                spec=_repair_spec(
-                    changeset.task.spec,
-                    observation,
-                    claim.attempt_number,
-                    maximum,
-                    runtime_evidence,
-                ),
-                constraints=changeset.task.constraints,
-                test_cmd=policy.get("test_cmd"),
-                gates_policy=gates_policy,
-                existing_branch=True,
-                expected_head_sha=observation.head_sha,
-                risk_level=risk.value,
+        runtime_policy = RuntimeAcceptancePolicy(
+            enabled=effective_safety_policy.runtime_workflow_generation_enabled
+        )
+        await changeset_store.set_safety_policy_provenance(
+            pool,
+            observation.changeset_id,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=(
+                effective_safety_policy.canonical_digest()
+            ),
+        )
+        async with mint_token(observation.changeset_id) as token:
+            result = await editor.implement(
+                EditRequest(
+                    repo=connection.repository_full_name,
+                    project_scope=changeset.project_id,
+                    requirement_ledger=changeset.requirement_ledger,
+                    inspection_snapshot=changeset.inspection_snapshot,
+                    dependency_slice=changeset.dependency_slice,
+                    verification_plan=changeset.verification_plan,
+                    verification_coverage=changeset.verification_coverage,
+                    runtime_acceptance_plan=changeset.runtime_acceptance_plan,
+                    runtime_acceptance_policy=runtime_policy,
+                    base_branch=(
+                        changeset.base_branch or connection.default_base_branch
+                    ),
+                    branch=changeset.branch,
+                    token=token,
+                    title=f"Repair CI: {changeset.task.title}",
+                    spec=_repair_spec(
+                        changeset.task.spec,
+                        observation,
+                        claim.attempt_number,
+                        maximum,
+                        runtime_evidence,
+                    ),
+                    constraints=changeset.task.constraints,
+                    test_cmd=tenant_policy.test_cmd,
+                    safety_policy=effective_safety_policy,
+                    existing_branch=True,
+                    expected_head_sha=observation.head_sha,
+                    risk_level=risk.value,
+                )
             )
-        )
     except Exception as exc:
         logger.exception(
             "CI remediation editor failed for changeset %s head %s",
@@ -612,20 +634,26 @@ async def repair_failed_ci(
     await _persist_result_evidence(
         pool, observation.changeset_id, result, changeset.prompts
     )
-    backstop_policy = dict(gates_policy)
+    verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
     if workflow_attestation_is_valid(
         result.generated_runtime_workflow,
         plan=result.runtime_acceptance_plan,
         policy=runtime_policy,
     ):
-        allowed = set(backstop_policy.get("allowed_protected_paths") or [])
-        allowed.add(result.generated_runtime_workflow.path)
-        backstop_policy["allowed_protected_paths"] = sorted(allowed)
+        verified_exemptions = (
+            VerifiedProtectedPathExemption(
+                content_sha256=result.generated_runtime_workflow.content_sha256,
+                runtime_acceptance_plan_sha256=(
+                    result.generated_runtime_workflow.runtime_acceptance_plan_sha256
+                ),
+            ),
+        )
     gate = evaluate_pre_push(
         diff_stat=result.diff_stat,
         changed_paths=result.changed_paths,
         diff_text=result.diff_text,
-        policy=backstop_policy,
+        policy=effective_safety_policy,
+        verified_exemptions=verified_exemptions,
     )
     success = result.success and gate.passed and bool(result.head_sha)
     error = result.error

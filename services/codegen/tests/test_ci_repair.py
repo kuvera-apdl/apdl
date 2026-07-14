@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -39,6 +40,12 @@ from app.runtime.models import (
     RuntimeEvidenceKind,
     RuntimeJobLogEvidence,
     RuntimeSurface,
+    RuntimeAcceptanceRequest,
+)
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    TenantCodegenConnectionPolicy,
+    TenantCodegenGatesPolicy,
 )
 from app.store import changesets as changeset_store
 from app.store.observations import (
@@ -63,8 +70,9 @@ async def repair_failed_ci(*args, publication_gate=None, **kwargs):
     )
 
 
-async def _mint(_installation_id: int, _repo: str) -> str:
-    return "ghs_tok"
+@asynccontextmanager
+async def _mint(_changeset_id: str):
+    yield "ghs_tok"
 
 
 def _repair_plan() -> RuntimeAcceptancePlan:
@@ -272,7 +280,7 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
     editor = FakeEditor(
         EditResult(
             success=True,
-            diff_stat={"files": 1},
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
             changed_paths=["src/fix.py"],
             diff_text="+fixed",
             head_sha="head-repaired",
@@ -316,6 +324,43 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
 
 
 @pytest.mark.asyncio
+async def test_repair_reuses_changeset_tenant_policy_snapshot(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    strict_snapshot = TenantCodegenConnectionPolicy(
+        gates=TenantCodegenGatesPolicy(max_files=1)
+    )
+    pool.store["changesets"]["cs-repair"]["tenant_policy_snapshot"] = (
+        strict_snapshot.model_dump_json()
+    )
+    pool.store["connections"]["demo"]["tenant_policy"] = (
+        TenantCodegenConnectionPolicy(
+            gates=TenantCodegenGatesPolicy(max_files=50)
+        ).model_dump_json()
+    )
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 2, "additions": 2, "deletions": 0},
+            changed_paths=["src/fix.py", "tests/test_fix.py"],
+            diff_text="+fixed",
+            head_sha="head-must-not-advance",
+        )
+    )
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    assert editor.last_request is not None
+    assert editor.last_request.safety_policy.max_files == 1
+    assert final.head_sha == "head-failed"
+    assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    attempts = await list_ci_remediation_attempts(pool, "cs-repair")
+    assert any("1-file limit" in (attempt.error or "") for attempt in attempts)
+
+
+@pytest.mark.asyncio
 async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
     monkeypatch,
 ):
@@ -323,11 +368,12 @@ async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
     monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
     pool, failed = await _seed_failed()
     editor = FakeEditor()
-    minted: list[tuple[int, str]] = []
+    minted: list[str] = []
 
-    async def mint(installation_id: int, repo: str) -> str:
-        minted.append((installation_id, repo))
-        return "must-not-be-returned"
+    @asynccontextmanager
+    async def mint(changeset_id: str):
+        minted.append(changeset_id)
+        yield "must-not-be-returned"
 
     await repair_failed_ci(
         pool,
@@ -354,10 +400,10 @@ async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
     monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
     pool, failed = await _seed_failed()
     workflow = ".github/workflows/apdl-runtime-acceptance.yml"
-    pool.store["connections"]["demo"]["policy"] = (
-        '{"runtime_acceptance":{"workflow_changes_authorized":true,'
-        '"generated_workflow_path":".github/workflows/'
-        'apdl-runtime-acceptance.yml"}}'
+    pool.store["connections"]["demo"]["tenant_policy"] = (
+        TenantCodegenConnectionPolicy(
+            runtime_acceptance=RuntimeAcceptanceRequest(enabled=True)
+        ).model_dump_json()
     )
     plan = _workflow_bound_repair_plan()
     pool.store["changesets"]["cs-repair"]["runtime_acceptance_plan"] = (
@@ -366,7 +412,7 @@ async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
     editor = _CountingEditor(
         EditResult(
             success=True,
-            diff_stat={"files": 1, "additions": 1},
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
             changed_paths=[workflow],
             diff_text=f"diff --git a/{workflow} b/{workflow}\n+permissions: write-all",
             head_sha="head-forged",
@@ -379,7 +425,15 @@ async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
         )
     )
 
-    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+    await repair_failed_ci(
+        pool,
+        failed,
+        editor=editor,
+        mint_token=_mint,
+        platform_safety_policy=PlatformCodegenSafetyPolicy(
+            runtime_workflow_generation_enabled=True
+        ),
+    )
 
     final = await changeset_store.get_changeset(pool, "cs-repair")
     assert final is not None
@@ -672,6 +726,7 @@ async def test_repair_completion_cannot_overwrite_concurrent_github_merge(
             row["merge_sha"] = "github-merge-sha"
             return EditResult(
                 success=True,
+                diff_stat={"files": 1, "additions": 1, "deletions": 0},
                 changed_paths=["src/fix.py"],
                 diff_text="+fixed",
                 head_sha="head-too-late",

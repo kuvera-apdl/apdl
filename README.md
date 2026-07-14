@@ -136,6 +136,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `config` | 8081 | Feature flags & experiments, SSE | [README](services/config/README.md) |
 | `query` | 8082 | Analytics queries on ClickHouse | [README](services/query/README.md) |
 | `agents` | 8083 | Autonomous AI agents | [README](services/agents/README.md) |
+| `codegen` | 8084 (internal) | Operator-granted GitHub PR creation and bounded repair | [README](services/codegen/README.md) |
 | `admin-api` | 8085 (internal) | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
 | `admin` | 5173 | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
@@ -175,7 +176,8 @@ apdl/
 │   ├── ingestion/           # Event ingestion + validation → Redis Streams
 │   ├── config/              # Flags & experiments CRUD, Redis cache, SSE
 │   ├── query/               # Funnels, cohorts, retention, experiment stats
-│   └── agents/              # Agent graphs, LLM router, memory, tools, safety
+│   ├── agents/              # Agent graphs, LLM router, memory, tools, safety
+│   └── codegen/             # Private, repository-granted PR/repair service
 │
 ├── pipeline/
 │   ├── redis/               # Redis Streams → ClickHouse event writer
@@ -234,7 +236,7 @@ and `curl` examples.
 |---|---|---|
 | `GET` | `/v1/flags` | Flags for a project (SDK bootstrap, Redis-cached) |
 | `GET` | `/v1/stream` | SSE stream for real-time flag updates |
-| `POST` | `/v1/evaluate` | Server-side gate evaluation (internal token) |
+| `POST` | `/v1/evaluate` | Server-side gate evaluation (project-scoped API key) |
 | `GET/POST` | `/v1/admin/flags` | List / create flags |
 | `PUT/DELETE` | `/v1/admin/flags/:key` | Update / archive flag |
 | `GET/POST` | `/v1/admin/experiments` | List / create experiments |

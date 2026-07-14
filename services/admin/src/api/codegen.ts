@@ -1,5 +1,5 @@
-// Codegen-service client. The same-origin admin proxy injects the internal
-// service token after authorizing the human session, project, and role.
+// Codegen-service client. The same-origin admin proxy injects a project-scoped
+// API key after authorizing the human session, project, and role.
 import { ApiError, request, type ServiceConnection } from './http'
 import {
   changesetListSchema,
@@ -84,7 +84,7 @@ export function abandonChangeset(
   })
 }
 
-/** Resolve a project's repo binding; `null` means "not connected" (404). */
+/** Read a project's active verified repository grant; `null` means no grant (404). */
 export async function getRepoConnection(
   conn: ServiceConnection,
   projectId: string,
