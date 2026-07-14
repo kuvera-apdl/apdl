@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from app.framework import AgentContext, CustomAgent, registered_agents, validate_definition
 from app.framework.tool_catalog import catalog_descriptions, llm_tool_schemas
-from app.framework.tool_loop import run_tool_loop
+from app.framework.tool_loop import run_preset_tools, run_tool_loop
 from app.safety.audit import AuditLogger
 from app.store.custom_agents import (
     SlugConflictError,
@@ -39,12 +39,25 @@ from app.store.custom_agents import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["custom-agents"])
 
+class PresetToolCall(BaseModel):
+    """One deterministic preset call: a catalog tool with fixed params.
+
+    Shape-only here — catalog membership and per-tool param validation happen
+    in ``validate_definition`` so problems aggregate into one 422.
+    """
+
+    tool: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class CustomAgentSpec(BaseModel):
     """Create/update body. Domain rules live in ``validate_definition`` so the
     wizard gets every problem in one aggregated 422, not pydantic's first.
 
     ``tools`` is the ALLOWED-tools selection (catalog names the reasoning
     model may call in its tool loop); an empty list allows the whole catalog.
+    ``preset_tools`` are deterministic calls executed verbatim on every run,
+    before reasoning, with results rendered into the prompt.
     """
 
     slug: str
@@ -54,6 +67,7 @@ class CustomAgentSpec(BaseModel):
     user_prompt_template: str
     model_tier: str = "reasoning"
     tools: list[str] = Field(default_factory=list)
+    preset_tools: list[PresetToolCall] = Field(default_factory=list)
     requires: list[str] = Field(default_factory=list)
     produces: str
     memory_query: str | None = None
@@ -99,6 +113,9 @@ class TestRunResponse(BaseModel):
     prompt: str
     raw_response: str
     parsed_output: Any
+    #: Deterministic preset calls executed before reasoning.
+    preset_results: list[dict[str, Any]] = Field(default_factory=list)
+    #: Calls the model chose itself inside the agentic loop.
     tool_results: list[dict[str, Any]]
     timings_ms: dict[str, int]
 
@@ -173,6 +190,7 @@ async def list_definitions(
             is_custom=False,
         )
         for name, cls in registered_agents().items()
+        if cls.enabled
     ]
     for row in await list_custom_agents(pool, project_id):
         agents.append(
@@ -258,6 +276,23 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
     total_start = time.monotonic()
     working: dict[str, Any] = dict(state)
     working["context"] = await agent.retrieve_context(ctx)
+
+    # Preset (deterministic) calls run before the prompt is built, exactly as
+    # gather() does in a real run — but with audit logging off, like the loop.
+    preset_start = time.monotonic()
+    preset_trace = (
+        await run_preset_tools(
+            ctx,
+            agent_name=agent.name,
+            preset_tools=agent.preset_tools,
+            log_tool_calls=False,
+        )
+        if agent.preset_tools
+        else []
+    )
+    working["tool_results"] = preset_trace
+    preset_ms = int((time.monotonic() - preset_start) * 1000)
+
     prompt = agent.build_prompt(ctx, state, working) or ""
 
     llm_start = time.monotonic()
@@ -280,11 +315,8 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
     parsed = agent.parse(loop_result.text)
     total_ms = int((time.monotonic() - total_start) * 1000)
 
-    return TestRunResponse(
-        prompt=prompt,
-        raw_response=loop_result.text,
-        parsed_output=parsed,
-        tool_results=[
+    def _entries(trace: list[Any]) -> list[dict[str, Any]]:
+        return [
             {
                 "tool": entry.tool,
                 "params": entry.params,
@@ -292,9 +324,16 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
                 "error": entry.error,
                 "elapsed_ms": entry.elapsed_ms,
             }
-            for entry in loop_result.trace
-        ],
-        timings_ms={"llm": llm_ms, "total": total_ms},
+            for entry in trace
+        ]
+
+    return TestRunResponse(
+        prompt=prompt,
+        raw_response=loop_result.text,
+        parsed_output=parsed,
+        preset_results=_entries(preset_trace),
+        tool_results=_entries(loop_result.trace),
+        timings_ms={"preset_tools": preset_ms, "llm": llm_ms, "total": total_ms},
     )
 
 

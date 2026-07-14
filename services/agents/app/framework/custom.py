@@ -7,10 +7,18 @@ position) becomes a ``CustomAgent`` instance whose attributes shadow the
 retrieval, the bounded tool loop, shape-enforcing parse, supervisor
 persistence — is reused unchanged.
 
-Custom agents are agentic: ``tools`` names which catalog tools the reasoning
-model MAY call (an empty selection allows the whole catalog); the model picks
-concrete parameters at run time inside the framework's tool loop. There is no
-pre-baked query list — the agent investigates.
+Custom agents gather data two ways, and both go through the same read-only
+catalog boundary:
+
+- **agentic** (non-deterministic): ``tools`` names which catalog tools the
+  reasoning model MAY call (an empty selection allows the whole catalog); the
+  model picks concrete parameters at run time inside the framework's tool
+  loop — the agent investigates.
+- **preset** (deterministic): ``preset_tools`` fixes tool + parameters at
+  authoring time; the framework executes them verbatim on EVERY run, before
+  reasoning, and renders the results into the prompt via ``{tool_results}``
+  (appended automatically when the template has no placeholder). The agent
+  always starts from the same baseline data.
 
 Deliberate omissions define the safety contract:
 
@@ -20,7 +28,8 @@ Deliberate omissions define the safety contract:
   acquire side effects or read another project's data no matter what its
   definition or its model says;
 - no ``act`` override → no deploy paths, never ``needs_approval``, so a
-  custom agent can never gate a run;
+  custom agent can never gate a run (the ``gather`` override below only runs
+  preset CATALOG tools — it adds data collection, not a side-effect surface);
 - no ``memory_entries`` override → custom agents read long-term memory
   (``memory_query``) but never write it, keeping the store curated by
   built-ins only;
@@ -38,7 +47,12 @@ from typing import Any
 
 from app.framework.base import BaseAgent
 from app.framework.context import AgentContext
-from app.framework.tool_catalog import TOOL_CATALOG, validate_tool_names
+from app.framework.tool_catalog import (
+    TOOL_CATALOG,
+    validate_preset_tools,
+    validate_tool_names,
+)
+from app.framework.tool_loop import ToolTraceEntry, run_preset_tools
 
 #: State keys a custom agent must never produce: supervisor seed keys, keys
 #: the run loop reads (``errors``, counter sources), BaseAgent working keys
@@ -81,6 +95,20 @@ def render_template(template: str, variables: dict[str, str]) -> str:
     return template
 
 
+def render_preset_results(trace: list[ToolTraceEntry]) -> str:
+    """Render executed preset calls as prompt-ready text blocks.
+
+    One heading per call (tool + the fixed params, so the model knows what
+    the data IS) followed by the truncated JSON result or the error.
+    """
+    blocks: list[str] = []
+    for entry in trace:
+        params = json.dumps(entry.params, default=str)
+        body = entry.result if entry.error is None else f"ERROR: {entry.error}"
+        blocks.append(f"### {entry.tool} {params}\n{body}")
+    return "\n\n".join(blocks)
+
+
 class CustomAgent(BaseAgent):
     """A user-defined, read-only, agentic analysis agent (see module docstring)."""
 
@@ -109,6 +137,16 @@ class CustomAgent(BaseAgent):
         self.max_tool_steps = int(
             definition.get("max_tool_steps", _MAX_TOOL_STEPS_DEFAULT)
         )
+        # Preset (deterministic) calls: tool + params fixed at authoring time,
+        # executed by gather() on every run. Defensive filter mirrors `tools`.
+        self.preset_tools = [
+            {
+                "tool": entry["tool"],
+                "params": entry.get("params") if isinstance(entry.get("params"), dict) else {},
+            }
+            for entry in (definition.get("preset_tools") or ())
+            if isinstance(entry, dict) and isinstance(entry.get("tool"), str)
+        ]
 
     def requirements_met(self, state: dict[str, Any]) -> bool:
         """Shadow the BaseAgent *classmethod*, which reads ``cls.requires``.
@@ -118,24 +156,46 @@ class CustomAgent(BaseAgent):
         """
         return all(state.get(key) for key in self.requires)
 
+    async def gather(
+        self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Execute the preset tool calls (if any) before reasoning.
+
+        Read-only by construction: presets run through the same ctx-scoped
+        catalog boundary as the agentic loop, so this override does not widen
+        the safety contract (see module docstring).
+        """
+        if not self.preset_tools:
+            return {}
+        trace = await run_preset_tools(
+            ctx, agent_name=self.name, preset_tools=self.preset_tools
+        )
+        return {"tool_results": trace}
+
     def build_prompt(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> str | None:
+        # Preset results render into {tool_results}; without presets the
+        # placeholder substitutes empty (templates from the pre-agentic era
+        # interpolated it, so it must never leak literally).
+        rendered_presets = render_preset_results(working.get("tool_results") or [])
         variables = {
             "context": working.get("context") or "",
             "project_id": ctx.project_id,
             "time_range_days": str(ctx.time_range_days),
-            # Legacy placeholder from the pre-agentic era (static tool results
-            # were rendered into the prompt). Data now arrives via the tool
-            # loop; substitute empty so old templates don't leak "{tool_results}".
-            "tool_results": "",
+            "tool_results": rendered_presets,
         }
         # Upstream outputs this agent declared as requirements are addressable
         # by their state key: requires=["insights"] enables an {insights}
         # placeholder.
         for key in self.requires:
             variables[key] = json.dumps(state.get(key, []), indent=2, default=str)
-        return render_template(self.user_prompt_template, variables)
+        template = self.user_prompt_template
+        # Preset results must reach the model even when the author never
+        # placed the placeholder — that determinism is the feature's contract.
+        if rendered_presets and "{tool_results}" not in template:
+            template += "\n\n## Preset data (gathered automatically)\n{tool_results}"
+        return render_template(template, variables)
 
 
 def validate_definition(
@@ -192,6 +252,17 @@ def validate_definition(
     else:
         try:
             validate_tool_names(tools)
+        except ValueError as exc:
+            errors.append(str(exc))
+
+    # Preset calls run verbatim on every run — params must validate against
+    # the tool's schema now, since no model can correct them at run time.
+    preset_tools = fields.get("preset_tools") or []
+    if not isinstance(preset_tools, list):
+        errors.append("preset_tools must be a list of {tool, params} entries")
+    else:
+        try:
+            validate_preset_tools(preset_tools)
         except ValueError as exc:
             errors.append(str(exc))
 

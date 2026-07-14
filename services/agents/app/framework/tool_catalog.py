@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.framework.context import AgentContext
 from app.tools import clickhouse
@@ -260,6 +260,54 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         ),
     )
 }
+
+
+#: Cap on preset (deterministic) tool calls per custom agent — presets run on
+#: EVERY run before reasoning, so each one is a guaranteed warehouse query.
+MAX_PRESET_TOOLS = 10
+
+
+def validate_preset_tools(entries: list[Any]) -> list[dict[str, Any]]:
+    """Validate a preset-tools selection: ``{"tool": name, "params": {...}}``.
+
+    Presets are the deterministic counterpart to the agentic allowed-tools
+    selection: the author fixes the tool AND its parameters in the wizard, and
+    the framework executes them verbatim on every run. Because nothing can
+    correct a bad call at run time (unlike the loop, where the model sees the
+    error and retries), params are validated against the tool's schema HERE,
+    at authoring time. Raises ``ValueError`` aggregating every problem; returns
+    the normalized entries.
+    """
+    errors: list[str] = []
+    normalized: list[dict[str, Any]] = []
+    if len(entries) > MAX_PRESET_TOOLS:
+        errors.append(f"preset_tools: at most {MAX_PRESET_TOOLS} preset calls allowed")
+    for index, entry in enumerate(entries[:MAX_PRESET_TOOLS]):
+        if not isinstance(entry, dict) or not isinstance(entry.get("tool"), str):
+            errors.append(f"preset_tools[{index}]: expected {{'tool': name, 'params': {{...}}}}")
+            continue
+        name = entry["tool"]
+        spec = TOOL_CATALOG.get(name)
+        if spec is None:
+            errors.append(f"preset_tools[{index}]: unknown tool {name!r}")
+            continue
+        params = entry.get("params") or {}
+        if not isinstance(params, dict):
+            errors.append(f"preset_tools[{index}]: params must be an object")
+            continue
+        try:
+            spec.params_model.model_validate(params)
+        except ValidationError as exc:
+            issues = "; ".join(
+                f"{'.'.join(str(loc) for loc in err['loc']) or 'params'}: {err['msg']}"
+                for err in exc.errors()
+            )
+            errors.append(f"preset_tools[{index}] ({name}): {issues}")
+            continue
+        normalized.append({"tool": name, "params": params})
+    if errors:
+        raise ValueError("; ".join(errors))
+    return normalized
 
 
 def validate_tool_names(tools: list[Any]) -> list[str]:

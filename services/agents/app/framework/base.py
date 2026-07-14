@@ -50,6 +50,10 @@ class BaseAgent(ABC):
     description: ClassVar[str] = ""
     #: Pipeline ordering hint; lower runs earlier in the supervisor.
     order: ClassVar[int] = 100
+    #: Disabled agents stay registered (their ``produces`` keys remain valid
+    #: for custom-agent validation) but are hidden from /definitions, rejected
+    #: at trigger time, and skipped by the supervisor.
+    enabled: ClassVar[bool] = True
     #: System prompt for the primary reasoning call.
     system_prompt: ClassVar[str] = ""
     #: LLM tier for the primary reasoning call ("fast" or "reasoning").

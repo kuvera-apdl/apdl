@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS custom_agents (
     model_tier           TEXT NOT NULL DEFAULT 'reasoning'
                          CHECK (model_tier IN ('fast', 'reasoning')),
     tools                JSONB NOT NULL DEFAULT '[]',
+    preset_tools         JSONB NOT NULL DEFAULT '[]',
     requires             JSONB NOT NULL DEFAULT '[]',
     produces             TEXT NOT NULL,
     memory_query         TEXT,
@@ -58,6 +59,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_agents_project_slug
 CUSTOM_AGENTS_MIGRATE_DDL = """
 ALTER TABLE custom_agents
     ADD COLUMN IF NOT EXISTS max_tool_steps INTEGER NOT NULL DEFAULT 8;
+ALTER TABLE custom_agents
+    ADD COLUMN IF NOT EXISTS preset_tools JSONB NOT NULL DEFAULT '[]';
 """
 
 
@@ -67,7 +70,7 @@ class SlugConflictError(Exception):
 
 _COLUMNS = (
     "agent_id, project_id, slug, display_name, description, system_prompt, "
-    "user_prompt_template, model_tier, tools, requires, produces, "
+    "user_prompt_template, model_tier, tools, preset_tools, requires, produces, "
     "memory_query, memory_top_k, pipeline_order, max_tool_steps, status, "
     "created_at, updated_at"
 )
@@ -81,6 +84,7 @@ _SPEC_FIELDS = (
     "user_prompt_template",
     "model_tier",
     "tools",
+    "preset_tools",
     "requires",
     "produces",
     "memory_query",
@@ -88,7 +92,7 @@ _SPEC_FIELDS = (
     "pipeline_order",
     "max_tool_steps",
 )
-_JSONB_FIELDS = {"tools", "requires"}
+_JSONB_FIELDS = {"tools", "preset_tools", "requires"}
 
 
 def _normalize_tools(value: Any) -> list[str]:
@@ -109,6 +113,25 @@ def _normalize_tools(value: Any) -> list[str]:
     return names
 
 
+def _normalize_preset_tools(value: Any) -> list[dict[str, Any]]:
+    """Coerce the preset_tools column to ``[{"tool": name, "params": {...}}]``.
+
+    Entries the wizard/router never wrote (hand-edited rows) degrade to being
+    dropped rather than crashing hydration; params are re-validated against
+    the tool schema by ``run_tool`` at execution time anyway.
+    """
+    if not isinstance(value, list):
+        return []
+    presets: list[dict[str, Any]] = []
+    for entry in value:
+        if isinstance(entry, dict) and isinstance(entry.get("tool"), str):
+            params = entry.get("params")
+            presets.append(
+                {"tool": entry["tool"], "params": params if isinstance(params, dict) else {}}
+            )
+    return presets
+
+
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     """Convert a row to a dict, parsing JSONB columns defensively.
 
@@ -127,6 +150,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
                 value = []
         out[key] = value if isinstance(value, list) else []
     out["tools"] = _normalize_tools(out["tools"])
+    out["preset_tools"] = _normalize_preset_tools(out["preset_tools"])
     return out
 
 
@@ -154,10 +178,10 @@ async def create_custom_agent(
                 INSERT INTO custom_agents
                     (agent_id, project_id, slug, display_name, description,
                      system_prompt, user_prompt_template, model_tier, tools,
-                     requires, produces, memory_query, memory_top_k,
-                     pipeline_order, max_tool_steps)
+                     preset_tools, requires, produces, memory_query,
+                     memory_top_k, pipeline_order, max_tool_steps)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb,
-                        $11, $12, $13, $14, $15)
+                        $11::jsonb, $12, $13, $14, $15, $16)
                 RETURNING {_COLUMNS}
                 """,
                 agent_id,
@@ -239,10 +263,11 @@ async def update_custom_agent(
                 UPDATE custom_agents
                 SET slug = $2, display_name = $3, description = $4,
                     system_prompt = $5, user_prompt_template = $6,
-                    model_tier = $7, tools = $8::jsonb, requires = $9::jsonb,
-                    produces = $10, memory_query = $11,
-                    memory_top_k = $12, pipeline_order = $13,
-                    max_tool_steps = $14, updated_at = now()
+                    model_tier = $7, tools = $8::jsonb,
+                    preset_tools = $9::jsonb, requires = $10::jsonb,
+                    produces = $11, memory_query = $12,
+                    memory_top_k = $13, pipeline_order = $14,
+                    max_tool_steps = $15, updated_at = now()
                 WHERE agent_id = $1
                 RETURNING {_COLUMNS}
                 """,

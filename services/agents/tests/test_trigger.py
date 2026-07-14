@@ -196,3 +196,28 @@ async def test_trigger_rejects_slug_not_active_in_project(monkeypatch):
 
     assert resp.status_code == 422
     assert "ghost_agent" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_rejects_disabled_builtin(monkeypatch):
+    """personalization is registered but disabled — a run naming it is rejected
+    up front, not accepted and silently skipped by the supervisor."""
+
+    async def fake_supervisor(**kwargs):
+        raise AssertionError("supervisor must not start for a disabled agent")
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["behavior_analysis", "personalization"],
+            },
+        )
+
+    assert resp.status_code == 422
+    assert "personalization" in resp.json()["detail"]

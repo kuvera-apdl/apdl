@@ -73,8 +73,11 @@ def test_list_agents_is_ordered_by_pipeline_order():
 
 
 def test_consumer_agents_declare_insight_dependency():
-    for name in ["experiment_design", "personalization", "feature_proposal"]:
+    for name in ["experiment_design", "personalization"]:
         assert "insights" in get_agent(name).requires
+    # Phase 4: feature_proposal is fed by the durable ship-verdict queue, not
+    # by insights — it must be runnable in a scheduled evaluation pipeline.
+    assert get_agent("feature_proposal").requires == ()
 
 
 def test_duplicate_registration_raises():

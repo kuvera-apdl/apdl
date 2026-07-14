@@ -12,6 +12,7 @@ from app.graphs import (  # noqa: F401  (imported for registration side-effects)
     behavior_analysis,
     code_implementation,
     experiment_design,
+    experiment_evaluation,
     feature_proposal,
     personalization,
 )

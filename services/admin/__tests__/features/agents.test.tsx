@@ -10,7 +10,6 @@ import { runStatusSchema } from '../../src/api/schemas/agents'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { gateOutcome, MATRIX_ROWS } from '../../src/features/agents/gatingMatrix'
-import { loadTrackedRuns } from '../../src/features/agents/runHistory'
 import { RunMonitorPage } from '../../src/features/agents/RunMonitorPage'
 import { TriggerPage } from '../../src/features/agents/TriggerPage'
 import { seedWorkspace } from '../helpers/fixtures'
@@ -163,7 +162,7 @@ describe('runStatusSchema', () => {
 })
 
 describe('TriggerPage', () => {
-  test('posts the manual trigger and tracks the run locally', async () => {
+  test('posts the manual trigger and navigates to the run', async () => {
     renderWithProviders(
       <Routes>
         <Route path="/agents/trigger" element={<TriggerPage />} />
@@ -173,16 +172,21 @@ describe('TriggerPage', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 
+    // Navigates to the new run — no client-side run tracking (the server
+    // owns run history now).
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
+    // Default mode runs the full built-in loop (the definitions endpoint is
+    // unmocked here, so the built-in fallback list is what's selected).
     expect(requests[0]?.body).toEqual({
       project_id: 'demo',
       trigger_type: 'manual',
-      analysis_types: ['behavior_analysis'],
+      analysis_types: [
+        'behavior_analysis',
+        'experiment_design',
+        'experiment_evaluation',
+        'feature_proposal',
+      ],
       time_range_days: 7,
-      autonomy_level: 2,
-    })
-    expect(loadTrackedRuns('ws-test')[0]).toMatchObject({
-      run_id: 'run-abc-123',
       autonomy_level: 2,
     })
   })

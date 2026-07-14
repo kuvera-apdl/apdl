@@ -26,6 +26,9 @@ def _run_row(run_id: str, project_id: str = "demo", status: str = "completed") -
         "experiments_count": 1,
         "started_at": datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 6, 10, 12, 5, tzinfo=timezone.utc),
+        "trigger_type": "manual",
+        "autonomy_level": 2,
+        "config": json.dumps({"analysis_types": ["behavior_analysis", "experiment_design"]}),
     }
 
 
@@ -134,6 +137,9 @@ async def test_list_runs_filters_by_project_and_status():
         assert body["count"] == 2
         assert [r["run_id"] for r in body["runs"]] == ["run-1", "run-2"]
         assert body["runs"][0]["started_at"] == "2026-06-10T12:00:00+00:00"
+        # Requested agents surface from config so clients need no local record.
+        assert body["runs"][0]["analysis_types"] == ["behavior_analysis", "experiment_design"]
+        assert body["runs"][0]["autonomy_level"] == 2
 
         filtered = await client.get(
             "/v1/agents/runs", params={"project_id": "demo", "status": "running"}
