@@ -8,9 +8,10 @@ import os
 from collections.abc import Mapping
 from typing import TypeAlias
 
+from app.editor.deadlines import resolve_codegen_deadline_plan
+
 
 _DEFAULT_MODEL = "claude-opus-4-8"
-_MAX_JOB_BUDGET_SECONDS = 3000
 
 JsonScalar: TypeAlias = str | bool | int | float | None
 
@@ -123,23 +124,20 @@ def normalized_codegen_behavior_configuration(
     model = _value(source, "CODEGEN_MODEL", _DEFAULT_MODEL)
     helper_model = source.get("CODEGEN_HELPER_MODEL") or model
     edit_retries = max(0, int(_value(source, "CODEGEN_EDIT_RETRIES", "1")))
-    agent_timeout = int(_value(source, "CODEGEN_TIMEOUT", "1800"))
-    git_timeout = int(_value(source, "CODEGEN_GIT_TIMEOUT", "300"))
-
     budget_override = _value(source, "CODEGEN_JOB_BUDGET", "")
-    if budget_override.strip():
-        job_budget = max(1, int(budget_override))
-        if job_budget > _MAX_JOB_BUDGET_SECONDS:
-            raise ValueError(
-                "CODEGEN_JOB_BUDGET cannot exceed 3000 seconds while a GitHub "
-                "write token is held"
-            )
-    else:
-        rounds = 1 + edit_retries
-        job_budget = min(
-            rounds * agent_timeout + 2 * git_timeout,
-            _MAX_JOB_BUDGET_SECONDS,
-        )
+    deadline_plan = resolve_codegen_deadline_plan(
+        agent_timeout_seconds=int(_value(source, "CODEGEN_TIMEOUT", "1800")),
+        git_timeout_seconds=int(_value(source, "CODEGEN_GIT_TIMEOUT", "300")),
+        llm_timeout_seconds=float(
+            _value(source, "CODEGEN_LLM_TIMEOUT", "240")
+        ),
+        edit_retries=edit_retries,
+        brief_enabled=_enabled(source, "CODEGEN_BRIEF"),
+        review_enabled=_enabled(source, "CODEGEN_REVIEW"),
+        job_budget_override=(
+            int(budget_override) if budget_override.strip() else None
+        ),
+    )
 
     # Empty routing variables are equivalent to their unset Compose/default
     # representation. Preserve all other text exactly: whitespace or a changed
@@ -165,12 +163,10 @@ def normalized_codegen_behavior_configuration(
             1,
             int(_value(source, "CODEGEN_CONTRACT_INSTALL_TIMEOUT", "600")),
         ),
-        "agent_timeout_seconds": agent_timeout,
-        "git_timeout_seconds": git_timeout,
-        "llm_timeout_seconds": float(
-            _value(source, "CODEGEN_LLM_TIMEOUT", "240")
-        ),
-        "job_budget_seconds": job_budget,
+        "agent_timeout_seconds": deadline_plan.agent_timeout_seconds,
+        "git_timeout_seconds": deadline_plan.git_timeout_seconds,
+        "llm_timeout_seconds": deadline_plan.llm_timeout_seconds,
+        "job_budget_seconds": deadline_plan.job_budget_seconds,
         # GitHub CI is authoritative; app.config ignores this legacy switch.
         "require_verify": False,
         "provider_routing": provider_routing,

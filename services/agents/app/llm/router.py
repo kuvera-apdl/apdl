@@ -21,8 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 import anthropic
 import openai
@@ -226,6 +227,58 @@ _PROVIDER_FN = {
     "local": _local_completion,
 }
 
+_CompletionT = TypeVar("_CompletionT")
+
+
+async def _route_with_fallback(
+    model_tier: str,
+    *,
+    operation: str,
+    invoke: Callable[[str, str, dict[str, Any]], Awaitable[_CompletionT]],
+    kwargs: dict[str, Any],
+) -> _CompletionT:
+    """Run one completion shape through the shared provider fallback chain."""
+    if model_tier not in _TIER_DEFAULTS:
+        raise ValueError(
+            f"Unknown model_tier {model_tier!r} — expected one of "
+            f"{sorted(_TIER_DEFAULTS)}"
+        )
+
+    models = _tier_models(model_tier)
+    if not models:
+        raise RuntimeError(
+            f"No LLM providers configured for tier '{model_tier}'. "
+            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or "
+            "LOCAL_LLM_URL."
+        )
+
+    merged = {**_TIER_DEFAULTS[model_tier], **kwargs}
+    last_exc: Exception | None = None
+    for entry in models:
+        provider = entry["provider"]
+        model = entry["model"]
+        try:
+            result = await invoke(provider, model, dict(merged))
+            # Visible at info level so a permanently-failing primary (every
+            # call silently landing on a fallback rung) is observable.
+            logger.info(
+                "LLM %s ok (provider=%s, model=%s)", operation, provider, model
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "LLM %s failed (provider=%s, model=%s): %s",
+                operation,
+                provider,
+                model,
+                exc,
+            )
+            last_exc = exc
+
+    raise RuntimeError(
+        f"All LLM providers failed for tier '{model_tier}'"
+    ) from last_exc
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -251,37 +304,17 @@ async def chat_completion(
     Raises:
         RuntimeError: If all providers fail.
     """
-    if model_tier not in _TIER_DEFAULTS:
-        raise ValueError(
-            f"Unknown model_tier {model_tier!r} — expected one of {sorted(_TIER_DEFAULTS)}"
-        )
+    async def invoke(
+        provider: str, model: str, provider_kwargs: dict[str, Any]
+    ) -> str:
+        return await _PROVIDER_FN[provider](model, messages, **provider_kwargs)
 
-    models = _tier_models(model_tier)
-    if not models:
-        raise RuntimeError(
-            f"No LLM providers configured for tier '{model_tier}'. "
-            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or LOCAL_LLM_URL."
-        )
-
-    defaults = _TIER_DEFAULTS.get(model_tier, {})
-    merged = {**defaults, **kwargs}
-
-    last_exc: Exception | None = None
-    for entry in models:
-        provider = entry["provider"]
-        model = entry["model"]
-        fn = _PROVIDER_FN[provider]
-        try:
-            result = await fn(model, messages, **merged)
-            # Visible at info level so a permanently-failing primary (every
-            # call silently landing on a fallback rung) is observable.
-            logger.info("LLM call ok (provider=%s, model=%s)", provider, model)
-            return result
-        except Exception as exc:
-            logger.warning("LLM call failed (provider=%s, model=%s): %s", provider, model, exc)
-            last_exc = exc
-
-    raise RuntimeError(f"All LLM providers failed for tier '{model_tier}'") from last_exc
+    return await _route_with_fallback(
+        model_tier,
+        operation="call",
+        invoke=invoke,
+        kwargs=kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +328,8 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: Opaque Gemini reasoning signature that must be replayed with the call.
+    thought_signature: bytes | None = None
 
 
 @dataclass
@@ -372,6 +407,8 @@ async def _openai_completion_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     client: openai.AsyncOpenAI,
+    *,
+    force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
     if _is_openai_reasoning_model(model):
@@ -380,6 +417,8 @@ async def _openai_completion_tools(
         kwargs.pop("temperature", None)
     if tools:
         kwargs["tools"] = _openai_tools(tools)
+        if force_text:
+            kwargs["tool_choice"] = "none"
     resp = await client.chat.completions.create(
         model=model, messages=_openai_tool_messages(messages), **kwargs
     )
@@ -437,6 +476,8 @@ async def _anthropic_completion_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     client: anthropic.AsyncAnthropic,
+    *,
+    force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
     system_text, chat_messages = _anthropic_tool_messages(messages)
@@ -446,6 +487,8 @@ async def _anthropic_completion_tools(
             {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
             for t in tools
         ]
+        if force_text:
+            kwargs["tool_choice"] = {"type": "none"}
     resp = await client.messages.create(
         model=model,
         system=system_text,
@@ -482,26 +525,38 @@ def _google_tool_contents(messages: list[dict[str, Any]]) -> tuple[str | None, l
             parts: list[dict[str, Any]] = []
             if msg.get("content"):
                 parts.append({"text": msg["content"]})
-            parts.extend(
-                {"function_call": {"name": tc["name"], "args": tc["arguments"]}}
-                for tc in msg["tool_calls"]
-            )
+            for tc in msg["tool_calls"]:
+                call_part: dict[str, Any] = {
+                    "function_call": {
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "args": tc["arguments"],
+                    }
+                }
+                if tc.get("thought_signature") is not None:
+                    call_part["thought_signature"] = tc["thought_signature"]
+                parts.append(call_part)
             contents.append({"role": "model", "parts": parts})
         elif role == "tool":
             # Gemini matches responses by function NAME (it has no call ids).
-            contents.append(
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "function_response": {
-                                "name": msg.get("name", ""),
-                                "response": {"result": msg["content"]},
-                            }
-                        }
-                    ],
+            response_part = {
+                "function_response": {
+                    "id": msg["tool_call_id"],
+                    "name": msg.get("name", ""),
+                    "response": {"result": msg["content"]},
                 }
-            )
+            }
+            if (
+                contents
+                and contents[-1]["role"] == "user"
+                and all(
+                    "function_response" in part
+                    for part in contents[-1].get("parts", [])
+                )
+            ):
+                contents[-1]["parts"].append(response_part)
+            else:
+                contents.append({"role": "user", "parts": [response_part]})
         else:
             gr = "model" if role == "assistant" else "user"
             contents.append({"role": gr, "parts": [{"text": msg.get("content") or ""}]})
@@ -513,6 +568,8 @@ async def _google_completion_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     client: genai.Client,
+    *,
+    force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
     system_instruction, contents = _google_tool_contents(messages)
@@ -537,6 +594,15 @@ async def _google_completion_tools(
         temperature=kwargs.get("temperature"),
         system_instruction=system_instruction,
         tools=genai_tools,
+        tool_config=(
+            genai_types.ToolConfig(
+                function_calling_config=genai_types.FunctionCallingConfig(
+                    mode=genai_types.FunctionCallingConfigMode.NONE
+                )
+            )
+            if tools and force_text
+            else None
+        ),
     )
     resp = await client.aio.models.generate_content(
         model=model, contents=contents, config=config
@@ -550,11 +616,13 @@ async def _google_completion_tools(
         if fc is not None:
             calls.append(
                 ToolCall(
-                    # Gemini emits no ids; synthesize stable ones so the
-                    # neutral format (and a cross-provider fallback) still works.
-                    id=f"call_{index}_{fc.name}",
-                    name=fc.name,
+                    # Older Gemini models may omit ids. Preserve a real id
+                    # whenever present and synthesize only as a compatibility
+                    # fallback for the normalized cross-provider transcript.
+                    id=getattr(fc, "id", None) or f"call_{index}_{fc.name}",
+                    name=fc.name or "",
                     arguments=_parse_arguments(dict(fc.args or {})),
+                    thought_signature=getattr(part, "thought_signature", None),
                 )
             )
         elif getattr(part, "text", None):
@@ -566,6 +634,8 @@ async def chat_completion_with_tools(
     model_tier: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
+    *,
+    force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
     """Route a tool-enabled chat completion through the provider chain.
@@ -576,8 +646,9 @@ async def chat_completion_with_tools(
             carry ``tool_calls`` (list of ``{"id", "name", "arguments": dict}``);
             tool results are ``{"role": "tool", "tool_call_id", "name", "content"}``.
         tools: Neutral tool specs ``{"name", "description", "parameters"}``
-            (parameters = JSON schema). ``None``/empty sends no tools — the
-            model must answer with text (used to force a final answer).
+            (parameters = JSON schema). ``None``/empty sends no tools.
+        force_text: Keep tool declarations available for validating historical
+            tool calls, but forbid the provider from requesting a new call.
 
     Returns:
         A :class:`ToolCompletion` with the assistant text and any tool calls.
@@ -585,48 +656,48 @@ async def chat_completion_with_tools(
     Raises:
         RuntimeError: If all providers fail.
     """
-    if model_tier not in _TIER_DEFAULTS:
-        raise ValueError(
-            f"Unknown model_tier {model_tier!r} — expected one of {sorted(_TIER_DEFAULTS)}"
-        )
-    models = _tier_models(model_tier)
-    if not models:
-        raise RuntimeError(
-            f"No LLM providers configured for tier '{model_tier}'. "
-            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or LOCAL_LLM_URL."
-        )
-    merged = {**_TIER_DEFAULTS[model_tier], **kwargs}
+    async def invoke(
+        provider: str, model: str, provider_kwargs: dict[str, Any]
+    ) -> ToolCompletion:
+        if provider == "openai":
+            client = _get_openai()
+        elif provider == "anthropic":
+            client = _get_anthropic()
+        elif provider == "google":
+            client = _get_google()
+        else:  # local — OpenAI-compatible servers speak the tools dialect
+            client = _get_local()
 
-    last_exc: Exception | None = None
-    for entry in models:
-        provider = entry["provider"]
-        model = entry["model"]
-        try:
-            if provider == "openai":
-                result = await _openai_completion_tools(
-                    model, messages, tools, _get_openai(), **dict(merged)
-                )
-            elif provider == "anthropic":
-                result = await _anthropic_completion_tools(
-                    model, messages, tools, _get_anthropic(), **dict(merged)
-                )
-            elif provider == "google":
-                result = await _google_completion_tools(
-                    model, messages, tools, _get_google(), **dict(merged)
-                )
-            else:  # local — OpenAI-compatible servers speak the tools dialect
-                result = await _openai_completion_tools(
-                    model, messages, tools, _get_local(), **dict(merged)
-                )
-            logger.info(
-                "LLM tool call ok (provider=%s, model=%s, tool_calls=%d)",
-                provider, model, len(result.tool_calls),
+        if provider == "anthropic":
+            return await _anthropic_completion_tools(
+                model,
+                messages,
+                tools,
+                client,
+                force_text=force_text,
+                **provider_kwargs,
             )
-            return result
-        except Exception as exc:
-            logger.warning(
-                "LLM tool call failed (provider=%s, model=%s): %s", provider, model, exc
+        if provider == "google":
+            return await _google_completion_tools(
+                model,
+                messages,
+                tools,
+                client,
+                force_text=force_text,
+                **provider_kwargs,
             )
-            last_exc = exc
+        return await _openai_completion_tools(
+            model,
+            messages,
+            tools,
+            client,
+            force_text=force_text,
+            **provider_kwargs,
+        )
 
-    raise RuntimeError(f"All LLM providers failed for tier '{model_tier}'") from last_exc
+    return await _route_with_fallback(
+        model_tier,
+        operation="tool call",
+        invoke=invoke,
+        kwargs=kwargs,
+    )

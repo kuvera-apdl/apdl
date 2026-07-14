@@ -15,7 +15,6 @@ from app.framework.custom import (
     render_template,
     validate_definition,
 )
-from app.framework.tool_catalog import TOOL_CATALOG
 from app.framework.tool_loop import ToolTraceEntry
 
 
@@ -58,17 +57,16 @@ def test_instance_attrs_shadow_classvars():
     assert agent.max_tool_steps == 6
 
 
-def test_empty_tools_selection_allows_whole_catalog():
-    # The wizard default: no explicit narrowing means every catalog tool.
+def test_empty_tools_selection_allows_no_agentic_tools():
     agent = CustomAgent(_definition(tools=[]))
-    assert agent.agentic_tools == tuple(TOOL_CATALOG)
+    assert agent.agentic_tools == ()
 
 
 def test_legacy_tool_dict_entries_are_ignored_defensively():
     # Pre-agentic rows stored {"tool": ..., "params": ...}; the store
     # normalizes them, but hydration must not crash if one slips through.
     agent = CustomAgent(_definition(tools=[{"tool": "discover_events"}]))
-    assert agent.agentic_tools == tuple(TOOL_CATALOG)
+    assert agent.agentic_tools == ()
 
 
 def test_requirements_met_honors_instance_requires():
@@ -245,6 +243,10 @@ def test_produces_must_not_be_reserved():
 
 def test_prompt_length_limits():
     assert any("system_prompt" in e for e in _validate(system_prompt=""))
+    assert any("non-whitespace" in e for e in _validate(system_prompt=" \n\t "))
+    assert any(
+        "non-whitespace" in e for e in _validate(user_prompt_template="   ")
+    )
     assert any(
         "user_prompt_template" in e
         for e in _validate(user_prompt_template="x" * (custom_mod._MAX_PROMPT + 1))
@@ -257,6 +259,8 @@ def test_tools_validated_against_catalog():
     # Legacy dict entries are no longer a valid spec shape.
     errors = _validate(tools=[{"tool": "discover_events", "params": {}}])
     assert any("unknown tool" in e for e in errors)
+    errors = _validate(tools=["discover_events", "discover_events"])
+    assert any("duplicate" in e for e in errors)
 
 
 def test_preset_tools_validated_against_catalog_and_param_schemas():

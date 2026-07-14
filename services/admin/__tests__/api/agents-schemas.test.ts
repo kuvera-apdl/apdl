@@ -2,7 +2,11 @@
 // on the old envelope, and the approval request must enforce exactly-one-of.
 import { describe, expect, test } from 'vitest'
 
-import { approvalRequestSchema, approvalResponseSchema } from '../../src/api/schemas/agents'
+import {
+  approvalRequestSchema,
+  approvalResponseSchema,
+  customAgentSpecSchema,
+} from '../../src/api/schemas/agents'
 
 describe('approvalResponseSchema', () => {
   test('accepts the full current envelope', () => {
@@ -13,10 +17,12 @@ describe('approvalResponseSchema', () => {
       rejected_count: 0,
       forked_runs: ['run-2'],
       opened_changesets: ['cs_1'],
+      errors: ['experiment deploy failed: exp_checkout'],
       message: 'ok',
     })
     expect(parsed.approved_count).toBe(1)
     expect(parsed.opened_changesets).toEqual(['cs_1'])
+    expect(parsed.errors).toEqual(['experiment deploy failed: exp_checkout'])
   })
 
   test('tolerates the legacy { run_id, status, message } envelope', () => {
@@ -46,6 +52,35 @@ describe('approvalRequestSchema', () => {
     expect(approvalRequestSchema.safeParse({ comment: 'hi' }).success).toBe(false)
     expect(
       approvalRequestSchema.safeParse({ approved: true, decisions: [] }).success,
+    ).toBe(false)
+  })
+})
+
+describe('customAgentSpecSchema', () => {
+  const validSpec = {
+    slug: 'churn_watch',
+    display_name: 'Churn watch',
+    description: '',
+    system_prompt: 'Analyse churn.',
+    user_prompt_template: 'Review {project_id}.',
+    model_tier: 'fast',
+    tools: [],
+    preset_tools: [],
+    requires: [],
+    produces: 'churn_signals',
+    memory_query: null,
+    memory_top_k: 5,
+    pipeline_order: 60,
+    max_tool_steps: 8,
+  }
+
+  test('rejects whitespace-only prompts while preserving exact empty tools', () => {
+    expect(customAgentSpecSchema.safeParse(validSpec).success).toBe(true)
+    expect(
+      customAgentSpecSchema.safeParse({ ...validSpec, system_prompt: ' \n\t ' }).success,
+    ).toBe(false)
+    expect(
+      customAgentSpecSchema.safeParse({ ...validSpec, user_prompt_template: '   ' }).success,
     ).toBe(false)
   })
 })

@@ -96,3 +96,46 @@ async def test_resume_skips_completed_and_runs_remaining(monkeypatch) -> None:
     assert later.ran is True, "the not-yet-run agent must run on resume"
     statuses = [args[1] for (query, args) in pool.conn.executed if "UPDATE agent_runs" in query]
     assert "completed" in statuses  # the run finishes after the last agent runs
+
+
+@pytest.mark.asyncio
+async def test_resume_finishes_with_errors_after_approved_deploy_failure(monkeypatch) -> None:
+    done = _Agent("experiment_design", 20, "experiment_designs")
+    registry = {"experiment_design": done}
+    monkeypatch.setattr(supervisor, "is_registered", lambda name: name in registry)
+    monkeypatch.setattr(supervisor, "get_agent", lambda name: registry[name])
+
+    deploy_error = "experiment deploy failed: exp_failed"
+    prior = [
+        {
+            "agent_name": "experiment_design",
+            "produces": "experiment_designs",
+            "output": json.dumps([{"experiment_id": "exp_failed"}]),
+        },
+        {
+            "agent_name": "approval_errors",
+            "produces": "errors",
+            "output": json.dumps([deploy_error]),
+        },
+    ]
+    pool = _FakePool(prior)
+
+    await supervisor.run_supervisor(
+        pool=pool,
+        vector_store=object(),
+        run_id="run-1",
+        project_id="demo",
+        analysis_types=["experiment_design"],
+        time_range_days=7,
+        autonomy_level=2,
+        resume=True,
+    )
+
+    assert done.ran is False
+    statuses = [
+        args[1]
+        for query, args in pool.conn.executed
+        if "UPDATE agent_runs" in query
+    ]
+    assert "completed_with_errors" in statuses
+    assert "completed" not in statuses

@@ -18,7 +18,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import require_role
 from app.graphs.experiment_design import deploy_experiment, open_treatment_changeset
@@ -78,6 +78,8 @@ class ApprovalRequest(BaseModel):
 
 
 class ApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     run_id: str
     status: str
     approved_count: int
@@ -86,7 +88,8 @@ class ApprovalResponse(BaseModel):
     #: Changeset ids opened by this approval: draft PRs from a
     #: code_implementation gate (Phase 6) or treatment changesets for approved
     #: experiment designs (loop phase 2).
-    opened_changesets: list[str] = []
+    opened_changesets: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
     message: str
 
 
@@ -192,6 +195,47 @@ async def _load_gate_items(
     return items
 
 
+async def _persist_approval_errors(
+    pool: asyncpg.Pool,
+    run_id: str,
+    lease_owner_id: str,
+    errors: list[str],
+) -> None:
+    """Persist approval-effect failures for the resumed supervisor state.
+
+    The internal result row uses the supervisor's canonical ``errors`` state
+    key. Ownership is checked in the same statement, so a stale approval worker
+    cannot write an error after losing its lease.
+    """
+    if not errors:
+        return
+    async with pool.acquire() as conn:
+        inserted = await conn.execute(
+            """
+            WITH owned_run AS (
+                SELECT run_id
+                FROM agent_runs
+                WHERE run_id = $1
+                  AND lease_owner_id = $3
+                  AND lease_expires_at > now()
+                FOR UPDATE
+            )
+            INSERT INTO agent_run_results (run_id, agent_name, produces, output)
+            SELECT $1, 'approval_errors', 'errors', $2::jsonb
+            FROM owned_run
+            ON CONFLICT (run_id, agent_name)
+            DO UPDATE SET produces = EXCLUDED.produces,
+                          output = EXCLUDED.output,
+                          created_at = now()
+            """,
+            run_id,
+            json.dumps(errors),
+            lease_owner_id,
+        )
+    if isinstance(inserted, str) and inserted.endswith(" 0"):
+        raise RunLeaseLostError(f"Run {run_id} approval lease expired")
+
+
 def _resolve_decisions(
     body: ApprovalRequest, gated_agent: str, items: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -272,7 +316,8 @@ async def _apply_approval_effects(
     rejected_items: list[dict[str, Any]],
     comment: str | None,
     gate_status: str,
-) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    lease_owner_id: str,
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
     """Apply one claimed gate's effects while the caller owns its lease.
 
     The caller races this whole coroutine against lease loss. Cancellation
@@ -308,6 +353,7 @@ async def _apply_approval_effects(
 
     forked_runs: list[str] = []
     opened_changesets: list[str] = []
+    errors: list[str] = []
     forked_supervisor_tasks: list[dict[str, Any]] = []
     if gated_agent == "experiment_design":
         for design in approved_items:
@@ -378,16 +424,18 @@ async def _apply_approval_effects(
                         {"experiment_id": _item_id(gated_agent, design)},
                     )
             else:
+                experiment_id = _item_id(gated_agent, design) or "(no id)"
+                errors.append(f"experiment deploy failed: {experiment_id}")
                 await audit.log(
                     run_id,
                     "deploy_failed",
-                    {"item_id": _item_id(gated_agent, design), "kind": gated_agent},
+                    {"item_id": experiment_id, "kind": gated_agent},
                     approval_status="approved",
                 )
                 logger.error(
                     "[%s] Deploy failed for approved experiment %s",
                     run_id,
-                    _item_id(gated_agent, design),
+                    experiment_id,
                 )
         for design in rejected_items:
             await _update_design_ledger(pool, run_id, project_id, design, "rejected")
@@ -472,6 +520,7 @@ async def _apply_approval_effects(
                     _item_id(gated_agent, proposal),
                 )
 
+    await _persist_approval_errors(pool, run_id, lease_owner_id, errors)
     await audit.log(
         run_id,
         "approval_decision",
@@ -481,10 +530,11 @@ async def _apply_approval_effects(
             "rejected": len(rejected_items),
             "forked_runs": forked_runs,
             "opened_changesets": opened_changesets,
+            "errors": errors,
         },
         approval_status=gate_status,
     )
-    return forked_runs, opened_changesets, forked_supervisor_tasks
+    return forked_runs, opened_changesets, errors, forked_supervisor_tasks
 
 
 @router.post("/{run_id}/approve", response_model=ApprovalResponse)
@@ -599,6 +649,7 @@ async def approve_action(
         (
             forked_runs,
             opened_changesets,
+            errors,
             forked_supervisor_tasks,
         ) = await run_while_lease_owned(
             _apply_approval_effects(
@@ -612,6 +663,7 @@ async def approve_action(
                 rejected_items=rejected_items,
                 comment=body.comment,
                 gate_status=gate_status,
+                lease_owner_id=approval_owner_id,
             ),
             lease_lost,
             run_id=run_id,
@@ -660,6 +712,7 @@ async def approve_action(
     opened_note = (
         f" · {len(opened_changesets)} PR(s) opened" if opened_changesets else ""
     )
+    error_note = f" · {len(errors)} error(s)" if errors else ""
     return ApprovalResponse(
         run_id=run_id,
         status=gate_status,
@@ -667,9 +720,11 @@ async def approve_action(
         rejected_count=len(rejected_items),
         forked_runs=forked_runs,
         opened_changesets=opened_changesets,
+        errors=errors,
         message=(
             f"{len(approved_items)} approved, {len(rejected_items)} rejected — run resumes."
             + opened_note
+            + error_note
         ),
     )
 

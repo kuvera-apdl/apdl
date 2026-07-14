@@ -74,6 +74,12 @@ def stubbed_store(monkeypatch):
     async def fake_list(pool, project_id, include_archived=False):
         return list(calls.get("existing") or [])
 
+    async def fake_outputs(pool, project_id):
+        return [
+            {"agent_id": row["agent_id"], "produces": row["produces"]}
+            for row in calls.get("existing") or []
+        ]
+
     async def fake_create(pool, project_id, fields):
         calls["created"] = (project_id, fields)
         return _row(**{k: v for k, v in fields.items()})
@@ -90,6 +96,7 @@ def stubbed_store(monkeypatch):
         return True
 
     monkeypatch.setattr(router_mod, "list_custom_agents", fake_list)
+    monkeypatch.setattr(router_mod, "list_active_custom_agent_outputs", fake_outputs)
     monkeypatch.setattr(router_mod, "create_custom_agent", fake_create)
     monkeypatch.setattr(router_mod, "get_custom_agent", fake_get)
     monkeypatch.setattr(router_mod, "update_custom_agent", fake_update)
@@ -108,6 +115,47 @@ async def test_create_happy_path(stubbed_store):
     project_id, fields = stubbed_store["created"]
     assert project_id == "demo"
     assert fields["produces"] == "churn_signals"
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_removed_and_unknown_contract_fields(stubbed_store):
+    async with _client() as client:
+        response = await client.post(
+            "/v1/agents/custom?project_id=demo",
+            json=_spec(parse_as="object"),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    assert response.json()["detail"][0]["loc"] == ["body", "parse_as"]
+    assert stubbed_store["created"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_unknown_nested_preset_fields(stubbed_store):
+    async with _client() as client:
+        response = await client.post(
+            "/v1/agents/custom?project_id=demo",
+            json=_spec(
+                preset_tools=[
+                    {
+                        "tool": "discover_events",
+                        "params": {"limit": 5},
+                        "parse_as": "object",
+                    }
+                ]
+            ),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "extra_forbidden"
+    assert response.json()["detail"][0]["loc"] == [
+        "body",
+        "preset_tools",
+        0,
+        "parse_as",
+    ]
+    assert stubbed_store["created"] is None
 
 
 @pytest.mark.asyncio
@@ -167,7 +215,9 @@ async def test_self_registered_custom_agent_test_invokes_no_tools_or_llm(monkeyp
         ({"produces": "insights"}, "reserved"),
         ({"produces": "errors"}, "reserved"),
         ({"tools": ["create_flag"]}, "unknown tool"),
+        ({"tools": ["discover_events", "discover_events"]}, "duplicate"),
         ({"max_tool_steps": 0}, "max_tool_steps"),
+        ({"system_prompt": "   \n"}, "non-whitespace"),
         ({"requires": ["no_such_output"]}, "does not match"),
         ({"requires": ["personalizations"]}, "does not match"),
         ({"model_tier": "turbo"}, "model_tier"),

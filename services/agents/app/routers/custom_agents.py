@@ -20,7 +20,7 @@ from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_project
 from app.framework import (
@@ -31,14 +31,23 @@ from app.framework import (
 )
 from app.framework.tool_catalog import catalog_descriptions, llm_tool_schemas
 from app.framework.tool_loop import run_preset_tools, run_tool_loop
+from app.llm.router import chat_completion
 from app.safety.audit import AuditLogger
 from app.store.custom_agents import (
     SlugConflictError,
     archive_custom_agent,
     create_custom_agent,
     get_custom_agent,
+    list_active_custom_agent_outputs,
     list_custom_agents,
     update_custom_agent,
+)
+from app.store.custom_agent_tests import (
+    CUSTOM_AGENT_TEST_RATE_WINDOW_SECONDS,
+    CustomAgentTestBusyError,
+    CustomAgentTestRateLimitError,
+    begin_custom_agent_test_run,
+    finish_custom_agent_test_run,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +61,8 @@ class PresetToolCall(BaseModel):
     in ``validate_definition`` so problems aggregate into one 422.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     tool: str
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -60,11 +71,13 @@ class CustomAgentSpec(BaseModel):
     """Create/update body. Domain rules live in ``validate_definition`` so the
     wizard gets every problem in one aggregated 422, not pydantic's first.
 
-    ``tools`` is the ALLOWED-tools selection (catalog names the reasoning
-    model may call in its tool loop); an empty list allows the whole catalog.
+    ``tools`` is the exact ALLOWED-tools selection (catalog names the reasoning
+    model may call in its tool loop); an empty list allows no agentic tools.
     ``preset_tools`` are deterministic calls executed verbatim on every run,
     before reasoning, with results rendered into the prompt.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     slug: str
     display_name: str
@@ -110,6 +123,8 @@ class DefinitionsResponse(BaseModel):
 
 
 class TestRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     project_id: str = Field(min_length=1)
     time_range_days: int = Field(default=7, ge=1, le=90)
     definition: CustomAgentSpec
@@ -153,6 +168,8 @@ async def _validate_against_project(
     project_id: str,
     spec: CustomAgentSpec,
     exclude_agent_id: str | None = None,
+    *,
+    enforce_produces_uniqueness: bool = True,
 ) -> list[str]:
     """DB-dependent rules: produces uniqueness and ``requires`` resolvability.
 
@@ -163,11 +180,11 @@ async def _validate_against_project(
     errors: list[str] = []
     siblings = [
         row
-        for row in await list_custom_agents(pool, project_id)
+        for row in await list_active_custom_agent_outputs(pool, project_id)
         if row["agent_id"] != exclude_agent_id
     ]
     sibling_produces = {row["produces"] for row in siblings}
-    if spec.produces in sibling_produces:
+    if enforce_produces_uniqueness and spec.produces in sibling_produces:
         errors.append(
             f"produces '{spec.produces}' is already used by another custom agent in this project"
         )
@@ -262,81 +279,153 @@ async def create_custom(
 
 @router.post("/custom/test", response_model=TestRunResponse)
 async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse:
-    """Dry-run a draft definition: the full agentic loop, zero persistence.
+    """Dry-run a draft definition without creating product run state.
 
     Uniqueness checks are skipped — a draft may legitimately shadow the agent
-    being edited. No ``agent_runs`` row, no audit entries (``log_tool_calls``
-    off), no memory writes (CustomAgent never writes memory), so testing is
-    free of side effects beyond read-only warehouse queries.
+    being edited — but dependency resolution is identical to save. Real query
+    and LLM work is single-flight/rate-limited per project and recorded in the
+    dry-run audit table. No ``agent_runs``/results or memory writes are made.
     """
     require_project(request, body.project_id, "agents:manage")
     errors = _validate_spec(body.definition)
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    errors += await _validate_against_project(
+        pool,
+        body.project_id,
+        body.definition,
+        enforce_produces_uniqueness=False,
+    )
     if errors:
         raise HTTPException(status_code=422, detail="; ".join(errors))
 
-    pool: asyncpg.Pool = request.app.state.pg_pool
-    agent = CustomAgent(_spec_fields(body.definition))
-    ctx = AgentContext(
-        pool=pool,
-        vector_store=request.app.state.vector_store,
-        audit=AuditLogger(pool),  # required by the dataclass; never .log()ed here
-        run_id=f"test-{uuid.uuid4()}",
-        project_id=body.project_id,
-        autonomy_level=1,
-        time_range_days=body.time_range_days,
-    )
-    # Same seed the supervisor uses, so `requires`-derived placeholders render
-    # as empty lists instead of leaking "{insights}" into the prompt.
-    state: dict[str, Any] = {
-        "project_id": body.project_id,
-        "insights": [],
-        "experiment_designs": [],
-        "personalizations": [],
-        "feature_proposals": [],
-        "errors": [],
-    }
+    test_run_id = f"test-{uuid.uuid4()}"
+    try:
+        await begin_custom_agent_test_run(
+            pool,
+            test_run_id=test_run_id,
+            project_id=body.project_id,
+            agent_slug=body.definition.slug,
+            model_tier=body.definition.model_tier,
+            time_range_days=body.time_range_days,
+            max_tool_steps=body.definition.max_tool_steps,
+            allowed_tool_count=len(body.definition.tools),
+            configured_preset_count=len(body.definition.preset_tools),
+        )
+    except CustomAgentTestBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CustomAgentTestRateLimitError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(CUSTOM_AGENT_TEST_RATE_WINDOW_SECONDS)},
+        ) from exc
 
     total_start = time.monotonic()
-    working: dict[str, Any] = dict(state)
-    working["context"] = await agent.retrieve_context(ctx)
-
-    # Preset (deterministic) calls run before the prompt is built, exactly as
-    # gather() does in a real run — but with audit logging off, like the loop.
-    preset_start = time.monotonic()
-    preset_trace = (
-        await run_preset_tools(
-            ctx,
-            agent_name=agent.name,
-            preset_tools=agent.preset_tools,
-            log_tool_calls=False,
-        )
-        if agent.preset_tools
-        else []
-    )
-    working["tool_results"] = preset_trace
-    preset_ms = int((time.monotonic() - preset_start) * 1000)
-
-    prompt = agent.build_prompt(ctx, state, working) or ""
-
-    llm_start = time.monotonic()
+    preset_trace: list[Any] = []
+    agentic_trace: list[Any] = []
+    llm_calls = 0
+    llm_ms: int | None = None
+    llm_start: float | None = None
     try:
-        loop_result = await run_tool_loop(
-            ctx,
-            agent_name=agent.name,
-            system_prompt=agent.system_prompt,
-            user_prompt=prompt,
-            tool_schemas=llm_tool_schemas(agent.agentic_tools),
-            model_tier=agent.model_tier,
-            max_steps=agent.max_tool_steps,
-            log_tool_calls=False,
+        agent = CustomAgent(_spec_fields(body.definition))
+        ctx = AgentContext(
+            pool=pool,
+            vector_store=request.app.state.vector_store,
+            audit=AuditLogger(pool),
+            run_id=test_run_id,
+            project_id=body.project_id,
+            autonomy_level=1,
+            time_range_days=body.time_range_days,
         )
-    except RuntimeError as exc:
-        # All providers failed — surface as a gateway error, not a 500 crash.
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
-    llm_ms = int((time.monotonic() - llm_start) * 1000)
+        # Same seed the supervisor uses, so `requires`-derived placeholders
+        # render as empty lists instead of leaking "{insights}" into the prompt.
+        state: dict[str, Any] = {
+            "project_id": body.project_id,
+            "insights": [],
+            "experiment_designs": [],
+            "personalizations": [],
+            "feature_proposals": [],
+            "errors": [],
+        }
+        working: dict[str, Any] = dict(state)
+        working["context"] = await agent.retrieve_context(ctx)
 
-    parsed = agent.parse(loop_result.text)
-    total_ms = int((time.monotonic() - total_start) * 1000)
+        # Presets run before prompt construction, exactly as in a real run.
+        # Tool-call audit logging stays on because these are real queries.
+        preset_start = time.monotonic()
+        preset_trace = (
+            await run_preset_tools(
+                ctx,
+                agent_name=agent.name,
+                preset_tools=agent.preset_tools,
+            )
+            if agent.preset_tools
+            else []
+        )
+        working["tool_results"] = preset_trace
+        preset_ms = int((time.monotonic() - preset_start) * 1000)
+
+        prompt = agent.build_prompt(ctx, state, working) or ""
+        llm_start = time.monotonic()
+        if agent.agentic_tools:
+            loop_result = await run_tool_loop(
+                ctx,
+                agent_name=agent.name,
+                system_prompt=agent.system_prompt,
+                user_prompt=prompt,
+                tool_schemas=llm_tool_schemas(agent.agentic_tools),
+                model_tier=agent.model_tier,
+                max_steps=agent.max_tool_steps,
+            )
+            raw_response = loop_result.text
+            agentic_trace = loop_result.trace
+            llm_calls = loop_result.rounds + 1
+        else:
+            raw_response = await chat_completion(
+                model_tier=agent.model_tier,
+                messages=[
+                    {"role": "system", "content": agent.system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            llm_calls = 1
+        llm_ms = int((time.monotonic() - llm_start) * 1000)
+        parsed = agent.parse(raw_response)
+        total_ms = int((time.monotonic() - total_start) * 1000)
+    except BaseException as exc:
+        if llm_start is not None and llm_calls == 0:
+            # A failed provider chain still consumed at least one logical
+            # completion attempt; individual fallback rungs are router logs.
+            llm_calls = 1
+        if llm_start is not None and llm_ms is None:
+            llm_ms = int((time.monotonic() - llm_start) * 1000)
+        total_ms = int((time.monotonic() - total_start) * 1000)
+        await finish_custom_agent_test_run(
+            pool,
+            test_run_id,
+            status="failed",
+            preset_tool_calls=len(preset_trace),
+            agentic_tool_calls=len(agentic_trace),
+            llm_calls=llm_calls,
+            llm_latency_ms=llm_ms,
+            total_latency_ms=total_ms,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        if isinstance(exc, RuntimeError):
+            # All providers failed — surface as a gateway error, not a 500 crash.
+            raise HTTPException(status_code=502, detail=f"LLM call failed: {exc}") from exc
+        raise
+
+    await finish_custom_agent_test_run(
+        pool,
+        test_run_id,
+        status="succeeded",
+        preset_tool_calls=len(preset_trace),
+        agentic_tool_calls=len(agentic_trace),
+        llm_calls=llm_calls,
+        llm_latency_ms=llm_ms,
+        total_latency_ms=total_ms,
+    )
 
     def _entries(trace: list[Any]) -> list[dict[str, Any]]:
         return [
@@ -352,11 +441,11 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
 
     return TestRunResponse(
         prompt=prompt,
-        raw_response=loop_result.text,
+        raw_response=raw_response,
         parsed_output=parsed,
         preset_results=_entries(preset_trace),
-        tool_results=_entries(loop_result.trace),
-        timings_ms={"preset_tools": preset_ms, "llm": llm_ms, "total": total_ms},
+        tool_results=_entries(agentic_trace),
+        timings_ms={"preset_tools": preset_ms, "llm": llm_ms or 0, "total": total_ms},
     )
 
 

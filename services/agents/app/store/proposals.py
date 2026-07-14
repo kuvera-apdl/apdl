@@ -99,16 +99,14 @@ def _spec_of(proposal: dict[str, Any]) -> str:
         prose = _text(proposal.get(key))
         if prose:
             break
-    if not prose:
-        return ""
-
     sections: list[str] = []
     problem = _text(proposal.get("problem_statement"))
-    if problem and problem != prose:
-        sections.append(f"## Problem\n{problem}")
-        sections.append(f"## What to build\n{prose}")
-    else:
-        sections.append(prose)
+    if prose:
+        if problem and problem != prose:
+            sections.append(f"## Problem\n{problem}")
+            sections.append(f"## What to build\n{prose}")
+        else:
+            sections.append(prose)
 
     notes = _impl_notes(proposal.get("implementation_spec"))
     if notes:

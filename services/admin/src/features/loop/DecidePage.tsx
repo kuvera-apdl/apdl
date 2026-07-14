@@ -80,11 +80,18 @@ export function DecidePage() {
     onSuccess: (res, { approved }) => {
       const opened = (res.opened_changesets ?? []).length
       const forked = (res.forked_runs ?? []).length
-      toast.success(
+      const errors = res.errors ?? []
+      const summary =
         `${approved ? 'Approved' : 'Rejected'} — run resumes` +
-          (forked ? ` · ${forked} PR run(s) forked` : '') +
-          (opened ? ` · ${opened} PR(s) opened` : ''),
-      )
+        (forked ? ` · ${forked} PR run(s) forked` : '') +
+        (opened ? ` · ${opened} PR(s) opened` : '')
+      if (errors.length > 0) {
+        toast.warning(`${summary} · ${errors.length} deployment error(s)`, {
+          description: errors.join(' · '),
+        })
+      } else {
+        toast.success(summary)
+      }
       void queryClient.invalidateQueries({ queryKey: [active?.id ?? 'none', 'decide'] })
     },
     onError: (err) => {

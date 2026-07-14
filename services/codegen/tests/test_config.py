@@ -10,6 +10,11 @@ import base64
 import pytest
 
 from app import config
+from app.editor.deadlines import (
+    CODEGEN_JOB_OVERHEAD_SECONDS,
+    CodegenDeadlineExceeded,
+    CodegenRunDeadline,
+)
 from app.editor.environment import codegen_behavior_configuration_sha256
 from app.evaluations.models import CodegenCandidateIdentity, RiskLevel, RolloutStage
 from app.editor.aider_editor import AiderEditor
@@ -134,6 +139,44 @@ def test_job_budget_caps_derived_pipeline_below_github_token_ttl(monkeypatch):
     assert config.codegen_job_budget() == config.MAX_CODEGEN_JOB_BUDGET_SECONDS
 
 
+def test_job_budget_counts_brief_and_every_possible_review(monkeypatch):
+    monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
+    monkeypatch.setenv("CODEGEN_TIMEOUT", "100")
+    monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "10")
+    monkeypatch.setenv("CODEGEN_LLM_TIMEOUT", "20")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_BRIEF", "true")
+    monkeypatch.setenv("CODEGEN_REVIEW", "true")
+
+    plan = config.codegen_deadline_plan()
+
+    assert plan.edit_rounds == 3
+    assert plan.brief_calls == 1
+    assert plan.review_calls == 3
+    assert plan.requested_phase_seconds == 400
+    assert plan.job_budget_seconds == CODEGEN_JOB_OVERHEAD_SECONDS + 400
+    assert plan.reconciled is False
+
+
+def test_inner_deadlines_are_reconciled_with_credential_safe_outer_cap(monkeypatch):
+    monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
+    monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
+    monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
+    monkeypatch.setenv("CODEGEN_LLM_TIMEOUT", "240")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    monkeypatch.setenv("CODEGEN_BRIEF", "true")
+    monkeypatch.setenv("CODEGEN_REVIEW", "true")
+
+    plan = config.codegen_deadline_plan()
+
+    assert plan.job_budget_seconds == config.MAX_CODEGEN_JOB_BUDGET_SECONDS
+    assert plan.reconciled is True
+    assert plan.reserved_seconds <= plan.job_budget_seconds
+    assert config.codegen_agent_timeout() == plan.agent_timeout_seconds
+    assert config.codegen_git_timeout() == plan.git_timeout_seconds
+    assert config.codegen_llm_timeout() == plan.llm_timeout_seconds
+
+
 def test_job_budget_env_override_can_tighten_but_not_expand_token_bound(monkeypatch):
     monkeypatch.setenv("CODEGEN_JOB_BUDGET", "2400")
     assert config.codegen_job_budget() == 2400
@@ -141,6 +184,40 @@ def test_job_budget_env_override_can_tighten_but_not_expand_token_bound(monkeypa
     monkeypatch.setenv("CODEGEN_JOB_BUDGET", "7200")
     with pytest.raises(ValueError, match="cannot exceed 3000 seconds"):
         config.codegen_job_budget()
+
+
+def test_tight_job_override_scales_every_active_inner_deadline(monkeypatch):
+    monkeypatch.setenv("CODEGEN_JOB_BUDGET", "200")
+    monkeypatch.setenv("CODEGEN_TIMEOUT", "100")
+    monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "20")
+    monkeypatch.setenv("CODEGEN_LLM_TIMEOUT", "10")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    monkeypatch.setenv("CODEGEN_BRIEF", "true")
+    monkeypatch.setenv("CODEGEN_REVIEW", "true")
+
+    plan = config.codegen_deadline_plan()
+
+    assert plan.job_budget_seconds == 200
+    assert plan.reconciled is True
+    assert plan.agent_timeout_seconds < 100
+    assert plan.git_timeout_seconds < 20
+    assert plan.llm_timeout_seconds < 10
+    assert plan.reserved_seconds <= plan.job_budget_seconds
+
+
+def test_run_deadline_clamps_every_phase_to_shared_remaining_wall_time():
+    now = [100.0]
+    deadline = CodegenRunDeadline(100, clock=lambda: now[0])
+
+    assert deadline.remaining_seconds() == 40
+    assert deadline.clamp_timeout(300) == 40
+
+    now[0] += 39.75
+    assert deadline.clamp_timeout(10) == pytest.approx(0.25)
+
+    now[0] += 0.25
+    with pytest.raises(CodegenDeadlineExceeded):
+        deadline.clamp_timeout(1)
 
 
 def test_stale_sweep_interval_default_and_disable(monkeypatch):

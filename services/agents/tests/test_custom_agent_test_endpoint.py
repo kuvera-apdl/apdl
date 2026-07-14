@@ -1,7 +1,8 @@
-"""POST /v1/agents/custom/test — dry-run of the full agentic loop, zero persistence."""
+"""POST /v1/agents/custom/test — bounded, audited full-loop dry-runs."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -10,6 +11,11 @@ from httpx import ASGITransport, AsyncClient
 from app.framework import tool_catalog, tool_loop
 from app.llm.router import ToolCall, ToolCompletion
 from app.main import app
+from app.routers import custom_agents as router_mod
+from app.store.custom_agent_tests import (
+    CustomAgentTestBusyError,
+    CustomAgentTestRateLimitError,
+)
 
 
 def _spec(**overrides: Any) -> dict[str, Any]:
@@ -35,6 +41,7 @@ def _spec(**overrides: Any) -> dict[str, Any]:
 class _FakeConn:
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple]] = []
+        self.fetch_result: list[dict[str, Any]] = []
 
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
@@ -48,7 +55,8 @@ class _FakeConn:
         return 1
 
     async def fetch(self, query: str, *args: Any):
-        return []
+        self.executed.append((query, args))
+        return self.fetch_result
 
 
 class _Acquire:
@@ -76,8 +84,25 @@ def _client(pool: _FakePool) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+@pytest.fixture(autouse=True)
+def _stub_dry_run_admission(monkeypatch):
+    calls: dict[str, list[Any]] = {"begun": [], "finished": []}
+
+    async def fake_begin(pool, **kwargs):
+        calls["begun"].append(kwargs)
+
+    async def fake_finish(pool, test_run_id, **kwargs):
+        calls["finished"].append((test_run_id, kwargs))
+
+    monkeypatch.setattr(router_mod, "begin_custom_agent_test_run", fake_begin)
+    monkeypatch.setattr(router_mod, "finish_custom_agent_test_run", fake_finish)
+    return calls
+
+
 @pytest.mark.asyncio
-async def test_dry_run_runs_loop_and_writes_nothing(monkeypatch):
+async def test_dry_run_runs_loop_and_audits_real_tool_spend(
+    monkeypatch, _stub_dry_run_admission
+):
     async def fake_run_tool(ctx, name, params):
         assert ctx.project_id == "demo"
         assert name == "discover_events"
@@ -119,14 +144,22 @@ async def test_dry_run_runs_loop_and_writes_nothing(monkeypatch):
     assert body["preset_results"] == []
     assert set(body["timings_ms"]) == {"preset_tools", "llm", "total"}
 
-    # The whole point of the dry run: zero DB writes — no run row, no audit
-    # entries (log_tool_calls off), no memory writes.
+    # Dry-runs avoid product run/result state, but real query calls are audited.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
-    assert writes == []
+    assert len([q for q in writes if "INSERT INTO agent_audit_log" in q]) == 1
+    assert not any("agent_runs" in q or "agent_run_results" in q for q in writes)
+    assert _stub_dry_run_admission["begun"][0]["project_id"] == "demo"
+    _, finish = _stub_dry_run_admission["finished"][0]
+    assert finish["status"] == "succeeded"
+    assert finish["preset_tool_calls"] == 0
+    assert finish["agentic_tool_calls"] == 1
+    assert finish["llm_calls"] == 2
 
 
 @pytest.mark.asyncio
-async def test_dry_run_executes_presets_before_the_loop(monkeypatch):
+async def test_dry_run_executes_presets_before_the_loop(
+    monkeypatch, _stub_dry_run_admission
+):
     ran: list[tuple[str, dict[str, Any]]] = []
 
     async def fake_run_tool(ctx, name, params):
@@ -157,9 +190,13 @@ async def test_dry_run_executes_presets_before_the_loop(monkeypatch):
     assert body["preset_results"][0]["tool"] == "list_flags"
     assert "beta_checkout" in body["preset_results"][0]["result"]
     assert "## Preset data (gathered automatically)" in body["prompt"]
-    # Presets are part of the dry run too: still zero DB writes.
+    # The real preset query is individually audited.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
-    assert writes == []
+    assert len([q for q in writes if "INSERT INTO agent_audit_log" in q]) == 1
+    _, finish = _stub_dry_run_admission["finished"][0]
+    assert finish["preset_tool_calls"] == 1
+    assert finish["agentic_tool_calls"] == 0
+    assert finish["llm_calls"] == 1
 
 
 @pytest.mark.asyncio
@@ -180,7 +217,7 @@ async def test_dry_run_rejects_invalid_preset_params(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dry_run_validates_definition(monkeypatch):
+async def test_dry_run_validates_definition(monkeypatch, _stub_dry_run_admission):
     pool = _FakePool()
     async with _client(pool) as client:
         resp = await client.post(
@@ -192,10 +229,146 @@ async def test_dry_run_validates_definition(monkeypatch):
         )
     assert resp.status_code == 422
     assert "reserved" in resp.json()["detail"]
+    assert _stub_dry_run_admission["begun"] == []
 
 
 @pytest.mark.asyncio
-async def test_dry_run_maps_total_llm_failure_to_502(monkeypatch):
+async def test_dry_run_validates_requires_but_skips_only_produces_uniqueness(
+    monkeypatch, _stub_dry_run_admission
+):
+    async def simple_chat(*args, **kwargs):
+        return ToolCompletion(text="[]")
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", simple_chat)
+
+    unresolved_pool = _FakePool()
+    async with _client(unresolved_pool) as client:
+        unresolved = await client.post(
+            "/v1/agents/custom/test",
+            json={
+                "project_id": "demo",
+                "definition": _spec(requires=["missing_output"]),
+            },
+        )
+    assert unresolved.status_code == 422
+    assert "does not match" in unresolved.json()["detail"]
+    assert _stub_dry_run_admission["begun"] == []
+
+    collision_pool = _FakePool()
+    collision_pool.conn.fetch_result = [
+        {"agent_id": "existing", "produces": "churn_signals"}
+    ]
+    async with _client(collision_pool) as client:
+        collision = await client.post(
+            "/v1/agents/custom/test",
+            json={"project_id": "demo", "definition": _spec()},
+        )
+    assert collision.status_code == 200
+    assert len(_stub_dry_run_admission["begun"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_tool_dry_run_uses_the_same_plain_completion_path_as_real_runs(
+    monkeypatch
+):
+    calls: list[tuple[str, list[dict[str, str]]]] = []
+
+    async def plain_completion(*, model_tier, messages, **kwargs):
+        calls.append((model_tier, messages))
+        return '[{"signal": "plain"}]'
+
+    async def forbidden_loop(*args, **kwargs):
+        raise AssertionError("zero-tool drafts must not enter the tool loop")
+
+    monkeypatch.setattr(router_mod, "chat_completion", plain_completion)
+    monkeypatch.setattr(router_mod, "run_tool_loop", forbidden_loop)
+
+    async with _client(_FakePool()) as client:
+        response = await client.post(
+            "/v1/agents/custom/test",
+            json={"project_id": "demo", "definition": _spec(tools=[])},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["parsed_output"] == [{"signal": "plain"}]
+    assert response.json()["tool_results"] == []
+    assert calls[0][0] == "fast"
+    assert [message["role"] for message in calls[0][1]] == ["system", "user"]
+
+
+@pytest.mark.asyncio
+async def test_failure_during_post_admission_setup_terminalizes_audit(
+    monkeypatch, _stub_dry_run_admission
+):
+    class BrokenAgent:
+        def __init__(self, definition):
+            raise ValueError("cannot hydrate")
+
+    monkeypatch.setattr(router_mod, "CustomAgent", BrokenAgent)
+
+    async with _client(_FakePool()) as client:
+        with pytest.raises(ValueError, match="cannot hydrate"):
+            await client.post(
+                "/v1/agents/custom/test",
+                json={"project_id": "demo", "definition": _spec()},
+            )
+
+    _, finish = _stub_dry_run_admission["finished"][0]
+    assert finish["status"] == "failed"
+    assert finish["error"] == "ValueError: cannot hydrate"
+
+
+@pytest.mark.asyncio
+async def test_request_cancellation_terminalizes_audit_without_being_swallowed(
+    monkeypatch, _stub_dry_run_admission
+):
+    async def cancel_context(self, ctx):
+        raise asyncio.CancelledError("client disconnected")
+
+    monkeypatch.setattr(router_mod.CustomAgent, "retrieve_context", cancel_context)
+
+    async with _client(_FakePool()) as client:
+        with pytest.raises(asyncio.CancelledError, match="client disconnected"):
+            await client.post(
+                "/v1/agents/custom/test",
+                json={"project_id": "demo", "definition": _spec()},
+            )
+
+    _, finish = _stub_dry_run_admission["finished"][0]
+    assert finish["status"] == "failed"
+    assert finish["error"] == "CancelledError: client disconnected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (CustomAgentTestBusyError("already running"), 409),
+        (CustomAgentTestRateLimitError("too many"), 429),
+    ],
+)
+async def test_dry_run_maps_database_admission_rejections(
+    monkeypatch, error, status
+):
+    async def reject(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(router_mod, "begin_custom_agent_test_run", reject)
+    async with _client(_FakePool()) as client:
+        response = await client.post(
+            "/v1/agents/custom/test",
+            json={"project_id": "demo", "definition": _spec()},
+        )
+
+    assert response.status_code == status
+    if status == 429:
+        assert response.headers["retry-after"] == "3600"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_maps_total_llm_failure_to_502(
+    monkeypatch, _stub_dry_run_admission
+):
     async def failing_chat(*args, **kwargs):
         raise RuntimeError("all providers failed")
 
@@ -208,6 +381,9 @@ async def test_dry_run_maps_total_llm_failure_to_502(monkeypatch):
             json={"project_id": "demo", "definition": _spec()},
         )
     assert resp.status_code == 502
+    _, finish = _stub_dry_run_admission["finished"][0]
+    assert finish["status"] == "failed"
+    assert "RuntimeError: all providers failed" in finish["error"]
 
 
 @pytest.mark.asyncio

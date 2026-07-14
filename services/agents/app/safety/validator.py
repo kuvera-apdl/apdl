@@ -291,7 +291,12 @@ class SafetyValidator:
         # a burst of rejected drafts must not exhaust the quota for the
         # eventual legitimate action.
         record = all(c["passed"] for c in checks)
-        checks.insert(0, self._check_rate_limits(action, record=record))
+        checks.insert(
+            0,
+            self._run_check(
+                "rate_limit", self._check_rate_limits, action, record=record
+            ),
+        )
 
         passed = all(c["passed"] for c in checks)
         risk_level = self._assess_risk(action, checks)
@@ -299,9 +304,11 @@ class SafetyValidator:
         return SafetyResult(passed=passed, checks=checks, risk_level=risk_level)
 
     @staticmethod
-    def _run_check(name: str, fn: Any, action: AgentAction) -> dict[str, Any]:
+    def _run_check(
+        name: str, fn: Any, action: AgentAction, **kwargs: Any
+    ) -> dict[str, Any]:
         try:
-            return fn(action)
+            return fn(action, **kwargs)
         except Exception as exc:
             logger.exception("Safety check %s crashed on %s action", name, action.type.value)
             return {

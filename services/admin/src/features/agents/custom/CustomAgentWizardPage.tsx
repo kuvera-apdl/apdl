@@ -10,7 +10,7 @@
 // inside a bounded loop — the Data tools step selects which tools are
 // ALLOWED, default all).
 import { ArrowLeft, ArrowRight, Check, FlaskConical, Save } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -79,7 +79,7 @@ interface FormState {
   system_prompt: string
   user_prompt_template: string
   model_tier: 'fast' | 'reasoning'
-  /** UI-only: false = whole catalog allowed (spec sends []); true = subset. */
+  /** UI-only: false = whole catalog allowed (spec sends every name); true = subset. */
   limitTools: boolean
   /** Allowed tool names; only meaningful when limitTools is true. */
   tools: string[]
@@ -122,7 +122,7 @@ function slugify(value: string): string {
     .slice(0, 64)
 }
 
-function toSpec(form: FormState): CustomAgentSpec {
+function toSpec(form: FormState, toolCatalog: ToolCatalogEntry[]): CustomAgentSpec {
   return {
     slug: form.slug,
     display_name: form.display_name,
@@ -130,8 +130,8 @@ function toSpec(form: FormState): CustomAgentSpec {
     system_prompt: form.system_prompt,
     user_prompt_template: form.user_prompt_template,
     model_tier: form.model_tier,
-    // Empty = whole catalog allowed (the server default).
-    tools: form.limitTools ? form.tools : [],
+    // The wire contract is an exact allow-list: [] means zero agentic tools.
+    tools: form.limitTools ? form.tools : toolCatalog.map((entry) => entry.name),
     preset_tools: form.preset_tools.map(presetToWire),
     max_tool_steps: form.max_tool_steps,
     requires: form.requires,
@@ -143,7 +143,11 @@ function toSpec(form: FormState): CustomAgentSpec {
 }
 
 /** Per-step validation problems; empty list means the step is complete. */
-function stepProblems(step: number, form: FormState): string[] {
+function stepProblems(
+  step: number,
+  form: FormState,
+  toolCatalog: ToolCatalogEntry[] = [],
+): string[] {
   const problems: string[] = []
   if (step === 0) {
     if (form.display_name.trim() === '') problems.push('Name is required.')
@@ -163,8 +167,8 @@ function stepProblems(step: number, form: FormState): string[] {
     if (form.user_prompt_template.trim() === '') problems.push('User prompt template is required.')
   }
   if (step === 3) {
-    if (form.limitTools && form.tools.length === 0)
-      problems.push('Select at least one allowed tool, or switch back to allowing all tools.')
+    if (!form.limitTools && toolCatalog.length === 0)
+      problems.push('The tool catalog must load before all tools can be allowed.')
     if (form.max_tool_steps < 1 || form.max_tool_steps > 16)
       problems.push('Tool budget must be between 1 and 16 rounds.')
   }
@@ -210,6 +214,7 @@ function CustomAgentWizard() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
   const [showProblems, setShowProblems] = useState(false)
   const [testResult, setTestResult] = useState<TestRunResponse | null>(null)
+  const seededAgentId = useRef<string | null>(null)
 
   const conn = active ? serviceConnection(active, 'agents') : null
 
@@ -229,10 +234,15 @@ function CustomAgentWizard() {
     queryFn: ({ signal }) => getCustomAgent(conn!, projectId!, agentId!, { signal }),
   })
 
-  // Prefill once when editing; keyed on agent_id so a route change re-seeds.
+  // Prefill once both the stored exact allow-list and current catalog exist.
   useEffect(() => {
     const agent = existingQuery.data
-    if (!agent) return
+    const catalog = definitionsQuery.data?.tool_catalog
+    if (!agent || !catalog || seededAgentId.current === agent.agent_id) return
+    seededAgentId.current = agent.agent_id
+    const stored = new Set(agent.tools)
+    const allowsAll =
+      catalog.length === stored.size && catalog.every((entry) => stored.has(entry.name))
     setForm({
       slug: agent.slug,
       slugTouched: true,
@@ -241,7 +251,7 @@ function CustomAgentWizard() {
       system_prompt: agent.system_prompt,
       user_prompt_template: agent.user_prompt_template,
       model_tier: agent.model_tier,
-      limitTools: agent.tools.length > 0,
+      limitTools: !allowsAll,
       tools: agent.tools,
       preset_tools: agent.preset_tools.map(draftFromWire),
       max_tool_steps: agent.max_tool_steps,
@@ -251,14 +261,15 @@ function CustomAgentWizard() {
       memory_top_k: agent.memory_top_k,
       pipeline_order: agent.pipeline_order,
     })
-  }, [existingQuery.data])
+  }, [definitionsQuery.data, existingQuery.data])
 
   const update = (patch: Partial<FormState>) => setForm((prev) => ({ ...prev, ...patch }))
 
-  const problems = stepProblems(step, form)
+  const toolCatalog = definitionsQuery.data?.tool_catalog ?? []
+  const problems = stepProblems(step, form, toolCatalog)
   const allProblems = useMemo(
-    () => STEPS.flatMap((_, index) => stepProblems(index, form)),
-    [form],
+    () => STEPS.flatMap((_, index) => stepProblems(index, form, toolCatalog)),
+    [form, toolCatalog],
   )
 
   const saveMutation = useMutation({
@@ -283,7 +294,7 @@ function CustomAgentWizard() {
       testCustomAgent(conn!, {
         project_id: projectId!,
         time_range_days: 7,
-        definition: toSpec(form),
+        definition: toSpec(form, toolCatalog),
       }),
     onSuccess: (result) => setTestResult(result),
     onError: (error) => {
@@ -293,7 +304,7 @@ function CustomAgentWizard() {
   })
 
   const submit = () => {
-    const spec = toSpec(form)
+    const spec = toSpec(form, toolCatalog)
     const parsed = customAgentSpecSchema.safeParse(spec)
     if (!parsed.success) {
       setShowProblems(true)
@@ -312,10 +323,18 @@ function CustomAgentWizard() {
     setStep((value) => Math.min(value + 1, STEPS.length - 1))
   }
 
-  if (isEdit && existingQuery.isError) {
-    return <ErrorState error={existingQuery.error} onRetry={() => void existingQuery.refetch()} />
+  if (isEdit && (existingQuery.isError || definitionsQuery.isError)) {
+    return (
+      <ErrorState
+        error={existingQuery.error ?? definitionsQuery.error!}
+        onRetry={() => {
+          void existingQuery.refetch()
+          void definitionsQuery.refetch()
+        }}
+      />
+    )
   }
-  if (isEdit && existingQuery.isPending) {
+  if (isEdit && (existingQuery.isPending || definitionsQuery.isPending)) {
     return (
       <div className="max-w-3xl space-y-3">
         <Skeleton className="h-8 w-1/2" />
@@ -325,7 +344,7 @@ function CustomAgentWizard() {
   }
 
   const definitions = definitionsQuery.data
-  const spec = toSpec(form)
+  const spec = toSpec(form, toolCatalog)
 
   return (
     <div className="max-w-3xl space-y-5">
@@ -334,7 +353,7 @@ function CustomAgentWizard() {
         title={isEdit ? `Edit ${existingQuery.data?.display_name ?? 'custom agent'}` : 'New custom agent'}
         description="A read-only analysis agent: it investigates project data by calling the query tools you allow — choosing its own queries as it reasons — and stores its findings in run results. It never deploys or changes anything."
         actions={
-          conn && projectId ? (
+          conn && projectId && definitions ? (
             <CurlButton
               spec={createCustomAgentCurl(conn, projectId, spec)}
               title={isEdit ? 'Update custom agent' : 'Create custom agent'}
@@ -343,7 +362,7 @@ function CustomAgentWizard() {
         }
       />
 
-      <Stepper step={step} onStep={setStep} form={form} />
+      <Stepper step={step} onStep={setStep} form={form} toolCatalog={toolCatalog} />
 
       {step === 0 ? <BasicsStep form={form} update={update} /> : null}
       {step === 1 ? (
@@ -405,15 +424,17 @@ function Stepper({
   step,
   onStep,
   form,
+  toolCatalog,
 }: {
   step: number
   onStep: (step: number) => void
   form: FormState
+  toolCatalog: ToolCatalogEntry[]
 }) {
   return (
     <ol className="flex flex-wrap items-center gap-2">
       {STEPS.map((label, index) => {
-        const complete = stepProblems(index, form).length === 0
+        const complete = stepProblems(index, form, toolCatalog).length === 0
         const current = index === step
         return (
           <li key={label} className="flex items-center gap-2">
@@ -590,7 +611,11 @@ function ToolsStep({
           {(
             [
               [false, 'All tools', 'the agent may use the entire catalog (default)'],
-              [true, 'Limit tools', 'restrict the agent to a subset you pick below'],
+              [
+                true,
+                'Limit tools',
+                'restrict the agent to a subset; select none for plain completion',
+              ],
             ] as const
           ).map(([limited, label, hint]) => (
             <label key={label} className="flex cursor-pointer items-center gap-2 text-sm">
@@ -650,7 +675,7 @@ function ToolsStep({
             max={16}
             value={form.max_tool_steps}
             className="w-24 tabular-nums"
-            onChange={(event) => update({ max_tool_steps: Number(event.target.value) || 8 })}
+            onChange={(event) => update({ max_tool_steps: Number(event.target.value) })}
           />
           <p className="text-xs text-muted-foreground">
             Maximum tool-calling rounds before the agent must produce its final answer. More

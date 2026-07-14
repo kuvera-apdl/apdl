@@ -37,6 +37,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,8 @@ from typing import Any
 from app import config
 from app.contracts.cache import FilesystemContractCache
 from app.contracts.installer import (
+    BoundedCommandExecutor,
+    CommandResult,
     SandboxedCheckRunner,
     SandboxedInstallRunner,
     detect_contract_input_drift,
@@ -60,7 +64,13 @@ from app.editor.brief import (
     compile_brief,
 )
 from app.editor.conventions import CONVENTIONS_MD
+from app.editor.deadlines import (
+    CodegenDeadlineExceeded,
+    CodegenRunDeadline,
+)
+from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
+from app.editor.prompts import append_prompt, replace_latest_prompt
 from app.inspection import (
     DependencySlice,
     InspectionSnapshot,
@@ -115,11 +125,47 @@ from app.verification import (
 logger = logging.getLogger(__name__)
 
 _DIFF_TEXT_CAP = 1_000_000  # cap the diff text fed to the secret scan (chars)
-_ERR_TAIL = 800  # how much subprocess output to surface on a generic failure
+_ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 # Verification/test failures are the actionable ``tests_failed`` case an operator
 # reads to fix the change, so they get a much larger budget: a build/test log's
 # real error (failing file, import, assertion, stack) needs room to survive.
 _VERIFY_ERR_TAIL = 6000
+_RUN_DEADLINE: ContextVar[CodegenRunDeadline | None] = ContextVar(
+    "codegen_run_deadline", default=None
+)
+
+
+class _DeadlineCommandExecutor:
+    """Clamp every contract subprocess to the editor's shared wall deadline."""
+
+    def __init__(self, deadline: CodegenRunDeadline) -> None:
+        self._deadline = deadline
+        self._delegate = BoundedCommandExecutor()
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        timeout_seconds: float,
+        output_limit: int,
+    ) -> CommandResult:
+        try:
+            timeout = self._deadline.clamp_timeout(timeout_seconds)
+        except CodegenDeadlineExceeded:
+            return CommandResult(
+                returncode=124,
+                output="[…Codegen job deadline exhausted before command start…]",
+                timed_out=True,
+            )
+        return self._delegate(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout_seconds=timeout,
+            output_limit=output_limit,
+        )
 
 _PROFILE_INPUT_NAMES = {
     "package.json",
@@ -145,25 +191,8 @@ def _profile_inputs_changed(paths: list[str]) -> bool:
 
 
 def _tail(text: str, limit: int = _ERR_TAIL) -> str:
-    """Return the last ``limit`` chars of ``text`` as a clean failure excerpt.
-
-    Two fixes over a bare ``text[-limit:]`` so a surfaced error is actually
-    informative: (1) the slice is snapped to the next line boundary so the
-    excerpt never begins mid-line (which reads as corrupted — e.g. an import
-    path shown as ``s/sdk/dist/...``), and (2) when content is dropped a marker
-    naming how much was truncated is prepended, so a reader knows the head of the
-    log is missing rather than assuming they have the whole story.
-    """
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    clipped = text[-limit:]
-    # Drop the partial leading line so the excerpt starts on a clean boundary.
-    newline = clipped.find("\n")
-    if 0 <= newline < len(clipped) - 1:
-        clipped = clipped[newline + 1 :]
-    dropped = len(text) - len(clipped)
-    return f"[…truncated {dropped} leading chars of {len(text)}…]\n{clipped}"
+    """Backward-compatible local name for the shared excerpt helper."""
+    return tail_excerpt(text, limit=limit)
 
 
 # Env vars forwarded to the agent subprocess. LLM access only: the
@@ -558,8 +587,11 @@ class AiderEditor:
         self._sdk_reference = config.codegen_sdk_reference_enabled()
         self._contracts_enabled = config.codegen_contracts_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
-        self._git_timeout = config.codegen_git_timeout()
-        self._agent_timeout = config.codegen_agent_timeout()
+        deadline_plan = config.codegen_deadline_plan()
+        self._git_timeout = deadline_plan.git_timeout_seconds
+        self._agent_timeout = deadline_plan.agent_timeout_seconds
+        self._llm_timeout = deadline_plan.llm_timeout_seconds
+        self._job_budget = deadline_plan.job_budget_seconds
         # Auxiliary LLM passes around the edit (brief compile + diff review).
         # ``complete`` is the injection seam for tests; production resolves a
         # LiteLLM-backed completer per run (None → the passes are skipped).
@@ -729,6 +761,8 @@ class AiderEditor:
                 )
             return True, None
 
+        run_deadline = CodegenRunDeadline(self._job_budget)
+        deadline_token = _RUN_DEADLINE.set(run_deadline)
         try:
             # 1. Production clones with one-shot auth.  Offline/shadow evaluation
             #    instead receives one clean, mutation-materialized checkout and
@@ -873,26 +907,40 @@ class AiderEditor:
                 contract_requests = _contract_requests_for_ledger(
                     repo_profile, requirement_ledger
                 )
-                contract_bundle = await asyncio.to_thread(
-                    resolve_contracts,
-                    repo_dir,
-                    project_scope=request.project_scope or request.repo,
-                    repository=request.repo,
-                    requests=contract_requests,
-                    runtime=_contract_runtime(),
-                    install_runner=SandboxedInstallRunner(
-                        sandboxed=config.codegen_isolated_worker(),
-                        timeout_seconds=config.codegen_contract_install_timeout(),
-                        workdir_base=work,
-                    ),
-                    check_runner=SandboxedCheckRunner(
-                        sandboxed=config.codegen_isolated_worker(),
-                        workdir_base=work,
-                    ),
-                    cache=FilesystemContractCache(
-                        Path(config.codegen_contract_cache_dir())
-                    ),
-                )
+                contract_executor = _DeadlineCommandExecutor(run_deadline)
+                try:
+                    contract_bundle = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            resolve_contracts,
+                            repo_dir,
+                            project_scope=request.project_scope or request.repo,
+                            repository=request.repo,
+                            requests=contract_requests,
+                            runtime=_contract_runtime(),
+                            install_runner=SandboxedInstallRunner(
+                                sandboxed=config.codegen_isolated_worker(),
+                                executor=contract_executor,
+                                timeout_seconds=(
+                                    config.codegen_contract_install_timeout()
+                                ),
+                                workdir_base=work,
+                            ),
+                            check_runner=SandboxedCheckRunner(
+                                sandboxed=config.codegen_isolated_worker(),
+                                executor=contract_executor,
+                                workdir_base=work,
+                            ),
+                            cache=FilesystemContractCache(
+                                Path(config.codegen_contract_cache_dir())
+                            ),
+                        ),
+                        timeout=run_deadline.remaining_seconds(),
+                    )
+                except TimeoutError:
+                    return fail(
+                        "Exact dependency contract resolution exhausted the "
+                        "shared Codegen job deadline."
+                    )
                 blocked = [
                     resolution
                     for resolution in contract_bundle.resolutions
@@ -951,22 +999,46 @@ class AiderEditor:
                     ),
                     "notes": None,
                 }
-                prompts.append(brief_prompt)
-                brief = await compile_brief(
-                    title=request.title,
-                    spec=request.spec,
-                    repo_digest=repo_digest,
-                    verification_context=probe.preamble,
-                    complete=complete,
-                )
+                # Record the attempted call before awaiting it so timeout/error
+                # paths retain the same diagnostic ordering as edit and review.
+                append_prompt(prompts, brief_prompt)
+                brief_failure: str | None = None
+                try:
+                    helper_timeout = run_deadline.clamp_timeout(self._llm_timeout)
+                    brief = await asyncio.wait_for(
+                        compile_brief(
+                            title=request.title,
+                            spec=request.spec,
+                            repo_digest=repo_digest,
+                            verification_context=probe.preamble,
+                            complete=complete,
+                        ),
+                        timeout=helper_timeout,
+                    )
+                except Exception as exc:
+                    brief = None
+                    brief_failure = type(exc).__name__
+                    logger.warning(
+                        "Brief compilation failed for %s (%s); using the raw spec.",
+                        request.repo,
+                        brief_failure,
+                    )
                 if brief:
                     task_text = brief
                     brief_used = True
                 else:
-                    brief_prompt["notes"] = (
-                        "Compilation produced no usable brief; the raw spec was "
-                        "handed to the editing agent instead."
-                    )
+                    if brief_failure is None:
+                        brief_prompt["notes"] = (
+                            "Compilation produced no usable brief; the raw spec was "
+                            "handed to the editing agent instead."
+                        )
+                    else:
+                        brief_prompt["notes"] = (
+                            f"Compilation failed ({brief_failure}) before producing "
+                            "a usable brief; the raw spec was handed to the editing "
+                            "agent instead."
+                        )
+                    replace_latest_prompt(prompts, brief_prompt)
                     if fail_closed_auxiliary:
                         return fail(
                             f"{request.risk_level}-risk change requires a parseable "
@@ -1118,14 +1190,15 @@ class AiderEditor:
             while True:
                 if agent_pending:
                     edit_attempt += 1
-                    prompts.append(
+                    append_prompt(
+                        prompts,
                         {
                             "stage": "edit",
                             "label": f"Edit instruction (attempt {edit_attempt})",
                             "system": None,
                             "user": message,
                             "notes": edit_notes,
-                        }
+                        },
                     )
                     rc, out = await self._exec(
                         [*argv, "--message", message],
@@ -1273,21 +1346,38 @@ class AiderEditor:
                             deterministic_uncertainties=uncertainties,
                             diff_text=diff_text,
                         )
-                        prompts.append(
-                            {
-                                "stage": "review",
-                                "label": f"Semantic review (round {review_round})",
-                                "system": SEMANTIC_REVIEW_SYSTEM,
-                                "user": review_prompt,
-                                "notes": (
-                                    "Independent evidence context; GitHub CI has "
-                                    "not reported at this stage."
-                                ),
-                            }
-                        )
-                        model_response = await complete(
-                            SEMANTIC_REVIEW_SYSTEM, review_prompt
-                        )
+                        review_prompt_entry = {
+                            "stage": "review",
+                            "label": f"Semantic review (round {review_round})",
+                            "system": SEMANTIC_REVIEW_SYSTEM,
+                            "user": review_prompt,
+                            "notes": (
+                                "Independent evidence context; GitHub CI has "
+                                "not reported at this stage."
+                            ),
+                        }
+                        append_prompt(prompts, review_prompt_entry)
+                        try:
+                            helper_timeout = run_deadline.clamp_timeout(
+                                self._llm_timeout
+                            )
+                            model_response = await asyncio.wait_for(
+                                complete(SEMANTIC_REVIEW_SYSTEM, review_prompt),
+                                timeout=helper_timeout,
+                            )
+                        except Exception as exc:
+                            failure_name = type(exc).__name__
+                            logger.warning(
+                                "Semantic review failed for %s (%s).",
+                                request.repo,
+                                failure_name,
+                            )
+                            review_prompt_entry["notes"] += (
+                                f" Completion failed ({failure_name}); no model "
+                                "verdict was accepted."
+                            )
+                            replace_latest_prompt(prompts, review_prompt_entry)
+                            model_response = None
                     review_verdict = assemble_review_verdict(
                         ledger=requirement_ledger,
                         contracts=contracts_for_review,
@@ -1502,6 +1592,7 @@ class AiderEditor:
                 review_verdict=review_verdict,
             )
         finally:
+            _RUN_DEADLINE.reset(deadline_token)
             if not keep:
                 shutil.rmtree(work, ignore_errors=True)
 
@@ -1558,13 +1649,27 @@ class AiderEditor:
         return None
 
     async def _exec(
-        self, argv: list[str], *, cwd: Path | None, env: dict[str, str], timeout: int
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        env: dict[str, str],
+        timeout: int | float,
     ) -> tuple[int, str]:
         """Run a subprocess; return (returncode, combined output).
 
         A non-zero exit is data, not an error — only spawn faults or a timeout
         surface as exceptions (caught by :meth:`implement`) or a synthetic 124.
         """
+        deadline = _RUN_DEADLINE.get()
+        if deadline is not None:
+            try:
+                timeout = deadline.clamp_timeout(timeout)
+            except CodegenDeadlineExceeded:
+                return (
+                    124,
+                    "Codegen job deadline exhausted before subprocess start",
+                )
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd) if cwd else None,

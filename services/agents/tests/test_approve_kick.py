@@ -428,6 +428,42 @@ async def test_experiment_design_deploys_approved_and_resumes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_experiment_deploy_failure_is_returned_and_persisted_for_resume(monkeypatch):
+    _, kicked, _ = _patch(monkeypatch)
+
+    async def failed_deploy(project_id, experiment):
+        return False
+
+    monkeypatch.setattr(approvals, "deploy_experiment", failed_deploy)
+    design = {
+        "experiment_id": "exp_failed",
+        "flag_config": {"key": "exp_failed"},
+        "variants": [],
+    }
+    store = {
+        "run": _run_row(
+            phase="experiment_design_approval",
+            analysis_types=("experiment_design", "feature_proposal"),
+        ),
+        "results": [{"output": json.dumps([design])}],
+    }
+
+    async with _client(store) as client:
+        resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
+
+    assert resp.status_code == 200
+    assert resp.json()["errors"] == ["experiment deploy failed: exp_failed"]
+    result_query, result_args = next(
+        (query, args)
+        for query, args in app.state.pg_pool.conn.executed
+        if "INSERT INTO agent_run_results" in query and "approval_errors" in query
+    )
+    assert "lease_owner_id = $3" in result_query
+    assert json.loads(result_args[1]) == ["experiment deploy failed: exp_failed"]
+    assert _resumes(kicked)
+
+
+@pytest.mark.asyncio
 async def test_experiment_design_reject_skips_deploy_but_resumes(monkeypatch):
     _, kicked, deployed = _patch(monkeypatch)
     design = {"experiment_id": "exp_demo", "flag_config": {"key": "exp_demo"}, "variants": []}

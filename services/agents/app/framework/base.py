@@ -35,7 +35,7 @@ from typing import Any, ClassVar
 
 from app.framework.context import AgentContext, AgentResult, MemoryEntry
 from app.framework.tool_catalog import llm_tool_schemas
-from app.framework.tool_loop import run_tool_loop
+from app.framework.tool_loop import ToolLoopResult, ToolTraceEntry, run_tool_loop
 from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
 
@@ -122,6 +122,14 @@ class BaseAgent(ABC):
                 out = self.empty_output()
         return out
 
+    def agentic_terminal_result(self, entry: ToolTraceEntry) -> str | None:
+        """Optionally stop an agentic loop on a deterministic tool result."""
+        return None
+
+    def parse_agentic(self, result: ToolLoopResult) -> Any:
+        """Parse a tool-loop result, with the trace available for grounding."""
+        return self.parse(result.text)
+
     async def act(
         self,
         ctx: AgentContext,
@@ -176,9 +184,10 @@ class BaseAgent(ABC):
                 tool_schemas=llm_tool_schemas(self.agentic_tools),
                 model_tier=self.model_tier,
                 max_steps=self.max_tool_steps,
+                terminal_result_for_tool=self.agentic_terminal_result,
             )
             working["tool_trace"] = loop_result.trace
-            output = self.parse(loop_result.text)
+            output = self.parse_agentic(loop_result)
         else:
             response = await chat_completion(
                 model_tier=self.model_tier,

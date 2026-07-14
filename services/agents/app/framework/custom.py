@@ -10,8 +10,8 @@ persistence — is reused unchanged.
 Custom agents gather data two ways, and both go through the same read-only
 catalog boundary:
 
-- **agentic** (non-deterministic): ``tools`` names which catalog tools the
-  reasoning model MAY call (an empty selection allows the whole catalog); the
+- **agentic** (non-deterministic): ``tools`` names exactly which catalog tools
+  the reasoning model MAY call (an empty selection allows no tools); the
   model picks concrete parameters at run time inside the framework's tool
   loop — the agent investigates.
 - **preset** (deterministic): ``preset_tools`` fixes tool + parameters at
@@ -48,7 +48,6 @@ from typing import Any
 from app.framework.base import BaseAgent
 from app.framework.context import AgentContext
 from app.framework.tool_catalog import (
-    TOOL_CATALOG,
     validate_preset_tools,
     validate_tool_names,
 )
@@ -130,10 +129,10 @@ class CustomAgent(BaseAgent):
         # flattens to lists, and parse() coerces a single object to [obj].
         self.parse_as = "list"
         self.user_prompt_template = definition["user_prompt_template"]
-        # Allowed tools: an empty selection means the full catalog — the
-        # wizard default. The stored subset only ever narrows.
+        # Allowed tools are an exact allow-list. The migration materializes
+        # the catalog for legacy [] rows, so [] is unambiguously zero tools.
         allowed = [t for t in (definition.get("tools") or ()) if isinstance(t, str)]
-        self.agentic_tools = tuple(allowed) if allowed else tuple(TOOL_CATALOG)
+        self.agentic_tools = tuple(allowed)
         self.max_tool_steps = int(
             definition.get("max_tool_steps", _MAX_TOOL_STEPS_DEFAULT)
         )
@@ -226,7 +225,9 @@ def validate_definition(
 
     for key in ("system_prompt", "user_prompt_template"):
         value = fields.get(key) or ""
-        if not 1 <= len(value) <= _MAX_PROMPT:
+        if not value.strip():
+            errors.append(f"{key} must contain non-whitespace characters")
+        elif len(value) > _MAX_PROMPT:
             errors.append(f"{key} must be 1-{_MAX_PROMPT} characters")
 
     if fields.get("model_tier") not in ("fast", "reasoning"):
@@ -245,13 +246,15 @@ def validate_definition(
     if not isinstance(max_tool_steps, int) or not 1 <= max_tool_steps <= 16:
         errors.append("max_tool_steps must be an integer between 1 and 16")
 
-    # Allowed-tool names; empty = whole catalog (the default).
+    # Allowed-tool names are exact; empty means the model receives no tools.
     tools = fields.get("tools") or []
     if not isinstance(tools, list):
         errors.append("tools must be a list of catalog tool names")
     else:
         try:
-            validate_tool_names(tools)
+            normalized_tools = validate_tool_names(tools)
+            if len(normalized_tools) != len(tools):
+                errors.append("tools must not contain duplicate names")
         except ValueError as exc:
             errors.append(str(exc))
 

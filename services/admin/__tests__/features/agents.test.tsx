@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { toast } from 'sonner'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { runStatusSchema } from '../../src/api/schemas/agents'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
@@ -108,7 +109,10 @@ const server = setupServer(
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
-afterEach(() => server.resetHandlers())
+afterEach(() => {
+  server.resetHandlers()
+  vi.restoreAllMocks()
+})
 afterAll(() => server.close())
 
 beforeEach(() => {
@@ -307,6 +311,41 @@ describe('RunMonitorPage', () => {
     expect(await screen.findByText('approved')).toBeInTheDocument()
   })
 
+  test('warns when an approved experiment fails to deploy', async () => {
+    const warning = vi.spyOn(toast, 'warning').mockReturnValue('approval-warning')
+    server.use(
+      http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', ({ params }) =>
+        HttpResponse.json({
+          run_id: String(params.runId),
+          status: 'approved',
+          approved_count: 1,
+          rejected_count: 0,
+          forked_runs: [],
+          opened_changesets: [],
+          errors: ['experiment deploy failed: exp_cta'],
+          message: '1 approved, 0 rejected — run resumes. · 1 error(s)',
+        }),
+      ),
+    )
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/runs/:runId" element={<RunMonitorPage />} />
+      </Routes>,
+      '/agents/runs/run-abc-123',
+    )
+
+    expect(await screen.findByText(/experiment design awaiting approval/i)).toBeInTheDocument()
+    expect(await screen.findByText("What you're approving (1)")).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /submit decisions/i }))
+
+    await waitFor(() =>
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('1 deployment error(s)'),
+        expect.objectContaining({ description: 'experiment deploy failed: exp_cta' }),
+      ),
+    )
+  })
+
   test('renders persisted outputs and the agent audit trail', async () => {
     monitorStatus = 'completed'
     monitorPhase = 'done'
@@ -413,5 +452,50 @@ describe('read-only loop surfaces', () => {
     expect(screen.getByText(/decisions are read-only/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /approve design/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
+  })
+
+  test('Decide warns instead of reporting false success on deploy failure', async () => {
+    const warning = vi.spyOn(toast, 'warning').mockReturnValue('decision-warning')
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/runs', () =>
+        HttpResponse.json({
+          runs: [
+            {
+              run_id: 'run-abc-123',
+              project_id: 'demo',
+              status: 'waiting_approval',
+              phase: 'experiment_design_approval',
+              insights_count: 4,
+              experiments_count: 1,
+              started_at: '2026-06-10T12:00:00+00:00',
+              updated_at: '2026-06-10T12:01:00+00:00',
+            },
+          ],
+          count: 1,
+        }),
+      ),
+      http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', ({ params }) =>
+        HttpResponse.json({
+          run_id: String(params.runId),
+          status: 'approved',
+          approved_count: 1,
+          rejected_count: 0,
+          forked_runs: [],
+          opened_changesets: [],
+          errors: ['experiment deploy failed: exp_cta'],
+          message: '1 approved, 0 rejected — run resumes. · 1 error(s)',
+        }),
+      ),
+    )
+    renderWithProviders(<DecidePage />, '/decide')
+
+    await userEvent.click(await screen.findByRole('button', { name: /approve design/i }))
+
+    await waitFor(() =>
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining('1 deployment error(s)'),
+        expect.objectContaining({ description: 'experiment deploy failed: exp_cta' }),
+      ),
+    )
   })
 })

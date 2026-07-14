@@ -94,13 +94,69 @@ async def test_full_run_investigates_then_produces_insights(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unparseable_investigation_yields_no_insights(monkeypatch):
+    async def fake_run_tool(ctx, name, params):
+        return {"events": [{"event_name": "page", "event_count": 1}]}
+
+    calls = {"n": 0}
+
     async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="c1", name="discover_events", arguments={})]
+            )
         return ToolCompletion(text="I could not find anything conclusive, sorry!")
 
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
     monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
 
     agent = BehaviorAnalysisAgent()
     result = await agent.run(_ctx(), {"insights": [], "errors": []})
     # Prose (no JSON) must degrade to zero insights, never a pseudo-insight
     # that would satisfy downstream requires=("insights",).
+    assert result.output == []
+
+
+@pytest.mark.asyncio
+async def test_empty_event_discovery_short_circuits_without_synthesis(monkeypatch):
+    async def fake_run_tool(ctx, name, params):
+        assert name == "discover_events"
+        return {"events": []}
+
+    llm_calls = {"n": 0}
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        llm_calls["n"] += 1
+        if llm_calls["n"] > 1:
+            raise AssertionError("empty discovery must not reach synthesis")
+        return ToolCompletion(
+            tool_calls=[ToolCall(id="c1", name="discover_events", arguments={})]
+        )
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+
+    result = await BehaviorAnalysisAgent().run(
+        _ctx(), {"insights": [], "errors": []}
+    )
+
+    assert result.output == []
+    assert llm_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_valid_json_without_event_discovery_is_rejected_as_ungrounded(
+    monkeypatch,
+):
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        return ToolCompletion(
+            text='[{"title": "Invented trend", "confidence": "high"}]'
+        )
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+
+    result = await BehaviorAnalysisAgent().run(
+        _ctx(), {"insights": [], "errors": []}
+    )
+
     assert result.output == []

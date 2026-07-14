@@ -107,16 +107,18 @@ async def test_tool_failure_becomes_result_content_not_crash(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_budget_exhaustion_forces_final_answer_without_tools(monkeypatch):
+async def test_budget_exhaustion_forces_text_with_tool_contract_preserved(monkeypatch):
     async def fake_run_tool(ctx, name, params):
         return {"ok": True}
 
     final_call: dict[str, Any] = {}
 
     async def greedy_chat(model_tier, messages, tools=None, **kwargs):
-        if tools is None:
-            # The forced-finish call: tools withheld, budget note appended.
+        if kwargs.get("force_text"):
+            # The forced-finish call retains declarations so providers can
+            # validate the historical tool messages, but forbids new calls.
             final_call["messages"] = messages
+            final_call["tools"] = tools
             return ToolCompletion(text="forced final")
         return ToolCompletion(
             tool_calls=[ToolCall(id="c", name="discover_events", arguments={})]
@@ -132,6 +134,47 @@ async def test_budget_exhaustion_forces_final_answer_without_tools(monkeypatch):
     assert result.text == "forced final"
     assert result.rounds == 2 and len(result.trace) == 2
     assert "tool budget" in final_call["messages"][-1]["content"].lower()
+    assert final_call["tools"] == _SCHEMAS
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_dispatch_a_catalog_tool_outside_agent_allowlist(
+    monkeypatch,
+):
+    dispatched: list[str] = []
+
+    async def fake_run_tool(ctx, name, params):
+        dispatched.append(name)
+        return {"unexpected": True}
+
+    calls = {"n": 0}
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="c1", name="list_flags", arguments={})]
+            )
+        tool_message = next(message for message in messages if message["role"] == "tool")
+        assert "not enabled for this agent" in tool_message["content"]
+        return ToolCompletion(text="done")
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+
+    result = await tool_loop.run_tool_loop(
+        _ctx(),
+        agent_name="a",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+    )
+
+    assert dispatched == []
+    assert result.trace[0].tool == "list_flags"
+    assert result.trace[0].error == (
+        "PermissionError: Tool 'list_flags' is not enabled for this agent"
+    )
 
 
 @pytest.mark.asyncio

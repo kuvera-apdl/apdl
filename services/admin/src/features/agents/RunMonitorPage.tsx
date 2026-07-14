@@ -172,11 +172,18 @@ function ApprovalPanel({
       })
       const forked = (res.forked_runs ?? []).length
       const opened = (res.opened_changesets ?? []).length
-      toast.success(
+      const errors = res.errors ?? []
+      const summary =
         `${res.approved_count ?? 0} approved, ${res.rejected_count ?? 0} rejected — run resumes` +
-          (forked ? ` · ${forked} PR run(s) forked` : '') +
-          (opened ? ` · ${opened} PR(s) opened` : ''),
-      )
+        (forked ? ` · ${forked} PR run(s) forked` : '') +
+        (opened ? ` · ${opened} PR(s) opened` : '')
+      if (errors.length > 0) {
+        toast.warning(`${summary} · ${errors.length} deployment error(s)`, {
+          description: errors.join(' · '),
+        })
+      } else {
+        toast.success(summary)
+      }
       onDecided()
     } catch (error) {
       if (error instanceof ApiError && error.status === 400) {

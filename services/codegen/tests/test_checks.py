@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -77,6 +79,31 @@ async def test_preserves_raw_signals_without_aggregating_a_ci_verdict():
     assert evidence.combined_status == combined
     assert evidence.check_runs == [run]
     assert not hasattr(evidence, "status")
+
+
+@pytest.mark.asyncio
+async def test_status_and_check_runs_are_requested_concurrently():
+    status_started = asyncio.Event()
+    checks_started = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            status_started.set()
+            await asyncio.wait_for(checks_started.wait(), timeout=2.0)
+            return httpx.Response(
+                200,
+                json={"sha": "head-exact", "total_count": 0, "statuses": []},
+            )
+        if request.url.path.endswith("/check-runs"):
+            checks_started.set()
+            await asyncio.wait_for(status_started.wait(), timeout=2.0)
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(404)
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert evidence.combined_status["sha"] == "head-exact"
+    assert evidence.check_runs == []
 
 
 @pytest.mark.asyncio
@@ -194,10 +221,42 @@ async def test_annotation_lookup_failure_keeps_the_raw_failed_run():
 
 @pytest.mark.asyncio
 async def test_rejects_a_non_object_combined_status_payload():
+    check_runs_requested = False
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal check_runs_requested
         if request.url.path.endswith("/status"):
             return httpx.Response(200, json=[])
-        raise AssertionError("check runs must not be fetched after invalid status data")
+        if request.url.path.endswith("/check-runs"):
+            check_runs_requested = True
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(404)
 
     with pytest.raises(ValueError, match="must be an object"):
         await _evidence(httpx.MockTransport(handler))
+
+    assert check_runs_requested is True
+
+
+@pytest.mark.asyncio
+async def test_failed_status_lookup_cancels_the_in_flight_check_lookup():
+    checks_started = asyncio.Event()
+    checks_cancelled = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            await asyncio.wait_for(checks_started.wait(), timeout=2.0)
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/check-runs"):
+            checks_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                checks_cancelled.set()
+                raise
+        return httpx.Response(404)
+
+    with pytest.raises(ValueError, match="must be an object"):
+        await _evidence(httpx.MockTransport(handler))
+
+    assert checks_cancelled.is_set()

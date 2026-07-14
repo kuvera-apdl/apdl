@@ -33,6 +33,37 @@ def test_spec_of_empty_when_no_usable_fields():
     assert _spec_of({"title": "only a title"}) == ""
 
 
+def test_spec_of_keeps_proposal_with_only_implementation_spec():
+    spec = _spec_of(
+        {
+            "implementation_spec": {
+                "components_affected": ["app/page.tsx"],
+                "technical_considerations": ["preserve the current route contract"],
+            }
+        }
+    )
+
+    assert spec.startswith("## Implementation notes\n")
+    assert "app/page.tsx" in spec
+    assert "preserve the current route contract" in spec
+
+
+def test_spec_of_keeps_proposal_with_only_success_criteria():
+    spec = _spec_of(
+        {
+            "success_criteria": [
+                {
+                    "metric": "checkout completion",
+                    "target": "+5%",
+                    "timeframe": "14 days",
+                }
+            ]
+        }
+    )
+
+    assert spec == "## Acceptance criteria\n- checkout completion — +5% (within 14 days)"
+
+
 def test_spec_of_renders_structured_fields_as_markdown_not_json():
     proposal = {
         "problem_statement": "53% of sessions never scroll.",

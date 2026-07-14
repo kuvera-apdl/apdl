@@ -100,49 +100,62 @@ async def trigger_agent_run(
             detail=f"Disabled analysis_types: {disabled}",
         )
 
-    # One pipeline per project at a time: concurrent runs duplicate LLM spend
-    # and can deploy duplicate experiments from the same insight. (Runs parked
-    # at waiting_approval don't block — they're not executing.)
-    async with pool.acquire() as conn:
-        active = await conn.fetchval(
-            """
-            SELECT run_id FROM agent_runs
-            WHERE project_id = $1
-              AND (status IN ('started', 'running')
-                   OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
-            LIMIT 1
-            """,
-            body.project_id,
-        )
-    if active:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Project {body.project_id} already has an active run ({active}).",
-        )
-
     run_id = str(uuid.uuid4())
 
+    # One pipeline per project at a time: concurrent runs duplicate LLM spend
+    # and can deploy duplicate experiments from the same insight. Serialize the
+    # check + insert with a transaction-scoped, project-keyed advisory lock so
+    # concurrent requests on different service replicas cannot both observe an
+    # empty slot. Runs parked at waiting_approval do not block because they are
+    # not executing.
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO agent_runs
-                (run_id, project_id, trigger_type, autonomy_level, status, phase,
-                 lease_expires_at, config)
-            VALUES ($1, $2, $3, $4, 'started', 'initializing',
-                    now() + ($5 * interval '1 second'), $6::jsonb)
-            """,
-            run_id,
-            body.project_id,
-            body.trigger_type.value,
-            body.autonomy_level,
-            RUN_LEASE_SECONDS,
-            json.dumps(
-                {
-                    "analysis_types": body.analysis_types,
-                    "time_range_days": body.time_range_days,
-                }
-            ),
-        )
+        async with conn.transaction():
+            await conn.execute(
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended('apdl:agent-run:' || $1::text, 0)
+                )
+                """,
+                body.project_id,
+            )
+            active = await conn.fetchval(
+                """
+                SELECT run_id FROM agent_runs
+                WHERE project_id = $1
+                  AND (status IN ('started', 'running')
+                       OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
+                LIMIT 1
+                """,
+                body.project_id,
+            )
+            if active:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Project {body.project_id} already has an active run ({active})."
+                    ),
+                )
+
+            await conn.execute(
+                """
+                INSERT INTO agent_runs
+                    (run_id, project_id, trigger_type, autonomy_level, status, phase,
+                     lease_expires_at, config)
+                VALUES ($1, $2, $3, $4, 'started', 'initializing',
+                        now() + ($5 * interval '1 second'), $6::jsonb)
+                """,
+                run_id,
+                body.project_id,
+                body.trigger_type.value,
+                body.autonomy_level,
+                RUN_LEASE_SECONDS,
+                json.dumps(
+                    {
+                        "analysis_types": body.analysis_types,
+                        "time_range_days": body.time_range_days,
+                    }
+                ),
+            )
 
     logger.info("Agent run %s created for project %s", run_id, body.project_id)
 

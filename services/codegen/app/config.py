@@ -11,6 +11,11 @@ import base64
 import os
 import tempfile
 
+from app.editor.deadlines import (
+    MAX_CODEGEN_JOB_BUDGET_SECONDS as _MAX_CODEGEN_JOB_BUDGET_SECONDS,
+    CodegenDeadlinePlan,
+    resolve_codegen_deadline_plan,
+)
 from app.evaluations.models import RolloutStage
 from app.safety.policy import (
     PlatformCodegenSafetyPolicy,
@@ -18,6 +23,7 @@ from app.safety.policy import (
 )
 
 _DEFAULT_MODEL = "claude-opus-4-8"
+MAX_CODEGEN_JOB_BUDGET_SECONDS = _MAX_CODEGEN_JOB_BUDGET_SECONDS
 
 
 def postgres_url() -> str:
@@ -261,9 +267,13 @@ def codegen_helper_model() -> str:
     return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
 
 
-def codegen_llm_timeout() -> float:
-    """Per-auxiliary-LLM-call timeout, seconds (brief compile / diff review)."""
+def _requested_codegen_llm_timeout() -> float:
     return float(os.getenv("CODEGEN_LLM_TIMEOUT", "240"))
+
+
+def codegen_llm_timeout() -> float:
+    """Effective per-auxiliary-call timeout within the whole-job deadline."""
+    return codegen_deadline_plan().llm_timeout_seconds
 
 
 def codegen_brief_enabled() -> bool:
@@ -315,43 +325,51 @@ def codegen_keep_workdir() -> bool:
     return os.getenv("CODEGEN_KEEP_WORKDIR") == "true"
 
 
-def codegen_git_timeout() -> int:
-    """Per-``git``-invocation timeout, seconds."""
+def _requested_codegen_git_timeout() -> int:
     return int(os.getenv("CODEGEN_GIT_TIMEOUT", "300"))
 
 
-def codegen_agent_timeout() -> int:
-    """Timeout for one editing-agent (aider) invocation, in seconds."""
+def _requested_codegen_agent_timeout() -> int:
     return int(os.getenv("CODEGEN_TIMEOUT", "1800"))
 
 
-MAX_CODEGEN_JOB_BUDGET_SECONDS = 3000
+def codegen_deadline_plan() -> CodegenDeadlinePlan:
+    """Return one reconciled plan for every inner and outer editor deadline."""
+    override = os.getenv("CODEGEN_JOB_BUDGET", "")
+    return resolve_codegen_deadline_plan(
+        agent_timeout_seconds=_requested_codegen_agent_timeout(),
+        git_timeout_seconds=_requested_codegen_git_timeout(),
+        llm_timeout_seconds=_requested_codegen_llm_timeout(),
+        edit_retries=codegen_edit_retries(),
+        brief_enabled=codegen_brief_enabled(),
+        review_enabled=codegen_review_enabled(),
+        job_budget_override=int(override) if override.strip() else None,
+    )
+
+
+def codegen_git_timeout() -> int:
+    """Effective per-git timeout within the whole-job deadline."""
+    return codegen_deadline_plan().git_timeout_seconds
+
+
+def codegen_agent_timeout() -> int:
+    """Effective timeout for one Aider invocation within the job deadline."""
+    return codegen_deadline_plan().agent_timeout_seconds
 
 
 def codegen_job_budget() -> int:
     """Wall-clock budget for one FULL changeset pipeline, seconds.
 
-    The agent timeout (``CODEGEN_TIMEOUT``) bounds a *single* aider invocation;
-    a whole job is clone + (1 + retries) × aider + push. This derived
-    budget is what must bound anything wrapping the pipeline as a unit: the
-    sandbox container's ``docker run`` (killing it at the bare agent timeout
-    truncates legitimate retry rounds) and the stale-changeset sweep deadline.
+    The budget accounts for authenticated clone/push, every possible Aider
+    round, one optional brief call, and one optional review call per round. If
+    their requested maxima exceed the credential-safe outer cap, the effective
+    inner timeouts are scaled together by :func:`codegen_deadline_plan`; no
+    phase is left promising more time than the outer container can provide.
     GitHub write credentials last at most one hour. Keep the credential-bearing
     sandbox below 50 minutes so token cleanup has a ten-minute safety window.
     ``CODEGEN_JOB_BUDGET`` may tighten this bound but cannot expand it.
     """
-    override = os.getenv("CODEGEN_JOB_BUDGET", "")
-    if override.strip():
-        budget = max(1, int(override))
-        if budget > MAX_CODEGEN_JOB_BUDGET_SECONDS:
-            raise ValueError(
-                "CODEGEN_JOB_BUDGET cannot exceed 3000 seconds while a GitHub "
-                "write token is held"
-            )
-        return budget
-    rounds = 1 + codegen_edit_retries()
-    derived = rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
-    return min(derived, MAX_CODEGEN_JOB_BUDGET_SECONDS)
+    return codegen_deadline_plan().job_budget_seconds
 
 
 def codegen_stale_sweep_interval() -> int:

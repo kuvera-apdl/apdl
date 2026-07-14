@@ -309,6 +309,27 @@ def test_parse_result_no_json_is_failure_with_stderr_tail():
     assert res.branch == "apdl/x"
 
 
+def test_parse_result_tail_is_line_safe_and_marks_truncation():
+    stderr = "header\n" + ("x" * 900) + "\ncomplete traceback line\nfinal cause"
+
+    res = ContainerAiderEditor()._parse_result(1, "", stderr, _req())
+
+    assert res.success is False
+    error = res.error or ""
+    assert "[…truncated " in error
+    assert "complete traceback line\nfinal cause" in error
+    assert ("x" * 20) not in error
+
+
+def test_parse_result_tail_omits_a_single_overlong_line():
+    res = ContainerAiderEditor()._parse_result(1, "", "x" * 1000, _req())
+
+    assert res.success is False
+    error = res.error or ""
+    assert "final line exceeds the 800-char excerpt limit" in error
+    assert "x" * 10 not in error
+
+
 @pytest.mark.asyncio
 async def test_implement_never_raises_on_docker_fault(monkeypatch):
     editor = ContainerAiderEditor()
