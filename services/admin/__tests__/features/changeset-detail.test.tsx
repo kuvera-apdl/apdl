@@ -10,6 +10,7 @@ import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailPage'
 import {
   makeChangesetObservationHistory,
+  makeDevelopmentPublicationAuthorization,
   makePublicationAuthorization,
   makeReviewVerdict,
   makeRuntimeAcceptancePlan,
@@ -241,6 +242,28 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getByText('5'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/GitHub remains authoritative for CI, review policy, and merge/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
+  })
+
+  test('labels local development publication without claiming rollout evidence', async () => {
+    server.use(
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
+        HttpResponse.json(
+          makeChangeset({
+            status: 'pr_open',
+            error: null,
+            publication_authorization: makeDevelopmentPublicationAuthorization(),
+          }),
+        ),
+      ),
+    )
+
+    renderDetail()
+    expect(await screen.findByText('Development PR')).toBeInTheDocument()
+    expect(screen.getByText('Local development only')).toBeInTheDocument()
+    expect(screen.getByText(/this is not rollout evidence/)).toBeInTheDocument()
+    expect(screen.getByText('Draft only')).toBeInTheDocument()
+    expect(screen.queryByText('Evaluation report SHA-256')).not.toBeInTheDocument()
+    expect(screen.queryByText('Candidate identity SHA-256')).not.toBeInTheDocument()
   })
 
   test('shows runtime plans and exact-head evidence without promoting external CI', async () => {

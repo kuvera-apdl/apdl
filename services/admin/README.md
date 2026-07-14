@@ -99,7 +99,7 @@ it with the current profile and grants core analytics roles plus
 projects can inspect Agents history, while trigger, approval, and custom-agent
 mutation controls remain unavailable.
 
-`scripts/dev.sh up-full` runs the backend and SPA together in Docker. The Vite
+`scripts/dev.sh up-core` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the
 private container network.
 

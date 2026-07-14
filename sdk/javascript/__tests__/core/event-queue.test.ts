@@ -693,19 +693,22 @@ describe('EventQueue', () => {
     });
 
     it('should drop a permanent rejection and continue with neighboring events', async () => {
+      let rejectFirstBatch!: (outcome: 'permanent_rejection') => void;
+      const firstOutcome = new Promise<'permanent_rejection'>((resolve) => {
+        rejectFirstBatch = resolve;
+      });
       const sendSpy = vi.spyOn(transport, 'send')
-        .mockResolvedValueOnce('permanent_rejection')
+        .mockReturnValueOnce(firstOutcome)
         .mockResolvedValueOnce('accepted');
       const storeSpy = vi.spyOn(storage, 'store').mockResolvedValue();
 
       queue.enqueue(createEvent({ event: 'permanently_rejected', messageId: 'msg-rejected' }));
       const firstFlush = queue.flush();
-      await Promise.resolve();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
       queue.enqueue(createEvent({ event: 'valid_neighbor', messageId: 'msg-neighbor' }));
+      rejectFirstBatch('permanent_rejection');
 
       const report = await firstFlush;
-      await Promise.resolve();
-      await Promise.resolve();
 
       expect(sendSpy).toHaveBeenCalledTimes(2);
       expect(storeSpy).not.toHaveBeenCalled();

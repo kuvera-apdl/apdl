@@ -56,7 +56,7 @@ Each `POST /v1/events` request goes through four stages:
 
 ```bash
 curl -X POST http://localhost:8080/v1/events \
-  -H "x-api-key: client_apdl_0123456789abcdef0123456789abcdef" \
+  -H "x-api-key: client_demo_0123456789abcdef0123456789abcdef" \
   -H "Content-Type: application/json" \
   -d '{
     "events": [
@@ -109,7 +109,7 @@ make dev            # start Docker deps (Redis, ClickHouse, PostgreSQL)
 make run-ingestion  # uvicorn with hot-reload → http://localhost:8080
 ```
 
-Or run the whole stack: `make dev-all`.
+Or run the supported core stack: `make dev-core`.
 
 ## Tests
 

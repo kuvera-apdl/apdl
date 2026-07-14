@@ -1,9 +1,9 @@
 services:
   # ─── Dependencies ────────────────────────────────────────
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     ports:
-      - "6379:6379"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes
@@ -14,10 +14,10 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.1
+    image: clickhouse/clickhouse-server:24.1@sha256:44caeed7c81f7934c28a8ffa3a422a4ca96cf3bccc486d21311e5133ce88d49f
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CLICKHOUSE_HTTP_HOST_PORT:-8123}:8123"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CLICKHOUSE_NATIVE_HOST_PORT:-9000}:9000"
     volumes:
       - clickhouse-data:/var/lib/clickhouse
     environment:
@@ -31,9 +31,9 @@ services:
       retries: 5
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
     ports:
-      - "5432:5432"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     environment:
@@ -68,11 +68,22 @@ services:
       context: ../../services/ingestion
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_INGESTION_HOST_PORT:-8080}:8080"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       LOG_LEVEL: info
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8080/health', timeout=2))['status'] == 'ok'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       redis:
         condition: service_healthy
@@ -86,7 +97,7 @@ services:
       context: ../../services/config
       dockerfile: Dockerfile
     ports:
-      - "8081:8081"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CONFIG_HOST_PORT:-8081}:8081"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
@@ -97,7 +108,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8081/health', timeout=2)",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8081/health', timeout=2))['status'] == 'ok'",
         ]
       interval: 5s
       timeout: 3s
@@ -115,7 +126,7 @@ services:
       context: ../../services/query
       dockerfile: Dockerfile
     ports:
-      - "8082:8082"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_QUERY_HOST_PORT:-8082}:8082"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_HOST: clickhouse
@@ -125,6 +136,17 @@ services:
       CLICKHOUSE_DB: apdl
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       CONFIG_SERVICE_URL: http://config:8081
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8082/ready', timeout=2))['status'] == 'ready'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -136,11 +158,12 @@ services:
         condition: service_healthy
 
   agents:
+    profiles: ["agents"]
     build:
       context: ../../services/agents
       dockerfile: Dockerfile
     ports:
-      - "8083:8083"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
     environment:
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
@@ -150,8 +173,10 @@ services:
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,6 +188,7 @@ services:
   # Codegen — autonomous code-implementation "hands". It creates and repairs
   # PR branches; GitHub alone owns CI verification, review policy, and merge.
   codegen:
+    profiles: ["codegen"]
     build:
       context: ../../services/codegen
       dockerfile: Dockerfile
@@ -277,7 +303,7 @@ services:
       dockerfile: Dockerfile
     environment:
       REDIS_URL: redis://redis:6379
-      CLICKHOUSE_URL: clickhouse://apdl:apdl_dev@clickhouse:9000/apdl
+      CLICKHOUSE_NATIVE_URL: clickhouse://apdl:apdl_dev@clickhouse:9000/apdl
     depends_on:
       redis:
         condition: service_healthy
@@ -301,21 +327,28 @@ services:
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8085/api/ready', timeout=2))['status'] == 'ready'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       postgres:
         condition: service_healthy
       postgres-migrate:
         condition: service_completed_successfully
       ingestion:
-        condition: service_started
+        condition: service_healthy
       config:
-        condition: service_started
+        condition: service_healthy
       query:
-        condition: service_started
-      agents:
-        condition: service_started
-      codegen:
-        condition: service_started
+        condition: service_healthy
 
   # Admin console — static SPA served by nginx. Only /api is dynamic, and it is
   # forwarded to admin-api on the private Compose network.
@@ -324,22 +357,43 @@ services:
       context: ../../services/admin
       dockerfile: Dockerfile
     ports:
-      - "5173:80"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_ADMIN_HOST_PORT:-5173}:80"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://127.0.0.1/api/ready | grep -q '\"status\":\"ready\"'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
-      - admin-api
+      admin-api:
+        condition: service_healthy
 
   # Gateway — single SDK front door. Routes /v1/events to ingestion and
   # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
   # URL (http://<host>:8000) instead of separate ingestion + config URLs.
   gateway:
-    image: nginx:1.27-alpine
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     ports:
-      - "8000:80"
+      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_GATEWAY_HOST_PORT:-8000}:80"
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O - http://127.0.0.1/ | grep -qx 'apdl gateway ok'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
-      - ingestion
-      - config
+      ingestion:
+        condition: service_healthy
+      config:
+        condition: service_healthy
 
 volumes:
   redis-data:

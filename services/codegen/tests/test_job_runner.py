@@ -19,7 +19,11 @@ from app.jobs.runner import run_changeset_job as _run_changeset_job
 from app.models.changeset import ChangesetStatus
 from app.models.connection import RepositoryTarget
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
-from app.publication import ConfiguredPublicationGate
+from app.publication import (
+    DEVELOPMENT_CODEGEN_REVISION,
+    ConfiguredPublicationGate,
+    DevelopmentPublicationAuthorization,
+)
 from app.profiling import RepoProfile
 from app.profiling.models import (
     CIWorkflow,
@@ -245,6 +249,57 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert "## Publication rollout" in calls["body"]
     assert "low_risk_canary" in calls["body"]
     assert final.publication_authorization.authorization_sha256 in calls["body"]
+
+
+@pytest.mark.asyncio
+async def test_development_publication_always_opens_draft_without_evidence_claims():
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=1)
+    await _seed(pool, "cs_dev12345")
+
+    ledger = _implemented_ledger(["src/theme.ts"])
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 3, "deletions": 0},
+            changed_paths=["src/theme.ts"],
+            requirement_ledger=ledger,
+            verification_plan=build_verification_plan(
+                ledger, _profile_with_github_ci()
+            ),
+        )
+    )
+    calls: dict = {}
+
+    async def open_pr(**kwargs) -> PullRequest:
+        calls.update(kwargs)
+        return _pr(19, status=GitHubPRStatus.draft)
+
+    await run_changeset_job(
+        pool,
+        "cs_dev12345",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+        publication_gate=ConfiguredPublicationGate(
+            stage=RolloutStage.development_pr,
+            model="test-model@1",
+            codegen_revision=DEVELOPMENT_CODEGEN_REVISION,
+            development_mode=True,
+        ),
+    )
+
+    final = await store.get_changeset(pool, "cs_dev12345")
+    assert final is not None
+    assert final.status is ChangesetStatus.pr_open
+    assert isinstance(
+        final.publication_authorization,
+        DevelopmentPublicationAuthorization,
+    )
+    assert final.publication_authorization.draft_only is True
+    assert calls["draft"] is True
+    assert "local development; no evaluation evidence is claimed" in calls["body"]
+    assert "Evaluation report SHA-256" not in calls["body"]
 
 
 @pytest.mark.asyncio

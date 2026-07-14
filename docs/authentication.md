@@ -205,11 +205,13 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 - Set `expires_at` for short-lived credentials. Expired records are rejected.
 - Never store the plaintext key in PostgreSQL or logs.
 
-For local development, `APDL_DEV_API_KEY` provisions one confidential key with
-all canonical roles and `APDL_DEV_CLIENT_KEY` provisions one browser key with
-exactly `events:write` and `config:read`. `scripts/init-postgres.sh` derives and
-stores each kind, project, non-secret prefix, and hash. Production deployments
-must leave both settings unset, set `APDL_SERVICE_API_KEYS` only to confidential
-project keys for internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure
-an exact HTTPS origin, and provision least-privilege credentials through their
-normal secret-management workflow.
+For local development, `APDL_DEV_API_KEY` provisions one confidential core key
+with `events:write`, Config read/write/evaluate, and `query:read`. It carries no
+Agents roles.
+`APDL_DEV_CLIENT_KEY` provisions one browser key with exactly `events:write`
+and `config:read`. `scripts/init-postgres.sh` derives and stores each kind,
+project, non-secret prefix, and hash. Production deployments must leave both
+settings unset, set `APDL_SERVICE_API_KEYS` only to confidential project keys
+for internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact
+HTTPS origin, and provision least-privilege credentials through their normal
+secret-management workflow.

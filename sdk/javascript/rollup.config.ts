@@ -35,7 +35,7 @@ export default defineConfig([
         sourcemap: true,
       },
       {
-        file: 'dist/apdl.cjs.js',
+        file: 'dist/apdl.cjs',
         format: 'cjs',
         sourcemap: true,
         exports: 'named',
@@ -66,12 +66,14 @@ export default defineConfig([
         file: 'dist/react.esm.js',
         format: 'es',
         sourcemap: true,
+        banner: "'use client';",
       },
       {
-        file: 'dist/react.cjs.js',
+        file: 'dist/react.cjs',
         format: 'cjs',
         sourcemap: true,
         exports: 'named',
+        banner: "'use client';",
       },
     ],
     plugins: [

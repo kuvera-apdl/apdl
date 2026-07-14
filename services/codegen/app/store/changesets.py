@@ -13,7 +13,6 @@ from typing import Any
 import asyncpg
 
 from app.contracts.models import ContractBundle
-from app.evaluations.publication import PublicationAuthorization
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
@@ -28,6 +27,10 @@ from app.models.observations import (
     ExternalCIStatus,
     GitHubPRStatus,
     PullRequestObservation,
+)
+from app.publication import (
+    PUBLICATION_AUTHORIZATION_ADAPTER,
+    PublicationAuthorizationRecord,
 )
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
@@ -153,12 +156,12 @@ def _runtime_evidence_assessment_from_row(
 
 def _publication_authorization_from_row(
     row: asyncpg.Record,
-) -> PublicationAuthorization | None:
+) -> PublicationAuthorizationRecord | None:
     value = _optional_column(row, "publication_authorization")
     if value is None:
         return None
     raw = value if isinstance(value, str) else json.dumps(value)
-    return PublicationAuthorization.model_validate_json(raw)
+    return PUBLICATION_AUTHORIZATION_ADAPTER.validate_json(raw)
 
 
 def _tenant_policy_snapshot_from_row(
@@ -669,10 +672,10 @@ async def set_runtime_acceptance_plan(
 async def set_publication_authorization(
     pool: asyncpg.Pool,
     changeset_id: str,
-    authorization: PublicationAuthorization,
+    authorization: PublicationAuthorizationRecord,
 ) -> None:
-    """Persist the exact evidence-bound decision before any GitHub credential use."""
-    validated = PublicationAuthorization.model_validate(
+    """Persist exact publication authority before any GitHub credential use."""
+    validated = PUBLICATION_AUTHORIZATION_ADAPTER.validate_python(
         authorization.model_dump(mode="python")
     )
     async with pool.acquire() as conn:

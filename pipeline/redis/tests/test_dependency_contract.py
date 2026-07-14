@@ -15,9 +15,10 @@ def test_fresh_setup_installs_writer_tools_without_bloating_runtime_image():
     assert any(line.startswith("pytest>=") for line in dev_requirements)
     assert any(line.startswith("ruff>=") for line in dev_requirements)
     assert "uv pip install -r requirements-dev.txt" in makefile
-    assert "COPY requirements.txt ." in dockerfile
+    assert "COPY requirements.lock ." in dockerfile
+    assert "--require-hashes -r requirements.lock" in dockerfile
     assert "requirements-dev.txt" not in dockerfile
     assert "clickhouse-writer:" in workflow
-    assert "pip install -r requirements-dev.txt" in workflow
-    assert "ruff check clickhouse_writer.py tests/" in workflow
-    assert "python -m pytest -q" in workflow
+    assert "uv pip install -r requirements-dev.txt" in workflow
+    assert ".venv/bin/ruff check clickhouse_writer.py tests/" in workflow
+    assert ".venv/bin/python -m pytest -q" in workflow

@@ -3,16 +3,22 @@
 The APDL data pipeline: moves events from Redis Streams into ClickHouse, owns
 the ClickHouse schema, and provides the ETL framework for custom event types.
 
+For APDL 0.3.0, only the Redis-to-ClickHouse writer and the PostgreSQL and
+ClickHouse migrations used by the source-built single-node core are supported.
+ETL v2, Kafka, and Flink are disconnected future/experimental surfaces: they
+are not started by the supported stack, published as release artifacts, or
+covered by the runtime support contract.
+
 ## Layout
 
-| Directory | What it is |
-|-----------|------------|
-| `redis/` | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
-| `clickhouse/` | SQL migrations and reference schemas (tables + materialized views) |
-| `postgres/` | The authoritative, versioned PostgreSQL migration sequence |
-| `etl/` | Standalone custom-events ETL framework (`apdl-etl` package) |
-| `kafka/` | Kafka topic definitions for the Phase 3+ migration |
-| `flink/` | Flink jobs (sessionization, enrichment, aggregations) for Phase 3+ |
+| Directory | 0.3.0 status | What it is |
+|-----------|---|------------|
+| `redis/` | Supported core | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
+| `clickhouse/` | Supported core migrations | SQL migrations and reference schemas (tables + materialized views) |
+| `postgres/` | Supported core migrations | The authoritative, versioned PostgreSQL migration sequence |
+| `etl/` | Unsupported experiment | Standalone custom-events ETL framework (`apdl-etl` package), not wired to live events |
+| `kafka/` | Unsupported design | Future Kafka topic definitions, not a runtime |
+| `flink/` | Unsupported design | Future Flink jobs, not a runtime |
 
 ## ClickHouse writer
 
@@ -106,6 +112,10 @@ renaming, editing, deleting, or inserting an older file fails closed.
 - `008_codegen_safety_policy.sql` -- strict tenant preferences and effective safety-policy provenance
 - `009_codegen_repository_authority.sql` -- operator-verified repository grants, legacy binding quarantine, and immutable changeset targets
 - `010_codegen_publication_identity.sql` -- v1 publication audit archive and strict image/config-bound v2 authority
+- `011_codegen_development_publication.sql` -- schema support for a draft-only development authorization; the 0.3.0 runtime still keeps Codegen offline
+- `012_config_atomic_mutations.sql` -- transactional Config mutations and durable change outbox
+- `013_disable_automatic_guardrails.sql` -- release fence for automatic experiment decisions
+- `014_disable_self_registered_agents.sql` -- immutable project provenance and execution fence for self-registered projects
 
 Config, Agents, and Codegen never create or alter tables at process startup.
 They verify the required ledger entry and schema columns, then fail with a
@@ -127,21 +137,25 @@ unprojectable `feature_flags` table as `feature_flags_legacy`, and migration 007
 preserves runtime-evidence rows without an exact CI binding in
 `codegen_runtime_evidence_observations_legacy_unbound`.
 
-## ETL framework
+## ETL framework (unsupported in 0.3.0)
 
-`etl/` is a standalone, dependency-light package (Pydantic only) that
+`etl/` is a standalone, dependency-light experimental package (Pydantic only) that
 standardizes how custom records reach the warehouse: every record is wrapped
 in a canonical envelope keyed by a `_schema` discriminator, processed through
 a `decode → validate → enrich → build_row` Template Method lifecycle with
 per-record DLQ isolation, routed by a schema registry, and handed to a
-pluggable `Loader`. New event types are scaffolded with `make new-transform`
-and need no pipeline changes. Full details: [`etl/docs/etl-framework.md`](etl/docs/etl-framework.md).
+pluggable `Loader`. No supported producer, consumer, loader process, Compose
+service, or release artifact connects it to the 0.3.0 runtime. New event types
+can be scaffolded for research with `make new-transform`; this is not a
+supported extension contract. Full design details:
+[`etl/docs/etl-framework.md`](etl/docs/etl-framework.md).
 
-## Kafka (Phase 3+)
+## Kafka and Flink (unsupported designs)
 
-`kafka/topics.yaml` defines the topic layout (partitions, replication,
-retention, keys) for migrating off Redis Streams once sustained throughput
-exceeds ~10K events/sec or retention beyond 7 days is needed.
+`kafka/topics.yaml` and `flink/` preserve future scaling ideas. No default
+runtime, build artifact, CI integration test, or supported deployment connects
+them to APDL. Do not treat the files as migration guidance or an available
+alternative to Redis Streams.
 
 ## Running locally
 
@@ -151,6 +165,10 @@ make migrate-clickhouse  # apply ClickHouse-only migrations
 make migrate-postgres    # transactionally apply the PostgreSQL sequence
 make run-pipeline        # start the ClickHouse writer
 ```
+
+These commands operate on a fresh local development stack. Multi-replica
+operation, in-place upgrades, backup, restore, Kubernetes, and Terraform are
+outside the 0.3.0 support boundary.
 
 ## Tests
 

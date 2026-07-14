@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/JahaanRawat/apdl/actions/workflows/ci.yml"><img src="https://github.com/JahaanRawat/apdl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/kuvera-apdl/apdl/actions/workflows/ci.yml"><img src="https://github.com/kuvera-apdl/apdl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12">
-  <img src="https://img.shields.io/badge/node-20%2B-339933.svg?logo=node.js&logoColor=white" alt="Node 20+">
+  <img src="https://img.shields.io/badge/node-20.19%2B-339933.svg?logo=node.js&logoColor=white" alt="Node 20.19+">
 </p>
 
 <p align="center">
@@ -32,16 +32,57 @@ data flow:
 > **events in → analytics out → agents act on flags & experiments → SDKs pick
 > up the changes → new events in…** — that feedback cycle is the *Loop*.
 
+## Release status
+
+APDL 0.3.0 is an OSS **developer preview**, not a production release. Its
+supported deployment is a fresh, single-node, source-built Docker Compose
+installation. The supported core consists of Ingestion, Config, Query, the
+Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console, together
+with Redis, ClickHouse, and PostgreSQL.
+
+The 0.3.0 release publishes exactly these installable artifacts from one tested
+revision:
+
+- GitHub source archives for this repository;
+- [`@apdl-oss/sdk`](https://www.npmjs.com/package/@apdl-oss/sdk) on npm; and
+- [`apdl-sdk`](https://pypi.org/project/apdl-sdk/) on PyPI.
+
+APDL does **not** publish GHCR or other container images for 0.3.0. Compose
+builds the core images from the checked-out source. Agents is an opt-in,
+operator-provisioned preview. Only the Codegen API/control plane is available
+as a source-only, non-publishing `offline` preview; its Aider editor/worker and
+`agent` dependency extra are unsupported and excluded from release audits.
+ETL v2, Kafka, Flink, Kubernetes, Terraform,
+multi-replica operation, upgrades, backup, and restore are unsupported. See
+[Support](SUPPORT.md) for the complete boundary.
+
 ## Quick Start
 
-Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20+, Python 3.12+.
+Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 3.12+.
 
 ```bash
-git clone https://github.com/JahaanRawat/apdl.git && cd apdl
-make setup               # venvs + deps for every package, infra containers, migrations, .env
-scripts/dev.sh up-full   # full stack in Docker (detached)
-scripts/dev.sh smoke     # end-to-end check: ingest event → create flag → query it back
+git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
+cp .env.example .env
+make dev-core            # supported core + local Admin console
+make smoke               # strict event → flag evaluation → exact query result
 ```
+
+This developer preview supports fresh, single-node databases only. Do not run
+`make dev-core` or the initialization scripts against an existing APDL
+deployment: in-place upgrades, backup, and restore are not supported or tested
+in this release.
+
+The same fresh-install proof CI runs is available as `make smoke-fresh`. It uses
+an isolated Compose project and fresh volumes, initializes both databases,
+provisions the canonical `demo` project with separate confidential and browser
+credentials, starts only the services needed for the core proof, sends and
+queries exactly one event, evaluates a flag, and removes every container and
+volume when it finishes.
+
+Agents and Codegen are opt-in Compose profiles. `make dev-core` leaves both off;
+`make dev-all` starts Agents plus the offline Codegen API/control plane. It does
+not install or launch the Aider editor/worker. Autonomous branch or PR
+publication is not part of this OSS developer-preview release.
 
 `scripts/dev.sh` is the master script for everything local:
 
@@ -49,7 +90,8 @@ scripts/dev.sh smoke     # end-to-end check: ingest event → create flag → qu
 |---|---|
 | `scripts/dev.sh setup` | Full local setup (same as `make setup`) |
 | `scripts/dev.sh up` | Start infra deps only (Redis, ClickHouse, PostgreSQL) + migrations |
-| `scripts/dev.sh up-full` | Full stack in Docker (detached) + migrations |
+| `scripts/dev.sh up-core` | Start the supported core stack (same as `make dev-core`) |
+| `scripts/dev.sh up-full` | Explicitly add optional Agents and offline Codegen (same as `make dev-all`) |
 | `scripts/dev.sh status` | Container status + service health endpoints |
 | `scripts/dev.sh smoke` | End-to-end smoke test against the running stack |
 | `scripts/dev.sh check` | Lint + test every package in parallel |
@@ -83,12 +125,9 @@ For full SDK usage, see [`sdk/javascript/README.md`](sdk/javascript/README.md).
 import { APDL } from '@apdl-oss/sdk';
 
 const apdl = APDL.init({
-  endpoints: {
-    ingestion: 'http://localhost:8080',
-    config: 'http://localhost:8081',
-  },
+  endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_apdl_0123456789abcdef0123456789abcdef',
+    clientKey: 'client_demo_0123456789abcdef0123456789abcdef',
   },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
   privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
@@ -105,7 +144,8 @@ if (checkoutVariant === 'treatment') {
 ```
 
 → [Full JS SDK docs](sdk/javascript/README.md): configuration, privacy
-controls, server-driven UI, real-time flag subscriptions.
+controls, local UI rendering APIs, and real-time flag subscriptions. The 0.3.0
+backend does not store or deliver UI configurations.
 
 ### Python (server-side) — [`apdl-sdk`](sdk/python/README.md)
 
@@ -113,7 +153,7 @@ controls, server-driven UI, real-time flag subscriptions.
 from apdl import APDL
 
 with APDL.init(
-    api_key="proj_apdl_0123456789abcdef0123456789abcdef",
+    api_key="proj_demo_0123456789abcdef0123456789abcdef",
     endpoint="http://localhost:8000",
 ) as client:
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -128,26 +168,23 @@ explanations, configuration.
 
 ## Architecture
 
-<p align="center">
-  <img src="docs/architecture.svg" alt="APDL Architecture" width="900"/>
-</p>
-
 Written walkthrough of the components and the three data flows (events, flags,
 the agent loop): [docs/architecture.md](docs/architecture.md).
 
-| Container | Port | Description | Docs |
-|---|---|---|---|
-| `ingestion` | 8080 | Event ingestion → Redis Streams | [README](services/ingestion/README.md) |
-| `config` | 8081 | Feature flags & experiments, SSE | [README](services/config/README.md) |
-| `query` | 8082 | Analytics queries on ClickHouse | [README](services/query/README.md) |
-| `agents` | 8083 | Autonomous AI agents | [README](services/agents/README.md) |
-| `codegen` | 8084 (internal) | Operator-granted GitHub PR creation and bounded repair | [README](services/codegen/README.md) |
-| `admin-api` | 8085 (internal) | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
-| `admin` | 5173 | Browser admin console | [README](services/admin/README.md) |
-| `clickhouse-writer` | — | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
-| `redis` | 6379 | Event streams + cache | — |
-| `clickhouse` | 8123 / 9000 | Analytics store (HTTP / native) | — |
-| `postgres` | 5432 | Config store + pgvector | — |
+| Container | Port | Release status | Description | Docs |
+|---|---|---|---|---|
+| `ingestion` | 8080 | Core | Event ingestion → Redis Streams | [README](services/ingestion/README.md) |
+| `config` | 8081 | Core | Feature flags & experiments, SSE | [README](services/config/README.md) |
+| `query` | 8082 | Core | Analytics queries on ClickHouse | [README](services/query/README.md) |
+| `agents` | 8083 | Operator preview | Opt-in LLM workflows; self-registered projects are read-only | [README](services/agents/README.md) |
+| `codegen` | 8084 (internal) | Offline preview | Source-only; publication is disabled | [README](services/codegen/README.md) |
+| `admin-api` | 8085 (internal) | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `admin` | 5173 | Core | Browser admin console | [README](services/admin/README.md) |
+| `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
+| `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
+| `redis` | 6379 | Core dependency | Event streams + cache | — |
+| `clickhouse` | 8123 / 9000 | Core dependency | Analytics store (HTTP / native) | — |
+| `postgres` | 5432 | Core dependency | Config store + pgvector | — |
 
 <details>
 <summary><b>Tech stack by layer</b></summary>
@@ -160,7 +197,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
 | Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, pgvector |
-| Event Pipeline | Redis Streams (Phase 1–2), Kafka (Phase 3+) |
+| Event Pipeline | Redis Streams writer; Kafka/Flink scaffolds are unsupported |
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |
 | Infrastructure | Docker Compose, GitHub Actions |
@@ -182,19 +219,20 @@ apdl/
 │   ├── config/              # Flags & experiments CRUD, Redis cache, SSE
 │   ├── query/               # Funnels, cohorts, retention, experiment stats
 │   ├── agents/              # Agent graphs, LLM router, memory, tools, safety
-│   └── codegen/             # Private, repository-granted PR/repair service
+│   └── codegen/             # Offline source preview; publication disabled
 │
 ├── pipeline/
 │   ├── redis/               # Redis Streams → ClickHouse event writer
-│   ├── etl/                 # Custom-events ETL framework (canonical envelope → v2 tables)
-│   ├── kafka/               # Kafka topic definitions (Phase 3+ migration)
+│   ├── etl/                 # Unsupported experimental v2 ETL framework
+│   ├── kafka/               # Unsupported future Kafka design
+│   ├── flink/               # Unsupported future Flink jobs
 │   └── clickhouse/          # Schemas + migrations
 │
 ├── examples/                # Runnable browser + Python end-to-end samples
 ├── fixtures/                # Cross-SDK golden values (gate bucketing parity)
 ├── scripts/                 # dev.sh (master setup/run/test), check.sh, fmt.sh
 ├── infra/docker/            # Docker Compose (deps + full stack)
-├── .github/workflows/       # CI (lint + test) and Release (npm + PyPI + Docker)
+├── .github/workflows/       # CI gates and Release (GitHub + npm + PyPI)
 └── Makefile                 # Build, test, lint, migrate, dev orchestration
 ```
 
@@ -409,7 +447,8 @@ The agents service runs autonomous analysis workflows powered by LLM reasoning
 
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns
 - **Experiment Design** — proposes A/B tests based on behavioral insights, creates flags and experiments
-- **Personalization** — configures server-driven UI components per user segment
+- **Personalization** — disabled in 0.3.0; no canonical Config storage or SDK
+  delivery path exists yet
 - **Feature Proposals** — generates product feature suggestions backed by data
 
 For eligible operator projects, every action passes a safety validator and an
@@ -419,16 +458,18 @@ shipping, and rollback remain disabled in this release:
 | Level | Behavior |
 |---|---|
 | L1 | Suggest only — surfaces insights for human review |
-| L2 | Auto-safe — auto-deploys low-risk changes (e.g., <5% rollout) |
-| L3 | Auto + approve risky — auto-deploys safe changes, queues risky ones for approval |
-| L4 | Full auto — executes all actions with audit logging |
+| L2 | Approval-only — holds every safety-passing action for human approval |
+| L3 | Higher autonomy — auto-deploys low-risk actions; queues medium/high-risk actions |
+| L4 | Full auto — deploys every safety-passing action except explicitly always-gated actions |
 
 ## Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
-conventions, and the PR workflow, and [SECURITY.md](SECURITY.md) for how to
-report vulnerabilities. Notable changes are tracked in
-[CHANGELOG.md](CHANGELOG.md).
+conventions, and the PR workflow. Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md) and [Governance](GOVERNANCE.md).
+[Support](SUPPORT.md) defines the supported release boundary, and
+[SECURITY.md](SECURITY.md) explains how to report vulnerabilities privately.
+Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

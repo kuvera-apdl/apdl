@@ -91,6 +91,7 @@ class RiskLevel(str, Enum):
 class RolloutStage(str, Enum):
     offline = "offline"
     shadow = "shadow"
+    development_pr = "development_pr"
     reviewed_pr = "reviewed_pr"
     low_risk_canary = "low_risk_canary"
 
@@ -652,6 +653,10 @@ class RolloutDecision(StrictModel):
 
     @model_validator(mode="after")
     def enforce_publication_semantics(self) -> RolloutDecision:
+        if self.requested_stage is RolloutStage.development_pr:
+            raise ValueError(
+                "development_pr uses the separate development publication contract"
+            )
         publishing = self.publish_branch or self.create_pull_request or self.ready_for_review
         if not self.allowed and publishing:
             raise ValueError("a denied rollout cannot grant publication capabilities")

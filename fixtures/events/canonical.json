@@ -8,7 +8,7 @@
       "timestamp": "2026-07-13T12:00:00.000Z",
       "properties": {"total": 42},
       "context": {
-        "library": {"name": "@apdl-oss/sdk", "version": "0.2.0"},
+        "library": {"name": "@apdl-oss/sdk", "version": "0.3.0"},
         "browser": {"name": "Firefox", "version": "128"},
         "device": {"type": "desktop"}
       },
@@ -21,7 +21,7 @@
       "user_id": "user-42",
       "timestamp": "2026-07-13T12:00:01.000Z",
       "traits": {"plan": "pro"},
-      "context": {"library": {"name": "apdl-python", "version": "0.1.0"}},
+      "context": {"library": {"name": "apdl-python", "version": "0.3.0"}},
       "message_id": "message-identify-1"
     },
     {
@@ -31,7 +31,7 @@
       "group_id": "account-7",
       "timestamp": "2026-07-13T12:00:02.000Z",
       "traits": {"name": "Acme"},
-      "context": {"library": {"name": "apdl-python", "version": "0.1.0"}},
+      "context": {"library": {"name": "apdl-python", "version": "0.3.0"}},
       "message_id": "message-group-1"
     },
     {
@@ -70,7 +70,7 @@
         "page": "/checkout",
         "component": "CheckoutPage"
       },
-      "context": {"library": {"name": "@apdl-oss/sdk", "version": "0.2.0"}},
+      "context": {"library": {"name": "@apdl-oss/sdk", "version": "0.3.0"}},
       "message_id": "message-exposure-1",
       "session_id": "session-1"
     }

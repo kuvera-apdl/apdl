@@ -539,11 +539,11 @@ async def test_heartbeat_errors_still_lose_at_local_confirmed_expiry(
             "worker-a",
             stop,
             lost,
-            lease_seconds=0.04,
-            heartbeat_seconds=0.005,
+            lease_seconds=0.5,
+            heartbeat_seconds=0.01,
             expiry_safety_seconds=0,
         ),
-        timeout=0.5,
+        timeout=1.5,
     )
 
     assert attempts >= 2

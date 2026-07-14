@@ -64,7 +64,7 @@ Create a flag:
 
 ```bash
 curl -X POST http://localhost:8081/v1/admin/flags \
-  -H "x-api-key: proj_apdl_0123456789abcdef0123456789abcdef" \
+  -H "x-api-key: proj_demo_0123456789abcdef0123456789abcdef" \
   -H "content-type: application/json" \
   -d '{
     "key": "new-checkout",

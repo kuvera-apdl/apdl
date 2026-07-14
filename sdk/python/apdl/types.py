@@ -18,7 +18,8 @@ from pydantic import (
     model_validator,
 )
 
-SDK_VERSION = "0.1.0"
+from ._version import __version__ as SDK_VERSION
+
 SDK_IDENTIFIER = f"python/{SDK_VERSION}"
 
 EventType = Literal["track", "identify", "group", "page"]

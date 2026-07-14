@@ -106,8 +106,9 @@ def codegen_revision() -> str:
     """Immutable codegen candidate revision bound to rollout evidence.
 
     Production deployments should set ``CODEGEN_REVISION`` to the image or Git
-    digest. The development fallback is intentionally conspicuous and can only
-    publish if an operator explicitly authorizes that exact value.
+    digest. The fallback is intentionally conspicuous and cannot publish. The
+    OSS developer-preview Compose paths keep this fallback and the ``offline``
+    rollout stage.
     """
     return (
         os.getenv("CODEGEN_REVISION", "").strip()
@@ -129,8 +130,18 @@ def codegen_rollout_stage() -> RolloutStage:
 
 
 def codegen_rollout_authorization_path() -> str:
-    """Operator-mounted rollout authorization artifact used for PR stages."""
+    """Operator-mounted rollout evidence used for evaluated PR stages."""
     return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
+
+
+def codegen_development_mode() -> bool:
+    """Explicit local-only acknowledgement for unevaluated draft PRs.
+
+    The rollout stage alone is not enough to enter development publication.
+    The local Compose overlay must set this second, deliberately named marker;
+    production and the fail-closed base deployment leave it unset.
+    """
+    return os.getenv("CODEGEN_DEVELOPMENT_MODE", "").strip().lower() == "true"
 
 
 def codegen_platform_safety_policy() -> PlatformCodegenSafetyPolicy:
@@ -221,7 +232,7 @@ def codegen_sandbox_mode() -> str:
 
 
 def codegen_sandbox_network() -> str:
-    """Named, operator-managed network used by the isolated worker."""
+    """Named network used by the isolated worker."""
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
 
 

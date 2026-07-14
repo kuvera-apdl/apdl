@@ -1,7 +1,7 @@
 """End-to-end APDL Python SDK example against a local stack.
 
 Prerequisites (see examples/README.md):
-  1. `make dev-all` — stack running on localhost
+  1. `make dev-core` — supported core stack running on localhost
   2. The `new-checkout` flag created via the config admin API
   3. `cd sdk/python && uv venv && uv pip install -e .`
 
@@ -11,7 +11,7 @@ Run:
 
 from apdl import APDL, APDLConfig
 
-API_KEY = "proj_apdl_0123456789abcdef0123456789abcdef"
+API_KEY = "proj_demo_0123456789abcdef0123456789abcdef"
 
 config = APDLConfig(
     api_key=API_KEY,

@@ -8,7 +8,7 @@ automatic retry on ClickHouse flush failures.
 
 Usage:
     REDIS_URL=redis://localhost:6379 \
-    CLICKHOUSE_URL=clickhouse://localhost:9000/apdl \
+    CLICKHOUSE_NATIVE_URL=clickhouse://apdl:apdl_dev@localhost:9000/apdl \
     python clickhouse_writer.py
 """
 
@@ -1082,7 +1082,8 @@ class ClickHouseWriter:
 async def main():
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     clickhouse_url = os.environ.get(
-        "CLICKHOUSE_URL", "clickhouse://localhost:9000/apdl"
+        "CLICKHOUSE_NATIVE_URL",
+        "clickhouse://apdl:apdl_dev@localhost:9000/apdl",
     )
     buffer_size = int(os.environ.get("BUFFER_SIZE", "1000"))
     flush_interval = float(os.environ.get("FLUSH_INTERVAL", "5.0"))

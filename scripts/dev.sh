@@ -3,7 +3,9 @@
 #
 #   scripts/dev.sh setup      Full local setup (venvs, npm, infra, migrations, .env)
 #   scripts/dev.sh up         Start infra deps (Redis, ClickHouse, PostgreSQL) + migrate
-#   scripts/dev.sh up-full    Start the full stack in Docker (detached) + migrate
+#   scripts/dev.sh up-core    Start the supported core stack (default application path)
+#   scripts/dev.sh up-full    Opt into core + Agents + offline Codegen
+#   scripts/dev.sh smoke-fresh Hermetic fresh-install core proof
 #   scripts/dev.sh status     Container status + service health endpoints
 #   scripts/dev.sh smoke      End-to-end smoke test against the running stack
 #   scripts/dev.sh test       All tests           (make test)
@@ -24,6 +26,19 @@ env_file_value() {
     awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ROOT_DIR/.env"
 }
 SMOKE_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
+SMOKE_CLIENT_KEY="${APDL_DEV_CLIENT_KEY:-$(env_file_value APDL_DEV_CLIENT_KEY)}"
+INGESTION_HOST_PORT="${APDL_INGESTION_HOST_PORT:-$(env_file_value APDL_INGESTION_HOST_PORT)}"
+CONFIG_HOST_PORT="${APDL_CONFIG_HOST_PORT:-$(env_file_value APDL_CONFIG_HOST_PORT)}"
+QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$(env_file_value APDL_QUERY_HOST_PORT)}"
+AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$(env_file_value APDL_AGENTS_HOST_PORT)}"
+ADMIN_HOST_PORT="${APDL_ADMIN_HOST_PORT:-$(env_file_value APDL_ADMIN_HOST_PORT)}"
+GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$(env_file_value APDL_GATEWAY_HOST_PORT)}"
+INGESTION_HOST_PORT="${INGESTION_HOST_PORT:-8080}"
+CONFIG_HOST_PORT="${CONFIG_HOST_PORT:-8081}"
+QUERY_HOST_PORT="${QUERY_HOST_PORT:-8082}"
+AGENTS_HOST_PORT="${AGENTS_HOST_PORT:-8083}"
+ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-5173}"
+GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-8000}"
 
 # Compose wrappers that load the repo-root .env. With `-f` pointing into
 # infra/docker/, Compose's project dir (and its default .env lookup) is that
@@ -35,6 +50,7 @@ dc() {
     docker compose "${args[@]}" "$@"
 }
 dc_full() { dc "$FULL_COMPOSE" "$@"; }
+dc_full_all() { dc "$FULL_COMPOSE" --profile agents --profile codegen "$@"; }
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info() { echo -e "${BLUE}==>${NC} $*"; }
@@ -63,20 +79,8 @@ wait_healthy() {
         sleep 2
     done
     echo ""
-    warn "Timed out waiting for health checks ($healthy/$want healthy) — continuing anyway"
-}
-
-# http_code <method> <url> [json-body]
-http_code() {
-    local method="$1" url="$2" body="${3:-}"
-    if [ -n "$body" ]; then
-        curl -s -o /tmp/apdl-smoke-body -w '%{http_code}' -X "$method" "$url" \
-            -H "x-api-key: $SMOKE_API_KEY" -H 'Content-Type: application/json' \
-            -d "$body" --max-time 10 || echo "000"
-    else
-        curl -s -o /tmp/apdl-smoke-body -w '%{http_code}' -X "$method" "$url" \
-            -H "x-api-key: $SMOKE_API_KEY" --max-time 10 || echo "000"
-    fi
+    warn "Timed out waiting for health checks ($healthy/$want healthy)"
+    return 1
 }
 
 # ── setup ────────────────────────────────────────────────────────────
@@ -115,7 +119,7 @@ cmd_setup() {
     if [ ! -f "$ROOT_DIR/.env" ] && [ -f "$ROOT_DIR/.env.example" ]; then
         cp "$ROOT_DIR/.env.example" "$ROOT_DIR/.env"
         ok "Created .env from .env.example"
-        warn "Review .env and add LLM API keys before running the agents service"
+        warn "Review .env; LLM API keys are needed only when opting into Agents"
     else
         ok ".env already exists"
     fi
@@ -124,6 +128,7 @@ cmd_setup() {
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"
     setup_python_package "Query Service"     "$ROOT_DIR/services/query"
     setup_python_package "Agents Service"    "$ROOT_DIR/services/agents"
+    setup_python_package "Codegen Service"   "$ROOT_DIR/services/codegen"
     setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
     setup_python_package "ETL Framework"     "$ROOT_DIR/pipeline/etl"
@@ -140,7 +145,8 @@ cmd_setup() {
     echo ""
     info "Setup complete! Common next steps:"
     echo ""
-    echo "  scripts/dev.sh up-full     Run the whole stack in Docker"
+    echo "  scripts/dev.sh up-core     Run the supported core stack in Docker"
+    echo "  scripts/dev.sh up-full     Opt into Agents + offline Codegen too"
     echo "  scripts/dev.sh smoke       End-to-end smoke test"
     echo "  scripts/dev.sh check       Lint + test every package in parallel"
     echo ""
@@ -152,12 +158,12 @@ cmd_setup() {
 # ── stack lifecycle ──────────────────────────────────────────────────
 
 cmd_up() {
-    # If the full stack is already running, reuse its compose file so we
+    # If an application stack is already running, reuse its compose file so we
     # don't recreate Redis/ClickHouse underneath the application services.
     local compose="$DEPS_COMPOSE"
     if [ -n "$(dc_full ps -q ingestion 2>/dev/null)" ]; then
         compose="$FULL_COMPOSE"
-        info "Full stack detected — starting infrastructure via the full compose file"
+        info "Application stack detected — starting infrastructure via its compose file"
     else
         info "Starting infrastructure (Redis, ClickHouse, PostgreSQL)"
     fi
@@ -170,22 +176,21 @@ cmd_up() {
 }
 
 cmd_up_full() {
-    info "Starting full stack in Docker (detached)"
-    dc_full up -d --build redis clickhouse postgres
-    wait_healthy "$FULL_COMPOSE" 3
-    CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
-    ok "ClickHouse schema initialized"
-    POSTGRES_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-postgres.sh"
-    ok "PostgreSQL schema initialized"
-    dc_full up -d --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
-    ok "Application services starting"
-    sleep 3
+    info "Starting core plus opt-in Agents and offline Codegen (detached)"
+    make -C "$ROOT_DIR" --no-print-directory dev-all
+    ok "Core and optional application services ready"
+    cmd_status
+}
+
+cmd_up_core() {
+    info "Starting the supported core development stack (detached)"
+    make -C "$ROOT_DIR" --no-print-directory dev-core
+    ok "Core application services ready"
     cmd_status
 }
 
 cmd_down() {
-    dc_full down
-    docker compose -f "$DEPS_COMPOSE" down
+    make -C "$ROOT_DIR" --no-print-directory dev-down
     ok "All containers stopped"
 }
 
@@ -195,13 +200,14 @@ cmd_reset() {
         read -r -p "Type 'yes' to continue: " answer
         [ "$answer" = "yes" ] || die "Aborted"
     fi
-    dc_full down -v
+    dc_full_all down -v
     docker compose -f "$DEPS_COMPOSE" down -v
+    docker network rm apdl-codegen-development >/dev/null 2>&1 || true
     ok "Containers stopped and volumes removed"
 }
 
 cmd_logs() {
-    dc_full logs -f --tail=100 "$@"
+    dc_full_all logs -f --tail=100 "$@"
 }
 
 # ── status & smoke ───────────────────────────────────────────────────
@@ -222,102 +228,94 @@ check_health() {
     fi
 }
 
+check_compose_health() {
+    local name="$1" service="$2" url="$3"
+    if dc_full_all exec -T "$service" curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+        ok "$name ($service → $url)"
+        return 0
+    fi
+    echo -e "${RED}  ✗${NC} $name not healthy inside the $service container"
+    return 1
+}
+
+compose_service_exists() {
+    [ -n "$(dc_full_all ps -a -q "$1" 2>/dev/null)" ]
+}
+
+compose_service_running() {
+    [ -n "$(dc_full_all ps --status running -q "$1" 2>/dev/null)" ]
+}
+
 cmd_status() {
     info "Containers"
-    dc_full ps 2>/dev/null || true
+    dc_full_all ps 2>/dev/null || true
     docker compose -f "$DEPS_COMPOSE" ps 2>/dev/null || true
     echo ""
     info "Service health"
     local failures=0
-    check_health "Ingestion" "http://localhost:8080/health" || failures=$((failures+1))
-    check_health "Config"    "http://localhost:8081/health" || failures=$((failures+1))
-    check_health "Query"     "http://localhost:8082/health" || failures=$((failures+1))
-    check_health "Agents"    "http://localhost:8083/health" optional || true
-    check_health "Admin API" "http://localhost:5173/api/health" optional || true
-    [ "$failures" -eq 0 ] || warn "$failures service(s) unhealthy — are they running? (scripts/dev.sh up-full)"
+    check_health "Ingestion" "http://localhost:$INGESTION_HOST_PORT/health" || failures=$((failures+1))
+    check_health "Config"    "http://localhost:$CONFIG_HOST_PORT/health" || failures=$((failures+1))
+    check_health "Query"     "http://localhost:$QUERY_HOST_PORT/ready" || failures=$((failures+1))
+    check_health "Gateway"   "http://localhost:$GATEWAY_HOST_PORT/" || failures=$((failures+1))
+    if compose_service_running clickhouse-writer; then
+        ok "ClickHouse writer process running (functional readiness requires scripts/dev.sh smoke)"
+    else
+        echo -e "${RED}  ✗${NC} ClickHouse writer is not running"
+        failures=$((failures+1))
+    fi
+    if compose_service_exists agents; then
+        check_health "Agents" "http://localhost:$AGENTS_HOST_PORT/ready" || failures=$((failures+1))
+    else
+        info "Agents disabled (opt in with scripts/dev.sh up-full or make dev-all)"
+    fi
+    if compose_service_exists codegen; then
+        check_compose_health "Codegen" "codegen" "http://127.0.0.1:8084/ready" || failures=$((failures+1))
+    else
+        info "Codegen disabled (opt in with scripts/dev.sh up-full or make dev-all; publication stays offline)"
+    fi
+    if compose_service_exists admin || compose_service_exists admin-api; then
+        check_health "Admin API" "http://localhost:$ADMIN_HOST_PORT/api/ready" || failures=$((failures+1))
+    else
+        info "Admin console not started"
+    fi
+    [ "$failures" -eq 0 ] || warn "$failures required/enabled service(s) unhealthy — are they running? (scripts/dev.sh up-core)"
+    [ "$failures" -eq 0 ]
 }
 
 cmd_smoke() {
     [ -n "$SMOKE_API_KEY" ] || die "APDL_DEV_API_KEY is required for the smoke test"
-    info "Smoke test against http://localhost:{8080,8081,8082}"
-    local failures=0 code flag_key event_name
-    flag_key="smoke-test-$$"
-    event_name="smoke_test_$$_$(date -u +%Y%m%dT%H%M%S)"
+    [ -n "$SMOKE_CLIENT_KEY" ] || die "APDL_DEV_CLIENT_KEY is required for the smoke test"
+    require python3 "Install Python 3.12"
+    info "Running the canonical core smoke against the current stack"
+    APDL_DEV_API_KEY="$SMOKE_API_KEY" \
+    APDL_DEV_CLIENT_KEY="$SMOKE_CLIENT_KEY" \
+    APDL_GATEWAY_URL="http://localhost:$GATEWAY_HOST_PORT" \
+    APDL_INGESTION_URL="http://localhost:$INGESTION_HOST_PORT" \
+    APDL_CONFIG_URL="http://localhost:$CONFIG_HOST_PORT" \
+    APDL_QUERY_URL="http://localhost:$QUERY_HOST_PORT" \
+    APDL_ADMIN_URL="http://localhost:$ADMIN_HOST_PORT" \
+        python3 "$ROOT_DIR/scripts/smoke_core.py"
+    ok "Core smoke passed"
+}
 
-    check_health "Ingestion" "http://localhost:8080/health" || die "Start the stack first: scripts/dev.sh up-full"
-    check_health "Config"    "http://localhost:8081/health" || die "Config service is not running"
-    check_health "Query"     "http://localhost:8082/health" || die "Query service is not running"
-    check_health "Agents"    "http://localhost:8083/health" optional || true
-
-    info "Ingesting one backlog-probe event '$event_name'"
-    code=$(http_code POST "http://localhost:8080/v1/events" \
-        "{\"events\":[{\"event\":\"$event_name\",\"user_id\":\"u_smoke\",\"properties\":{\"source\":\"dev.sh\"}}]}")
-    if [ "$code" = "202" ]; then ok "POST /v1/events → 202"; else
-        echo -e "${RED}  ✗${NC} POST /v1/events → $code ($(cat /tmp/apdl-smoke-body))"; failures=$((failures+1)); fi
-
-    info "Creating flag '$flag_key'"
-    code=$(http_code POST "http://localhost:8081/v1/admin/flags" \
-        "{\"key\":\"$flag_key\",\"name\":\"Smoke test flag\",\"state\":\"active\",\"enabled\":true,
-          \"owners\":[\"dev@localhost\"],
-          \"fallthrough\":{\"value\":true,\"rollout\":{\"percentage\":100,\"bucket_by\":\"user_id\"}}}")
-    if [ "$code" = "201" ]; then ok "POST /v1/admin/flags → 201"; else
-        echo -e "${RED}  ✗${NC} POST /v1/admin/flags → $code ($(cat /tmp/apdl-smoke-body))"; failures=$((failures+1)); fi
-
-    info "Fetching SDK flag config"
-    code=$(http_code GET "http://localhost:8081/v1/flags")
-    if [ "$code" = "200" ] && grep -q "$flag_key" /tmp/apdl-smoke-body; then
-        ok "GET /v1/flags → 200, contains '$flag_key'"
-    else
-        echo -e "${RED}  ✗${NC} GET /v1/flags → $code (flag missing from payload?)"; failures=$((failures+1))
-    fi
-
-    info "Waiting for the event to land in ClickHouse (writer flushes every 5s)"
-    local count_body landed=0 attempt
-    count_body="{\"project_id\":\"demo\",\"start_date\":\"$(date -u +%Y-%m-%d)\",\"end_date\":\"$(date -u +%Y-%m-%d)\",
-                 \"selectors\":[{\"event_name\":\"$event_name\"}]}"
-    for attempt in $(seq 1 12); do
-        code=$(http_code POST "http://localhost:8082/v1/query/events/count" "$count_body")
-        if [ "$code" != "200" ]; then
-            echo -e "${RED}  ✗${NC} POST /v1/query/events/count → $code ($(cat /tmp/apdl-smoke-body))"
-            failures=$((failures+1)); break
-        fi
-        total=$(grep -o '"total_events":[0-9]*' /tmp/apdl-smoke-body | cut -d: -f2)
-        if [ "${total:-0}" -ge 1 ]; then
-            ok "POST /v1/query/events/count → 200, total_events=$total"
-            landed=1; break
-        fi
-        sleep 2
-    done
-    if [ "$code" = "200" ] && [ "$landed" != "1" ]; then
-        echo -e "${RED}  ✗${NC} Exact event '$event_name' never appeared in ClickHouse — is the clickhouse-writer running?"
-        failures=$((failures+1))
-    fi
-
-    info "Cleaning up flag '$flag_key'"
-    code=$(http_code DELETE "http://localhost:8081/v1/admin/flags/$flag_key")
-    if [ "$code" = "200" ]; then ok "DELETE /v1/admin/flags/$flag_key → 200 (archived)"; else
-        warn "Cleanup returned $code — archive '$flag_key' manually if needed"; fi
-
-    echo ""
-    if [ "$failures" -eq 0 ]; then
-        ok "Smoke test passed — events ingest, flags serve, queries answer"
-    else
-        die "Smoke test failed ($failures step(s))"
-    fi
+cmd_smoke_fresh() {
+    make -C "$ROOT_DIR" --no-print-directory smoke-fresh
 }
 
 # ── dispatch ─────────────────────────────────────────────────────────
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-help}" in
     setup)   cmd_setup ;;
     up)      cmd_up ;;
+    up-core) cmd_up_core ;;
     up-full) cmd_up_full ;;
     down)    cmd_down ;;
     reset)   shift; cmd_reset "$@" ;;
     status)  cmd_status ;;
     smoke)   cmd_smoke ;;
+    smoke-fresh) cmd_smoke_fresh ;;
     test)    make -C "$ROOT_DIR" test ;;
     lint)    make -C "$ROOT_DIR" lint ;;
     check)   make -C "$ROOT_DIR" check ;;

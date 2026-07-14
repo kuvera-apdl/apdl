@@ -32,13 +32,16 @@ export function PublicationAuthorizationCard({
   authorization: PublicationAuthorization
 }) {
   const { decision, request } = authorization
+  const isDevelopment = authorization.schema_version === 'development_publication_authorization@1'
 
   return (
     <Card className={cn(!decision.allowed && 'border-amber-400 dark:border-amber-800')}>
       <CardHeader>
         <CardTitle>Publication authorization</CardTitle>
         <CardDescription>
-          Read-only rollout evidence evaluated before APDL may publish a branch and pull request.
+          {isDevelopment
+            ? 'Local development authorization. Pull requests are always drafts and this is not rollout evidence.'
+            : 'Read-only rollout evidence evaluated before APDL may publish a branch and pull request.'}{' '}
           GitHub remains authoritative for CI, review policy, and merge.
         </CardDescription>
       </CardHeader>
@@ -85,13 +88,22 @@ export function PublicationAuthorizationCard({
         ) : null}
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Digest
-            title="Candidate identity SHA-256"
-            value={authorization.expected_candidate_identity_sha256}
-          />
-          <Digest title="Evaluation report SHA-256" value={authorization.report_sha256} />
-          <Digest title="Evidence bundle SHA-256" value={authorization.bundle_sha256} />
-          <Digest title="Rollout policy SHA-256" value={authorization.policy_sha256} />
+          {isDevelopment ? (
+            <>
+              <Fact title="Authority">Local development only</Fact>
+              <Fact title="Draft only">{authorization.draft_only ? 'Yes' : 'No'}</Fact>
+            </>
+          ) : (
+            <>
+              <Digest
+                title="Candidate identity SHA-256"
+                value={authorization.expected_candidate_identity_sha256}
+              />
+              <Digest title="Evaluation report SHA-256" value={authorization.report_sha256} />
+              <Digest title="Evidence bundle SHA-256" value={authorization.bundle_sha256} />
+              <Digest title="Rollout policy SHA-256" value={authorization.policy_sha256} />
+            </>
+          )}
           <Digest title="Rollout decision SHA-256" value={decision.decision_sha256} />
           <Digest title="Authorization SHA-256" value={authorization.authorization_sha256} />
         </div>

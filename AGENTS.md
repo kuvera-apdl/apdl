@@ -190,10 +190,12 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
 - **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params).
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`.
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`.
-- **CI runs on push/PR to main:** JS SDK tests + build, Python SDK lint + tests
-  (ruff + pytest), and Python linting (ruff) for all five services.
-- **Releases:** git tags matching `v*` trigger npm publish + Docker image builds
-  to GHCR.
+- **CI runs on push/PR to main:** lint, tests, builds, package contracts,
+  dependency audits, and isolated core/experiment smokes for the declared
+  developer-preview surface.
+- **Releases:** the tag must match `release-manifest.json`; `v0.3.0` publishes
+  the JavaScript SDK to npm, the Python SDK to PyPI, and source/checksum assets
+  to GitHub Releases. No GHCR images are published for this release line.
 
 ## Strict Schema Rule
 

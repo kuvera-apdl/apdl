@@ -3,16 +3,16 @@
 Browser TypeScript SDK for the **Autonomous Product Development Loop** platform.
 The SDK sends product analytics events to the ingestion service, evaluates
 feature flag variants client-side, receives real-time configuration updates from
-the config service over SSE, renders server-driven UI, and exposes experiment
-context for flag targeting. It uses the same FNV-1a bucketing as the Python SDK
-and the config service, so a user buckets identically no matter where a flag is
-evaluated.
+the config service over SSE, provides a local UI renderer, and exposes
+experiment context for flag targeting. It uses the same FNV-1a bucketing as the
+Python SDK and the config service, so a user buckets identically no matter where
+a flag is evaluated.
 
 - 🪄 Auto-capture: page views, clicks, form submissions, scroll depth, rage
   clicks, frontend errors, web vitals
 - 🚩 Local feature flag variant evaluation (no network round-trip on the hot path)
 - 🔁 Real-time flag updates over SSE, with a persisted local flag cache
-- 🧩 Server-driven UI components (banner, modal, toast, …) plus custom registrations
+- 🧩 Local UI component renderer (backend UI-config delivery is not in 0.3.0)
 - 🔒 Privacy controls: consent management, PII scrubbing, cookieless mode
 - ⚛️ First-party React/Next adapter (`@apdl-oss/sdk/react`) — a provider + hook, no wrapper boilerplate
 - 🧯 Zero-config setup: env conventions, SSR-safe init, idempotent singleton, fail-soft validation
@@ -38,7 +38,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'https://api.example.com',
   auth: {
-    clientKey: 'client_apdl_0123456789abcdef',
+    clientKey: 'client_demo_0123456789abcdef',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -162,13 +162,13 @@ explicitly chosen semantic label.
 ## Local Development Endpoints
 
 When running the local APDL services, initialize the SDK with the local
-gateway URL (`make dev-all` starts the gateway on port 8000):
+gateway URL (`make dev-core` starts the gateway on port 8000):
 
 ```typescript
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_apdl_0123456789abcdef',
+    clientKey: 'client_demo_0123456789abcdef',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -325,10 +325,13 @@ records are discarded. Each project retains at most the newest 1,000 events and
 without counting or deleting another project's records. A single oversized or
 non-JSON-serializable event is not retained.
 
-## Server-Driven UI
+## Local UI Renderer (No 0.3.0 Backend Delivery)
 
-Agents and the config service can push UI configurations (banners, modals,
-toasts, …) rendered into page slots:
+The package includes component registration, rendering, and slot-discovery
+utilities. APDL 0.3.0 does not have a canonical Config UI-config endpoint and
+does not publish UI configurations over SSE, so applications must pass a
+locally owned `UIConfig` to `apdl.ui.render(...)`. The Agents personalization
+graph is disabled for the same reason.
 
 ```typescript
 // Register a custom component
@@ -337,6 +340,8 @@ apdl.ui.register({
   schema: { properties: { deadline: { type: 'string' } } },
   render: (props, ctx) => { /* return an HTMLElement */ },
 });
+
+apdl.ui.render(locallyOwnedConfig, document.querySelector('#offer')!);
 
 // React when the SDK discovers a UI slot on the page
 apdl.ui.onSlotUpdate((slotId, element) => { /* ... */ });

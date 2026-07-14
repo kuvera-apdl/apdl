@@ -130,7 +130,7 @@ if [ -n "${APDL_DEV_API_KEY:-}" ]; then
         "$APDL_DEV_API_KEY" \
         "confidential" \
         "local-dev-confidential" \
-        "{events:write,config:read,config:write,config:evaluate,query:read,agents:read,agents:run,agents:manage,agents:approve}"
+        "{events:write,config:read,config:write,config:evaluate,query:read}"
 fi
 
 if [ -n "${APDL_DEV_CLIENT_KEY:-}" ]; then
