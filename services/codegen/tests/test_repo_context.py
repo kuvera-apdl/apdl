@@ -1,4 +1,4 @@
-"""Tests for the repo-context document (GitHub-API-backed, no clone)."""
+"""GitHub-backed canonical repository profile tests."""
 
 import base64
 import json
@@ -6,153 +6,151 @@ import json
 import httpx
 import pytest
 
-from app.github.repo_context import _detect_framework, fetch_repo_context
+from app.github.repo_context import fetch_repo_context
+from app.profiling.models import BranchProtectionStatus, UncertaintyCode
 
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
 
 
-def _mock_transport(responses: dict[str, httpx.Response]) -> httpx.MockTransport:
+def _tree(*paths: str, truncated: bool = False) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "tree": [{"path": path, "type": "blob"} for path in paths],
+            "truncated": truncated,
+        },
+    )
+
+
+def _transport(
+    *,
+    tree: httpx.Response,
+    contents: dict[str, str] | None = None,
+    protected: bool | None = None,
+) -> httpx.MockTransport:
+    contents = contents or {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        for fragment, response in responses.items():
-            if fragment in str(request.url):
-                return response
-        return httpx.Response(404, json={"message": "Not Found"})
+        if "/git/trees/" in request.url.path:
+            return tree
+        if "/branches/" in request.url.path:
+            if protected is None:
+                return httpx.Response(404)
+            return httpx.Response(200, json={"protected": protected})
+        marker = "/contents/"
+        if marker in request.url.path:
+            path = request.url.path.split(marker, 1)[1]
+            if path in contents:
+                return httpx.Response(
+                    200,
+                    json={"encoding": "base64", "content": _b64(contents[path])},
+                )
+        return httpx.Response(404)
 
     return httpx.MockTransport(handler)
 
 
-def _tree(*paths: str) -> httpx.Response:
-    return httpx.Response(
-        200, json={"tree": [{"path": p, "type": "blob"} for p in paths]}
+@pytest.mark.asyncio
+async def test_fetch_repo_context_returns_strict_node_profile():
+    manifest = json.dumps(
+        {
+            "scripts": {"build": "next build", "test": "vitest run"},
+            "dependencies": {"next": "^15"},
+            "devDependencies": {"vitest": "^2"},
+        }
     )
+    lock = json.dumps(
+        {
+            "lockfileVersion": 3,
+            "packages": {
+                "node_modules/next": {"version": "15.1.0"},
+                "node_modules/vitest": {"version": "2.1.9"},
+            },
+        }
+    )
+    transport = _transport(
+        tree=_tree(
+            "app/page.tsx",
+            "package.json",
+            "package-lock.json",
+            ".github/workflows/ci.yml",
+            "AGENTS.md",
+        ),
+        contents={
+            "package.json": manifest,
+            "package-lock.json": lock,
+            ".github/workflows/ci.yml": "name: ci",
+            "AGENTS.md": "instructions",
+        },
+        protected=True,
+    )
+
+    profile = await fetch_repo_context(
+        repo="acme/widgets",
+        branch="main",
+        token="ghs_tok",
+        client=httpx.AsyncClient(transport=transport),
+    )
+
+    assert profile.schema_version == "repo_profile@1"
+    assert profile.repo == "acme/widgets"
+    assert profile.frameworks == ["Next.js"]
+    assert (
+        next(dep for dep in profile.dependencies if dep.name == "next").resolved_version
+        == "15.1.0"
+    )
+    assert profile.routes[0].path == "app/page.tsx"
+    assert profile.ci_workflows[0].path == ".github/workflows/ci.yml"
+    assert profile.instructions[0].path == "AGENTS.md"
+    assert profile.branch_protection.status is BranchProtectionStatus.protected
 
 
 @pytest.mark.asyncio
-async def test_fetch_repo_context_builds_full_document():
-    manifest = {
-        "scripts": {"build": "next build", "test": "vitest run"},
-        "dependencies": {"next": "^15"},
+async def test_fetch_repo_context_profiles_go_entrypoint_and_unknown_protection():
+    transport = _transport(
+        tree=_tree("go.mod", "go.sum", "cmd/api/main.go"),
+        contents={
+            "go.mod": "module example.com/api\nrequire github.com/go-chi/chi v5.1.0\n",
+            "go.sum": "github.com/go-chi/chi v5.1.0 h1:abc\n",
+            "cmd/api/main.go": "package main\nfunc main() {}",
+        },
+    )
+    profile = await fetch_repo_context(
+        repo="acme/api",
+        branch="main",
+        token="ghs_tok",
+        client=httpx.AsyncClient(transport=transport),
+    )
+    assert profile.languages == ["Go"]
+    assert profile.entrypoints[0].path == "cmd/api/main.go"
+    assert profile.branch_protection.status is BranchProtectionStatus.unknown
+    assert UncertaintyCode.branch_protection_unknown in {
+        uncertainty.code for uncertainty in profile.uncertainties
     }
-    transport = _mock_transport(
-        {
-            "/git/trees/main": _tree("app/page.tsx", "package.json", "lib/utils.ts"),
-            "/contents/package.json": httpx.Response(
-                200, json={"encoding": "base64", "content": _b64(json.dumps(manifest))}
-            ),
-            "/readme": httpx.Response(
-                200, json={"encoding": "base64", "content": _b64("# Keelstone\nDemo.")}
-            ),
-        }
-    )
-
-    context = await fetch_repo_context(
-        repo="acme/widgets",
-        branch="main",
-        token="ghs_tok",
-        client=httpx.AsyncClient(transport=transport),
-    )
-
-    assert context["repo"] == "acme/widgets"
-    assert context["framework"] == "Next.js (App Router)"
-    assert context["scripts"]["build"] == "next build"
-    assert context["dependencies"] == ["next"]
-    assert context["has_test_script"] is True
-    assert "app/page.tsx" in context["paths"]
-    assert context["paths_truncated"] is False
-    assert context["readme_excerpt"].startswith("# Keelstone")
 
 
 @pytest.mark.asyncio
-async def test_fetch_repo_context_tolerates_missing_manifest_and_readme():
-    transport = _mock_transport({"/git/trees/main": _tree("main.go", "go.mod")})
-
-    context = await fetch_repo_context(
-        repo="acme/svc",
-        branch="main",
-        token="ghs_tok",
-        client=httpx.AsyncClient(transport=transport),
+async def test_fetch_repo_context_excludes_noise_and_surfaces_truncation():
+    transport = _transport(
+        tree=_tree(
+            "node_modules/pkg/index.js",
+            "dist/out.js",
+            "src/a.ts",
+            truncated=True,
+        ),
+        protected=False,
     )
-
-    assert context["framework"] == "Go"
-    assert context["scripts"] == {}
-    assert context["readme_excerpt"] == ""
-
-
-@pytest.mark.asyncio
-async def test_fetch_repo_context_excludes_noise_paths():
-    transport = _mock_transport(
-        {"/git/trees/main": _tree("node_modules/x/index.js", "dist/out.js", "src/a.ts")}
-    )
-
-    context = await fetch_repo_context(
-        repo="acme/widgets",
-        branch="main",
-        token="ghs_tok",
-        client=httpx.AsyncClient(transport=transport),
-    )
-
-    assert context["paths"] == ["src/a.ts"]
-
-
-@pytest.mark.asyncio
-async def test_manifest_detection_survives_the_path_cap():
-    # Trees list alphabetically, so a root package.json sorts after a large
-    # app/ subtree; detection must see the FULL tree, not the capped list.
-    files = [f"app/components/c{i:04d}.tsx" for i in range(450)]
-    manifest = {"scripts": {"test": "vitest run"}, "dependencies": {"next": "^15"}}
-    transport = _mock_transport(
-        {
-            "/git/trees/main": _tree(*files, "package.json"),
-            "/contents/package.json": httpx.Response(
-                200, json={"encoding": "base64", "content": _b64(json.dumps(manifest))}
-            ),
-        }
-    )
-
-    context = await fetch_repo_context(
-        repo="acme/big",
-        branch="main",
-        token="ghs_tok",
-        client=httpx.AsyncClient(transport=transport),
-    )
-
-    assert context["framework"] == "Next.js (App Router)"
-    assert context["has_test_script"] is True
-    assert "next" in context["dependencies"]
-    assert len(context["paths"]) == 400  # document stays bounded
-    assert context["paths_truncated"] is True
-
-
-@pytest.mark.asyncio
-async def test_github_truncated_tree_flag_marks_paths_truncated():
-    transport = _mock_transport(
-        {
-            "/git/trees/main": httpx.Response(
-                200,
-                json={
-                    "tree": [{"path": "src/a.ts", "type": "blob"}],
-                    "truncated": True,
-                },
-            )
-        }
-    )
-
-    context = await fetch_repo_context(
+    profile = await fetch_repo_context(
         repo="acme/huge",
         branch="main",
         token="ghs_tok",
         client=httpx.AsyncClient(transport=transport),
     )
-
-    assert context["paths_truncated"] is True
-
-
-def test_detect_framework_variants():
-    assert _detect_framework({"next"}, ["pages/index.tsx"]) == "Next.js (Pages Router)"
-    assert _detect_framework({"react"}, []) == "React"
-    assert _detect_framework(set(), ["manage.py"]) == "Django"
-    assert _detect_framework(set(), ["pyproject.toml"]) == "Python"
-    assert _detect_framework(set(), ["Cargo.toml"]) == "Rust"
-    assert _detect_framework(set(), ["whatever.txt"]) == "unknown"
+    assert profile.paths == ["src/a.ts"]
+    assert profile.paths_truncated is True
+    assert profile.branch_protection.status is BranchProtectionStatus.unprotected
+    assert UncertaintyCode.repository_tree_truncated in {
+        uncertainty.code for uncertainty in profile.uncertainties
+    }

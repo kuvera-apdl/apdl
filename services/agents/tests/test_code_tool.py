@@ -45,21 +45,6 @@ async def test_get_changeset(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_abandon_changeset_hits_endpoint(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    async def fake_post(path: str, payload: dict[str, Any] | None = None):
-        captured["path"] = path
-        return {"status": "abandoned"}
-
-    monkeypatch.setattr(code, "_post", fake_post)
-
-    result = await code.abandon_changeset("cs_9")
-    assert captured["path"] == "/v1/changesets/cs_9/abandon"
-    assert result["status"] == "abandoned"
-
-
-@pytest.mark.asyncio
 async def test_revert_changeset_hits_endpoint(monkeypatch):
     captured: dict[str, Any] = {}
 

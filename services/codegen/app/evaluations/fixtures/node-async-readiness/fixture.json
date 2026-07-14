@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "node-async-readiness",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "track-after-ready",
+      "path": "src/client.js",
+      "contains": "client.onReady(() => client.track(\"signup\"));"
+    }
+  ]
+}

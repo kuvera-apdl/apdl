@@ -9,8 +9,18 @@ import json
 
 import pytest
 
+from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
+from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.profiling import RepoProfile
+from app.requirements import compile_requirement_ledger
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
+from app.semantic_review import assemble_review_verdict
+from app.verification import build_verification_plan, evaluate_verification_coverage
 
 
 def _req(**over) -> EditRequest:
@@ -36,6 +46,7 @@ def test_docker_argv_has_hardening_and_image_last():
 def test_docker_argv_passes_nonsecret_inputs_as_values():
     argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
     assert "CS_REPO=acme/widgets" in argv
+    assert "CS_PROJECT_SCOPE=acme/widgets" in argv
     assert "CS_BRANCH=apdl/x" in argv
     assert "CS_TEST_CMD=python -m pytest -q" in argv
     assert 'CS_CONSTRAINTS=["keep tests green"]' in argv
@@ -57,11 +68,9 @@ def test_docker_argv_forwards_editor_config(monkeypatch):
     # The sandboxed AiderEditor must behave exactly like the in-process one:
     # operator knobs (fail-closed posture, timeouts, pass toggles) ride along.
     monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
-    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "900")
     monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
     argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
     assert "CODEGEN_REQUIRE_VERIFY=false" in argv
-    assert "CODEGEN_TEST_TIMEOUT=900" in argv
     assert "CODEGEN_CONVENTIONS=false" in argv
 
 
@@ -69,11 +78,10 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
     # The container runs the WHOLE pipeline (retry rounds included); capping it
     # at the bare agent timeout would kill legitimate retries mid-run.
     monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
-    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "600")
     monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
     monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
-    assert ContainerAiderEditor()._timeout == 2 * (1800 + 600) + 2 * 300
+    assert ContainerAiderEditor()._timeout == 2 * 1800 + 2 * 300
 
 
 def test_secrets_are_passed_by_name_not_value(monkeypatch):
@@ -110,15 +118,57 @@ def test_last_json_finds_result_among_noise():
 
 def test_parse_result_maps_success_json():
     editor = ContainerAiderEditor()
+    ledger = compile_requirement_ledger(title="Add thing", spec="Do the thing.")
+    plan = build_verification_plan(ledger, RepoProfile())
+    coverage = evaluate_verification_coverage(plan, changed_paths=["a.py", "b.py"])
+    review = assemble_review_verdict(
+        ledger=ledger,
+        contracts=ContractBundle(),
+        dependency_slice=DependencySlice(),
+        verification_plan=plan,
+        verification_coverage=coverage,
+        diff_text="diff --git a/a.py b/a.py\n+changed",
+        model_response_text=None,
+    )
+    runtime_plan = RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+    )
+    workflow = GeneratedRuntimeWorkflowAttestation(
+        path=".github/workflows/apdl-runtime-acceptance.yml",
+        content_sha256="d" * 64,
+        runtime_acceptance_plan_sha256=runtime_plan.evidence_hash(),
+    )
     out = json.dumps({
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
         "changed_paths": ["a.py", "b.py"], "diff_text": "diff…", "error": None,
+        "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
+        "contract_bundle": ContractBundle().model_dump(mode="json"),
+        "requirement_ledger": ledger.model_dump(mode="json"),
+        "inspection_snapshot": InspectionSnapshot().model_dump(mode="json"),
+        "dependency_slice": DependencySlice().model_dump(mode="json"),
+        "verification_plan": plan.model_dump(mode="json"),
+        "verification_coverage": coverage.model_dump(mode="json"),
+        "runtime_acceptance_plan": runtime_plan.model_dump(mode="json"),
+        "generated_runtime_workflow": workflow.model_dump(mode="json"),
+        "review_verdict": review.model_dump(mode="json"),
     })
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
     assert res.diff_stat["files"] == 2
     assert res.changed_paths == ["a.py", "b.py"]
+    assert res.prompts[0]["stage"] == "edit"
+    assert res.contract_bundle == ContractBundle()
+    assert res.requirement_ledger == ledger
+    assert res.inspection_snapshot == InspectionSnapshot()
+    assert res.dependency_slice == DependencySlice()
+    assert res.verification_plan == plan
+    assert res.verification_coverage == coverage
+    assert res.runtime_acceptance_plan == runtime_plan
+    assert res.generated_runtime_workflow == workflow
+    assert res.review_verdict == review
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():

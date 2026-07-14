@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "python-version-drift",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "locked-client-method",
+      "path": "app.py",
+      "contains": "client.capture(\"signup\")"
+    }
+  ]
+}

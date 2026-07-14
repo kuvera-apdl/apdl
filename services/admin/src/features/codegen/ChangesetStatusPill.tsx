@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import type { Changeset } from '@/api/types/codegen'
 
 const ACTIVE = 'animate-pulse border-sky-200 bg-sky-100 text-sky-800 dark:border-sky-900 dark:bg-sky-950/60 dark:text-sky-300'
 const GATE = 'animate-pulse border-amber-200 bg-amber-100 text-amber-800 dark:border-amber-900 dark:bg-amber-950/60 dark:text-amber-300'
@@ -10,28 +11,56 @@ const STATUS_STYLES: Record<string, string> = {
   queued: MUTED,
   cloning: ACTIVE,
   editing: ACTIVE,
-  testing: ACTIVE,
-  tests_failed: BAD,
   pushing: ACTIVE,
   pr_open: GATE,
-  ci_running: ACTIVE,
-  ci_failed: BAD,
-  ci_passed: GOOD,
-  waiting_approval: GATE,
   merged: GOOD,
   abandoned: MUTED,
   error: BAD,
 }
 
-export function ChangesetStatusPill({ status }: { status: string }) {
+const PR_STATUS_STYLES: Record<string, string> = {
+  draft: GATE,
+  open: ACTIVE,
+  merged: GOOD,
+  closed: MUTED,
+}
+
+const CI_STATUS_STYLES: Record<string, string> = {
+  pending: ACTIVE,
+  passed: GOOD,
+  failed: BAD,
+  unverified_external_ci: GATE,
+}
+
+function StatusPill({ status, styles }: { status: string; styles: Record<string, string> }) {
   return (
     <span
       className={cn(
         'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium',
-        STATUS_STYLES[status] ?? 'bg-secondary text-secondary-foreground',
+        styles[status] ?? 'bg-secondary text-secondary-foreground',
       )}
     >
       {status.replace(/_/g, ' ')}
     </span>
   )
+}
+
+export function ChangesetStatusPill({ status }: { status: Changeset['status'] }) {
+  return <StatusPill status={status} styles={STATUS_STYLES} />
+}
+
+export function GitHubPRStatusPill({
+  status,
+}: {
+  status: NonNullable<Changeset['github_pr_status']>
+}) {
+  return <StatusPill status={status} styles={PR_STATUS_STYLES} />
+}
+
+export function ExternalCIStatusPill({
+  status,
+}: {
+  status: NonNullable<Changeset['external_ci_status']>
+}) {
+  return <StatusPill status={status} styles={CI_STATUS_STYLES} />
 }

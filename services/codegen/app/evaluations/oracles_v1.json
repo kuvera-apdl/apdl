@@ -1,0 +1,62 @@
+{
+  "schema_version": "evaluation_oracle_set@1",
+  "corpus_id": "generalized-codegen-v2",
+  "oracles": [
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "node-async-readiness",
+      "fixture_sha256": "99e343b0daceb1fd06f050cbc09ab220d0efd5998b86a8e2fee36d65918793f8",
+      "expected_detection": ["contract_resolver", "semantic_review", "github_ci"],
+      "expected_behavior": "Tracking occurs only after the exact-version client reports readiness."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "python-version-drift",
+      "fixture_sha256": "53dd2d9d5114c4c7fa723d723fd6642399a7aa1847c353dbd336a2826c5406dd",
+      "expected_detection": ["contract_resolver", "github_ci"],
+      "expected_behavior": "The integration calls only the capture API available in the locked package."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "node-dropped-props",
+      "fixture_sha256": "38dc3e5e910c8900bd8311b734f157e45e0cb8a0b3744ba819850871dc994f14",
+      "expected_detection": ["semantic_review", "github_ci"],
+      "expected_behavior": "The wrapper forwards interaction and accessibility props to the button."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "go-absent-metrics",
+      "fixture_sha256": "66cec70fb0adddf1dd62721bf892d3611a2a736f48380d22f8c73935ba0b8208",
+      "expected_detection": ["semantic_review", "github_ci"],
+      "expected_behavior": "Job completion is recorded through the canonical metrics sink."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "rust-missing-route",
+      "fixture_sha256": "d90effa3aa5aec4ffa081af219dd6928c15195a6d04894d455e6ae47e0077414",
+      "expected_detection": ["semantic_review", "github_ci"],
+      "expected_behavior": "The codegen health handler is registered on the application router."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "jvm-spatial-placement",
+      "fixture_sha256": "d365fa7ef911e20f82804953b097ec3c4f59998bd16d934dc0cf5469638a988e",
+      "expected_detection": ["runtime_artifact", "github_ci"],
+      "expected_behavior": "The action renders after the title inside the primary toolbar."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "dotnet-missing-ci",
+      "fixture_sha256": "4d3fcfc16383aaac7372de48b745dcbe456d30befefbb4b25720b4f606a92f66",
+      "expected_detection": ["semantic_review"],
+      "expected_behavior": "An empty check set is recorded as unverified_external_ci, never passed."
+    },
+    {
+      "schema_version": "evaluation_oracle@1",
+      "case_id": "python-flaky-infrastructure",
+      "fixture_sha256": "be89f674d94412575649af9aeaaf97dd912eafd20bad6f1fceea52c31903babb",
+      "expected_detection": ["remediation_classifier"],
+      "expected_behavior": "Runner timeouts request a GitHub-native rerun without a product-code edit."
+    }
+  ]
+}

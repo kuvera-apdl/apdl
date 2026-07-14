@@ -1,18 +1,30 @@
 """Canonical changeset domain model and lifecycle state machine.
 
 A *changeset* is one unit of autonomous code work: clone a connected repo, edit
-it to satisfy a task, test it, push a branch, open a pull request, and — once CI
-is green and policy permits — merge. Exactly one canonical ``status`` field
-tracks its lifecycle (Strict Schema Rule: no aliases, no parallel state).
+it to satisfy a task, push a branch, and open a pull request. GitHub owns CI
+verification and merge; APDL only observes those external outcomes.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.contracts.models import ContractBundle
+from app.evaluations.publication import PublicationAuthorization
+from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.models.observations import (
+    CIRemediationStatus,
+    ExternalCIStatus,
+    GitHubPRStatus,
+)
+from app.requirements.models import RequirementLedger
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
+from app.semantic_review.models import ReviewVerdict
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 
 class ChangesetStatus(str, Enum):
@@ -21,16 +33,10 @@ class ChangesetStatus(str, Enum):
     queued = "queued"
     cloning = "cloning"
     editing = "editing"
-    testing = "testing"
-    tests_failed = "tests_failed"  # terminal: local tests never went green; no PR
     pushing = "pushing"
     pr_open = "pr_open"
-    ci_running = "ci_running"
-    ci_failed = "ci_failed"
-    ci_passed = "ci_passed"
-    waiting_approval = "waiting_approval"
     merged = "merged"  # terminal: change landed on the base branch
-    abandoned = "abandoned"  # terminal: PR closed / branch dropped
+    abandoned = "abandoned"  # GitHub closed it; a GitHub reopen can restore pr_open
     error = "error"  # terminal: unexpected failure
 
 
@@ -41,35 +47,17 @@ ALLOWED_TRANSITIONS: dict[ChangesetStatus, frozenset[ChangesetStatus]] = {
         {ChangesetStatus.cloning, ChangesetStatus.abandoned, ChangesetStatus.error}
     ),
     ChangesetStatus.cloning: frozenset({ChangesetStatus.editing, ChangesetStatus.error}),
-    ChangesetStatus.editing: frozenset({ChangesetStatus.testing, ChangesetStatus.error}),
-    ChangesetStatus.testing: frozenset(
-        {ChangesetStatus.tests_failed, ChangesetStatus.pushing, ChangesetStatus.error}
-    ),
+    ChangesetStatus.editing: frozenset({ChangesetStatus.pushing, ChangesetStatus.error}),
     ChangesetStatus.pushing: frozenset({ChangesetStatus.pr_open, ChangesetStatus.error}),
     ChangesetStatus.pr_open: frozenset(
-        {ChangesetStatus.ci_running, ChangesetStatus.abandoned, ChangesetStatus.error}
-    ),
-    ChangesetStatus.ci_running: frozenset(
-        {ChangesetStatus.ci_passed, ChangesetStatus.ci_failed, ChangesetStatus.error}
-    ),
-    ChangesetStatus.ci_failed: frozenset(
-        {ChangesetStatus.ci_running, ChangesetStatus.abandoned, ChangesetStatus.error}
-    ),
-    ChangesetStatus.ci_passed: frozenset(
         {
-            ChangesetStatus.waiting_approval,
             ChangesetStatus.merged,
             ChangesetStatus.abandoned,
             ChangesetStatus.error,
         }
     ),
-    ChangesetStatus.waiting_approval: frozenset(
-        {ChangesetStatus.merged, ChangesetStatus.abandoned, ChangesetStatus.error}
-    ),
-    # Terminal states intentionally map to the empty set.
-    ChangesetStatus.tests_failed: frozenset(),
+    ChangesetStatus.abandoned: frozenset({ChangesetStatus.pr_open}),
     ChangesetStatus.merged: frozenset(),
-    ChangesetStatus.abandoned: frozenset(),
     ChangesetStatus.error: frozenset(),
 }
 
@@ -78,26 +66,17 @@ TERMINAL_STATUSES: frozenset[ChangesetStatus] = frozenset(
     status for status, nxt in ALLOWED_TRANSITIONS.items() if not nxt
 )
 
-#: Failed outcomes a run can be *retried* from — a retry re-enqueues the same
-#: task on a fresh changeset (new branch + PR) because the lifecycle cannot move
-#: a terminal row backwards. ``merged`` is excluded (roll a landed change back
-#: with /revert, not /retry); in-flight statuses are excluded (still running).
-#: ``ci_failed`` is included even though it is technically non-terminal: its PR
-#: is red and stuck, and a clean re-attempt is the natural next step.
+#: Only a pre-PR generation error may be retried as fresh work. Open/closed PRs
+#: remain GitHub-owned; CI failures repair the same branch and GitHub reopens PRs.
 RETRYABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
-    {
-        ChangesetStatus.tests_failed,
-        ChangesetStatus.ci_failed,
-        ChangesetStatus.error,
-        ChangesetStatus.abandoned,
-    }
+    {ChangesetStatus.error}
 )
 
 #: Statuses from which a CI poll/webhook sync can still advance a changeset (its
 #: PR is open and CI may report or be re-run). The single source of truth shared
 #: by the sync (``jobs.ci``) and the poller's "what to sweep" query (``store``).
 CI_SYNCABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
-    {ChangesetStatus.pr_open, ChangesetStatus.ci_running, ChangesetStatus.ci_failed}
+    {ChangesetStatus.pr_open}
 )
 
 
@@ -141,7 +120,6 @@ class ChangesetCreate(BaseModel):
     task: TaskSpec
     run_id: str | None = None
     base_branch: str | None = None
-    draft: bool = True
 
 
 class Changeset(BaseModel):
@@ -158,13 +136,17 @@ class Changeset(BaseModel):
     branch: str | None = None
     pr_url: str | None = None
     pr_number: int | None = None
-    pr_node_id: str | None = None
-    ci_status: str | None = None
-    #: When the changeset started awaiting CI (set once at pr_open). Anchors the
-    #: CI sync's grace window and pending deadline — unlike ``updated_at``, it is
-    #: never refreshed by status transitions. ``None`` for pre-PR changesets and
-    #: rows that predate the column (the sync falls back to ``updated_at``).
-    ci_awaiting_since: datetime | None = None
+    head_sha: str | None = None
+    github_pr_status: GitHubPRStatus | None = None
+    external_ci_status: ExternalCIStatus | None = None
+    #: When APDL first started awaiting GitHub evidence for the current PR head.
+    #: This is diagnostic timing only; it cannot turn missing CI into a pass or
+    #: age an open PR out of synchronization.
+    external_ci_awaiting_since: datetime | None = None
+    ci_retry_count: int = Field(default=0, ge=0)
+    ci_remediation_status: CIRemediationStatus = CIRemediationStatus.idle
+    ci_failure_key: str | None = None
+    ci_failure_summary: str | None = None
     #: Merge commit SHA recorded at merge time; the deterministic revert target.
     merge_sha: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)
@@ -173,14 +155,16 @@ class Changeset(BaseModel):
     #: :class:`app.editor.base.EditResult`. Empty for runs that predate prompt
     #: recording or that never reached the editing stage.
     prompts: list[dict[str, Any]] = Field(default_factory=list)
+    contract_bundle: ContractBundle | None = None
+    requirement_ledger: RequirementLedger | None = None
+    inspection_snapshot: InspectionSnapshot | None = None
+    dependency_slice: DependencySlice | None = None
+    verification_plan: VerificationPlan | None = None
+    verification_coverage: VerificationCoverage | None = None
+    runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
+    runtime_evidence_assessment: RuntimeEvidenceAssessment | None = None
+    review_verdict: ReviewVerdict | None = None
+    publication_authorization: PublicationAuthorization | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime
-
-
-class MergeRequest(BaseModel):
-    """Request body for ``POST /v1/changesets/{id}/merge``."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    merge_method: Literal["squash", "merge", "rebase"] = "squash"

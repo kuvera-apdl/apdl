@@ -19,20 +19,32 @@ def test_render_repo_capabilities_full_document():
         {
             "repo": "acme/widgets",
             "branch": "main",
-            "framework": "Next.js (App Router)",
-            "has_test_script": False,
-            "scripts": {"build": "next build", "lint": "eslint"},
-            "readme_excerpt": "# Keelstone\nDemo fintech site.",
+            "schema_version": "repo_profile@1",
+            "languages": ["TypeScript"],
+            "frameworks": ["Next.js"],
+            "commands": [
+                {"kind": "build", "command": "npm run build", "cwd": "."},
+                {"kind": "lint", "command": "npm run lint", "cwd": "."},
+            ],
+            "test_facilities": [],
+            "packages": [{"path": "."}],
+            "routes": [{"path": "app/page.tsx"}],
+            "entrypoints": [],
+            "services": [],
+            "deployment_targets": [],
+            "ci_workflows": [{"path": ".github/workflows/ci.yml"}],
+            "branch_protection": {"status": "protected"},
+            "uncertainties": [],
             "paths": ["app/page.tsx", "lib/utils.ts"],
             "paths_truncated": True,
         }
     )
 
     assert "Repository: acme/widgets (branch main)" in text
-    assert "Stack: Next.js (App Router)" in text
-    assert "Test script present: no" in text
-    assert "package.json scripts: build, lint" in text
-    assert "Demo fintech site." in text
+    assert "Frameworks: Next.js" in text
+    assert "Test facilities: none detected" in text
+    assert "build: npm run build" in text
+    assert "Branch protection: protected" in text
     assert "app/page.tsx" in text
     assert "(file list truncated)" in text
 
@@ -78,7 +90,9 @@ def test_build_prompt_carries_repo_context_and_existing_work():
         "repo_context": {
             "repo": "acme/widgets",
             "branch": "main",
-            "framework": "Next.js (App Router)",
+            "schema_version": "repo_profile@1",
+            "languages": ["TypeScript"],
+            "frameworks": ["Next.js"],
             "paths": ["app/page.tsx"],
         },
         "recent_proposals": [{"title": "Bot filter", "status": "implemented"}],
@@ -89,7 +103,7 @@ def test_build_prompt_carries_repo_context_and_existing_work():
 
     assert "exp_cta" in prompt
     assert "Make the sticky CTA permanent." in prompt
-    assert "Next.js (App Router)" in prompt
+    assert "Next.js" in prompt
     assert "app/page.tsx" in prompt
     assert "- Bot filter (proposal, implemented)" in prompt
     # The old placeholder must never reach the model again.

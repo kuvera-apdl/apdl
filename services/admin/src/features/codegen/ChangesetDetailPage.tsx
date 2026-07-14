@@ -1,7 +1,7 @@
 // Per-changeset detail (/codegen/:id). The list view is a scannable summary;
 // this page is the diagnostic surface — the full task + spec the agent was
 // given, the lifecycle stage it reached, PR/CI/diff facts, and (crucially) the
-// UNTRUNCATED failure reason for a tests_failed / error run, which is the one
+// UNTRUNCATED failure reason for an error run, which is the one
 // thing an operator needs to know why an autonomous PR never opened.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronRight, ExternalLink, GitBranch } from 'lucide-react'
@@ -11,12 +11,13 @@ import { toast } from 'sonner'
 import {
   abandonChangeset,
   getChangeset,
-  mergeChangeset,
+  getChangesetObservations,
+  getRuntimeEvidenceObservations,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
 import { ApiError } from '@/api/http'
-import { RETRYABLE_CHANGESET_STATUSES, TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
+import { TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset, ChangesetPrompt } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -27,30 +28,34 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { queryKeys } from '@/core/queryClient'
 import { cn } from '@/lib/utils'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
-import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
+import { ChangesetObservationHistory } from '@/features/codegen/ChangesetObservationHistory'
+import { PublicationAuthorizationCard } from '@/features/codegen/PublicationAuthorizationCard'
+import {
+  RuntimeAcceptancePlanCard,
+  RuntimeEvidenceHistory,
+} from '@/features/codegen/RuntimeAcceptanceEvidence'
+import {
+  ChangesetStatusPill,
+  ExternalCIStatusPill,
+  GitHubPRStatusPill,
+} from '@/features/codegen/ChangesetStatusPill'
 
 const REFETCH_MS = 5000
 
 // Happy-path lifecycle stages, in order. A failure status maps to the stage it
 // died on (STAGE_OF); statuses that can fail anywhere map to -1 (no highlight).
-const STAGE_LABELS = ['Queued', 'Clone', 'Edit', 'Test', 'Push', 'PR', 'CI', 'Merged'] as const
+const STAGE_LABELS = ['Queued', 'Clone', 'Edit', 'Push', 'PR', 'Merged'] as const
 const STAGE_OF: Record<string, number> = {
   queued: 0,
   cloning: 1,
   editing: 2,
-  testing: 3,
-  tests_failed: 3,
-  pushing: 4,
-  pr_open: 5,
-  ci_running: 6,
-  ci_failed: 6,
-  ci_passed: 6,
-  waiting_approval: 6,
-  merged: 7,
-  abandoned: -1,
+  pushing: 3,
+  pr_open: 4,
+  abandoned: 4,
+  merged: 5,
   error: -1,
 }
-const FAILED_STATUSES = new Set(['tests_failed', 'ci_failed', 'error'])
+const FAILED_STATUSES = new Set(['error'])
 
 function statNumber(diffStat: Record<string, unknown>, key: string): number | null {
   const value = diffStat[key]
@@ -176,6 +181,19 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   )
 }
 
+function verificationLabel(value: string): string {
+  return value
+    .split('_')
+    .map((word, index) => {
+      if (word === 'github') return 'GitHub'
+      if (word === 'ci' || word === 'api' || word === 'sdk' || word === 'ui') {
+        return word.toUpperCase()
+      }
+      return index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word
+    })
+    .join(' ')
+}
+
 export function ChangesetDetailPage() {
   const { id = '' } = useParams()
   const { active } = useWorkspace()
@@ -190,6 +208,26 @@ export function ChangesetDetailPage() {
     queryFn: ({ signal }) => getChangeset(serviceConnection(ws, 'codegen'), id, { signal }),
   })
 
+  const observations = useQuery({
+    queryKey: queryKeys.changesetObservations(active?.id ?? 'none', id),
+    enabled: active !== null && id !== '' && query.data?.pr_number != null,
+    refetchInterval: query.data?.status === 'merged' ? false : REFETCH_MS,
+    queryFn: ({ signal }) =>
+      getChangesetObservations(serviceConnection(ws, 'codegen'), id, { signal }),
+  })
+
+  const runtimeObservations = useQuery({
+    queryKey: queryKeys.changesetRuntimeObservations(active?.id ?? 'none', id),
+    enabled:
+      active !== null &&
+      id !== '' &&
+      query.data?.pr_number != null &&
+      query.data?.runtime_acceptance_plan != null,
+    refetchInterval: query.data?.status === 'merged' ? false : REFETCH_MS,
+    queryFn: ({ signal }) =>
+      getRuntimeEvidenceObservations(serviceConnection(ws, 'codegen'), id, { signal }),
+  })
+
   const invalidate = () => {
     if (active) {
       void queryClient.invalidateQueries({ queryKey: queryKeys.changeset(active.id, id) })
@@ -199,14 +237,6 @@ export function ChangesetDetailPage() {
   const onError = (fallback: string) => (error: Error) =>
     toast.error(error instanceof ApiError ? error.message : fallback)
 
-  const merge = useMutation({
-    mutationFn: () => mergeChangeset(serviceConnection(ws, 'codegen'), id),
-    onSuccess: () => {
-      toast.success('Merge requested')
-      invalidate()
-    },
-    onError: onError('Merge failed'),
-  })
   const abandon = useMutation({
     mutationFn: () => abandonChangeset(serviceConnection(ws, 'codegen'), id),
     onSuccess: () => {
@@ -231,7 +261,7 @@ export function ChangesetDetailPage() {
     },
     onError: onError('Retry failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
+  const busy = abandon.isPending || revert.isPending || retry.isPending
 
   if (query.isPending) {
     return (
@@ -251,12 +281,7 @@ export function ChangesetDetailPage() {
   }
 
   const cs: Changeset = query.data
-  // 'passed' / 'none' / 'no_report' all mean no CI verdict is left to wait on —
-  // mirrors the merge endpoint's gate.
-  const mergeable =
-    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
-    (cs.ci_status === 'passed' || cs.ci_status === 'none' || cs.ci_status === 'no_report')
-  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
+  const hasPullRequest = cs.pr_number !== null || cs.pr_url !== null
   const files = statNumber(cs.diff_stat, 'files')
   const additions = statNumber(cs.diff_stat, 'additions')
   const deletions = statNumber(cs.diff_stat, 'deletions')
@@ -283,27 +308,21 @@ export function ChangesetDetailPage() {
             <Button size="sm" variant="outline" disabled={busy} onClick={() => revert.mutate()}>
               Revert
             </Button>
-          ) : (
-            <>
-              {retryable ? (
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
-                  Retry
-                </Button>
-              ) : (
-                <Button size="sm" disabled={busy || !mergeable} onClick={() => merge.mutate()}>
-                  Merge
-                </Button>
-              )}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy || TERMINAL_CHANGESET_STATUSES.has(cs.status)}
-                onClick={() => abandon.mutate()}
-              >
-                Abandon
+          ) : hasPullRequest ? (
+            cs.pr_url ? (
+              <Button size="sm" asChild>
+                <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
               </Button>
-            </>
-          )
+            ) : null
+          ) : cs.status === 'error' ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
+              Retry
+            </Button>
+          ) : cs.status === 'queued' ? (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => abandon.mutate()}>
+              Abandon
+            </Button>
+          ) : null
         }
       />
 
@@ -315,7 +334,7 @@ export function ChangesetDetailPage() {
               Failure reason
             </CardTitle>
             <CardDescription>
-              Why this run ended in <code className="font-mono">{cs.status}</code> without opening (or completing) a PR.
+              Why generation ended in <code className="font-mono">{cs.status}</code> before APDL could complete its lifecycle step.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -326,15 +345,378 @@ export function ChangesetDetailPage() {
         </Card>
       ) : null}
 
+      {cs.ci_failure_summary ? (
+        <Card className="border-amber-400 dark:border-amber-800">
+          <CardHeader>
+            <CardTitle>GitHub CI failure</CardTitle>
+            <CardDescription>
+              Evidence used by APDL's bounded same-branch repair loop.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-words">
+              {cs.ci_failure_summary}
+            </pre>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.external_ci_status === 'unverified_external_ci' ? (
+        <Card className="border-amber-400 dark:border-amber-800">
+          <CardHeader>
+            <CardTitle>No external CI configured</CardTitle>
+            <CardDescription>
+              GitHub reported no CI signals for the exact PR head. This changeset is unverified;
+              absence of CI is never represented as passed.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
+
       <Card>
         <CardHeader>
-          <CardTitle>Lifecycle</CardTitle>
-          <CardDescription>Stage this changeset reached in the autonomous pipeline.</CardDescription>
+          <CardTitle>APDL lifecycle</CardTitle>
+          <CardDescription>
+            APDL generation and PR-publication stage only. GitHub PR and CI state are separate.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <LifecycleStepper status={cs.status} />
         </CardContent>
       </Card>
+
+      {cs.publication_authorization ? (
+        <PublicationAuthorizationCard authorization={cs.publication_authorization} />
+      ) : null}
+
+      {cs.requirement_ledger ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Requirement ledger</CardTitle>
+            <CardDescription>
+              Stable implementation mappings and the GitHub CI evidence expected for each criterion.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {cs.requirement_ledger.requirements.map((requirement) => (
+              <div key={requirement.requirement_id} className="rounded-md border p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <code className="font-mono text-xs">{requirement.requirement_id}</code>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                    {requirement.implementation_status}
+                  </span>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                    {requirement.risk} risk
+                  </span>
+                </div>
+                <p className="mt-2">{requirement.observable_behavior}</p>
+                {requirement.implementation_evidence.length > 0 ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Code: {requirement.implementation_evidence.map((item) => item.path).join(', ')}
+                  </p>
+                ) : null}
+                {requirement.expected_ci_evidence.length > 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Expected GitHub evidence:{' '}
+                    {requirement.expected_ci_evidence.map((item) => item.evidence_id).join(', ')}
+                  </p>
+                ) : requirement.decision_reason ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Decision: {requirement.decision_reason}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.verification_plan ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Verification plan</CardTitle>
+            <CardDescription>
+              Required regression evidence planned before the diff is handed to GitHub CI.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Fact label="Disposition">
+                {verificationLabel(cs.verification_plan.disposition)}
+              </Fact>
+              <Fact label="Authority">GitHub CI</Fact>
+              <Fact label="Risk">{verificationLabel(cs.verification_plan.risk)}</Fact>
+              <Fact label="Test runner">
+                {cs.verification_plan.test_runner_configured ? 'Configured' : 'Not configured'}
+              </Fact>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {cs.verification_plan.disposition_reason}
+            </p>
+            {cs.verification_plan.test_commands.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Repository test commands
+                </p>
+                <ul className="mt-1 space-y-1 text-sm">
+                  {cs.verification_plan.test_commands.map((testCommand) => (
+                    <li key={`${testCommand.cwd}:${testCommand.command}`}>
+                      <code className="font-mono text-xs">{testCommand.command}</code>
+                      <span className="text-muted-foreground"> in {testCommand.cwd}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_plan.github_workflow_paths.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  GitHub workflows
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.verification_plan.github_workflow_paths.map((path) => (
+                    <li key={path}>
+                      <code className="font-mono text-xs">{path}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_plan.items.length > 0 ? (
+              <div className="space-y-2">
+                {cs.verification_plan.items.map((item) => (
+                  <div key={item.plan_item_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{item.plan_item_id}</code>
+                      <code className="font-mono text-xs text-muted-foreground">
+                        {item.requirement_id}
+                      </code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(item.surface)}
+                      </span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {item.requirement_risk} risk
+                      </span>
+                    </div>
+                    <p className="mt-2">{item.expected_assertion}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Expected GitHub evidence: {item.expected_ci_evidence_ids.join(', ')}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.verification_coverage ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pre-CI coverage</CardTitle>
+            <CardDescription>
+              APDL records whether the diff contains planned coverage paths. GitHub remains
+              authoritative for executing CI and reporting its result.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Fact label="Disposition">
+                {verificationLabel(cs.verification_coverage.disposition)}
+              </Fact>
+              <Fact label="Changed tests">
+                {cs.verification_coverage.changed_test_paths.length}
+              </Fact>
+              <Fact label="Workflow policy">
+                {verificationLabel(cs.verification_coverage.workflow_gate_policy)}
+              </Fact>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {cs.verification_coverage.disposition_reason}
+            </p>
+            {cs.verification_coverage.changed_test_paths.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Changed test paths
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.verification_coverage.changed_test_paths.map((path) => (
+                    <li key={path}>
+                      <code className="font-mono text-xs">{path}</code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {cs.verification_coverage.items.length > 0 ? (
+              <div className="space-y-2">
+                {cs.verification_coverage.items.map((item) => (
+                  <div
+                    key={item.plan_item_id}
+                    className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+                  >
+                    <code className="font-mono text-xs">{item.plan_item_id}</code>
+                    <span>{verificationLabel(item.status)}</span>
+                    {item.coverage_paths.length > 0 ? (
+                      <span className="text-xs text-muted-foreground">
+                        {item.coverage_paths.join(', ')}
+                      </span>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.runtime_acceptance_plan ? (
+        <RuntimeAcceptancePlanCard plan={cs.runtime_acceptance_plan} />
+      ) : null}
+
+      {cs.review_verdict ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Semantic review</CardTitle>
+            <CardDescription>
+              APDL&apos;s evidence-backed pre-push review of the exact generated diff. This is not a
+              GitHub CI result; GitHub remains authoritative for checks, review policy, and merge.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <Fact label="Decision">
+                {verificationLabel(cs.review_verdict.overall_decision)}
+              </Fact>
+              <Fact label="Model response">
+                {verificationLabel(cs.review_verdict.model_response_status)}
+              </Fact>
+              <Fact label="Deterministic findings">
+                {cs.review_verdict.deterministic_findings.length}
+              </Fact>
+            </div>
+            <Fact label="Reviewed diff SHA-256">
+              <code className="font-mono text-xs break-all">
+                {cs.review_verdict.reviewed_diff_sha256}
+              </code>
+            </Fact>
+            <p className="text-xs text-muted-foreground">
+              Deterministic errors override any model approval.
+            </p>
+            {cs.review_verdict.requirement_decisions.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Requirement decisions
+                </p>
+                {cs.review_verdict.requirement_decisions.map((decision) => (
+                  <div key={decision.requirement_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{decision.requirement_id}</code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(decision.decision)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{decision.rationale}</p>
+                    {decision.evidence_ids.length > 0 ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Evidence: {decision.evidence_ids.join(', ')}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.deterministic_findings.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Deterministic findings
+                </p>
+                {cs.review_verdict.deterministic_findings.map((finding) => (
+                  <div key={finding.finding_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{finding.finding_id}</code>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs">
+                        {verificationLabel(finding.severity)}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {verificationLabel(finding.code)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{finding.message}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Action: {finding.actionable_instruction}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.uncertainties.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Uncertainties
+                </p>
+                {cs.review_verdict.uncertainties.map((uncertainty) => (
+                  <div key={uncertainty.uncertainty_id} className="rounded-md border p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{uncertainty.uncertainty_id}</code>
+                      <span className="text-xs text-muted-foreground">
+                        {verificationLabel(uncertainty.code)}
+                      </span>
+                    </div>
+                    <p className="mt-2">{uncertainty.message}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Resolution: {uncertainty.resolution_instruction}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {cs.review_verdict.actionable_instructions.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Required actions
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.review_verdict.actionable_instructions.map((instruction, index) => (
+                    <li key={`${index}:${instruction}`}>{instruction}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {cs.dependency_slice ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Repository evidence</CardTitle>
+            <CardDescription>
+              Content-addressed files, callers, routes, and tests connected to the generated diff.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Fact label="Changed files">{cs.dependency_slice.changed_files.length}</Fact>
+            <Fact label="Local dependencies">
+              {cs.dependency_slice.imported_local_symbols.length}
+            </Fact>
+            <Fact label="Callers">{cs.dependency_slice.callers.length}</Fact>
+            <Fact label="Affected tests">{cs.dependency_slice.affected_tests.length}</Fact>
+            {cs.dependency_slice.unresolved_references.length > 0 ? (
+              <div className="sm:col-span-2 lg:col-span-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                  Unresolved references
+                </p>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {cs.dependency_slice.unresolved_references.map((reference) => (
+                    <li key={reference}>{reference}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardContent className="grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -366,12 +748,39 @@ export function ChangesetDetailPage() {
               '—'
             )}
           </Fact>
-          <Fact label="CI status">
-            {cs.ci_status === 'none'
-              ? 'no CI configured'
-              : cs.ci_status === 'no_report'
-                ? 'CI never reported (gate released)'
-                : (cs.ci_status ?? '—')}
+          <Fact label="GitHub PR status">
+            {cs.github_pr_status ? (
+              <GitHubPRStatusPill status={cs.github_pr_status} />
+            ) : (
+              '—'
+            )}
+          </Fact>
+          <Fact label="External CI status">
+            {cs.external_ci_status ? (
+              <ExternalCIStatusPill status={cs.external_ci_status} />
+            ) : (
+              '—'
+            )}
+          </Fact>
+          <Fact label="Exact PR head">
+            {cs.head_sha ? (
+              <code className="font-mono text-xs break-all" title={cs.head_sha}>
+                {cs.head_sha}
+              </code>
+            ) : (
+              '—'
+            )}
+          </Fact>
+          <Fact label="CI repair">
+            {cs.ci_remediation_status} · {cs.ci_retry_count} attempt
+            {cs.ci_retry_count === 1 ? '' : 's'}
+          </Fact>
+          <Fact label="Awaiting external CI since">
+            {cs.external_ci_awaiting_since ? (
+              <RelativeTime value={cs.external_ci_awaiting_since} />
+            ) : (
+              '—'
+            )}
           </Fact>
           <Fact label="Merge commit">
             {cs.merge_sha ? <code className="font-mono">{cs.merge_sha.slice(0, 12)}</code> : '—'}
@@ -402,6 +811,33 @@ export function ChangesetDetailPage() {
           </Fact>
         </CardContent>
       </Card>
+
+      {cs.pr_number !== null ? (
+        observations.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : observations.isError ? (
+          <ErrorState error={observations.error} onRetry={() => void observations.refetch()} />
+        ) : (
+          <ChangesetObservationHistory history={observations.data} />
+        )
+      ) : null}
+
+      {cs.runtime_acceptance_plan && cs.pr_number !== null ? (
+        runtimeObservations.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : runtimeObservations.isError ? (
+          <ErrorState
+            error={runtimeObservations.error}
+            onRetry={() => void runtimeObservations.refetch()}
+          />
+        ) : (
+          <RuntimeEvidenceHistory
+            observations={runtimeObservations.data}
+            currentAssessment={cs.runtime_evidence_assessment}
+            externalCIStatus={cs.external_ci_status}
+          />
+        )
+      ) : null}
 
       <Card>
         <CardHeader>

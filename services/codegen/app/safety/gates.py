@@ -50,11 +50,15 @@ def scan_secrets(diff_text: str) -> list[str]:
 
 
 def protected_path_violations(
-    paths: list[str], protected: tuple[str, ...] = DEFAULT_PROTECTED_PATTERNS
+    paths: list[str],
+    protected: tuple[str, ...] = DEFAULT_PROTECTED_PATTERNS,
+    allowed: tuple[str, ...] = (),
 ) -> list[str]:
     """Return a message for each changed path that matches a protected pattern."""
     out: list[str] = []
     for path in paths:
+        if path in allowed:
+            continue
         for pattern in protected:
             if fnmatch(path, pattern) or fnmatch(path, f"*/{pattern}"):
                 out.append(f"Change touches protected path '{path}' (matches '{pattern}').")
@@ -91,6 +95,7 @@ def evaluate_pre_push(
     """
     policy = policy or {}
     protected = tuple(policy.get("protected_paths", DEFAULT_PROTECTED_PATTERNS))
+    allowed = tuple(policy.get("allowed_protected_paths", ()))
     violations: list[str] = []
 
     size = diff_too_large(
@@ -100,7 +105,7 @@ def evaluate_pre_push(
     )
     if size:
         violations.append(size)
-    violations.extend(protected_path_violations(changed_paths, protected))
+    violations.extend(protected_path_violations(changed_paths, protected, allowed))
     if diff_text:
         violations.extend(scan_secrets(diff_text))
 

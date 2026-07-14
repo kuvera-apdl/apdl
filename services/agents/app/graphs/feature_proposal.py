@@ -40,18 +40,62 @@ def _render_repo_capabilities(context: dict[str, Any]) -> str:
         )
     lines = [
         f"Repository: {context.get('repo', '?')} (branch {context.get('branch', '?')})",
-        f"Stack: {context.get('framework', 'unknown')}",
-        f"Test script present: {'yes' if context.get('has_test_script') else 'no'}",
+        "Languages: " + (", ".join(context.get("languages") or []) or "unknown"),
+        "Frameworks: "
+        + (", ".join(context.get("frameworks") or []) or "none detected"),
     ]
-    scripts = context.get("scripts") or {}
-    if scripts:
-        lines.append("package.json scripts: " + ", ".join(sorted(scripts)))
-    readme = str(context.get("readme_excerpt") or "").strip()
-    if readme:
-        lines.append(f"README (excerpt):\n{readme}")
+    commands = context.get("commands") or []
+    if commands:
+        lines.append(
+            "Commands:\n"
+            + "\n".join(
+                f"- {command.get('kind', '?')}: {command.get('command', '?')} "
+                f"(cwd {command.get('cwd', '.')})"
+                for command in commands
+            )
+        )
+    facilities = context.get("test_facilities") or []
+    lines.append(
+        "Test facilities: "
+        + (", ".join(item.get("name", "?") for item in facilities) or "none detected")
+    )
+    for label, key in (
+        ("Packages", "packages"),
+        ("Routes", "routes"),
+        ("Entrypoints", "entrypoints"),
+        ("Services", "services"),
+        ("Deployments", "deployment_targets"),
+        ("CI workflows", "ci_workflows"),
+    ):
+        values = context.get(key) or []
+        if values:
+            lines.append(
+                f"{label}: " + ", ".join(str(item.get("path", "?")) for item in values)
+            )
+    instructions = context.get("instructions") or []
+    if instructions:
+        lines.append(
+            "Repository instructions:\n"
+            + "\n\n".join(
+                f"[{item.get('path', '?')} scoped to {item.get('scope', '.')}]:\n"
+                f"{str(item.get('content', ''))}"
+                for item in instructions
+            )
+        )
+    protection = context.get("branch_protection") or {}
+    lines.append(f"Branch protection: {protection.get('status', 'unknown')}")
+    uncertainties = context.get("uncertainties") or []
+    if uncertainties:
+        lines.append(
+            "Uncertainties:\n"
+            + "\n".join(
+                f"- {item.get('code', '?')}: {item.get('message', '')}"
+                for item in uncertainties
+            )
+        )
     paths = context.get("paths") or []
     if paths:
-        listing = "\n".join(paths)
+        listing = "\n".join(paths[:400])
         if context.get("paths_truncated"):
             listing += "\n(file list truncated)"
         lines.append(f"Files:\n{listing}")

@@ -20,6 +20,9 @@ dependencies = [
     "pyjwt[crypto]>=2.9.0",
 ]
 
+[project.scripts]
+apdl-codegen-eval = "app.evaluations.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",

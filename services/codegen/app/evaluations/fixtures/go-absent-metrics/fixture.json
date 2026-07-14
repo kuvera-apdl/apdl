@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "go-absent-metrics",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "canonical-metrics-sink",
+      "path": "handler.go",
+      "contains": "metrics.RecordCompleted(job.ID)"
+    }
+  ]
+}

@@ -2,8 +2,8 @@
 
 The agents service never touches git, credentials, or the sandbox directly; it
 asks the codegen service (`:8084`) to produce and manage changesets, exactly as
-the flag tools defer to the config service. Merge gating and approval stay here
-in the brain; codegen is purely the hands.
+the flag tools defer to the config service. GitHub owns CI verification and
+merge; APDL only creates and observes pull requests.
 """
 
 from __future__ import annotations
@@ -74,12 +74,12 @@ async def open_changeset(
 
 
 async def get_changeset(changeset_id: str) -> dict[str, Any]:
-    """Fetch a changeset's current status (incl. ``pr_url`` and ``ci_status``)."""
+    """Fetch lifecycle, GitHub PR, external CI, and remediation projections."""
     return await _get(f"/v1/changesets/{_seg(changeset_id)}")
 
 
 async def get_repo_context(project_id: str) -> dict[str, Any]:
-    """Compact facts about the project's connected repo (stack, layout, scripts).
+    """Canonical repo profile (ecosystems, commands, contracts, CI, uncertainty).
 
     Grounds the feature-proposal prompt in what the repository actually is, so
     specs name real files and stay inside the repo's capabilities instead of
@@ -91,16 +91,6 @@ async def get_repo_context(project_id: str) -> dict[str, Any]:
 async def list_changesets(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """List the project's changesets (newest first), incl. task title + PR state."""
     return await _get("/v1/changesets", params={"project_id": project_id, "limit": limit})
-
-
-async def merge_changeset(changeset_id: str, merge_method: str = "squash") -> dict[str, Any]:
-    """Merge a changeset's PR. codegen enforces green CI; APDL gates the call."""
-    return await _post(f"/v1/changesets/{_seg(changeset_id)}/merge", {"merge_method": merge_method})
-
-
-async def abandon_changeset(changeset_id: str) -> dict[str, Any]:
-    """Abandon a changeset (close PR / drop branch) — rollback for un-merged work."""
-    return await _post(f"/v1/changesets/{_seg(changeset_id)}/abandon")
 
 
 async def revert_changeset(changeset_id: str) -> dict[str, Any]:

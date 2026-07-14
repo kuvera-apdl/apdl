@@ -12,7 +12,9 @@ from typing import Any
 
 import asyncpg
 
-from app.config import codegen_ci_sync_max_age_seconds
+from app.contracts.models import ContractBundle
+from app.evaluations.publication import PublicationAuthorization
+from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
     Changeset,
@@ -20,7 +22,17 @@ from app.models.changeset import (
     TaskSpec,
     assert_transition,
 )
+from app.models.observations import (
+    CIRemediationStatus,
+    ExternalCIStatus,
+    GitHubPRStatus,
+    PullRequestObservation,
+)
+from app.requirements.models import RequirementLedger
+from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
+from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 #: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
 #: a queued row hasn't started, so a restart re-enqueues it rather than failing
@@ -30,7 +42,6 @@ from app.store.jsonb import loads_jsonb
 _ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
     ChangesetStatus.cloning,
     ChangesetStatus.editing,
-    ChangesetStatus.testing,
     ChangesetStatus.pushing,
 )
 
@@ -58,6 +69,96 @@ def _optional_column(row: asyncpg.Record, key: str) -> Any:
         return None
 
 
+def _contract_bundle_from_row(row: asyncpg.Record) -> ContractBundle | None:
+    value = _optional_column(row, "contract_bundle")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value)
+    return ContractBundle.model_validate(value)
+
+
+def _requirement_ledger_from_row(row: asyncpg.Record) -> RequirementLedger | None:
+    value = _optional_column(row, "requirement_ledger")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return RequirementLedger.model_validate_json(value)
+    return RequirementLedger.model_validate_json(json.dumps(value))
+
+
+def _inspection_snapshot_from_row(row: asyncpg.Record) -> InspectionSnapshot | None:
+    value = _optional_column(row, "inspection_snapshot")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return InspectionSnapshot.model_validate_json(raw)
+
+
+def _dependency_slice_from_row(row: asyncpg.Record) -> DependencySlice | None:
+    value = _optional_column(row, "dependency_slice")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return DependencySlice.model_validate_json(raw)
+
+
+def _verification_plan_from_row(row: asyncpg.Record) -> VerificationPlan | None:
+    value = _optional_column(row, "verification_plan")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return VerificationPlan.model_validate_json(raw)
+
+
+def _verification_coverage_from_row(
+    row: asyncpg.Record,
+) -> VerificationCoverage | None:
+    value = _optional_column(row, "verification_coverage")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return VerificationCoverage.model_validate_json(raw)
+
+
+def _review_verdict_from_row(row: asyncpg.Record) -> ReviewVerdict | None:
+    value = _optional_column(row, "review_verdict")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return ReviewVerdict.model_validate_json(raw)
+
+
+def _runtime_acceptance_plan_from_row(
+    row: asyncpg.Record,
+) -> RuntimeAcceptancePlan | None:
+    value = _optional_column(row, "runtime_acceptance_plan")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return RuntimeAcceptancePlan.model_validate_json(raw)
+
+
+def _runtime_evidence_assessment_from_row(
+    row: asyncpg.Record,
+) -> RuntimeEvidenceAssessment | None:
+    value = _optional_column(row, "runtime_evidence_assessment")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return RuntimeEvidenceAssessment.model_validate_json(raw)
+
+
+def _publication_authorization_from_row(
+    row: asyncpg.Record,
+) -> PublicationAuthorization | None:
+    value = _optional_column(row, "publication_authorization")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return PublicationAuthorization.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -69,12 +170,31 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         branch=row["branch"],
         pr_url=row["pr_url"],
         pr_number=row["pr_number"],
-        pr_node_id=row["pr_node_id"],
-        ci_status=row["ci_status"],
-        ci_awaiting_since=_optional_column(row, "ci_awaiting_since"),
+        head_sha=_optional_column(row, "head_sha"),
+        github_pr_status=_optional_column(row, "github_pr_status"),
+        external_ci_status=_optional_column(row, "external_ci_status"),
+        external_ci_awaiting_since=_optional_column(
+            row, "external_ci_awaiting_since"
+        ),
+        ci_retry_count=_optional_column(row, "ci_retry_count") or 0,
+        ci_remediation_status=(
+            _optional_column(row, "ci_remediation_status") or CIRemediationStatus.idle
+        ),
+        ci_failure_key=_optional_column(row, "ci_failure_key"),
+        ci_failure_summary=_optional_column(row, "ci_failure_summary"),
         merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
         prompts=_prompts_from_row(row),
+        contract_bundle=_contract_bundle_from_row(row),
+        requirement_ledger=_requirement_ledger_from_row(row),
+        inspection_snapshot=_inspection_snapshot_from_row(row),
+        dependency_slice=_dependency_slice_from_row(row),
+        verification_plan=_verification_plan_from_row(row),
+        verification_coverage=_verification_coverage_from_row(row),
+        runtime_acceptance_plan=_runtime_acceptance_plan_from_row(row),
+        runtime_evidence_assessment=_runtime_evidence_assessment_from_row(row),
+        review_verdict=_review_verdict_from_row(row),
+        publication_authorization=_publication_authorization_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -118,27 +238,41 @@ async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | No
     return _row_to_changeset(row) if row else None
 
 
-async def get_changeset_by_branch(
-    pool: asyncpg.Pool, branch: str, repo: str
+async def get_changeset_by_head_sha(
+    pool: asyncpg.Pool, head_sha: str, repo: str
 ) -> Changeset | None:
-    """Find the active changeset for a ``branch`` on a specific ``repo``.
-
-    Used to route GitHub webhooks. Scoped by repo (joined through the project's
-    connection) as well as branch + status, so two connected repos that happen
-    to share a branch name can't mis-route each other's CI events.
-    """
+    """Find an open changeset by exact GitHub head SHA and repository."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
             JOIN codegen_connections conn ON conn.project_id = cs.project_id
-            WHERE cs.branch = $1
+            WHERE cs.head_sha = $1
               AND conn.repo = $2
-              AND cs.status IN ('pr_open', 'ci_running', 'ci_failed', 'ci_passed')
+              AND cs.status = 'pr_open'
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
-            branch,
+            head_sha,
+            repo,
+        )
+    return _row_to_changeset(row) if row else None
+
+
+async def get_changeset_by_pr_number(
+    pool: asyncpg.Pool, pr_number: int, repo: str
+) -> Changeset | None:
+    """Find the APDL changeset associated with a GitHub pull request."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT cs.* FROM codegen_changesets cs
+            JOIN codegen_connections conn ON conn.project_id = cs.project_id
+            WHERE cs.pr_number = $1 AND conn.repo = $2
+            ORDER BY cs.created_at DESC
+            LIMIT 1
+            """,
+            pr_number,
             repo,
         )
     return _row_to_changeset(row) if row else None
@@ -161,34 +295,18 @@ async def list_changesets(
     return [_row_to_changeset(r) for r in rows]
 
 
-async def list_syncable_changeset_ids(
-    pool: asyncpg.Pool, *, max_age_seconds: int | None = None
-) -> list[str]:
-    """Ids of changesets whose CI status a poll can still advance, oldest first.
-
-    The CI poller sweeps these every interval. ``sync_ci_status`` re-checks each
-    one under a row lock, so an id that has moved to a terminal/ineligible state
-    by the time it runs is simply a no-op.
-
-    ``ci_failed`` is syncable (a re-run can flip it green) but is never abandoned
-    automatically, so an age cap (``max_age_seconds``, default from config) drops
-    changesets that haven't moved in a long time — otherwise the failed set grows
-    unbounded and the poller re-mints a token for each one every interval. Pass
-    ``0`` to disable the cap.
-    """
-    if max_age_seconds is None:
-        max_age_seconds = codegen_ci_sync_max_age_seconds()
+async def list_syncable_changeset_ids(pool: asyncpg.Pool) -> list[str]:
+    """Open PR changesets to recover from GitHub; never age them out."""
     statuses = [s.value for s in CI_SYNCABLE_STATUSES]
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT changeset_id FROM codegen_changesets
             WHERE status = ANY($1::text[])
-              AND ($2 <= 0 OR updated_at >= now() - $2 * interval '1 second')
-            ORDER BY updated_at ASC
+              AND (github_pr_status IS NULL OR github_pr_status IN ('open', 'draft'))
+            ORDER BY updated_at ASC, changeset_id ASC
             """,
             statuses,
-            max_age_seconds,
         )
     return [r["changeset_id"] for r in rows]
 
@@ -256,28 +374,66 @@ async def mark_pr_open(
     changeset_id: str,
     *,
     branch: str,
-    pr_url: str,
-    pr_number: int,
+    observation: PullRequestObservation,
+    external_ci_status: ExternalCIStatus,
     diff_stat: dict[str, Any],
-    node_id: str = "",
 ) -> Changeset | None:
-    """Transition ``pushing → pr_open`` and persist the branch + PR identifiers.
-
-    Also stamps ``ci_awaiting_since``: the PR being open is the moment the
-    changeset starts awaiting CI, and this anchor (unlike ``updated_at``) is
-    never refreshed by later transitions — the CI sync's grace window and
-    pending deadline measure from here.
-    """
-    return await _guarded_update(
-        pool,
-        changeset_id,
-        ChangesetStatus.pr_open,
-        set_clause=(
-            "branch = $3, pr_url = $4, pr_number = $5, "
-            "pr_node_id = $6, diff_stat = $7::jsonb, ci_awaiting_since = now()"
-        ),
-        params=(branch, pr_url, pr_number, node_id, json.dumps(diff_stat)),
-    )
+    """Atomically journal and project the exact GitHub PR created by APDL."""
+    if observation.changeset_id != changeset_id or observation.action != "opened":
+        raise ValueError("initial PR observation must identify this changeset and open")
+    if observation.status not in {GitHubPRStatus.draft, GitHubPRStatus.open}:
+        raise ValueError("initial PR observation must be draft or open")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            current = await conn.fetchval(
+                "SELECT status FROM codegen_changesets WHERE changeset_id = $1 FOR UPDATE",
+                changeset_id,
+            )
+            if current is None:
+                return None
+            assert_transition(ChangesetStatus(current), ChangesetStatus.pr_open)
+            inserted = await conn.fetchval(
+                """
+                INSERT INTO codegen_pull_request_observations
+                    (observation_id, delivery_id, changeset_id, repository,
+                     pr_number, head_sha, status, github_updated_at,
+                     observed_at, payload)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+                ON CONFLICT DO NOTHING RETURNING observation_id
+                """,
+                observation.observation_id,
+                observation.delivery_id,
+                observation.changeset_id,
+                observation.repository,
+                observation.pr_number,
+                observation.head_sha,
+                observation.status.value,
+                observation.github_updated_at,
+                observation.observed_at,
+                observation.model_dump_json(),
+            )
+            if inserted is None:
+                raise ValueError("initial pull-request observation already exists")
+            row = await conn.fetchrow(
+                """
+                UPDATE codegen_changesets
+                SET status = 'pr_open', branch = $2, pr_url = $3,
+                    pr_number = $4, head_sha = $5, github_pr_status = $6,
+                    external_ci_status = $7, diff_stat = $8::jsonb,
+                    external_ci_awaiting_since = now(),
+                    ci_remediation_status = 'idle', updated_at = now()
+                WHERE changeset_id = $1 RETURNING *
+                """,
+                changeset_id,
+                branch,
+                observation.github_url,
+                observation.pr_number,
+                observation.head_sha,
+                observation.status.value,
+                external_ci_status.value,
+                json.dumps(diff_stat),
+            )
+    return _row_to_changeset(row)
 
 
 async def set_prompts(
@@ -302,6 +458,157 @@ async def set_prompts(
         )
 
 
+async def set_contract_bundle(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    bundle: ContractBundle,
+) -> None:
+    """Persist exact dependency evidence without changing lifecycle or CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET contract_bundle = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(bundle.model_dump(mode="json")),
+        )
+
+
+async def set_requirement_ledger(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    ledger: RequirementLedger,
+) -> None:
+    """Persist the stable requirement/evidence mapping without changing CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET requirement_ledger = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(ledger.model_dump(mode="json")),
+        )
+
+
+async def set_inspection_evidence(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    snapshot: InspectionSnapshot | None,
+    dependency_slice: DependencySlice | None,
+) -> None:
+    """Persist auditable repository evidence without changing lifecycle or CI."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET inspection_snapshot = COALESCE($2::jsonb, inspection_snapshot),
+                dependency_slice = COALESCE($3::jsonb, dependency_slice),
+                updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            (
+                json.dumps(snapshot.model_dump(mode="json"))
+                if snapshot is not None
+                else None
+            ),
+            (
+                json.dumps(dependency_slice.model_dump(mode="json"))
+                if dependency_slice is not None
+                else None
+            ),
+        )
+
+
+async def set_verification_evidence(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    plan: VerificationPlan | None,
+    coverage: VerificationCoverage | None,
+) -> None:
+    """Persist expected GitHub coverage facts, never a CI result."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET verification_plan = COALESCE($2::jsonb, verification_plan),
+                verification_coverage = COALESCE($3::jsonb, verification_coverage),
+                updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(plan.model_dump(mode="json")) if plan is not None else None,
+            (
+                json.dumps(coverage.model_dump(mode="json"))
+                if coverage is not None
+                else None
+            ),
+        )
+
+
+async def set_review_verdict(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    verdict: ReviewVerdict,
+) -> None:
+    """Persist the evidence-backed pre-push judgment without changing CI state."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET review_verdict = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(verdict.model_dump(mode="json")),
+        )
+
+
+async def set_runtime_acceptance_plan(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    plan: RuntimeAcceptancePlan,
+) -> None:
+    """Persist planned GitHub runtime evidence without claiming a result."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET runtime_acceptance_plan = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(plan.model_dump(mode="json")),
+        )
+
+
+async def set_publication_authorization(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    authorization: PublicationAuthorization,
+) -> None:
+    """Persist the exact evidence-bound decision before any GitHub credential use."""
+    validated = PublicationAuthorization.model_validate(
+        authorization.model_dump(mode="python")
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE codegen_changesets
+            SET publication_authorization = $2::jsonb, updated_at = now()
+            WHERE changeset_id = $1
+            """,
+            changeset_id,
+            json.dumps(validated.model_dump(mode="json")),
+        )
+
+
 async def mark_merged(
     pool: asyncpg.Pool, changeset_id: str, *, merge_sha: str
 ) -> Changeset | None:
@@ -316,27 +623,6 @@ async def mark_merged(
         ChangesetStatus.merged,
         set_clause="merge_sha = $3",
         params=(merge_sha,),
-    )
-
-
-async def set_ci_status(
-    pool: asyncpg.Pool,
-    changeset_id: str,
-    *,
-    target: ChangesetStatus,
-    ci_status: str,
-) -> Changeset | None:
-    """Transition to ``target`` and persist the external ``ci_status`` string.
-
-    Used to move ``pr_open → ci_running → ci_passed | ci_failed`` as the repo's
-    own CI reports in (via webhook or poll).
-    """
-    return await _guarded_update(
-        pool,
-        changeset_id,
-        target,
-        set_clause="ci_status = $3",
-        params=(ci_status,),
     )
 
 

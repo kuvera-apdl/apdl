@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "python-flaky-infrastructure",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "rerun-infrastructure-failure",
+      "path": "classifier.py",
+      "contains": "return \"infrastructure_rerun\""
+    }
+  ]
+}

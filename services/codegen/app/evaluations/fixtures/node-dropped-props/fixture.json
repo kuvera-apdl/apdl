@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "node-dropped-props",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "forward-button-props",
+      "path": "src/Button.jsx",
+      "contains": "<button {...props}>{label}</button>"
+    }
+  ]
+}

@@ -26,10 +26,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 # The model-agnostic coding agent (any model via LiteLLM, chosen at run time via
 # CODEGEN_MODEL).
-RUN pip install --no-cache-dir aider-chat
-# The shared, stdlib-only edit logic + the in-sandbox runner (the ENTRYPOINT).
-COPY app/__init__.py /app/app/__init__.py
-COPY app/editor/ /app/app/editor/
+RUN pip install --no-cache-dir aider-chat uv
+# The editor imports the profiler, contract resolver, deterministic safety
+# gates, and strict pipeline schemas. Copy the complete app package so the
+# worker image exercises the same code as the API process.
+COPY app/ /app/app/
 COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \
@@ -38,6 +39,7 @@ USER agent
 WORKDIR /app
 ENV PYTHONPATH=/app \
     CODEGEN_WORKDIR=/workspace \
+    APDL_CODEGEN_ISOLATED_WORKER=true \
     AIDER_ANALYTICS=false \
     AIDER_CHECK_UPDATE=false
 ENTRYPOINT ["python", "/app/run_changeset.py"]

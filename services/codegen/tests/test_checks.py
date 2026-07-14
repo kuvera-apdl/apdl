@@ -1,177 +1,203 @@
-"""Unit tests for the GitHub CI-status reader (httpx MockTransport)."""
+"""Tests for bounded raw GitHub CI evidence collection on an exact head."""
+
+from __future__ import annotations
 
 import httpx
 import pytest
 
-from app.github.checks import CIStatus, get_ci_status
+from app.github.checks import GitHubCIEvidence, get_ci_evidence
 
 
-def _transport(
-    state: str,
-    total: int,
-    check_runs: list[dict],
-    *,
-    workflows: list[dict] | None = None,
-    check_suites: list[dict] | None = None,
-) -> httpx.MockTransport:
+async def _evidence(transport: httpx.MockTransport) -> GitHubCIEvidence:
+    async with httpx.AsyncClient(transport=transport) as client:
+        return await get_ci_evidence("acme/widgets", "head-exact", "tok", client=client)
+
+
+@pytest.mark.asyncio
+async def test_reads_only_raw_status_and_check_runs_for_the_exact_head():
+    requested: list[str] = []
+    combined = {
+        "sha": "head-exact",
+        "state": "pending",
+        "total_count": 0,
+        "statuses": [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        assert request.headers["Authorization"] == "Bearer tok"
+        if request.url.path.endswith("/commits/head-exact/status"):
+            return httpx.Response(200, json=combined)
+        if request.url.path.endswith("/commits/head-exact/check-runs"):
+            return httpx.Response(200, json={"check_runs": []})
+        raise AssertionError(f"unexpected inference request: {request.url}")
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert evidence.combined_status == combined
+    assert evidence.check_runs == []
+    assert requested == [
+        "/repos/acme/widgets/commits/head-exact/status",
+        "/repos/acme/widgets/commits/head-exact/check-runs",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preserves_raw_signals_without_aggregating_a_ci_verdict():
+    combined = {
+        "sha": "head-exact",
+        "state": "failure",
+        "total_count": 1,
+        "statuses": [
+            {
+                "id": 7,
+                "sha": "head-exact",
+                "context": "deploy",
+                "state": "failure",
+            }
+        ],
+    }
+    run = {
+        "id": 9,
+        "head_sha": "head-exact",
+        "name": "tests",
+        "status": "in_progress",
+        "conclusion": None,
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/status"):
-            return httpx.Response(200, json={"state": state, "total_count": total})
+            return httpx.Response(200, json=combined)
         if request.url.path.endswith("/check-runs"):
-            return httpx.Response(200, json={"check_runs": check_runs})
-        if request.url.path.endswith("/check-suites"):
-            return httpx.Response(200, json={"check_suites": check_suites or []})
-        if request.url.path.endswith("/actions/workflows"):
-            return httpx.Response(200, json={"workflows": workflows or []})
+            return httpx.Response(200, json={"check_runs": [run]})
         return httpx.Response(404)
 
-    return httpx.MockTransport(handler)
+    evidence = await _evidence(httpx.MockTransport(handler))
 
-
-async def _status(transport: httpx.MockTransport) -> CIStatus:
-    async with httpx.AsyncClient(transport=transport) as client:
-        return await get_ci_status("acme/widgets", "sha", "tok", client=client)
-
-
-@pytest.mark.asyncio
-async def test_passed_when_combined_status_success():
-    status = await _status(_transport("success", 1, []))
-    assert status == "passed"
-    assert status.observed  # a real report on the ref, not an inference
+    assert evidence.combined_status == combined
+    assert evidence.check_runs == [run]
+    assert not hasattr(evidence, "status")
 
 
 @pytest.mark.asyncio
-async def test_failed_when_combined_status_failure():
-    assert await _status(_transport("failure", 1, [])) == "failed"
-
-
-@pytest.mark.asyncio
-async def test_pending_when_a_check_run_is_incomplete():
-    runs = [{"status": "in_progress", "conclusion": None}]
-    status = await _status(_transport("pending", 0, runs))
-    assert status == "pending"
-    assert status.observed  # real CI is executing — never subject to the deadline
-
-
-@pytest.mark.asyncio
-async def test_failed_when_a_check_run_failed():
-    runs = [{"status": "completed", "conclusion": "failure"}]
-    assert await _status(_transport("success", 1, runs)) == "failed"
-
-
-@pytest.mark.asyncio
-async def test_failed_wins_over_a_sibling_still_running():
-    # A red conclusion fails the ref even while another run is still executing —
-    # the verdict cannot improve, and it must not hide behind the slower run.
-    runs = [
-        {"status": "in_progress", "conclusion": None},
-        {"status": "completed", "conclusion": "failure"},
-    ]
-    assert await _status(_transport("pending", 0, runs)) == "failed"
-
-
-@pytest.mark.asyncio
-async def test_passed_when_all_check_runs_green():
-    runs = [{"status": "completed", "conclusion": "success"}]
-    assert await _status(_transport("", 0, runs)) == "passed"
-
-
-@pytest.mark.asyncio
-async def test_check_runs_are_paginated_so_a_late_failure_is_seen():
-    # GitHub pages check-runs (default 30/page). A failing run past page one must
-    # still fail the ref — an unpaginated read would report "passed" on red CI.
-    page1 = [{"status": "completed", "conclusion": "success"} for _ in range(100)]
-    page2 = [{"status": "completed", "conclusion": "failure"}]
+async def test_check_runs_are_collected_across_bounded_github_pages():
+    first = {
+        "id": 1,
+        "head_sha": "head-exact",
+        "name": "lint",
+        "status": "completed",
+        "conclusion": "success",
+    }
+    second = {
+        "id": 2,
+        "head_sha": "head-exact",
+        "name": "tests",
+        "status": "completed",
+        "conclusion": "success",
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/status"):
-            return httpx.Response(200, json={"state": "success", "total_count": 1})
-        if request.url.path.endswith("/check-runs"):
-            if request.url.params.get("page") == "2":
-                return httpx.Response(200, json={"check_runs": page2})
             return httpx.Response(
                 200,
-                json={"check_runs": page1},
-                headers={
-                    "Link": (
-                        "<https://api.github.com/repos/acme/widgets/commits/sha/"
-                        'check-runs?per_page=100&page=2>; rel="next"'
-                    )
-                },
+                json={"sha": "head-exact", "total_count": 0, "statuses": []},
+            )
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, json={"check_runs": [second]})
+        return httpx.Response(
+            200,
+            json={"check_runs": [first]},
+            headers={
+                "Link": (
+                    "<https://api.github.com/repos/acme/widgets/commits/"
+                    'head-exact/check-runs?per_page=100&page=2>; rel="next"'
+                )
+            },
+        )
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert [run["id"] for run in evidence.check_runs] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_failed_check_annotations_are_bounded_and_attached_to_raw_runs():
+    runs = [
+        {
+            "id": number,
+            "head_sha": "head-exact",
+            "name": f"job-{number}",
+            "status": "completed",
+            "conclusion": "failure",
+        }
+        for number in range(1, 12)
+    ]
+    annotation_requests: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(
+                200,
+                json={"sha": "head-exact", "total_count": 0, "statuses": []},
+            )
+        if request.url.path.endswith("/commits/head-exact/check-runs"):
+            return httpx.Response(200, json={"check_runs": runs})
+        if "/annotations" in request.url.path:
+            run_id = int(request.url.path.split("/")[-2])
+            annotation_requests.append(run_id)
+            assert request.url.params["per_page"] == "50"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "path": "tests/test_api.py",
+                        "start_line": number,
+                        "annotation_level": "failure",
+                        "message": f"failure {number}",
+                    }
+                    for number in range(1, 61)
+                ],
             )
         return httpx.Response(404)
 
-    assert await _status(httpx.MockTransport(handler)) == "failed"
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert annotation_requests == list(range(1, 11))
+    assert len(evidence.check_runs[0]["_failure_annotations"]) == 50
+    assert "_failure_annotations" not in evidence.check_runs[10]
 
 
 @pytest.mark.asyncio
-async def test_none_when_no_signal_and_no_workflows():
-    # No statuses, no check-runs, and the repo has zero Actions workflows → the
-    # repo has no CI to wait on, so report "none" (merge is not blocked on CI).
-    status = await _status(_transport("pending", 0, []))
-    assert status == "none"
-    assert not status.observed
+async def test_annotation_lookup_failure_keeps_the_raw_failed_run():
+    run = {
+        "id": 42,
+        "head_sha": "head-exact",
+        "name": "tests",
+        "status": "completed",
+        "conclusion": "timed_out",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json={"sha": "head-exact", "statuses": []})
+        if request.url.path.endswith("/check-runs"):
+            return httpx.Response(200, json={"check_runs": [run]})
+        if request.url.path.endswith("/annotations"):
+            return httpx.Response(503)
+        return httpx.Response(404)
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert evidence.check_runs == [run]
+    assert "_failure_annotations" not in evidence.check_runs[0]
 
 
 @pytest.mark.asyncio
-async def test_pending_when_no_signal_yet_but_active_workflows_exist():
-    # No checks reported yet, but the repo HAS active workflows — they are most
-    # likely queued (e.g. right after the PR opened), so hold as pending. The
-    # verdict is inferred, so the sync layer's deadline applies (a workflow that
-    # only triggers on main would otherwise hold the gate forever).
-    status = await _status(
-        _transport("pending", 0, [], workflows=[{"state": "active"}, {"state": "active"}])
-    )
-    assert status == "pending"
-    assert not status.observed
+async def test_rejects_a_non_object_combined_status_payload():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(200, json=[])
+        raise AssertionError("check runs must not be fetched after invalid status data")
 
-
-@pytest.mark.asyncio
-async def test_none_when_only_disabled_workflows_exist():
-    # A disabled workflow can never run — it is not evidence that CI will report.
-    status = await _status(
-        _transport("pending", 0, [], workflows=[{"state": "disabled_manually"}])
-    )
-    assert status == "none"
-
-
-@pytest.mark.asyncio
-async def test_none_when_only_phantom_queued_suites_exist():
-    # GitHub auto-creates a check-suite for EVERY installed checks:write app on
-    # every push (Vercel, Railway, …) — apps that never run checks on this repo
-    # leave suites sitting "queued" with zero runs FOREVER. Counting those as
-    # "CI is coming" wedged changesets in ci_running permanently; they must be
-    # ignored. (The sync grace window covers a real CI's brief queued gap.)
-    suites = [
-        {"status": "queued", "conclusion": None, "latest_check_runs_count": 0},
-        {"status": "queued", "conclusion": None, "latest_check_runs_count": 0},
-    ]
-    status = await _status(_transport("pending", 0, [], check_suites=suites))
-    assert status == "none"
-
-
-@pytest.mark.asyncio
-async def test_pending_when_a_suite_is_in_progress():
-    # An in_progress suite means an app has actually started working on the ref —
-    # real evidence, held as (inferred) pending.
-    suites = [{"status": "in_progress", "conclusion": None, "latest_check_runs_count": 0}]
-    status = await _status(_transport("pending", 0, [], check_suites=suites))
-    assert status == "pending"
-    assert not status.observed
-
-
-@pytest.mark.asyncio
-async def test_pending_when_a_queued_suite_owns_check_runs():
-    # A queued suite that already owns check runs is live, not phantom.
-    suites = [{"status": "queued", "conclusion": None, "latest_check_runs_count": 3}]
-    status = await _status(_transport("pending", 0, [], check_suites=suites))
-    assert status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_none_when_only_completed_suites_and_no_workflows():
-    # All check-suites are completed (with no surfaced check-runs/statuses) and the
-    # repo has no workflows — nothing is pending, so "none" is correct.
-    suites = [{"status": "completed", "conclusion": None, "latest_check_runs_count": 0}]
-    status = await _status(_transport("", 0, [], check_suites=suites))
-    assert status == "none"
+    with pytest.raises(ValueError, match="must be an object"):
+        await _evidence(httpx.MockTransport(handler))
