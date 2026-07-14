@@ -27,8 +27,10 @@ def _make_ctx(level: int = 3) -> AgentContext:
 def _patch(monkeypatch, proposals, *, open_result=None):
     calls: dict[str, list] = {"opened": [], "implemented": [], "failed": [], "claimed": []}
 
-    async def fake_claim(pool, project_id, limit=5, proposal_id=None):
-        calls["claimed"].append({"limit": limit, "proposal_id": proposal_id})
+    async def fake_claim(pool, project_id, run_id, limit=5, proposal_id=None):
+        calls["claimed"].append(
+            {"run_id": run_id, "limit": limit, "proposal_id": proposal_id}
+        )
         if proposal_id is not None:
             return [p for p in proposals if p.get("proposal_id") == proposal_id]
         return list(proposals)
@@ -37,11 +39,11 @@ def _patch(monkeypatch, proposals, *, open_result=None):
         calls["opened"].append(kwargs)
         return open_result or {"changeset_id": "cs_1", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id):
-        calls["implemented"].append((proposal_id, changeset_id))
+    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
+        calls["implemented"].append((proposal_id, changeset_id, run_id))
 
-    async def fake_failed(pool, proposal_id, error):
-        calls["failed"].append((proposal_id, error))
+    async def fake_failed(pool, proposal_id, error, run_id):
+        calls["failed"].append((proposal_id, error, run_id))
 
     monkeypatch.setattr(code_implementation, "claim_proposals", fake_claim)
     monkeypatch.setattr(code_implementation, "open_changeset", fake_open)
@@ -62,7 +64,8 @@ async def test_l3_opens_changeset_and_marks_implemented(monkeypatch):
     assert calls["opened"][0]["project_id"] == "apdl"
     assert calls["opened"][0]["title"] == "Add dark mode"
     assert calls["opened"][0]["run_id"] == "run-1"
-    assert calls["implemented"] == [("p1", "cs_1")]
+    assert calls["opened"][0]["context"] == {"proposal_id": "p1"}
+    assert calls["implemented"] == [("p1", "cs_1", "run-1")]
     assert result.metadata["opened"] == 1
 
 
@@ -114,7 +117,7 @@ async def test_codegen_failure_marks_proposal_failed(monkeypatch):
     result = await CodeImplementationAgent().run(_make_ctx(4), {})
 
     assert "error" in result.output[0]
-    assert calls["failed"][0] == ("p1", "codegen down")
+    assert calls["failed"][0] == ("p1", "codegen down", "run-1")
 
 
 @pytest.mark.asyncio
@@ -127,5 +130,6 @@ async def test_forked_run_claims_only_its_target_proposal(monkeypatch):
     result = await CodeImplementationAgent().run(ctx, {})
 
     # gather forwards the target to claim_proposals, which returns only that one.
+    assert calls["claimed"][0]["run_id"] == "run-1"
     assert calls["claimed"][0]["proposal_id"] == "p2"
     assert [o["proposal_id"] for o in result.output] == ["p2"]

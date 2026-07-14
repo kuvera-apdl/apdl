@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${POSTGRES_COMPOSE_FILE:-$ROOT_DIR/infra/docker/docker-compose.deps.yml}"
@@ -18,8 +19,11 @@ env_file_value() {
 APDL_DEV_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
 
 POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
+POSTGRES_MIGRATOR_SERVICE="${POSTGRES_MIGRATOR_SERVICE:-postgres-migrate}"
 POSTGRES_USER="${POSTGRES_USER:-apdl}"
 POSTGRES_DB="${POSTGRES_DB:-apdl}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_file_value POSTGRES_PASSWORD)}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-apdl_dev}"
 MIGRATIONS_DIR="${POSTGRES_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/postgres/migrations}"
 
 echo "==> Initializing PostgreSQL"
@@ -40,14 +44,16 @@ for _ in $(seq 1 30); do
 done
 [ "$ready" -eq 1 ] || { echo "PostgreSQL did not become ready in time." >&2; exit 1; }
 
-for migration in "$MIGRATIONS_DIR"/*.sql; do
-    [ -f "$migration" ] || continue
-    echo "  Applying $(basename "$migration")"
-    docker exec -i "$container_id" psql \
-        -v ON_ERROR_STOP=1 \
-        -U "$POSTGRES_USER" \
-        -d "$POSTGRES_DB" < "$migration" >/dev/null
-done
+docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
+docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
+    -e PGHOST="$POSTGRES_SERVICE" \
+    -e PGPORT=5432 \
+    -e PGUSER="$POSTGRES_USER" \
+    -e PGPASSWORD="$POSTGRES_PASSWORD" \
+    -e PGDATABASE="$POSTGRES_DB" \
+    -e POSTGRES_MIGRATIONS_DIR=/migrations \
+    -v "$MIGRATIONS_DIR:/migrations:ro" \
+    "$POSTGRES_MIGRATOR_SERVICE"
 
 # Explicit local-development bootstrap. Production deployments should provision
 # credentials through their secret-management workflow and leave this unset.

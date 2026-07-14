@@ -210,6 +210,10 @@ async def open_treatment_changeset(
         title=title,
         spec=spec,
         run_id=run_id,
+        context={
+            "experiment_id": str(design.get("experiment_id") or ""),
+            "flag_key": _flag_key_of(design),
+        },
         constraints=[
             "All existing tests must pass.",
             "Do not modify or remove the control code path.",

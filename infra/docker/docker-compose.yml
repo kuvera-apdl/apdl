@@ -46,6 +46,22 @@ services:
       timeout: 3s
       retries: 5
 
+  postgres-migrate:
+    build:
+      context: ../../pipeline/postgres
+      dockerfile: Dockerfile
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: apdl
+      PGPASSWORD: apdl_dev
+      PGDATABASE: apdl
+      POSTGRES_MIGRATIONS_DIR: /migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # ─── Application Services ───────────────────────────────
   ingestion:
     build:
@@ -62,6 +78,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
 
   config:
     build:
@@ -78,6 +96,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
 
   query:
     build:
@@ -104,6 +124,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
 
   agents:
     build:
@@ -126,6 +148,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
@@ -201,6 +225,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
 
   clickhouse-writer:
     build:
@@ -236,6 +262,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
       ingestion:
         condition: service_started
       config:

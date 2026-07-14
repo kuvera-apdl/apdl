@@ -283,6 +283,16 @@ apdl.privacy.removeScrubber(scrubSsn);
 `privacyMode: 'cookieless'` derives a daily-rotating anonymous ID with no
 client-side persistence; `'strict'` additionally enables aggressive scrubbing.
 
+Failed analytics deliveries may be retained in IndexedDB for up to seven days.
+Each record is scoped to the canonical project ID derived from the client key;
+the key itself is never persisted. A client cannot drain or clear another
+project's records on the same origin, and current analytics consent is checked
+again before any retained event is restored. Legacy, invalid, and expired
+records are discarded. Each project retains at most the newest 1,000 events and
+5 MiB of UTF-8 JSON event payloads; older records are evicted deterministically
+without counting or deleting another project's records. A single oversized or
+non-JSON-serializable event is not retained.
+
 ## Server-Driven UI
 
 Agents and the config service can push UI configurations (banners, modals,

@@ -1,9 +1,23 @@
 import json
+from pathlib import Path
 
 import pytest
 
-from app import main
 from app.store import postgres
+
+
+CONFIG_MIGRATION_SQL = (
+    Path(__file__).resolve().parents[3]
+    / "pipeline"
+    / "postgres"
+    / "migrations"
+    / "006_config.sql"
+).read_text()
+
+
+def _table_definition(sql: str, table: str) -> str:
+    start = sql.index(f"CREATE TABLE IF NOT EXISTS {table} (")
+    return sql[start : sql.index("\n);", start) + 3]
 
 
 @pytest.mark.asyncio
@@ -127,7 +141,7 @@ def test_row_to_flag_omits_obsolete_columns_from_legacy_records():
 
 
 def test_create_flags_table_defines_only_canonical_variant_columns():
-    create_sql = main.CREATE_FLAGS_TABLE
+    create_sql = _table_definition(CONFIG_MIGRATION_SQL, "flags")
 
     assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
     assert "variants JSONB NOT NULL DEFAULT" in create_sql
@@ -140,7 +154,7 @@ def test_create_flags_table_defines_only_canonical_variant_columns():
 
 
 def test_migration_rewrites_and_drops_legacy_boolean_flag_shape():
-    migrate_sql = main.MIGRATE_FLAGS_TABLE
+    migrate_sql = CONFIG_MIGRATION_SQL
 
     assert "ADD COLUMN IF NOT EXISTS default_variant" in migrate_sql
     assert "ADD COLUMN IF NOT EXISTS variants" in migrate_sql
@@ -150,7 +164,7 @@ def test_migration_rewrites_and_drops_legacy_boolean_flag_shape():
     assert "DROP COLUMN IF EXISTS variants_json" in migrate_sql
     assert "DROP COLUMN IF EXISTS rollout_percentage" in migrate_sql
     assert "DROP COLUMN IF EXISTS client_exposed" in migrate_sql
-    assert "DROP TABLE feature_flags" in migrate_sql
+    assert "RENAME TO feature_flags_legacy" in migrate_sql
     assert "fallthrough - 'rollout'" in migrate_sql
     assert "ALTER COLUMN default_variant SET NOT NULL" in migrate_sql
     assert "flags_fallthrough_rollout_only_check" in migrate_sql
@@ -258,7 +272,7 @@ def test_row_to_experiment_includes_canonical_columns():
 
 
 def test_create_experiments_table_defines_canonical_columns():
-    create_sql = main.CREATE_EXPERIMENTS_TABLE
+    create_sql = _table_definition(CONFIG_MIGRATION_SQL, "experiments")
 
     assert "flag_key TEXT NOT NULL DEFAULT ''" in create_sql
     assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
@@ -267,7 +281,7 @@ def test_create_experiments_table_defines_canonical_columns():
 
 
 def test_migrate_experiments_table_adds_columns_and_normalizes_status():
-    migrate_sql = main.MIGRATE_EXPERIMENTS_TABLE
+    migrate_sql = CONFIG_MIGRATION_SQL
 
     assert "ADD COLUMN IF NOT EXISTS flag_key" in migrate_sql
     assert "ADD COLUMN IF NOT EXISTS default_variant" in migrate_sql

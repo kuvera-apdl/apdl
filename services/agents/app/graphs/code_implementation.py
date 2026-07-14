@@ -53,6 +53,7 @@ class CodeImplementationAgent(BaseAgent):
             claimed = await claim_proposals(
                 ctx.pool,
                 ctx.project_id,
+                ctx.run_id,
                 self.max_proposals,
                 proposal_id=ctx.target_proposal_id,
             )
@@ -127,6 +128,7 @@ class CodeImplementationAgent(BaseAgent):
                 title=title,
                 spec=spec,
                 run_id=ctx.run_id,
+                context={"proposal_id": proposal_id},
                 constraints=["All existing tests must pass."],
             )
             result["changeset_id"] = changeset.get("changeset_id", "")
@@ -141,7 +143,12 @@ class CodeImplementationAgent(BaseAgent):
         # the proposal 'failed' with a live PR attached (a state that lies and
         # that no future sweep could distinguish from a real failure).
         try:
-            await mark_implemented(ctx.pool, proposal_id, result["changeset_id"])
+            await mark_implemented(
+                ctx.pool,
+                proposal_id,
+                result["changeset_id"],
+                ctx.run_id,
+            )
         except Exception as exc:
             logger.error(
                 "PR opened for %s but could not mark it implemented: %s", proposal_id, exc
@@ -151,6 +158,6 @@ class CodeImplementationAgent(BaseAgent):
     @staticmethod
     async def _safe_fail(ctx: AgentContext, proposal_id: str, error: str) -> None:
         try:
-            await mark_failed(ctx.pool, proposal_id, error)
+            await mark_failed(ctx.pool, proposal_id, error, ctx.run_id)
         except Exception as exc:
             logger.warning("Could not mark proposal %s failed: %s", proposal_id, exc)

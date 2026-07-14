@@ -66,8 +66,8 @@ for migration in "$CLICKHOUSE_MIGRATIONS_DIR"/*.sql; do
     [ -f "$migration" ] || continue
 
     if grep -qiE "NOT ClickHouse|Target:[[:space:]]*PostgreSQL|psql[[:space:]]+\\\$POSTGRES_URL" "$migration"; then
-        echo "  Skipping $(basename "$migration") (not a ClickHouse migration)"
-        continue
+        echo "Misplaced PostgreSQL migration in ClickHouse directory: $migration" >&2
+        exit 1
     fi
 
     echo "  Applying $(basename "$migration")"

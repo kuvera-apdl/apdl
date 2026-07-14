@@ -122,6 +122,21 @@ jobs:
       - run: ruff check app/
         working-directory: services/config
 
+  clickhouse-writer:
+    name: ClickHouse Writer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+        working-directory: pipeline/redis
+      - run: ruff check clickhouse_writer.py tests/
+        working-directory: pipeline/redis
+      - run: python -m pytest -q
+        working-directory: pipeline/redis
+
   etl-framework:
     name: ETL Framework
     runs-on: ubuntu-latest

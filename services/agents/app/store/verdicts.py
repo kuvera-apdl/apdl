@@ -18,26 +18,6 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-EXPERIMENT_VERDICTS_DDL = """
-CREATE TABLE IF NOT EXISTS experiment_verdicts (
-    id              BIGSERIAL PRIMARY KEY,
-    project_id      TEXT NOT NULL,
-    experiment_id   TEXT NOT NULL,
-    run_id          TEXT,
-    verdict         TEXT NOT NULL,
-    reasoning       TEXT NOT NULL DEFAULT '',
-    results         JSONB DEFAULT '{}',
-    durable_feature TEXT NOT NULL DEFAULT '',
-    consumed        BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-EXPERIMENT_VERDICTS_INDEX_DDL = """
-CREATE INDEX IF NOT EXISTS experiment_verdicts_project_created_idx
-    ON experiment_verdicts (project_id, created_at DESC);
-"""
-
 VALID_VERDICTS = ("ship", "rollback", "iterate", "extend", "immature")
 
 
