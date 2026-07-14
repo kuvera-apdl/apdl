@@ -2,6 +2,14 @@
 // One canonical name per field — no aliases, no tolerant parsing. Every object
 // is .strict() to mirror Pydantic's extra="forbid"; drift fails loudly.
 import { z } from 'zod'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_RULES,
+  MAX_STRING_LENGTH,
+  isConditionValueValid,
+  isIdentifier,
+} from '@/core/evaluator/targetingContract'
 
 export const conditionOperatorSchema = z.enum([
   'equals',
@@ -14,7 +22,6 @@ export const conditionOperatorSchema = z.enum([
   'not_contains',
   'starts_with',
   'ends_with',
-  'regex',
   'in',
   'not_in',
   'exists',
@@ -28,17 +35,15 @@ export const flagStateSchema = z.enum(['draft', 'active', 'disabled', 'archived'
 
 const EXISTENCE_OPERATORS = new Set<string>(['exists', 'not_exists'])
 
-// Serialized flags carry `value: null` for existence conditions (Pydantic dumps
-// the default), while create payloads omit the key entirely — accept both.
 export const gateConditionSchema = z
   .object({
-    attribute: z.string().min(1),
+    attribute: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     operator: conditionOperatorSchema,
     value: z.unknown().optional(),
   })
   .strict()
   .superRefine((condition, ctx) => {
-    const hasValue = condition.value !== undefined && condition.value !== null
+    const hasValue = Object.prototype.hasOwnProperty.call(condition, 'value')
     if (EXISTENCE_OPERATORS.has(condition.operator) && hasValue) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -52,28 +57,39 @@ export const gateConditionSchema = z
         path: ['value'],
         message: `${condition.operator} conditions require value`,
       })
+      return
+    }
+    if (
+      !EXISTENCE_OPERATORS.has(condition.operator) &&
+      !isConditionValueValid(condition.operator, condition.value)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value'],
+        message: `invalid value for ${condition.operator} condition`,
+      })
     }
   })
 
 export const rolloutConfigSchema = z
   .object({
     percentage: z.number().min(0).max(100),
-    bucket_by: z.string().min(1),
+    bucket_by: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
   })
   .strict()
 
 export const variantConfigSchema = z
   .object({
-    key: z.string().min(1),
+    key: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     weight: z.number().int().min(0),
   })
   .strict()
 
 export const gateRuleSchema = z
   .object({
-    id: z.string().min(1),
-    name: z.string(),
-    conditions: z.array(gateConditionSchema),
+    id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
+    name: z.string().max(MAX_STRING_LENGTH),
+    conditions: z.array(gateConditionSchema).max(MAX_CONDITIONS_PER_RULE),
     rollout: rolloutConfigSchema,
   })
   .strict()
@@ -90,7 +106,7 @@ export const guardrailConfigSchema = z
     threshold: guardrailThresholdSchema,
     scope: z.string(),
     minimum_exposures: z.number().int().min(0),
-    window_minutes: z.number().int().min(1),
+    window_minutes: z.number().int().min(1).max(129_600),
   })
   .strict()
   .superRefine((guardrail, ctx) => {
@@ -150,21 +166,21 @@ function variantInvariants(flag: VariantFlagShape, ctx: z.RefinementCtx): void {
 // Field order mirrors serialize_flag() in services/config/app/utils.py.
 const flagConfigShape = z
   .object({
-    key: z.string().min(1),
+    key: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     project_id: z.string(),
-    name: z.string(),
+    name: z.string().max(MAX_STRING_LENGTH),
     state: flagStateSchema,
     owners: z.array(z.string()),
     review_by: z.string().nullable(),
     description: z.string(),
     enabled: z.boolean(),
-    default_variant: z.string().min(1),
+    default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     variants: z.array(variantConfigSchema),
-    rules: z.array(gateRuleSchema),
+    rules: z.array(gateRuleSchema).max(MAX_RULES),
     fallthrough: fallthroughConfigSchema,
-    salt: z.string(),
+    salt: z.string().max(MAX_STRING_LENGTH),
     evaluation_mode: evaluationModeSchema,
-    auto_disable: z.boolean(),
+    auto_disable: z.literal(false),
     guardrails: z.array(guardrailConfigSchema),
     disabled_reason: z.string(),
     disabled_by: z.string(),
@@ -205,6 +221,13 @@ export const flagAuditActionSchema = z.enum([
   'flag_cleanup_archived',
 ])
 
+export const flagAuditOriginSchema = z.enum([
+  'manual',
+  'automation',
+  'experiment',
+  'scheduler',
+])
+
 export const flagAuditEntrySchema = z
   .object({
     id: z.number().int(),
@@ -212,6 +235,7 @@ export const flagAuditEntrySchema = z
     flag_key: z.string(),
     action: flagAuditActionSchema,
     actor: z.string(),
+    origin: flagAuditOriginSchema,
     previous_version: z.number().int().nullable(),
     new_version: z.number().int().nullable(),
     before: z.record(z.unknown()).nullable(),
@@ -248,12 +272,12 @@ export const flagAuditResponseSchema = z
 // SDK bootstrap representation (SSE `config` event payload entries).
 export const clientFlagConfigSchema = z
   .object({
-    key: z.string().min(1),
+    key: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     enabled: z.boolean(),
-    default_variant: z.string().min(1),
+    default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     variants: z.array(variantConfigSchema),
-    salt: z.string(),
-    rules: z.array(gateRuleSchema),
+    salt: z.string().max(MAX_STRING_LENGTH),
+    rules: z.array(gateRuleSchema).max(MAX_RULES),
     fallthrough: fallthroughConfigSchema,
     version: z.number().int().min(1),
   })
@@ -274,22 +298,34 @@ export const flagUpdatePayloadSchema = z.union([
     .object({
       action: z.enum(['flag_created', 'flag_updated', 'flag_archived']),
       flag: clientFlagConfigSchema,
+      version: z.number().int().min(1),
     })
     .strict(),
   z
     .object({
       action: z.literal('flag_removed'),
       key: z.string(),
+      version: z.number().int().min(1),
     })
     .strict(),
 ])
 
-// SSE `experiment_update` payloads (status absent on deletes).
+// SSE `experiment_update` payloads always carry the changed aggregate version.
+const experimentUpdateStatusSchema = z.enum([
+  'draft',
+  'scheduled',
+  'running',
+  'completed',
+  'stopped',
+])
+
 export const experimentUpdatePayloadSchema = z
   .object({
     action: z.enum(['experiment_created', 'experiment_updated', 'experiment_deleted']),
     key: z.string(),
-    status: z.string().optional(),
+    status: experimentUpdateStatusSchema.nullable(),
+    flag_key: z.string(),
+    version: z.number().int().min(1),
   })
   .strict()
 
@@ -315,20 +351,20 @@ function stateEnabledInvariant(
 
 export const flagCreateSchema = z
   .object({
-    key: z.string().min(1),
-    name: z.string().min(1),
+    key: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
+    name: z.string().min(1).max(MAX_STRING_LENGTH),
     state: writableFlagStateSchema,
     owners: z.array(z.string().min(1)),
     // Omitted entirely when unset — the server create path runs exclude_none.
     review_by: z.string().optional(),
     enabled: z.boolean(),
     description: z.string(),
-    default_variant: z.string().min(1),
+    default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     variants: z.array(variantConfigSchema),
-    rules: z.array(gateRuleSchema),
+    rules: z.array(gateRuleSchema).max(MAX_RULES),
     fallthrough: fallthroughConfigSchema,
     evaluation_mode: evaluationModeSchema,
-    auto_disable: z.boolean(),
+    auto_disable: z.literal(false).default(false),
     guardrails: z.array(guardrailConfigSchema),
   })
   .strict()
@@ -338,23 +374,20 @@ export const flagCreateSchema = z
 export const flagUpdateSchema = z
   .object({
     version: z.number().int().min(1),
-    state: writableFlagStateSchema.optional(),
     owners: z.array(z.string().min(1)).optional(),
     review_by: z.string().optional(),
-    enabled: z.boolean().optional(),
-    name: z.string().min(1).optional(),
+    name: z.string().min(1).max(MAX_STRING_LENGTH).optional(),
     description: z.string().optional(),
-    default_variant: z.string().min(1).optional(),
+    default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
     variants: z.array(variantConfigSchema).optional(),
-    rules: z.array(gateRuleSchema).optional(),
+    rules: z.array(gateRuleSchema).max(MAX_RULES).optional(),
     fallthrough: fallthroughConfigSchema.optional(),
     evaluation_mode: evaluationModeSchema.optional(),
-    auto_disable: z.boolean().optional(),
+    auto_disable: z.literal(false).optional(),
     guardrails: z.array(guardrailConfigSchema).optional(),
   })
   .strict()
   .superRefine((update, ctx) => {
-    stateEnabledInvariant(update, ctx)
     if (update.variants !== undefined && update.default_variant !== undefined) {
       variantInvariants({ default_variant: update.default_variant, variants: update.variants }, ctx)
     } else if (update.variants !== undefined) {
@@ -369,10 +402,17 @@ export const flagUpdateSchema = z
     }
   })
 
+export const flagTransitionSchema = z
+  .object({
+    version: z.number().int().min(1),
+    target_state: z.enum(['draft', 'active']),
+  })
+  .strict()
+
 export const flagDisableSchema = z
   .object({
+    version: z.number().int().min(1),
     reason: z.enum(['guardrail_failed', 'experiment_rollback']),
-    source: z.enum(['system', 'admin']),
     evidence: z.record(z.unknown()),
   })
   .strict()
@@ -380,7 +420,6 @@ export const flagDisableSchema = z
 export const flagCleanupSchema = z
   .object({
     version: z.number().int().min(1),
-    source: z.enum(['admin', 'system']),
     evidence: z.record(z.unknown()),
   })
   .strict()
@@ -392,6 +431,7 @@ export const flagCreateResponseSchema = z
 export const flagUpdateResponseSchema = z
   .object({ updated: z.boolean(), flag: flagConfigSchema })
   .strict()
+export const flagTransitionResponseSchema = flagUpdateResponseSchema
 export const flagDisableResponseSchema = z
   .object({ disabled: z.boolean(), flag: flagConfigSchema })
   .strict()
@@ -404,18 +444,37 @@ export const flagCleanupResponseSchema = z
 
 // ---------- Server-side evaluation (POST /v1/evaluate) ----------
 
+const evaluationAttributesSchema = z.record(z.unknown()).superRefine((attributes, ctx) => {
+  for (const [key, value] of Object.entries(attributes)) {
+    if (!isIdentifier(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `attribute keys must be 1..${MAX_IDENTIFIER_LENGTH} characters`,
+      })
+    }
+    if (typeof value === 'string' && value.length > MAX_STRING_LENGTH) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `string attributes must be at most ${MAX_STRING_LENGTH} characters`,
+      })
+    }
+  }
+})
+
 export const evalContextSchema = z
   .object({
-    user_id: z.string(),
-    anonymous_id: z.string(),
-    attributes: z.record(z.unknown()),
+    user_id: z.string().max(MAX_IDENTIFIER_LENGTH).nullable().optional(),
+    anonymous_id: z.string().max(MAX_IDENTIFIER_LENGTH).nullable().optional(),
+    attributes: evaluationAttributesSchema,
   })
   .strict()
 
 export const gateEvaluateRequestSchema = z
   .object({
-    project_id: z.string().min(1),
-    key: z.string().min(1),
+    project_id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
+    key: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     context: evalContextSchema,
     log_exposure: z.boolean(),
     session_id: z.string().optional(),

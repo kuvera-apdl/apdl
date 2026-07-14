@@ -7,6 +7,17 @@ interface ClickRecord {
   timestamp: number;
 }
 
+const SENSITIVE_AUTOCOMPLETE_TOKENS = new Set([
+  'current-password',
+  'new-password',
+  'one-time-code',
+  'transaction-amount',
+  'transaction-currency',
+]);
+
+const SENSITIVE_EDITABLE_HINT =
+  /(?:^|[-_\s])(password|passwd|passcode|one[-_\s]?time[-_\s]?code|otp|card[-_\s]?(?:number|security|cvc|cvv)|cvc|cvv)(?:$|[-_\s])/i;
+
 /**
  * Auto-capture module that listens for DOM events and generates
  * tracking events automatically based on configuration.
@@ -65,16 +76,18 @@ export class AutoCapture {
     // Click tracking
     if (this.config.clicks || this.config.rage_clicks) {
       this.clickHandler = (e: MouseEvent) => {
-        const target = e.target as Element | null;
-        if (!target || !shouldCapture(target)) return;
+        const target = e.target;
+        if (
+          !(target instanceof Element) ||
+          !shouldCapture(target) ||
+          this.isSensitiveClickEvent(e, target)
+        ) {
+          return;
+        }
 
         if (this.config.clicks) {
           this.capture.trackEvent('$click', {
             tag: target.tagName?.toLowerCase(),
-            text: this.getElementText(target),
-            href: (target as HTMLAnchorElement).href || undefined,
-            id: target.id || undefined,
-            classes: target.className || undefined,
             x: e.clientX,
             y: e.clientY,
           });
@@ -196,9 +209,6 @@ export class AutoCapture {
       const target = e.target as Element | null;
       this.capture.trackEvent('$rage_click', {
         tag: target?.tagName?.toLowerCase(),
-        text: target ? this.getElementText(target) : undefined,
-        id: target?.id || undefined,
-        classes: target?.className || undefined,
         clickCount: targetClicks.length,
         x: e.clientX,
         y: e.clientY,
@@ -242,13 +252,97 @@ export class AutoCapture {
     this.reportedThresholds.clear();
   }
 
-  private getElementText(el: Element): string {
-    // Get text content, truncated and cleaned
-    const text =
-      (el as HTMLElement).innerText ||
-      el.textContent ||
-      (el as HTMLInputElement).value ||
-      '';
-    return text.trim().substring(0, 255);
+  /**
+   * Sensitive controls are excluded rather than merely redacted. This check
+   * happens before rage-click bookkeeping, so excluded clicks cannot later
+   * produce a rage-click event.
+   */
+  private isSensitiveClickEvent(event: MouseEvent, target: Element): boolean {
+    if (this.isSensitiveClickTarget(target)) {
+      return true;
+    }
+
+    // In a web component, event.target is retargeted to the shadow host. The
+    // composed path retains the actual control and lets us keep the same
+    // privacy boundary for native and custom elements.
+    return event.composedPath().some((pathTarget) => {
+      return (
+        pathTarget instanceof Element &&
+        pathTarget !== target &&
+        this.isSensitiveClickTarget(pathTarget)
+      );
+    });
+  }
+
+  private isSensitiveClickTarget(target: Element): boolean {
+    let current: Element | null = target;
+
+    while (current) {
+      if (this.isSensitiveElement(current)) {
+        return true;
+      }
+
+      // A click on a label (or one of its descendants) can activate the
+      // associated control, including a password or payment field.
+      if (current.tagName?.toLowerCase() === 'label') {
+        const control = (current as HTMLLabelElement).control;
+        if (control && this.isSensitiveElement(control)) {
+          return true;
+        }
+      }
+
+      current = current.parentElement;
+    }
+
+    return false;
+  }
+
+  private isSensitiveElement(element: Element): boolean {
+    const tag = element.tagName?.toLowerCase();
+    const type = element.getAttribute('type')?.trim().toLowerCase();
+
+    if (tag === 'input' && (type === 'password' || type === 'file')) {
+      return true;
+    }
+
+    const autocomplete = element.getAttribute('autocomplete');
+    if (autocomplete) {
+      const tokens = autocomplete.toLowerCase().split(/\s+/);
+      if (
+        tokens.some(
+          (token) =>
+            token.startsWith('cc-') ||
+            SENSITIVE_AUTOCOMPLETE_TOKENS.has(token)
+        )
+      ) {
+        return true;
+      }
+    }
+
+    if (!this.isEditableElement(element)) {
+      return false;
+    }
+
+    // Custom password/OTP/payment widgets may expose semantics through their
+    // editable element even when they are not native password inputs.
+    return ['name', 'id', 'aria-label'].some((attribute) => {
+      const hint = element.getAttribute(attribute);
+      return hint !== null && SENSITIVE_EDITABLE_HINT.test(hint);
+    });
+  }
+
+  private isEditableElement(element: Element): boolean {
+    const tag = element.tagName?.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      return true;
+    }
+
+    const contenteditable = element.getAttribute('contenteditable');
+    if (contenteditable !== null && contenteditable.toLowerCase() !== 'false') {
+      return true;
+    }
+
+    const role = element.getAttribute('role')?.toLowerCase();
+    return role === 'textbox' || role === 'searchbox' || role === 'combobox';
   }
 }

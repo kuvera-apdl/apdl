@@ -29,7 +29,7 @@ const ACTION_STYLES: Record<FlagAuditAction, string> = {
     'border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-900 dark:bg-violet-950/60 dark:text-violet-300',
 }
 
-// The guardrail monitor and agent rollbacks write system-attributed entries.
+// Automated mutations write system-attributed entries.
 const SYSTEM_ACTORS = new Set(['system', 'guardrail-monitor'])
 
 function AuditEntryItem({ entry }: { entry: FlagAuditEntry }) {
@@ -54,6 +54,7 @@ function AuditEntryItem({ entry }: { entry: FlagAuditEntry }) {
         <Badge variant={SYSTEM_ACTORS.has(entry.actor) ? 'destructive' : 'secondary'}>
           {entry.actor}
         </Badge>
+        <Badge variant="outline">{entry.origin}</Badge>
         {entry.previous_version !== null || entry.new_version !== null ? (
           <span className="tabular-nums text-muted-foreground">
             v{entry.previous_version ?? '∅'} → v{entry.new_version ?? '∅'}

@@ -8,6 +8,10 @@ import { useState } from 'react'
 import { z } from 'zod'
 
 import { gateRuleSchema } from '@/api/schemas/flags'
+import {
+  experimentCreateStatusSchema,
+  experimentPathKeySchema,
+} from '@/api/schemas/experiments'
 import type { GateRule } from '@/api/types/flags'
 import type {
   ExperimentCreate,
@@ -24,17 +28,19 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 
 // Mirrors the Config service _ALLOWED_STATUS_TRANSITIONS: completed/stopped are
-// terminal (no resume). Create starts as draft or running.
-const CREATE_STATUSES: ExperimentStatus[] = ['draft', 'running']
+// terminal (no resume).
+const CREATE_STATUSES: ExperimentStatus[] = ['draft', 'scheduled', 'running']
 const STATUS_TRANSITIONS: Record<ExperimentStatus, ExperimentStatus[]> = {
-  draft: ['draft', 'running', 'stopped'],
+  draft: ['draft', 'scheduled', 'running', 'stopped'],
+  scheduled: ['scheduled', 'running', 'stopped'],
   running: ['running', 'completed', 'stopped'],
   completed: ['completed'],
   stopped: ['stopped'],
 }
 
-const METRIC_TYPES = ['conversion', 'count', 'revenue', 'duration']
 const METRIC_DIRECTIONS = ['increase', 'decrease']
+const MAX_EXPERIMENT_VARIANTS = 10
+const MAX_EXPERIMENT_DURATION_MS = 90 * 24 * 60 * 60 * 1000
 
 export interface ExperimentVariantRow {
   key: string
@@ -53,7 +59,6 @@ export interface ExperimentFormValues {
   variants: ExperimentVariantRow[]
   default_variant: string
   metricEvent: string
-  metricType: string
   metricDirection: string
   targetingRulesJson: string
 }
@@ -73,7 +78,6 @@ export function emptyExperimentValues(): ExperimentFormValues {
     ],
     default_variant: 'control',
     metricEvent: '',
-    metricType: 'conversion',
     metricDirection: 'increase',
     targetingRulesJson: '',
   }
@@ -86,8 +90,8 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     status: entry.status,
     description: entry.description,
     traffic_percentage: entry.traffic_percentage,
-    start_date: entry.start_date,
-    end_date: entry.end_date,
+    start_date: entry.start_date ?? '',
+    end_date: entry.end_date ?? '',
     variants: entry.variants.map((variant) => ({
       key: variant.key,
       weight: variant.weight,
@@ -95,7 +99,6 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     })),
     default_variant: entry.default_variant,
     metricEvent: entry.primary_metric?.event ?? '',
-    metricType: entry.primary_metric?.type ?? 'conversion',
     metricDirection: entry.primary_metric?.direction ?? 'increase',
     targetingRulesJson:
       entry.targeting_rules.length > 0 ? JSON.stringify(entry.targeting_rules, null, 2) : '',
@@ -130,20 +133,33 @@ function buildMetric(values: ExperimentFormValues): ExperimentMetric | null {
   if (values.metricEvent.trim() === '') return null
   return {
     event: values.metricEvent.trim(),
-    type: values.metricType,
+    type: 'conversion',
     direction: values.metricDirection,
   }
+}
+
+function toAwareDateTime(value: string): string | null {
+  const trimmed = value.trim()
+  if (trimmed === '') return null
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return `${trimmed}T00:00:00Z`
+  return trimmed
+}
+
+function isAwareDateTime(value: string | null): boolean {
+  return value === null || (
+    /(?:Z|[+-]\d{2}:\d{2})$/.test(value) && !Number.isNaN(Date.parse(value))
+  )
 }
 
 export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
   const create: ExperimentCreate = {
     key: values.key.trim(),
     flag_key: values.flagKey.trim() || values.key.trim(),
-    status: values.status,
+    status: experimentCreateStatusSchema.parse(values.status),
     description: values.description,
     traffic_percentage: values.traffic_percentage,
-    start_date: values.start_date,
-    end_date: values.end_date,
+    start_date: toAwareDateTime(values.start_date),
+    end_date: toAwareDateTime(values.end_date),
     variants: projectVariants(values.variants),
     default_variant: values.default_variant,
     targeting_rules: parseTargetingRules(values.targetingRulesJson).value ?? [],
@@ -153,43 +169,111 @@ export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
   return create
 }
 
-export function buildUpdate(values: ExperimentFormValues): ExperimentUpdate {
-  const update: ExperimentUpdate = {
-    status: values.status,
-    description: values.description,
-    traffic_percentage: values.traffic_percentage,
-    start_date: values.start_date,
-    end_date: values.end_date,
-    variants: projectVariants(values.variants),
-    default_variant: values.default_variant,
-    targeting_rules: parseTargetingRules(values.targetingRulesJson).value ?? [],
+const same = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right)
+
+export function buildUpdate(
+  values: ExperimentFormValues,
+  base: ExperimentEntry,
+  version: number = base.version,
+): ExperimentUpdate {
+  const update: ExperimentUpdate = { version }
+
+  if (values.status !== base.status) update.status = values.status
+  if (values.description !== base.description) update.description = values.description
+  if (values.traffic_percentage !== base.traffic_percentage) {
+    update.traffic_percentage = values.traffic_percentage
   }
-  const metric = buildMetric(values)
-  if (metric) update.primary_metric = metric
+
+  const targetingRules = parseTargetingRules(values.targetingRulesJson).value ?? []
+  if (!same(targetingRules, base.targeting_rules)) update.targeting_rules = targetingRules
+
+  // Config freezes analysis-defining fields as soon as an experiment leaves
+  // draft. Merely echoing their current values still counts as an attempted
+  // mutation, so non-draft updates must omit them entirely.
+  if (base.status === 'draft') {
+    const startDate = toAwareDateTime(values.start_date)
+    const endDate = toAwareDateTime(values.end_date)
+    const variants = projectVariants(values.variants)
+    const primaryMetric = buildMetric(values)
+
+    if (startDate !== base.start_date) update.start_date = startDate
+    if (endDate !== base.end_date) update.end_date = endDate
+    if (!same(variants, base.variants)) update.variants = variants
+    if (values.default_variant !== base.default_variant) {
+      update.default_variant = values.default_variant
+    }
+    if (!same(primaryMetric, base.primary_metric)) update.primary_metric = primaryMetric
+  }
+
   return update
 }
 
 interface ExperimentFormErrors {
+  key?: string
+  flagKey?: string
   variants?: string
   default_variant?: string
   targeting?: string
+  dates?: string
+  metric?: string
 }
 
 export function validateExperimentForm(values: ExperimentFormValues): ExperimentFormErrors {
   const errors: ExperimentFormErrors = {}
+  const key = values.key.trim()
+  const flagKey = values.flagKey.trim()
+  if (!experimentPathKeySchema.safeParse(key).success) {
+    errors.key = 'Use 1–128 letters, numbers, dots, underscores, or hyphens'
+  }
+  if (flagKey !== '' && !experimentPathKeySchema.safeParse(flagKey).success) {
+    errors.flagKey = 'Use 1–128 letters, numbers, dots, underscores, or hyphens'
+  }
   const keys = values.variants.map((variant) => variant.key.trim())
-  if (values.variants.length === 0) errors.variants = 'Add at least one variant'
+  if (values.variants.length < 2) errors.variants = 'Add at least two variants'
+  else if (values.variants.length > MAX_EXPERIMENT_VARIANTS)
+    errors.variants = `Experiments support at most ${MAX_EXPERIMENT_VARIANTS} variants`
   else if (keys.some((key) => key === '')) errors.variants = 'Every variant needs a key'
   else if (new Set(keys).size !== keys.length) errors.variants = 'Variant keys must be unique'
-  else if (values.variants.reduce((sum, variant) => sum + variant.weight, 0) <= 0)
-    errors.variants = 'Total weight must be positive'
+  else if (values.variants.some((variant) => !Number.isInteger(variant.weight) || variant.weight <= 0))
+    errors.variants = 'Every variant weight must be a positive integer'
 
   if (!keys.includes(values.default_variant)) {
-    errors.default_variant = 'Choose a default variant that matches a variant key'
+    errors.default_variant = 'Choose a control variant that matches a variant key'
   }
 
   const rules = parseTargetingRules(values.targetingRulesJson)
   if (rules.error) errors.targeting = rules.error
+
+  const start = toAwareDateTime(values.start_date)
+  const end = toAwareDateTime(values.end_date)
+  if (!isAwareDateTime(start) || !isAwareDateTime(end)) {
+    errors.dates = 'Use YYYY-MM-DD or an ISO 8601 timestamp with a timezone'
+  } else if (end !== null && start === null) {
+    errors.dates = 'End date requires a start date'
+  } else if (start !== null && end !== null && Date.parse(end) <= Date.parse(start)) {
+    errors.dates = 'End date must be after start date'
+  } else if (
+    start !== null &&
+    end !== null &&
+    Date.parse(end) - Date.parse(start) > MAX_EXPERIMENT_DURATION_MS
+  ) {
+    errors.dates = 'Experiment duration must not exceed 90 days'
+  }
+
+  if (
+    !errors.dates &&
+    (values.status === 'scheduled' || values.status === 'running') &&
+    (start === null || end === null)
+  ) {
+    errors.dates = 'Scheduled and running experiments require start and end dates'
+  }
+  if (
+    (values.status === 'scheduled' || values.status === 'running') &&
+    values.metricEvent.trim() === ''
+  ) {
+    errors.metric = 'Scheduled and running experiments require a primary metric'
+  }
   return errors
 }
 
@@ -245,7 +329,9 @@ export function ExperimentForm({
             placeholder="checkout-redesign"
             className="font-mono text-xs"
           />
-          {keyError ? <p className="text-xs text-destructive">{keyError}</p> : null}
+          {keyError || errors.key ? (
+            <p className="text-xs text-destructive">{keyError ?? errors.key}</p>
+          ) : null}
         </div>
         <div className="space-y-1.5">
           <Label>Flag key</Label>
@@ -260,6 +346,7 @@ export function ExperimentForm({
             Backing flag whose exposures measure this experiment. Defaults to the key; immutable
             once created.
           </p>
+          {errors.flagKey ? <p className="text-xs text-destructive">{errors.flagKey}</p> : null}
         </div>
       </div>
 
@@ -308,11 +395,11 @@ export function ExperimentForm({
               />
               <Input
                 type="number"
-                min={0}
+                min={1}
                 step={1}
                 value={variant.weight}
                 onChange={(event) =>
-                  setVariant(index, { weight: Math.max(0, Math.floor(Number(event.target.value) || 0)) })
+                  setVariant(index, { weight: Math.max(1, Math.floor(Number(event.target.value) || 1)) })
                 }
                 aria-label={`Variant ${index + 1} weight`}
                 className="w-24 tabular-nums"
@@ -330,14 +417,20 @@ export function ExperimentForm({
                 size="icon"
                 onClick={() => removeVariant(index)}
                 aria-label={`Remove variant ${index + 1}`}
-                disabled={values.variants.length <= 1}
+                disabled={values.variants.length <= 2}
               >
                 <Trash2 />
               </Button>
             </div>
           ))}
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={addVariant}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={addVariant}
+          disabled={values.variants.length >= MAX_EXPERIMENT_VARIANTS}
+        >
           <Plus />
           Add variant
         </Button>
@@ -349,11 +442,11 @@ export function ExperimentForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label>Default variant</Label>
+          <Label>Control variant</Label>
           <Select
             value={values.default_variant}
             onChange={(event) => set({ default_variant: event.target.value })}
-            aria-label="Default variant"
+            aria-label="Control variant"
           >
             {variantKeys.length === 0 ? <option value="">—</option> : null}
             {variantKeys.map((key) => (
@@ -365,7 +458,9 @@ export function ExperimentForm({
           {errors.default_variant ? (
             <p className="text-xs text-destructive">{errors.default_variant}</p>
           ) : (
-            <p className="text-xs text-muted-foreground">Served when the flag is off or invalid.</p>
+            <p className="text-xs text-muted-foreground">
+              Statistical control for every comparison and the backing flag&apos;s fallback variant.
+            </p>
           )}
         </div>
         <div className="space-y-1.5">
@@ -394,17 +489,7 @@ export function ExperimentForm({
             aria-label="Metric event"
             className="font-mono text-xs"
           />
-          <Select
-            value={values.metricType}
-            onChange={(event) => set({ metricType: event.target.value })}
-            aria-label="Metric type"
-          >
-            {METRIC_TYPES.map((type) => (
-              <option key={type} value={type}>
-                {type}
-              </option>
-            ))}
-          </Select>
+          <Input value="conversion" disabled aria-label="Metric type" />
           <Select
             value={values.metricDirection}
             onChange={(event) => set({ metricDirection: event.target.value })}
@@ -420,8 +505,8 @@ export function ExperimentForm({
         <p className="text-xs text-muted-foreground">
           Optional — leave the event blank to skip. Only the event drives results.
         </p>
+        {errors.metric ? <p className="text-xs text-destructive">{errors.metric}</p> : null}
       </div>
-
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label>Start date</Label>
@@ -440,6 +525,7 @@ export function ExperimentForm({
           />
         </div>
       </div>
+      {errors.dates ? <p className="text-xs text-destructive">{errors.dates}</p> : null}
 
       <div className="space-y-1.5">
         <Label>Targeting rules (JSON array)</Label>

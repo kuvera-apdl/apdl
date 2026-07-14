@@ -1,5 +1,6 @@
 import type { ConsentState } from './config';
 import type { ExperimentContext } from './types';
+import type { DeliveryReport } from './types';
 import type { FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
 import type { ComponentDefinition, UIConfig } from '../ui/components/types';
 import type { ScrubFunction } from '../privacy/scrubber';
@@ -22,7 +23,7 @@ export interface APDLApi {
   getVariantDetails(key: string, options?: FlagEvaluationOptions): FlagEvaluationResult;
   onVariantChange(key: string, callback: (variant: string | null) => void): () => void;
 
-  shutdown(): Promise<void>;
+  shutdown(): Promise<DeliveryReport>;
 
   ui: {
     register: (definition: ComponentDefinition) => void;
@@ -51,6 +52,6 @@ export interface APDLApi {
     enable: () => void;
     disable: () => void;
     getQueue: () => unknown[];
-    flush: () => Promise<void>;
+    flush: () => Promise<DeliveryReport>;
   };
 }

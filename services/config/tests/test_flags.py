@@ -92,7 +92,7 @@ def make_flag() -> dict:
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
-        "auto_disable": True,
+        "auto_disable": False,
         "guardrails": [],
         "disabled_reason": "",
         "disabled_by": "",

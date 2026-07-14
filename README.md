@@ -66,9 +66,11 @@ make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
 
 ## Using the SDKs
 
-API keys follow `proj_{project_id}_{secret}`. Services verify the full key against a
-hashed PostgreSQL record and derive project/role authority from that record;
-see [authentication and tenant authorization](docs/authentication.md).
+Browser SDK keys follow `client_{project_id}_{token}` and are restricted to
+event writes plus client-visible config reads. Server SDKs and trusted services
+use confidential `proj_{project_id}_{secret}` keys. Services verify the full key
+against a hashed PostgreSQL record and derive project/role authority from that
+record; see [authentication and tenant authorization](docs/authentication.md).
 Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identical
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).
@@ -86,7 +88,7 @@ const apdl = APDL.init({
     config: 'http://localhost:8081',
   },
   auth: {
-    clientKey: 'proj_apdl_0123456789abcdef',
+    clientKey: 'client_apdl_0123456789abcdef0123456789abcdef',
   },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
   privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
@@ -110,7 +112,10 @@ controls, server-driven UI, real-time flag subscriptions.
 ```python
 from apdl import APDL
 
-with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
+with APDL.init(
+    api_key="proj_apdl_0123456789abcdef0123456789abcdef",
+    endpoint="http://localhost:8000",
+) as client:
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
     client.identify("u_123", {"plan": "pro"})
 
@@ -227,7 +232,7 @@ and `curl` examples.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/v1/events` | Ingest event batch (1–500 events, returns `202`) |
+| `POST` | `/v1/events` | Ingest strict event batch (1–100 events, returns `202`) |
 | `GET` | `/health` | Health check |
 
 ### Config (`:8081`) — [full docs](services/config/README.md)
@@ -241,6 +246,7 @@ and `curl` examples.
 | `PUT/DELETE` | `/v1/admin/flags/:key` | Update / archive flag |
 | `GET/POST` | `/v1/admin/experiments` | List / create experiments |
 | `PUT/DELETE` | `/v1/admin/experiments/:key` | Update / delete experiment |
+| `GET` | `/v1/experiments/:key/analysis` | Immutable metadata for authoritative analysis |
 | `GET` | `/health` | Health check |
 
 The admin API also covers stale-flag reports, system disable, cleanup, and
@@ -256,7 +262,7 @@ per-flag audit history — see the [config service README](services/config/READM
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
 | `POST` | `/v1/query/cohort` | Cohort analysis |
 | `POST` | `/v1/query/retention` | Retention curves |
-| `GET` | `/v1/query/experiment/:id?metric=…&flag_key=…` | Experiment results with statistical tests (`flag_key` required) |
+| `GET` | `/v1/query/experiment/:key` | Config-owned conversion experiment analysis |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate flag guardrails |
 | `GET` | `/health`, `/ready` | Health / readiness |
 
@@ -391,6 +397,13 @@ Filtered cohort comparison:
 
 ## Autonomous Agents
 
+Agents execution is an operator-provisioned capability in the OSS developer
+preview. Projects created through public registration keep `agents:read` for
+definitions, history, results, and audit records, but cannot trigger runs,
+manage/test custom agents, or approve queued actions. Agents derives this
+boundary from immutable project provenance as well as credential roles, so an
+overprivileged key cannot enable execution for a self-registered project.
+
 The agents service runs autonomous analysis workflows powered by LLM reasoning
 (via OpenAI, Anthropic, Google, and local model SDKs):
 
@@ -399,8 +412,9 @@ The agents service runs autonomous analysis workflows powered by LLM reasoning
 - **Personalization** — configures server-driven UI components per user segment
 - **Feature Proposals** — generates product feature suggestions backed by data
 
-Every action passes a safety validator and an autonomy gate, is audit-logged,
-and can be rolled back:
+For eligible operator projects, every action passes a safety validator and an
+autonomy gate and is audit-logged. Autonomous experiment evaluation, stopping,
+shipping, and rollback remain disabled in this release:
 
 | Level | Behavior |
 |---|---|

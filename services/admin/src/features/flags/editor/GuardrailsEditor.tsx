@@ -64,6 +64,7 @@ export function GuardrailsEditor() {
               <Input
                 type="number"
                 min={1}
+                max={129600}
                 step={1}
                 className="w-24 tabular-nums"
                 {...register(`guardrails.${index}.window_minutes`, { valueAsNumber: true })}
@@ -96,8 +97,8 @@ export function GuardrailsEditor() {
         Add guardrail
       </Button>
       <p className="text-xs text-muted-foreground">
-        Breaching guardrails auto-disable the flag via the background monitor. Each metric has one
-        valid threshold — the pairing is enforced by the server.
+        Guardrails are read-only diagnostics in the OSS developer preview. Each metric has one
+        valid threshold; automatic flag mutation is unavailable.
       </p>
     </div>
   )

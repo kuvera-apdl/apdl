@@ -11,9 +11,20 @@ from app.models.schemas import EventSelector
 # Event queries
 # ---------------------------------------------------------------------------
 
+
+def canonical_actor_sql(table_alias: str = "") -> str:
+    """Return the one non-stitching actor identity used by Query analytics."""
+    prefix = f"{table_alias}." if table_alias else ""
+    return (
+        f"if({prefix}user_id != '', concat('u:', {prefix}user_id), "
+        f"if({prefix}anonymous_id != '', "
+        f"concat('a:', {prefix}anonymous_id), ''))"
+    )
+
 def build_event_count_query(selectors: list[EventSelector], params: dict[str, Any]) -> str:
-    """Build a count query that returns one row per event selector."""
+    """Build selector rows plus one exact range-wide total row."""
     subqueries: list[str] = []
+    selector_conditions: list[str] = []
     for index, selector in enumerate(selectors):
         prefix = f"count_{index}"
         label_param = f"{prefix}_label"
@@ -25,26 +36,48 @@ def build_event_count_query(selectors: list[EventSelector], params: dict[str, An
         condition = build_selector_condition(
             selector, params, prefix, event_name_column="events.event_name"
         )
+        selector_conditions.append(condition)
         subqueries.append(
             f"""
 SELECT
+    0 AS is_total,
     %({label_param})s AS selector,
     %({prefix}_event_name)s AS event_name,
     count() AS event_count,
-    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
-FROM events
+    uniqExactIf({canonical_actor_sql()}, {canonical_actor_sql()} != '') AS unique_users
+FROM events FINAL
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
   AND {condition}
 """
         )
 
+    total_condition = "\n      OR ".join(
+        f"({condition})" for condition in selector_conditions
+    )
+    subqueries.append(
+        f"""
+SELECT
+    1 AS is_total,
+    '' AS selector,
+    '' AS event_name,
+    count() AS event_count,
+    uniqExactIf({canonical_actor_sql()}, {canonical_actor_sql()} != '') AS unique_users
+FROM events FINAL
+WHERE project_id = %(project_id)s
+  AND event_date BETWEEN %(start_date)s AND %(end_date)s
+  AND (
+      {total_condition}
+  )
+"""
+    )
+
     return f"""
 SELECT *
 FROM (
 {'\nUNION ALL\n'.join(subqueries)}
 )
-ORDER BY event_count DESC
+ORDER BY is_total, event_count DESC
 """
 
 
@@ -61,8 +94,8 @@ SELECT
     %(selector_label)s AS selector,
     toStartOfInterval(timestamp, INTERVAL {interval}) AS bucket,
     count() AS event_count,
-    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
-FROM events
+    uniqExactIf({canonical_actor_sql()}, {canonical_actor_sql()} != '') AS unique_users
+FROM events FINAL
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
   AND {condition}
@@ -80,8 +113,8 @@ SELECT
     %(selector_label)s AS selector,
     JSONExtractString(properties, %(property)s) AS property_value,
     count() AS event_count,
-    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
-FROM events
+    uniqExactIf({canonical_actor_sql()}, {canonical_actor_sql()} != '') AS unique_users
+FROM events FINAL
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
   AND {condition}
@@ -125,18 +158,19 @@ def build_funnel_query(
     return f"""
 WITH funnel AS (
     SELECT
-        user_id,
+        {canonical_actor_sql()} AS actor_id,
         windowFunnel({window_milliseconds})(
             toUInt64(toUnixTimestamp64Milli(timestamp)),
             {conditions}
         ) AS depth
-    FROM events
+    FROM events FINAL
     WHERE project_id = %(project_id)s
       AND event_date BETWEEN %(start_date)s AND %(end_date)s
+      AND {canonical_actor_sql()} != ''
       AND (
           {prefilter}
       )
-    GROUP BY user_id
+    GROUP BY actor_id
 )
 SELECT
     step_number,
@@ -185,25 +219,27 @@ def _build_retention_day_query(cohort_condition: str, return_condition: str) -> 
 WITH
     cohort AS (
         SELECT
-            user_id,
+            {canonical_actor_sql()} AS actor_id,
             min(event_date) AS cohort_date
-        FROM events
+        FROM events FINAL
         WHERE project_id = %(project_id)s
           AND {cohort_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
-        GROUP BY user_id
+          AND {canonical_actor_sql()} != ''
+        GROUP BY actor_id
     ),
     activity AS (
         SELECT DISTINCT
-            user_id,
+            {canonical_actor_sql()} AS actor_id,
             event_date AS activity_date
-        FROM events
+        FROM events FINAL
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+          AND {canonical_actor_sql()} != ''
     ),
     cohort_sizes AS (
-        SELECT cohort_date, count(DISTINCT user_id) AS cohort_size
+        SELECT cohort_date, uniqExact(actor_id) AS cohort_size
         FROM cohort
         GROUP BY cohort_date
     )
@@ -211,10 +247,10 @@ SELECT
     c.cohort_date,
     cs.cohort_size,
     dateDiff('day', c.cohort_date, a.activity_date) AS period_offset,
-    count(DISTINCT a.user_id) AS active_users
+    uniqExact(a.actor_id) AS active_users
 FROM cohort c
 INNER JOIN cohort_sizes cs ON cs.cohort_date = c.cohort_date
-LEFT JOIN activity a ON c.user_id = a.user_id
+LEFT JOIN activity a ON c.actor_id = a.actor_id
 GROUP BY c.cohort_date, cs.cohort_size, period_offset
 ORDER BY c.cohort_date, period_offset
 """
@@ -225,25 +261,27 @@ def _build_retention_week_query(cohort_condition: str, return_condition: str) ->
 WITH
     cohort AS (
         SELECT
-            user_id,
+            {canonical_actor_sql()} AS actor_id,
             toMonday(min(event_date)) AS cohort_week
-        FROM events
+        FROM events FINAL
         WHERE project_id = %(project_id)s
           AND {cohort_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
-        GROUP BY user_id
+          AND {canonical_actor_sql()} != ''
+        GROUP BY actor_id
     ),
     activity AS (
         SELECT DISTINCT
-            user_id,
+            {canonical_actor_sql()} AS actor_id,
             toMonday(event_date) AS activity_week
-        FROM events
+        FROM events FINAL
         WHERE project_id = %(project_id)s
           AND {return_condition}
           AND event_date BETWEEN %(start_date)s AND %(end_date)s
+          AND {canonical_actor_sql()} != ''
     ),
     cohort_sizes AS (
-        SELECT cohort_week, count(DISTINCT user_id) AS cohort_size
+        SELECT cohort_week, uniqExact(actor_id) AS cohort_size
         FROM cohort
         GROUP BY cohort_week
     )
@@ -251,10 +289,10 @@ SELECT
     c.cohort_week,
     cs.cohort_size,
     dateDiff('week', c.cohort_week, a.activity_week) AS period_offset,
-    count(DISTINCT a.user_id) AS active_users
+    uniqExact(a.actor_id) AS active_users
 FROM cohort c
 INNER JOIN cohort_sizes cs ON cs.cohort_week = c.cohort_week
-LEFT JOIN activity a ON c.user_id = a.user_id
+LEFT JOIN activity a ON c.actor_id = a.actor_id
 GROUP BY c.cohort_week, cs.cohort_size, period_offset
 ORDER BY c.cohort_week, period_offset
 """
@@ -268,18 +306,42 @@ def build_cohort_query(metric_selector: EventSelector, params: dict[str, Any]) -
     """Build a cohort comparison query using a selector for the metric event."""
     condition = build_selector_condition(metric_selector, params, "cohort_metric")
     return f"""
+WITH
+    matched AS (
+        SELECT
+            JSONExtractString(properties, %(cohort_property)s) AS cohort_value,
+            toStartOfInterval(timestamp, INTERVAL 1 DAY) AS day,
+            {canonical_actor_sql()} AS actor_id
+        FROM events FINAL
+        WHERE project_id = %(project_id)s
+          AND event_date BETWEEN %(start_date)s AND %(end_date)s
+          AND {condition}
+          AND JSONHas(properties, %(cohort_property)s)
+          AND {canonical_actor_sql()} != ''
+    ),
+    daily AS (
+        SELECT
+            cohort_value,
+            day,
+            count() AS event_count,
+            uniqExact(actor_id) AS unique_users
+        FROM matched
+        GROUP BY cohort_value, day
+    ),
+    totals AS (
+        SELECT cohort_value, uniqExact(actor_id) AS total_users
+        FROM matched
+        GROUP BY cohort_value
+    )
 SELECT
-    JSONExtractString(properties, %(cohort_property)s) AS cohort_value,
-    toStartOfInterval(timestamp, INTERVAL 1 DAY) AS day,
-    count() AS event_count,
-    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
-FROM events
-WHERE project_id = %(project_id)s
-  AND event_date BETWEEN %(start_date)s AND %(end_date)s
-  AND {condition}
-  AND JSONHas(properties, %(cohort_property)s)
-GROUP BY cohort_value, day
-ORDER BY cohort_value, day
+    daily.cohort_value,
+    daily.day,
+    daily.event_count,
+    daily.unique_users,
+    totals.total_users
+FROM daily
+INNER JOIN totals USING (cohort_value)
+ORDER BY daily.cohort_value, daily.day
 """
 
 
@@ -289,12 +351,12 @@ ORDER BY cohort_value, day
 
 def build_event_catalog_query(params: dict[str, Any]) -> str:
     """List distinct event names with volume, most frequent first."""
-    return """
+    return f"""
 SELECT
     event_name,
     count() AS event_count,
-    uniqIf(if(user_id != '', user_id, anonymous_id), user_id != '' OR anonymous_id != '') AS unique_users
-FROM events
+    uniqExactIf({canonical_actor_sql()}, {canonical_actor_sql()} != '') AS unique_users
+FROM events FINAL
 WHERE project_id = %(project_id)s
   AND event_date BETWEEN %(start_date)s AND %(end_date)s
 GROUP BY event_name
@@ -307,53 +369,70 @@ LIMIT %(limit)s
 # Experiment queries
 # ---------------------------------------------------------------------------
 
-EXPERIMENT_EXPOSURES_QUERY = """
+EXPERIMENT_ANALYSIS_QUERY = f"""
 WITH
-    exposures AS (
+    fromUnixTimestamp64Milli(%(start_ms)s, 'UTC') AS analysis_start,
+    fromUnixTimestamp64Milli(%(end_ms)s, 'UTC') AS analysis_end,
+    raw_exposures AS (
         SELECT
-            if(user_id != '', user_id, anonymous_id) AS assignment_id,
+            {canonical_actor_sql()} AS actor_id,
             variant,
-            min(first_exposure) AS first_exposure
-        FROM feature_flag_exposures
+            first_exposure,
+            message_id
+        FROM feature_flag_exposures FINAL
         WHERE project_id = %(project_id)s
           AND flag_key = %(flag_key)s
-          AND (user_id != '' OR anonymous_id != '')
-        GROUP BY assignment_id, variant
-    )
-SELECT
-    assignment_id AS user_id,
-    variant,
-    first_exposure
-FROM exposures
-"""
-
-EXPERIMENT_METRICS_QUERY = """
-WITH
-    exposures AS (
+          AND first_exposure >= analysis_start
+          AND first_exposure < analysis_end
+          AND event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
+          AND {canonical_actor_sql()} != ''
+    ),
+    assignments AS (
         SELECT
-            if(user_id != '', user_id, anonymous_id) AS assignment_id,
-            variant,
-            min(first_exposure) AS first_exposure
-        FROM feature_flag_exposures
+            actor_id,
+            argMin(variant, tuple(first_exposure, message_id)) AS assigned_variant,
+            min(first_exposure) AS assigned_at,
+            uniqExact(variant) > 1 AS crossed_over
+        FROM raw_exposures
+        GROUP BY actor_id
+    ),
+    metric_events AS (
+        SELECT
+            {canonical_actor_sql()} AS actor_id,
+            timestamp
+        FROM events FINAL
         WHERE project_id = %(project_id)s
-          AND flag_key = %(flag_key)s
-          AND (user_id != '' OR anonymous_id != '')
-        GROUP BY assignment_id, variant
+          AND event_name = %(metric_event)s
+          AND timestamp >= analysis_start
+          AND timestamp < analysis_end
+          AND event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
+          AND {canonical_actor_sql()} != ''
+    ),
+    actor_outcomes AS (
+        SELECT
+            a.actor_id,
+            a.assigned_variant,
+            a.crossed_over,
+            countIf(
+                m.timestamp >= a.assigned_at
+                AND m.timestamp < analysis_end
+            ) > 0 AS converted
+        FROM assignments AS a
+        LEFT JOIN metric_events AS m ON m.actor_id = a.actor_id
+        GROUP BY
+            a.actor_id,
+            a.assigned_variant,
+            a.crossed_over,
+            a.assigned_at
     )
 SELECT
-    e.variant,
-    e.assignment_id AS user_id,
-    count() AS metric_value
-FROM exposures e
-INNER JOIN events ev
-    ON ev.project_id = %(project_id)s
-   AND (
-       ev.user_id = e.assignment_id
-       OR ev.anonymous_id = e.assignment_id
-   )
-   AND ev.timestamp >= e.first_exposure
-   AND ev.event_name = %(metric)s
-GROUP BY e.variant, e.assignment_id
+    assigned_variant AS variant,
+    count() AS sample_size,
+    countIf(converted) AS conversions,
+    countIf(crossed_over) AS crossover_actors
+FROM actor_outcomes
+GROUP BY assigned_variant
+ORDER BY assigned_variant
 """
 
 
@@ -365,21 +444,26 @@ FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY = """
 WITH
     exposures AS (
         SELECT
-            session_id,
-            variant,
+            if(
+                session_id != '',
+                concat('s:', session_id),
+                {exposure_actor}
+            ) AS assignment_id,
+            argMin(variant, tuple(first_exposure, message_id)) AS variant,
             min(first_exposure) AS exposure_time
-        FROM feature_flag_exposures
+        FROM feature_flag_exposures FINAL
         WHERE project_id = %(project_id)s
           AND flag_key = %(flag_key)s
           AND variant != ''
           AND first_exposure >= subtractMinutes(now(), %(window_minutes)s)
           AND event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
+          AND (session_id != '' OR {exposure_actor} != '')
           {exposure_scope_filter}
-        GROUP BY session_id, variant
+        GROUP BY assignment_id
     ),
     exposure_failures AS (
         SELECT
-            e.session_id AS session_id,
+            e.assignment_id AS assignment_id,
             e.variant AS variant,
             countIf(
                 f.timestamp >= e.exposure_time
@@ -387,14 +471,18 @@ WITH
                 AND f.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
             ) AS failure_count
         FROM exposures e
-        LEFT JOIN frontend_health_events f
+        LEFT JOIN frontend_health_events AS f FINAL
             ON f.project_id = %(project_id)s
-           AND f.session_id = e.session_id
+           AND if(
+                f.session_id != '',
+                concat('s:', f.session_id),
+                {health_actor}
+           ) = e.assignment_id
            AND f.event_name = '$frontend_error'
            AND JSONHas(f.active_flags, %(flag_key)s)
            AND JSONExtractString(f.active_flags, %(flag_key)s) = e.variant
            {health_scope_filter}
-        GROUP BY e.session_id, e.variant
+        GROUP BY e.assignment_id, e.variant
     ),
     variant_stats AS (
         SELECT
@@ -437,4 +525,6 @@ def build_feature_flag_frontend_error_guardrail_query(
     return FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY.format(
         exposure_scope_filter=exposure_scope_filter,
         health_scope_filter=health_scope_filter,
+        exposure_actor=canonical_actor_sql(),
+        health_actor=canonical_actor_sql("f"),
     )

@@ -38,7 +38,6 @@ export type ConditionOperator =
   | 'not_contains'
   | 'starts_with'
   | 'ends_with'
-  | 'regex'
   | 'in'
   | 'not_in'
   | 'exists'
@@ -89,7 +88,7 @@ export interface FlagEvaluationOptions {
 }
 
 export interface EvalContext {
-  user_id?: string;
-  anonymous_id: string;
+  user_id?: string | null;
+  anonymous_id?: string | null;
   attributes?: Record<string, unknown>;
 }

@@ -25,6 +25,7 @@ def authenticated_request_context(monkeypatch):
                     "agents:approve",
                 }
             ),
+            self_registered_project=False,
         )
         request.state.principal = principal
         return principal

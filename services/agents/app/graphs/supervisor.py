@@ -206,7 +206,6 @@ async def run_supervisor(
     autonomy_level: int,
     resume: bool = False,
     target_proposal_id: str | None = None,
-    target_experiment_id: str | None = None,
 ) -> None:
     """Acquire exclusive run ownership and execute the supervisor graph."""
     lease_owner_id = new_lease_owner_id()
@@ -246,7 +245,6 @@ async def run_supervisor(
             lease_lost=lease_lost,
             resume=resume,
             target_proposal_id=target_proposal_id,
-            target_experiment_id=target_experiment_id,
         )
     finally:
         lease_stop.set()
@@ -269,7 +267,6 @@ async def _run_owned_supervisor(
     lease_lost: asyncio.Event,
     resume: bool = False,
     target_proposal_id: str | None = None,
-    target_experiment_id: str | None = None,
 ) -> None:
     """Execute one supervisor graph while holding an unexpired lease.
 
@@ -292,7 +289,6 @@ async def _run_owned_supervisor(
         autonomy_level=autonomy_level,
         time_range_days=time_range_days,
         target_proposal_id=target_proposal_id,
-        target_experiment_id=target_experiment_id,
     )
     state: dict[str, Any] = {
         "project_id": project_id,

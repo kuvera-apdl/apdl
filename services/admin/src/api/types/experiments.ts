@@ -1,7 +1,10 @@
 import type { z } from 'zod'
 
 import type {
-  analysisMethodSchema,
+  experimentAnalysisInsufficientSchema,
+  experimentAnalysisReadySchema,
+  experimentArmResultSchema,
+  experimentComparisonSchema,
   experimentCreateResponseSchema,
   experimentCreateSchema,
   experimentDeleteResponseSchema,
@@ -13,7 +16,6 @@ import type {
   experimentUpdateResponseSchema,
   experimentUpdateSchema,
   experimentVariantSchema,
-  variantResultSchema,
 } from '../schemas/experiments'
 
 export type ExperimentEntry = z.infer<typeof experimentEntrySchema>
@@ -26,6 +28,8 @@ export type ExperimentMetric = z.infer<typeof experimentMetricSchema>
 export type ExperimentCreateResponse = z.infer<typeof experimentCreateResponseSchema>
 export type ExperimentUpdateResponse = z.infer<typeof experimentUpdateResponseSchema>
 export type ExperimentDeleteResponse = z.infer<typeof experimentDeleteResponseSchema>
-export type AnalysisMethod = z.infer<typeof analysisMethodSchema>
-export type VariantResult = z.infer<typeof variantResultSchema>
+export type ExperimentArmResult = z.infer<typeof experimentArmResultSchema>
+export type ExperimentComparison = z.infer<typeof experimentComparisonSchema>
+export type ExperimentAnalysisReady = z.infer<typeof experimentAnalysisReadySchema>
+export type ExperimentAnalysisInsufficient = z.infer<typeof experimentAnalysisInsufficientSchema>
 export type ExperimentResult = z.infer<typeof experimentResultSchema>

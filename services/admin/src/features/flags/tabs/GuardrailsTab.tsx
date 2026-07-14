@@ -12,7 +12,7 @@ export function GuardrailsTab({ flag }: { flag: FlagConfig }) {
           <EmptyState
             icon={<ShieldCheck className="h-8 w-8" />}
             title="No guardrails configured"
-            description="Guardrails auto-disable the flag when an error metric breaches its threshold."
+            description="Guardrails are read-only diagnostics in the OSS developer preview."
           />
         </div>
       ) : (
@@ -48,9 +48,8 @@ export function GuardrailsTab({ flag }: { flag: FlagConfig }) {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Breaches are enforced by the config service's background monitor (every 60s when the
-        server runs with <code className="font-mono">GUARDRAIL_MONITOR_ENABLED</code>). Whether the
-        monitor is currently enabled is not exposed by the API yet — see plan gap G6.
+        Guardrail results are read-only in the OSS developer preview. Automatic flag disabling is
+        intentionally unavailable until the analytics decision contract is release-ready.
       </p>
     </div>
   )

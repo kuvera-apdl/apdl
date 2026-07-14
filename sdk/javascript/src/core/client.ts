@@ -6,7 +6,11 @@ import {
   type ResolvedConfig,
 } from './config';
 import { API_KEY_HEADER, SDK_IDENTIFIER, SDK_IDENTIFIER_HEADER } from './constants';
-import { generateId, type ExperimentContext } from './types';
+import {
+  generateId,
+  type DeliveryReport,
+  type ExperimentContext,
+} from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
 import { EventQueue } from './event-queue';
@@ -35,7 +39,6 @@ import { ConsentManager } from '../privacy/consent';
 import { Scrubber, type ScrubFunction } from '../privacy/scrubber';
 import { CookielessIdentity } from '../privacy/cookieless';
 
-const ANON_ID_KEY = 'apdl_anonymous_id';
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
 
 interface ActiveFlagState {
@@ -72,6 +75,9 @@ export class APDLClient implements APDLApi {
   private missingFlagWarnings: Set<string> = new Set();
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
   private experimentContext: ExperimentContext = { attributes: {} };
+  private analyticsCaptureEnabled = false;
+  private isShutDown = false;
+  private shutdownPromise: Promise<DeliveryReport> | null = null;
 
   /** UI namespace */
   public ui: {
@@ -105,7 +111,7 @@ export class APDLClient implements APDLApi {
     enable: () => void;
     disable: () => void;
     getQueue: () => unknown[];
-    flush: () => Promise<void>;
+    flush: () => Promise<DeliveryReport>;
   };
 
   constructor(config: PartialAPDLConfig) {
@@ -114,9 +120,10 @@ export class APDLClient implements APDLApi {
     // Privacy subsystems
     this.consentManager = new ConsentManager(
       this.config.consent,
-      this.config.persistence
+      this.config.persistence,
+      this.config.projectId
     );
-    this.scrubber = new Scrubber(this.config.privacyMode !== 'standard');
+    this.scrubber = new Scrubber();
 
     // Core transport
     this.transport = new Transport(this.config.auth.clientKey, {
@@ -132,7 +139,10 @@ export class APDLClient implements APDLApi {
     );
 
     // Session and context
-    this.sessionManager = new SessionManager(this.config.persistence);
+    this.sessionManager = new SessionManager(
+      this.config.persistence,
+      this.config.projectId
+    );
     this.contextCollector = new ContextCollector();
 
     // Anonymous ID
@@ -169,6 +179,10 @@ export class APDLClient implements APDLApi {
       this.contextCollector,
       () => this.activeFlagSnapshot()
     );
+    this.analyticsCaptureEnabled = this.consentManager.isGranted('analytics');
+    this.consentManager.onUpdate((state) => {
+      this.handleAnalyticsConsent(state.analytics);
+    });
 
     // UI subsystem
     this.componentRegistry = new ComponentRegistry();
@@ -255,6 +269,7 @@ export class APDLClient implements APDLApi {
    * Tracks a custom event.
    */
   track(event: string, properties?: Record<string, unknown>): void {
+    this.assertActive();
     this.manualCapture.trackEvent(event, properties);
   }
 
@@ -262,6 +277,7 @@ export class APDLClient implements APDLApi {
    * Identifies the current user.
    */
   identify(userId: string, traits?: Record<string, unknown>): void {
+    this.assertActive();
     this.manualCapture.identifyUser(userId, traits);
   }
 
@@ -269,6 +285,7 @@ export class APDLClient implements APDLApi {
    * Associates the user with a group.
    */
   group(groupId: string, traits?: Record<string, unknown>): void {
+    this.assertActive();
     this.manualCapture.groupUser(groupId, traits);
   }
 
@@ -276,6 +293,7 @@ export class APDLClient implements APDLApi {
    * Tracks a page view.
    */
   page(name?: string, properties?: Record<string, unknown>): void {
+    this.assertActive();
     this.manualCapture.pageView(name, properties);
   }
 
@@ -283,6 +301,7 @@ export class APDLClient implements APDLApi {
    * Resets the user identity and session.
    */
   reset(): void {
+    this.assertActive();
     this.manualCapture.reset();
     // Generate a new anonymous ID
     const newId = generateId();
@@ -334,14 +353,17 @@ export class APDLClient implements APDLApi {
   /**
    * Gracefully shuts down the SDK, flushing remaining events.
    */
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<DeliveryReport> {
+    if (this.shutdownPromise !== null) return this.shutdownPromise;
+
+    this.isShutDown = true;
     this.autoCapture.stop();
     this.healthCapture.stop();
     this.sseConnection.disconnect();
     this.slotManager.stop();
     this.uiRenderer.cleanupAll();
-    await this.eventQueue.flush();
-    this.eventQueue.stop();
+    this.shutdownPromise = this.eventQueue.shutdown();
+    return this.shutdownPromise;
   }
 
   // ── Private ───────────────────────────────────────────────────
@@ -350,20 +372,22 @@ export class APDLClient implements APDLApi {
     // Start event queue (flush timer + offline drain)
     void this.eventQueue.start();
 
-    // Start auto-capture
-    this.autoCapture.start();
-
-    // Start health capture
-    this.healthCapture.start();
-
-    // Start SSE connection for real-time config
-    this.sseConnection.connect();
+    if (this.analyticsCaptureEnabled) {
+      this.autoCapture.start();
+      this.healthCapture.start();
+    }
 
     // Start slot manager
     this.slotManager.start();
 
-    // Fetch initial flag configuration
-    void this.fetchInitialFlags();
+    // Establish the initial snapshot before opening the update stream. This
+    // gives SSE updates a deterministic baseline and avoids an older fetch
+    // response overwriting a newer streamed configuration.
+    void this.fetchInitialFlags().finally(() => {
+      if (!this.isShutDown) {
+        this.sseConnection.connect();
+      }
+    });
 
     // Handle cookieless mode
     if (this.config.privacyMode === 'cookieless') {
@@ -421,7 +445,7 @@ export class APDLClient implements APDLApi {
     if (this.config.persistence !== 'memory') {
       try {
         if (typeof localStorage !== 'undefined') {
-          const stored = localStorage.getItem(ANON_ID_KEY);
+          const stored = localStorage.getItem(this.anonymousIdStorageKey());
           if (stored) return stored;
         }
       } catch {
@@ -439,7 +463,7 @@ export class APDLClient implements APDLApi {
 
     try {
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(ANON_ID_KEY, id);
+        localStorage.setItem(this.anonymousIdStorageKey(), id);
       }
     } catch {
       // Storage unavailable
@@ -447,15 +471,12 @@ export class APDLClient implements APDLApi {
   }
 
   private getEvalContext(): EvalContext {
-    const userAttributes = this.stringifyAttributes(this.manualCapture.getTraits());
-    const experimentAttributes = this.stringifyAttributes(this.experimentContext.attributes);
-
     return {
       user_id: this.manualCapture.getUserId(),
       anonymous_id: this.manualCapture.getAnonymousId(),
       attributes: {
-        ...userAttributes,
-        ...experimentAttributes,
+        ...this.manualCapture.getTraits(),
+        ...this.experimentContext.attributes,
       },
     };
   }
@@ -464,7 +485,12 @@ export class APDLClient implements APDLApi {
     result: FlagEvaluationResult,
     options?: FlagEvaluationOptions
   ): void {
-    if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
+    if (
+      this.isShutDown ||
+      result.variant === null ||
+      result.reason === 'not_found' ||
+      result.reason === 'invalid_config'
+    ) {
       return;
     }
 
@@ -480,7 +506,6 @@ export class APDLClient implements APDLApi {
     }
 
     this.featureFlagExposureKeys.add(dedupeKey);
-    const exposureContext = this.experimentExposureContext();
     this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
       flag_key: result.key,
       variant: result.variant,
@@ -494,7 +519,6 @@ export class APDLClient implements APDLApi {
       source: result.source,
       page,
       component,
-      ...(exposureContext ? { experiment_context: exposureContext } : {}),
     });
   }
 
@@ -635,15 +659,6 @@ export class APDLClient implements APDLApi {
     };
   }
 
-  private experimentExposureContext(): ExperimentContext | null {
-    const attributes = this.stringifyAttributes(this.experimentContext.attributes);
-    if (Object.keys(attributes).length === 0) {
-      return null;
-    }
-
-    return { attributes };
-  }
-
   private shouldPersistFlagCache(): boolean {
     return this.config.privacyMode === 'standard'
       && this.config.persistence === 'localStorage';
@@ -653,6 +668,31 @@ export class APDLClient implements APDLApi {
     return `apdl_flags_${this.config.projectId}`;
   }
 
+  private anonymousIdStorageKey(): string {
+    return `apdl_anonymous_id_${this.config.projectId}`;
+  }
+
+  private handleAnalyticsConsent(granted: boolean): void {
+    if (this.isShutDown || granted === this.analyticsCaptureEnabled) return;
+
+    this.analyticsCaptureEnabled = granted;
+    if (!granted) {
+      this.autoCapture.stop();
+      this.healthCapture.stop();
+      void this.eventQueue.revokeAnalyticsConsent();
+      return;
+    }
+
+    this.autoCapture.start();
+    this.healthCapture.start();
+  }
+
+  private assertActive(): void {
+    if (this.isShutDown) {
+      throw new Error('APDL: client is shut down');
+    }
+  }
+
   private registerBuiltInComponents(): void {
     this.componentRegistry.register(BannerComponent);
     this.componentRegistry.register(ModalComponent);
@@ -660,27 +700,6 @@ export class APDLClient implements APDLApi {
     this.componentRegistry.register(CardComponent);
     this.componentRegistry.register(ToastComponent);
     this.componentRegistry.register(InlineMessageComponent);
-  }
-
-  private stringifyAttributes(
-    attributes: Record<string, unknown>
-  ): Record<string, string> {
-    const result: Record<string, string> = {};
-
-    for (const [key, value] of Object.entries(attributes)) {
-      if (value === undefined || value === null) {
-        continue;
-      }
-      if (typeof value === 'string') {
-        result[key] = value;
-      } else if (typeof value === 'number' || typeof value === 'boolean') {
-        result[key] = String(value);
-      } else {
-        result[key] = JSON.stringify(value);
-      }
-    }
-
-    return result;
   }
 
   private assertPlainObject(value: unknown, path: string): Record<string, unknown> {

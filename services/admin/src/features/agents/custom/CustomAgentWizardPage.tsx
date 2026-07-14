@@ -42,7 +42,8 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { queryKeys } from '@/core/queryClient'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentRoleUnavailable } from '@/features/agents/AgentAccessNotice'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -179,6 +180,26 @@ function stepProblems(step: number, form: FormState): string[] {
 }
 
 export function CustomAgentWizardPage() {
+  const { active } = useWorkspace()
+  if (!hasWorkspaceRole(active, 'agents:manage')) {
+    return (
+      <div className="max-w-3xl space-y-5">
+        <PageHeader
+          backTo={{ to: '/agents/custom', label: 'Custom agents' }}
+          title="Custom-agent management"
+          description="Custom-agent definitions are read-only in this workspace."
+        />
+        <AgentRoleUnavailable
+          role="agents:manage"
+          title="Custom-agent management unavailable"
+        />
+      </div>
+    )
+  }
+  return <CustomAgentWizard />
+}
+
+function CustomAgentWizard() {
   const { agentId } = useParams<{ agentId: string }>()
   const isEdit = Boolean(agentId)
   const { active, projectId } = useWorkspace()

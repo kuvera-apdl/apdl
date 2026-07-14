@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.models.schemas import FlagCreate, FlagDisable, FlagUpdate
+from app.models.schemas import FlagCreate, FlagDisable, FlagUpdate, GuardrailConfig
 from app.utils import serialize_client_flag, serialize_flag, serialize_flag_collection
 
 
@@ -35,7 +35,7 @@ def make_flag() -> dict:
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
-        "auto_disable": True,
+        "auto_disable": False,
         "guardrails": [{
             "metric": "frontend_error_rate",
             "threshold": "2x_baseline",
@@ -70,6 +70,24 @@ def make_create_payload(**overrides) -> dict:
     return payload
 
 
+def test_guardrail_window_is_limited_to_ninety_days():
+    with pytest.raises(ValidationError, match="less than or equal to 129600"):
+        GuardrailConfig(
+            metric="frontend_error_count",
+            threshold="at_least_one",
+            window_minutes=129_601,
+        )
+
+
+def test_automatic_guardrail_mutation_is_rejected_by_public_writes():
+    with pytest.raises(ValidationError):
+        FlagCreate.model_validate(
+            make_create_payload(auto_disable=True)
+        )
+    with pytest.raises(ValidationError):
+        FlagUpdate.model_validate({"version": 1, "auto_disable": True})
+
+
 def test_serialize_flag_returns_full_canonical_admin_shape():
     assert serialize_flag(make_flag()) == make_flag()
 
@@ -99,6 +117,19 @@ def test_serialize_client_flag_returns_sdk_shape_only():
         },
         "version": 4,
     }
+
+
+def test_serializers_omit_presence_condition_value():
+    flag = make_flag()
+    flag["rules"][0]["conditions"] = [
+        {"attribute": "plan", "operator": "exists"}
+    ]
+
+    admin_condition = serialize_flag(flag)["rules"][0]["conditions"][0]
+    client_condition = serialize_client_flag(flag)["rules"][0]["conditions"][0]
+
+    assert admin_condition == {"attribute": "plan", "operator": "exists"}
+    assert client_condition == {"attribute": "plan", "operator": "exists"}
 
 
 def test_serialize_client_flag_rejects_nested_old_fallthrough_value():
@@ -299,12 +330,17 @@ def test_flag_update_requires_version():
 
 def test_flag_disable_accepts_experiment_rollback_reason():
     body = FlagDisable.model_validate({
+        "version": 4,
         "reason": "experiment_rollback",
-        "source": "system",
         "evidence": {"rollback_monitor": "experiment"},
     })
 
     assert body.reason == "experiment_rollback"
+
+
+def test_flag_disable_rejects_spoofed_source():
+    with pytest.raises(ValidationError):
+        FlagDisable.model_validate({"version": 4, "source": "system"})
 
 
 def test_frontend_error_count_guardrail_requires_at_least_one_threshold():

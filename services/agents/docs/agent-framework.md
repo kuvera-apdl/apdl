@@ -85,7 +85,7 @@ decision = gate_action(ctx.autonomy_level, safety_result)
 ```
 
 * **L1** suggest-only — never deploys.
-* **L2** auto-applies safe actions, routes risk to approval.
+* **L2** routes every safety-passing action to approval.
 * **L3** auto-applies low-risk, approves the rest.
 * **L4** full autonomy.
 

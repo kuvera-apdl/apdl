@@ -1,8 +1,9 @@
-"""Client configuration model with validation and sensible defaults."""
+"""Client configuration model with strict, self-hosted-safe defaults."""
 
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -10,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 # services derive tenant authority only from the verified database record.
 _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$")
 
-DEFAULT_ENDPOINT = "https://api.apdl.dev"
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 DEFAULT_FLUSH_INTERVAL = 3.0
@@ -34,7 +34,7 @@ class APDLConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_key: str
-    endpoint: str = DEFAULT_ENDPOINT
+    endpoint: str
 
     # Event batching
     batch_size: int = DEFAULT_BATCH_SIZE
@@ -72,6 +72,27 @@ class APDLConfig(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
+        if not isinstance(v, str) or v != v.strip() or not v:
+            raise ValueError("APDL: endpoint is required and must be an HTTP(S) origin")
+        parsed = urlsplit(v)
+        try:
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("APDL: endpoint contains an invalid port") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "APDL: endpoint must be an HTTP(S) origin without credentials, path, "
+                "query, or fragment"
+            )
         return v.rstrip("/")
 
     @field_validator("batch_size")

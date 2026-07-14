@@ -3,7 +3,7 @@
 The four autonomy levels are a product-wide contract:
 
 * **L1** — suggest only; never mutate anything.
-* **L2** — auto-apply safe actions, route anything risky to human approval.
+* **L2** — hold every safety-passing action for human approval.
 * **L3** — auto-apply low-risk actions, route the rest to approval.
 * **L4** — full autonomy.
 

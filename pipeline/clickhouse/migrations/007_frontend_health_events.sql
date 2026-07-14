@@ -1,6 +1,7 @@
 -- Migration 007: Frontend health event projection
 CREATE TABLE IF NOT EXISTS frontend_health_events (
     project_id             String,
+    message_id             String,
     event_name             LowCardinality(String),
     user_id                String,
     anonymous_id           String,
@@ -20,14 +21,15 @@ CREATE TABLE IF NOT EXISTS frontend_health_events (
     active_flags           String,
     active_flag_versions   String,
     event_date             Date DEFAULT toDate(timestamp)
-) ENGINE = MergeTree()
+) ENGINE = ReplacingMergeTree(timestamp)
 PARTITION BY (project_id, toYYYYMM(event_date))
-ORDER BY (project_id, event_name, page, timestamp, session_id);
+ORDER BY (project_id, message_id);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS frontend_health_events_mv
 TO frontend_health_events
 AS SELECT
     project_id,
+    message_id,
     event_name,
     user_id,
     anonymous_id,

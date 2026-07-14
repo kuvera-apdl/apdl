@@ -32,7 +32,7 @@ def make_flag(overrides: dict | None = None) -> dict:
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
-        "auto_disable": True,
+        "auto_disable": False,
         "guardrails": [],
         "version": 4,
     }

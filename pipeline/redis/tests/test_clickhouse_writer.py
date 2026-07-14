@@ -1,10 +1,15 @@
 import asyncio
 import json
+from pathlib import Path
 
 import clickhouse_writer as writer_module
 import pytest
 from clickhouse_driver.errors import ServerException, TypeMismatchError
 from clickhouse_writer import BufferedEvent, ClickHouseWriter
+
+CONTRACT_FIXTURE = (
+    Path(__file__).resolve().parents[3] / "fixtures" / "events" / "canonical.json"
+)
 
 
 class FakeRedis:
@@ -96,10 +101,23 @@ def buffered_event(message_id="1-0"):
     )
 
 
+def canonical_event(event="signup", **overrides):
+    value = {
+        "event": event,
+        "type": "track",
+        "anonymous_id": "anon-test",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": f"message-{event}",
+    }
+    value.update(overrides)
+    return value
+
+
 def stream_message(message_id="1-0"):
     return (
         "events:raw:demo",
-        [(message_id, {"event_json": json.dumps({"event": "signup"})})],
+        [(message_id, {"event_json": json.dumps(canonical_event())})],
     )
 
 
@@ -167,6 +185,59 @@ def test_durable_rows_are_not_reinserted_when_redis_ack_retries(monkeypatch):
         assert await writer._flush() is True
         assert len(ch_client.inserts) == 1
         assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("1-0",))]
+
+    asyncio.run(scenario())
+
+
+def test_crash_after_insert_replay_converges_on_one_storage_identity(monkeypatch):
+    """A stable client message ID collapses an insert-before-ACK replay."""
+
+    class IdempotentClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.rows: dict[tuple[str, str], dict] = {}
+
+        def execute(self, _query, rows, **_kwargs):
+            self.inserts.append(rows)
+            for row in rows:
+                self.rows[(row["project_id"], row["message_id"])] = row
+
+    class FailedAckRedis(FakeRedis):
+        async def xack(self, _stream_key, _group, *_message_ids):
+            raise ConnectionError("writer crashed before ACK")
+
+    async def scenario():
+        clickhouse = IdempotentClickHouse()
+        payload = canonical_event(message_id="client-stable-id")
+        delivery = [
+            (
+                "events:raw:demo",
+                [("1-0", {"event_json": json.dumps(payload)})],
+            )
+        ]
+
+        first, _, _ = make_writer(
+            monkeypatch,
+            redis_client=FailedAckRedis(),
+            ch_client=clickhouse,
+            buffer_size=1,
+        )
+        assert await first._process_messages(delivery) == 1
+        assert len(clickhouse.rows) == 1
+
+        restarted, redis_client, _ = make_writer(
+            monkeypatch,
+            redis_client=FakeRedis(),
+            ch_client=clickhouse,
+            buffer_size=1,
+        )
+        assert await restarted._process_messages(delivery) == 1
+
+        assert len(clickhouse.inserts) == 2
+        assert list(clickhouse.rows) == [("demo", "client-stable-id")]
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
+        ]
 
     asyncio.run(scenario())
 
@@ -241,10 +312,7 @@ def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
 def test_project_authority_is_derived_from_validated_stream_key(monkeypatch):
     async def scenario():
         writer, redis_client, ch_client = make_writer(monkeypatch, buffer_size=1)
-        event_json = {
-            "event": "signup",
-            "project_id": "demo",
-        }
+        event_json = canonical_event(project_id="demo")
         results = [
             (
                 "events:raw:demo",
@@ -279,7 +347,7 @@ def test_conflicting_project_assertions_are_rejected_without_ack(monkeypatch):
                         {
                             "project_id": "victim",
                             "event_json": json.dumps(
-                                {"event": "signup", "project_id": "demo"}
+                                canonical_event(project_id="demo")
                             ),
                         },
                     ),
@@ -287,7 +355,7 @@ def test_conflicting_project_assertions_are_rejected_without_ack(monkeypatch):
                         "2-0",
                         {
                             "event_json": json.dumps(
-                                {"event": "signup", "project_id": "victim"}
+                                canonical_event(project_id="victim")
                             )
                         },
                     ),
@@ -320,29 +388,48 @@ def test_invalid_stream_project_is_rejected(monkeypatch):
             raise AssertionError(f"accepted invalid stream key {stream_key!r}")
 
 
-def test_type_only_nullable_legacy_event_projects_to_canonical_row(monkeypatch):
+def test_writer_uses_shared_canonical_contract_fixture(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    fixture = json.loads(CONTRACT_FIXTURE.read_text())
+
+    rows = []
+    for event in fixture["valid"]:
+        row = writer._parse_event({"event_json": json.dumps(event)}, "demo")
+        assert row["message_id"] == event["message_id"]
+        assert row["event_type"] == event["type"]
+        rows.append(row)
+
+    assert json.loads(rows[0]["context"])["browser"]["name"] == "Firefox"
+    assert rows[0]["browser"] == "Firefox"
+    assert json.loads(rows[1]["traits"]) == {"plan": "pro"}
+    assert rows[2]["group_id"] == "account-7"
+
+    for case in fixture["invalid"]:
+        with pytest.raises((TypeError, ValueError)):
+            writer._parse_event(
+                {"event_json": json.dumps(case["event"])},
+                "demo",
+            )
+
+
+def test_legacy_alias_event_is_rejected(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 
-    row = writer._parse_event(
-        {
-            "event_json": json.dumps(
-                {
+    with pytest.raises(ValueError, match="unknown fields"):
+        writer._parse_event(
+            {
+                "event_json": json.dumps({
+                    "event": "identify",
                     "type": "identify",
                     "userId": "user-1",
                     "anonymousId": "anon-1",
-                    "properties": None,
-                    "context": None,
-                }
-            )
-        },
-        "demo",
-    )
-
-    assert row["event_name"] == "identify"
-    assert row["user_id"] == "user-1"
-    assert row["anonymous_id"] == "anon-1"
-    assert row["properties"] == "{}"
-    assert row["device_type"] == ""
+                    "timestamp": "2026-07-13T12:00:00.000Z",
+                    "context": {},
+                    "message_id": "message-alias",
+                })
+            },
+            "demo",
+        )
 
 
 def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
@@ -351,7 +438,7 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
         results = [
             (
                 "events:raw:demo",
-                [("1-0", {"event_json": json.dumps({"event": ["bad"]})})],
+                [("1-0", {"event_json": json.dumps(canonical_event(["bad"]))})],
             )
         ]
 
@@ -378,6 +465,70 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_duplicate_json_keys_are_rejected(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    raw = (
+        '{"event":"first","event":"second","type":"track",'
+        '"anonymous_id":"anon","timestamp":"2026-07-13T12:00:00.000Z",'
+        '"context":{},"message_id":"duplicate"}'
+    )
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        writer._parse_event({"event_json": raw}, "demo")
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-07-13T12:00Z",
+        "2026-07-13 12:00:00Z",
+        "2026-07-13T12:00:00.1234567Z",
+        "0999-01-01T00:00:00Z",
+    ],
+)
+def test_noncanonical_timestamps_are_rejected(monkeypatch, timestamp):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(timestamp=timestamp)
+
+    with pytest.raises(ValueError, match="canonical RFC3339|canonical digits"):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("user_id", None),
+        ("properties", None),
+        ("traits", None),
+        ("session_id", None),
+    ],
+)
+def test_explicit_null_optional_fields_are_rejected(monkeypatch, field, value):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(user_id="user-1")
+    payload[field] = value
+
+    with pytest.raises(ValueError, match="omitted rather than null"):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"locale": None},
+        {"browser": {"name": "Firefox", "version": None}},
+        {"device": {"type": ""}},
+        {"screen": {"width": True, "height": 100}},
+        {"page": {"url": 42, "title": "", "path": "/", "search": ""}},
+    ],
+)
+def test_malformed_context_values_are_rejected(monkeypatch, context):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(context=context)
+
+    with pytest.raises((TypeError, ValueError)):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
 def test_dlq_failure_leaves_reject_pending_while_valid_event_flushes(monkeypatch):
     async def scenario():
         redis_client = FakeRedis()
@@ -391,8 +542,8 @@ def test_dlq_failure_leaves_reject_pending_while_valid_event_flushes(monkeypatch
             (
                 "events:raw:demo",
                 [
-                    ("1-0", {"event_json": json.dumps({"event": ["bad"]})}),
-                    ("2-0", {"event_json": json.dumps({"event": "signup"})}),
+                    ("1-0", {"event_json": json.dumps(canonical_event(["bad"]))}),
+                    ("2-0", {"event_json": json.dumps(canonical_event())}),
                 ],
             )
         ]
@@ -423,11 +574,11 @@ def test_insert_poison_isolated_without_blocking_valid_row(monkeypatch):
         results = [
             (
                 "events:raw:demo",
-                [("1-0", {"event_json": json.dumps({"event": "signup"})})],
+                [("1-0", {"event_json": json.dumps(canonical_event())})],
             ),
             (
                 "events:raw:other",
-                [("2-0", {"event_json": json.dumps({"event": "poison"})})],
+                [("2-0", {"event_json": json.dumps(canonical_event("poison"))})],
             ),
         ]
 
@@ -496,7 +647,7 @@ def test_multistream_overdelivery_never_exceeds_global_buffer(monkeypatch):
             stream_message("1-0"),
             (
                 "events:raw:other",
-                [("2-0", {"event_json": json.dumps({"event": "purchase"})})],
+                [("2-0", {"event_json": json.dumps(canonical_event("purchase"))})],
             ),
         ]
 

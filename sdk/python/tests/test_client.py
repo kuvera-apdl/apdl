@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import RecordingTransport, make_flag
 
-from apdl import APDLClient, APDLConfig
+from apdl import APDL, APDLClient, APDLConfig
 from apdl.types import FEATURE_FLAG_EXPOSURE_EVENT
 
 CANONICAL_EXPOSURE_KEYS = {
@@ -28,23 +28,24 @@ CANONICAL_EXPOSURE_KEYS = {
 
 
 def make_client(transport: RecordingTransport, **cfg) -> APDLClient:
-    base = dict(api_key="proj_test_0123456789abcdef", enable_flags=False)
+    base = dict(
+        api_key="proj_test_0123456789abcdef",
+        endpoint="https://apdl.test",
+        enable_flags=False,
+    )
     base.update(cfg)
     return APDLClient(APDLConfig(**base), transport=transport)
 
 
 def _ingestion_validator():
-    """The real ingestion validator, or None if the service is not importable."""
+    """Import the real monorepo Ingestion validator for wire-contract tests."""
     root = Path(__file__).resolve().parents[3]
     ingestion = str(root / "services" / "ingestion")
     if ingestion not in sys.path:
         sys.path.insert(0, ingestion)
-    try:
-        from app.validation.schema import validate_single_event
+    from app.validation.schema import validate_single_event
 
-        return validate_single_event
-    except Exception:  # pragma: no cover - only when run outside the monorepo
-        return None
+    return validate_single_event
 
 
 # ── Event tracking ────────────────────────────────────────────
@@ -90,6 +91,20 @@ def test_event_requires_identity():
     client = make_client(RecordingTransport())
     with pytest.raises(ValueError):
         client.track("x")
+    client.shutdown()
+
+
+def test_non_json_event_is_rejected_synchronously_before_queueing():
+    transport = RecordingTransport()
+    client = make_client(transport)
+    cycle: dict = {}
+    cycle["self"] = cycle
+
+    with pytest.raises(ValueError, match="cyclic JSON"):
+        client.track("x", cycle, user_id="u1")
+
+    assert client.pending_events == 0
+    assert transport.posts == []
     client.shutdown()
 
 
@@ -154,8 +169,6 @@ def test_exposure_carries_page_and_component():
 
 def test_exposure_passes_real_ingestion_validator():
     validate = _ingestion_validator()
-    if validate is None:
-        pytest.skip("ingestion service not importable in isolation")
 
     transport = RecordingTransport()
     client = make_client(transport, log_exposures=True)
@@ -270,17 +283,82 @@ def test_context_manager_shuts_down():
         "proj_demo_short",  # secret < 16 chars
         "proj__0123456789abcdef",  # empty project id
         "proj_demo_with-dashes-0123456789",  # non-alphanumeric secret
+        "client_demo_0123456789abcdef",  # browser-only credential family
     ],
 )
 def test_rejects_malformed_api_key(bad_key):
     with pytest.raises(ValueError):
-        APDLConfig(api_key=bad_key)
+        APDLConfig(api_key=bad_key, endpoint="https://apdl.test")
+
+
+def test_requires_an_explicit_endpoint():
+    with pytest.raises(ValueError, match="endpoint"):
+        APDLConfig(api_key="proj_test_0123456789abcdef")
+
+    with pytest.raises(ValueError, match="api_key and endpoint are required"):
+        APDL.init(api_key="proj_test_0123456789abcdef")
+
+
+def test_init_accepts_explicit_key_and_endpoint():
+    client = APDL.init(
+        api_key="proj_test_0123456789abcdef",
+        endpoint="https://apdl.test",
+        enable_flags=False,
+        transport=RecordingTransport(),
+    )
+
+    assert client.project_id == "test"
+    client.shutdown()
+
+
+def test_client_rejects_competing_config_and_explicit_options():
+    config = APDLConfig(
+        api_key="proj_test_0123456789abcdef",
+        endpoint="https://apdl.test",
+        enable_flags=False,
+    )
+
+    with pytest.raises(ValueError, match="either config or explicit"):
+        APDLClient(config, endpoint="https://other.test")
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "api.apdl.test",
+        "ftp://apdl.test",
+        "https://user:secret@apdl.test",
+        "https://:443",
+        "https://apdl.test:not-a-port",
+        "https://apdl.test/v1",
+        "https://apdl.test?tenant=one",
+        "https://apdl.test#fragment",
+        " https://apdl.test",
+    ],
+)
+def test_rejects_noncanonical_endpoint(endpoint):
+    with pytest.raises(ValueError, match="endpoint"):
+        APDLConfig(api_key="proj_test_0123456789abcdef", endpoint=endpoint)
+
+
+def test_endpoint_accepts_an_http_origin_and_removes_a_trailing_slash():
+    config = APDLConfig(
+        api_key="proj_test_0123456789abcdef",
+        endpoint="http://localhost:8000/",
+    )
+
+    assert config.endpoint == "http://localhost:8000"
 
 
 def test_exposes_project_id_from_api_key():
     transport = RecordingTransport()
     client = APDLClient(
-        APDLConfig(api_key="proj_acme42_0123456789abcdef", enable_flags=False),
+        APDLConfig(
+            api_key="proj_acme42_0123456789abcdef",
+            endpoint="https://apdl.test",
+            enable_flags=False,
+        ),
         transport=transport,
     )
     assert client.project_id == "acme42"

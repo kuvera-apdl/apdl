@@ -52,6 +52,7 @@ export class ManualCapture {
     }
 
     const event = this.buildEvent('identify', {
+      event: 'identify',
       traits: this.traits,
     });
     this.queue.enqueue(event);
@@ -67,6 +68,7 @@ export class ManualCapture {
     }
 
     const event = this.buildEvent('group', {
+      event: 'group',
       groupId,
       traits: this.groupTraits,
     });
@@ -93,7 +95,7 @@ export class ManualCapture {
     }
 
     const event = this.buildEvent('page', {
-      event: name,
+      event: 'page',
       properties: pageProps,
     });
 

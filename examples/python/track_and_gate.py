@@ -11,7 +11,7 @@ Run:
 
 from apdl import APDL, APDLConfig
 
-API_KEY = "proj_demo_0123456789abcdef"
+API_KEY = "proj_apdl_0123456789abcdef0123456789abcdef"
 
 config = APDLConfig(
     api_key=API_KEY,

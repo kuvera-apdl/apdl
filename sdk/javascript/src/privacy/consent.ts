@@ -1,7 +1,5 @@
 import type { ConsentState } from '../core/config';
 
-const CONSENT_KEY = 'apdl_consent';
-
 type ConsentCategory = keyof ConsentState;
 type ConsentCallback = (state: ConsentState) => void;
 
@@ -14,12 +12,15 @@ export class ConsentManager {
   private state: ConsentState;
   private listeners: Set<ConsentCallback> = new Set();
   private persistence: 'localStorage' | 'cookie' | 'memory';
+  private storageKey: string;
 
   constructor(
     initialState: ConsentState,
-    persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage'
+    persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage',
+    projectId: string
   ) {
     this.persistence = persistence;
+    this.storageKey = `apdl_consent_${projectId}`;
 
     // Try to restore from persistence, falling back to initial state
     const restored = this.restore();
@@ -97,7 +98,7 @@ export class ConsentManager {
 
     try {
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(CONSENT_KEY, JSON.stringify(this.state));
+        localStorage.setItem(this.storageKey, JSON.stringify(this.state));
       }
     } catch {
       // Storage may be full or unavailable
@@ -110,7 +111,7 @@ export class ConsentManager {
     try {
       if (typeof localStorage === 'undefined') return null;
 
-      const raw = localStorage.getItem(CONSENT_KEY);
+      const raw = localStorage.getItem(this.storageKey);
       if (!raw) return null;
 
       const parsed = JSON.parse(raw) as ConsentState;

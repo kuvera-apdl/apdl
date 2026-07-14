@@ -16,7 +16,7 @@ RECEIVED_AT = datetime(2026, 5, 26, 10, 11, 12, tzinfo=timezone.utc)
 @pytest.fixture
 def ctx() -> EtlContext:
     return EtlContext(
-        project_id=42,
+        project_id="project42",
         received_at=RECEIVED_AT,
         ingested_at=RECEIVED_AT,
         ip="203.0.113.7",
@@ -29,7 +29,7 @@ def make_envelope(schema: str, payload: dict[str, Any], **overrides: Any) -> dic
     env = {
         "_id": str(uuid4()),
         "_schema": schema,
-        "_project_id": 42,
+        "_project_id": "project42",
         "_idempotency_key": overrides.pop("idempotency_key", "msg-1"),
         "_source": "sdk-js@2.4.1",
         "_occurred_at": "2026-05-26T10:11:12.000Z",

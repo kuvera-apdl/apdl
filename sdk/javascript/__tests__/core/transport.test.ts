@@ -28,7 +28,7 @@ describe('Transport', () => {
       await vi.runAllTimersAsync();
       const result = await promise;
 
-      expect(result).toBe(true);
+      expect(result).toBe('accepted');
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       const call = fetchMock.mock.calls[0];
@@ -41,6 +41,7 @@ describe('Transport', () => {
         }),
         body: JSON.stringify({ data: 'test' }),
       });
+      expect(call[1]).not.toHaveProperty('keepalive');
     });
 
     it('should return true on 2xx response', async () => {
@@ -51,10 +52,10 @@ describe('Transport', () => {
 
       const promise = transport.send('https://api.test.dev/v1/events', {});
       await vi.runAllTimersAsync();
-      expect(await promise).toBe(true);
+      expect(await promise).toBe('accepted');
     });
 
-    it('should return false on 4xx (non-429) without retry', async () => {
+    it('should return permanent_rejection on non-transient 4xx without retry', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: false,
         status: 400,
@@ -66,10 +67,30 @@ describe('Transport', () => {
       await vi.runAllTimersAsync();
       const result = await promise;
 
-      expect(result).toBe(false);
+      expect(result).toBe('permanent_rejection');
       // Should NOT retry on 4xx
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
+
+    it.each([302, 600])(
+      'should permanently reject unexpected HTTP %i without retry',
+      async (status) => {
+        const fetchMock = vi.fn().mockResolvedValue({
+          ok: false,
+          status,
+          headers: new Headers(),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await transport.send(
+          'https://api.test.dev/v1/events',
+          {}
+        );
+
+        expect(result).toBe('permanent_rejection');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      }
+    );
 
     it('should retry on 429 rate limit', async () => {
       let callCount = 0;
@@ -97,8 +118,29 @@ describe('Transport', () => {
       }
       const result = await promise;
 
-      expect(result).toBe(true);
+      expect(result).toBe('accepted');
       expect(callCount).toBe(3);
+    });
+
+    it.each([408, 425])('should retry transient HTTP %i responses', async (status) => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status,
+          headers: new Headers(),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 202,
+          headers: new Headers(),
+        });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const promise = transport.send('https://api.test.dev/v1/events', {});
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await promise).toBe('accepted');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     it('should retry on 5xx server errors', async () => {
@@ -126,7 +168,7 @@ describe('Transport', () => {
       }
       const result = await promise;
 
-      expect(result).toBe(true);
+      expect(result).toBe('accepted');
       expect(callCount).toBe(2);
     });
 
@@ -151,11 +193,11 @@ describe('Transport', () => {
       }
       const result = await promise;
 
-      expect(result).toBe(true);
+      expect(result).toBe('accepted');
       expect(callCount).toBe(2);
     });
 
-    it('should return false after exhausting all retries', async () => {
+    it('should return retryable after exhausting all retries', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
@@ -170,9 +212,21 @@ describe('Transport', () => {
       }
       const result = await promise;
 
-      expect(result).toBe(false);
+      expect(result).toBe('retryable');
       // 1 initial + 7 retries = 8 total
       expect(fetchMock).toHaveBeenCalledTimes(8);
+    });
+
+    it('should permanently reject a locally non-serializable payload without fetching', async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await transport.send('https://api.test.dev/v1/events', {
+        value: BigInt(1),
+      });
+
+      expect(result).toBe('permanent_rejection');
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
@@ -186,7 +240,7 @@ describe('Transport', () => {
         { test: true }
       );
 
-      expect(result).toBe(true);
+      expect(result).toBe('accepted');
       expect(fetchMock).toHaveBeenCalledWith(
         'https://api.test.dev/v1/events',
         expect.objectContaining({
@@ -197,18 +251,21 @@ describe('Transport', () => {
       );
     });
 
-    it('should return false when the server rejects the request', async () => {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+    it('should classify a permanent server rejection', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: false, status: 400 })
+      );
 
       const result = await transport.sendKeepalive(
         'https://api.test.dev/v1/events',
         {}
       );
 
-      expect(result).toBe(false);
+      expect(result).toBe('permanent_rejection');
     });
 
-    it('should return false on a network error', async () => {
+    it('should classify a network error as retryable', async () => {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
 
       const result = await transport.sendKeepalive(
@@ -216,7 +273,41 @@ describe('Transport', () => {
         {}
       );
 
-      expect(result).toBe(false);
+      expect(result).toBe('retryable');
     });
+
+    it.each([408, 425, 429, 503])(
+      'should classify keepalive HTTP %i as retryable',
+      async (status) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({ ok: false, status })
+        );
+
+        const result = await transport.sendKeepalive(
+          'https://api.test.dev/v1/events',
+          {}
+        );
+
+        expect(result).toBe('retryable');
+      }
+    );
+
+    it.each([302, 600])(
+      'should classify keepalive HTTP %i as a permanent rejection',
+      async (status) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue({ ok: false, status })
+        );
+
+        const result = await transport.sendKeepalive(
+          'https://api.test.dev/v1/events',
+          {}
+        );
+
+        expect(result).toBe('permanent_rejection');
+      }
+    );
   });
 });

@@ -10,11 +10,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import type { CustomAgent } from '../../src/api/types/agents'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
-import { WorkspaceProvider } from '../../src/core/workspace'
+import { WorkspaceProvider, type Workspace } from '../../src/core/workspace'
 import { CustomAgentsPage } from '../../src/features/agents/custom/CustomAgentsPage'
 import { CustomAgentWizardPage } from '../../src/features/agents/custom/CustomAgentWizardPage'
 import { TriggerPage } from '../../src/features/agents/TriggerPage'
-import { seedWorkspace } from '../helpers/fixtures'
+import { makeReadOnlyAgentWorkspace, seedWorkspace } from '../helpers/fixtures'
 
 const BASE = '*/api/projects/demo/agents'
 const QUERY_BASE = '*/api/projects/demo/query'
@@ -163,10 +163,14 @@ beforeEach(() => {
   customAgents = []
 })
 
-function renderWithProviders(ui: React.ReactElement, initialPath: string) {
+function renderWithProviders(
+  ui: React.ReactElement,
+  initialPath: string,
+  workspace: Workspace = seedWorkspace(),
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+    <WorkspaceProvider initialWorkspaces={[workspace]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[initialPath]}>{ui}</MemoryRouter>
@@ -177,6 +181,24 @@ function renderWithProviders(ui: React.ReactElement, initialPath: string) {
 }
 
 describe('CustomAgentsPage', () => {
+  test('preserves definitions but removes management controls without agents:manage', async () => {
+    customAgents = [makeCustomAgent()]
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/custom" element={<CustomAgentsPage />} />
+      </Routes>,
+      '/agents/custom',
+      seedWorkspace(makeReadOnlyAgentWorkspace()),
+    )
+
+    expect(await screen.findByText('Churn watch')).toBeInTheDocument()
+    expect(screen.getByText(/definitions remain visible for audit/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /new custom agent/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Churn watch' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit Churn watch' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archive Churn watch' })).not.toBeInTheDocument()
+  })
+
   test('lists the project custom agents', async () => {
     customAgents = [makeCustomAgent()]
     renderWithProviders(
@@ -218,6 +240,27 @@ describe('CustomAgentsPage', () => {
 })
 
 describe('CustomAgentWizardPage', () => {
+  test.each(['/agents/custom/new', '/agents/custom/agent-1/edit'])(
+    'fails closed on direct mutation URL %s without agents:manage',
+    (path) => {
+      renderWithProviders(
+        <Routes>
+          <Route path="/agents/custom/new" element={<CustomAgentWizardPage />} />
+          <Route path="/agents/custom/:agentId/edit" element={<CustomAgentWizardPage />} />
+        </Routes>,
+        path,
+        seedWorkspace(makeReadOnlyAgentWorkspace()),
+      )
+
+      expect(screen.getByText('Custom-agent management unavailable')).toBeInTheDocument()
+      expect(screen.getByText(/does not grant agents:manage/i)).toBeInTheDocument()
+      expect(screen.queryByLabelText('Name')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /run test/i })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /create agent|save changes/i })).not.toBeInTheDocument()
+      expect(requests.some((entry) => ['create', 'test'].includes(entry.path))).toBe(false)
+    },
+  )
+
   async function fillWizardToTestStep() {
     // Step 1: Basics — slug auto-derives from the name.
     await userEvent.type(await screen.findByLabelText('Name'), 'Churn watch')

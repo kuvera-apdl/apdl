@@ -9,7 +9,7 @@ from enum import Enum
 
 import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_project
 from app.framework.registry import is_registered, registered_agents
@@ -28,27 +28,24 @@ class TriggerType(str, Enum):
 
 
 class TriggerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     project_id: str = Field(min_length=1)
     trigger_type: TriggerType
     analysis_types: list[str] = Field(
         default_factory=lambda: ["behavior_analysis"],
         min_length=1,
         max_length=16,
-        description="Agent graphs to run: behavior_analysis, experiment_design, experiment_evaluation, feature_proposal, code_implementation",
+        description="Agent graphs to run; disabled built-ins are rejected.",
     )
     time_range_days: int = Field(default=7, ge=1, le=90)
     autonomy_level: int = Field(
         default=2,
         ge=1,
         le=4,
-        description="L1=suggest only, L2=auto-safe, L3=auto+approve risky, L4=full auto",
-    )
-    target_experiment_id: str | None = Field(
-        default=None,
         description=(
-            "Scope an experiment_evaluation run to one experiment (a human's "
-            "'evaluate now'); an immature experiment then gets an explicit "
-            "immature verdict instead of being skipped."
+            "L1=suggest only; L2=approval; L3 auto-applies low risk; L4 applies "
+            "every safety-passing action except explicitly always-gated actions"
         ),
     )
 
@@ -143,11 +140,6 @@ async def trigger_agent_run(
                 {
                     "analysis_types": body.analysis_types,
                     "time_range_days": body.time_range_days,
-                    **(
-                        {"target_experiment_id": body.target_experiment_id}
-                        if body.target_experiment_id
-                        else {}
-                    ),
                 }
             ),
         )
@@ -164,7 +156,6 @@ async def trigger_agent_run(
         analysis_types=body.analysis_types,
         time_range_days=body.time_range_days,
         autonomy_level=body.autonomy_level,
-        target_experiment_id=body.target_experiment_id,
     )
 
     return TriggerResponse(run_id=run_id, status="started")

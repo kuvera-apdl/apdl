@@ -1,10 +1,23 @@
 """Pydantic models for gates and experiments."""
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+
+from app.flags.targeting_contract import (
+    MAX_CONDITIONS_PER_RULE,
+    MAX_IDENTIFIER_LENGTH,
+    MAX_MEMBERSHIP_VALUES,
+    MAX_RULES,
+    MAX_STRING_LENGTH,
+    PRESENCE_OPERATORS,
+    is_bounded_string,
+    is_condition_value_valid,
+    is_identifier,
+    is_json_number,
+)
 
 
 class StrictModel(BaseModel):
@@ -24,7 +37,6 @@ ConditionOperator = Literal[
     "not_contains",
     "starts_with",
     "ends_with",
-    "regex",
     "in",
     "not_in",
     "exists",
@@ -36,7 +48,19 @@ GuardrailThreshold = Literal["2x_baseline", "at_least_one"]
 EvaluationMode = Literal["client", "server", "both"]
 FlagState = Literal["draft", "active", "disabled", "archived"]
 WritableFlagState = Literal["draft", "active", "disabled"]
-ExperimentStatus = Literal["draft", "running", "completed", "stopped"]
+ExperimentStatus = Literal[
+    "draft",
+    "scheduled",
+    "running",
+    "completed",
+    "stopped",
+]
+ExperimentCreateStatus = Literal["draft", "scheduled", "running"]
+MAX_EXPERIMENT_VARIANTS = 10
+MAX_EXPERIMENT_DURATION_DAYS = 90
+MAX_EXPERIMENT_DURATION = timedelta(days=MAX_EXPERIMENT_DURATION_DAYS)
+MAX_ANALYTICS_WINDOW_MINUTES = 90 * 24 * 60
+RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 GateEvaluationReason = Literal[
     "not_found",
     "invalid_config",
@@ -52,35 +76,40 @@ GateConfigSource = Literal["memory", "initial_fetch", "sse", "local_storage", "s
 
 
 class GateCondition(StrictModel):
-    attribute: str = Field(..., min_length=1)
+    attribute: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     operator: ConditionOperator
     value: Any | None = None
 
     @model_validator(mode="after")
     def validate_value(self):
-        if self.operator in {"exists", "not_exists"}:
+        if self.operator in PRESENCE_OPERATORS:
             if "value" in self.model_fields_set:
                 raise ValueError(f"{self.operator} conditions must not include value")
             return self
-        if self.value is None:
+        if "value" not in self.model_fields_set:
             raise ValueError(f"{self.operator} conditions require value")
+        if not is_condition_value_valid(self.operator, self.value):
+            raise ValueError(f"invalid value for {self.operator} condition")
         return self
 
 
 class RolloutConfig(StrictModel):
     percentage: float = Field(..., ge=0.0, le=100.0)
-    bucket_by: str = Field(..., min_length=1)
+    bucket_by: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
 
 
 class VariantConfig(StrictModel):
-    key: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     weight: int = Field(..., ge=0, strict=True)
 
 
 class GateRule(StrictModel):
-    id: str = Field(..., min_length=1)
-    name: str = ""
-    conditions: list[GateCondition] = Field(default_factory=list)
+    id: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    name: str = Field(default="", max_length=MAX_STRING_LENGTH)
+    conditions: list[GateCondition] = Field(
+        default_factory=list,
+        max_length=MAX_CONDITIONS_PER_RULE,
+    )
     rollout: RolloutConfig
 
 
@@ -93,7 +122,11 @@ class GuardrailConfig(StrictModel):
     threshold: GuardrailThreshold
     scope: str = ""
     minimum_exposures: int = Field(default=0, ge=0)
-    window_minutes: int = Field(default=10, ge=1)
+    window_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=MAX_ANALYTICS_WINDOW_MINUTES,
+    )
 
     @model_validator(mode="after")
     def validate_metric_threshold(self):
@@ -136,20 +169,6 @@ def validate_variant_weights(variants: list[VariantConfig]) -> None:
         raise ValueError("variant weights must contain at least one positive weight")
 
 
-def derive_default_variant(variant_keys: list[str], explicit: str | None = None) -> str:
-    """Resolve the default variant: an explicit choice (validated), else
-    ``"control"`` when present, else the first variant key."""
-    if explicit is not None:
-        if explicit not in variant_keys:
-            raise ValueError("default_variant must match a variant key")
-        return explicit
-    if "control" in variant_keys:
-        return "control"
-    if variant_keys:
-        return variant_keys[0]
-    raise ValueError("variants must contain at least one variant")
-
-
 def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
     """Validate the canonical variant fields for a complete flag config."""
     default_variant = flag.get("default_variant")
@@ -168,7 +187,11 @@ def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
 
 
 class VariantFlagMixin(StrictModel):
-    default_variant: str = Field(..., min_length=1)
+    default_variant: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_LENGTH,
+    )
     variants: list[VariantConfig] = Field(...)
 
     @model_validator(mode="after")
@@ -178,7 +201,7 @@ class VariantFlagMixin(StrictModel):
 
 
 class FlagConfig(VariantFlagMixin):
-    key: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     project_id: str = ""
     name: str = ""
     state: FlagState = "draft"
@@ -186,11 +209,11 @@ class FlagConfig(VariantFlagMixin):
     review_by: date | None = None
     enabled: bool = False
     description: str = ""
-    rules: list[GateRule] = Field(default_factory=list)
+    rules: list[GateRule] = Field(default_factory=list, max_length=MAX_RULES)
     fallthrough: FallthroughConfig
-    salt: str = ""
+    salt: str = Field(default="", max_length=MAX_STRING_LENGTH)
     evaluation_mode: EvaluationMode = "client"
-    auto_disable: bool = True
+    auto_disable: Literal[False] = False
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
     disabled_reason: str = ""
     disabled_by: str = ""
@@ -202,10 +225,10 @@ class FlagConfig(VariantFlagMixin):
 
 
 class ClientFlagConfig(VariantFlagMixin):
-    key: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     enabled: bool
-    salt: str
-    rules: list[GateRule]
+    salt: str = Field(..., max_length=MAX_STRING_LENGTH)
+    rules: list[GateRule] = Field(..., max_length=MAX_RULES)
     fallthrough: FallthroughConfig
     version: int = Field(..., ge=1)
 
@@ -223,16 +246,50 @@ class ExperimentConfig(BaseModel):
     targeting_rules_json: str = "[]"
     primary_metric_json: str = "{}"
     traffic_percentage: float = 100.0
-    start_date: str = ""
-    end_date: str = ""
+    start_date: AwareDatetime | None = None
+    end_date: AwareDatetime | None = None
+    version: int = Field(default=1, ge=1)
     created_at: str = ""
     updated_at: str = ""
 
 
+def _validate_context_value(value: Any, *, depth: int = 0) -> bool:
+    """Bound JSON context values without coercing their types."""
+    if value is None or isinstance(value, bool) or is_json_number(value):
+        return True
+    if isinstance(value, str):
+        return is_bounded_string(value)
+    if depth >= 4:
+        return False
+    if isinstance(value, list):
+        return len(value) <= MAX_MEMBERSHIP_VALUES and all(
+            _validate_context_value(item, depth=depth + 1) for item in value
+        )
+    if isinstance(value, dict):
+        return len(value) <= MAX_MEMBERSHIP_VALUES and all(
+            is_identifier(key)
+            and _validate_context_value(item, depth=depth + 1)
+            for key, item in value.items()
+        )
+    return False
+
+
 class EvalContext(StrictModel):
-    user_id: str = ""
-    anonymous_id: str = ""
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    user_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
+    anonymous_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
+    attributes: dict[str, Any] = Field(
+        default_factory=dict,
+        max_length=MAX_MEMBERSHIP_VALUES,
+    )
+
+    @model_validator(mode="after")
+    def validate_attributes(self):
+        if not all(
+            is_identifier(key) and _validate_context_value(value)
+            for key, value in self.attributes.items()
+        ):
+            raise ValueError("attributes must contain bounded JSON values")
+        return self
 
 
 class EvalResult(StrictModel):
@@ -275,17 +332,17 @@ class GateEvaluateResponse(StrictModel):
 # ---------- Admin request bodies ----------
 
 class FlagCreate(VariantFlagMixin):
-    key: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     name: str = Field(..., min_length=1)
     state: WritableFlagState = "draft"
     owners: list[str] = Field(default_factory=list)
     review_by: date | None = None
     enabled: bool = False
     description: str = ""
-    rules: list[GateRule] = Field(default_factory=list)
+    rules: list[GateRule] = Field(default_factory=list, max_length=MAX_RULES)
     fallthrough: FallthroughConfig
     evaluation_mode: EvaluationMode = "client"
-    auto_disable: bool = True
+    auto_disable: Literal[False] = False
     guardrails: list[GuardrailConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -297,26 +354,30 @@ class FlagCreate(VariantFlagMixin):
 
 class FlagUpdate(StrictModel):
     version: int = Field(..., ge=1)
-    state: WritableFlagState | None = None
     owners: list[str] | None = None
     review_by: date | None = None
-    enabled: bool | None = None
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
-    default_variant: str | None = Field(default=None, min_length=1)
+    default_variant: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_LENGTH,
+    )
     variants: list[VariantConfig] | None = None
-    rules: list[GateRule] | None = None
+    rules: list[GateRule] | None = Field(default=None, max_length=MAX_RULES)
     fallthrough: FallthroughConfig | None = None
     evaluation_mode: EvaluationMode | None = None
-    auto_disable: bool | None = None
+    auto_disable: Literal[False] | None = None
     guardrails: list[GuardrailConfig] | None = None
 
     @model_validator(mode="after")
     def validate_lifecycle(self):
+        nullable_fields = {"review_by"}
+        for field in self.model_fields_set - nullable_fields:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
         if self.owners is not None:
             validate_owners(self.owners)
-        if self.state is not None and self.enabled is not None:
-            validate_state_enabled(self.state, self.enabled)
         if self.variants is not None:
             validate_variant_weights(self.variants)
         if self.variants is not None and self.default_variant is not None:
@@ -324,15 +385,19 @@ class FlagUpdate(StrictModel):
         return self
 
 
+class FlagTransition(StrictModel):
+    version: int = Field(..., ge=1)
+    target_state: Literal["draft", "active"]
+
+
 class FlagDisable(StrictModel):
+    version: int = Field(..., ge=1)
     reason: Literal["guardrail_failed", "experiment_rollback"] = "guardrail_failed"
-    source: Literal["system", "admin"] = "system"
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class FlagCleanup(StrictModel):
     version: int = Field(..., ge=1)
-    source: Literal["admin", "system"] = "admin"
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -356,72 +421,173 @@ class ExperimentVariant(StrictModel):
     the flag is derived.
     """
 
-    key: str = Field(..., min_length=1)
-    weight: int = Field(..., ge=0, strict=True)
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    weight: int = Field(..., gt=0, strict=True)
     description: str = ""
 
 
 class ExperimentMetric(StrictModel):
-    """Primary/secondary metric descriptor.
+    """Canonical primary conversion-metric descriptor.
 
-    ``type`` and ``direction`` are advisory for analysis and display; only
-    ``event`` drives the Query service's exposure→event join.
+    ``type`` is fixed to ``conversion``; ``event`` drives the Query service's
+    exposure-to-conversion join and ``direction`` remains display metadata.
     """
 
     event: str = Field(..., min_length=1)
-    type: str = "conversion"
+    type: Literal["conversion"] = "conversion"
     direction: str = "increase"
-
-
-def default_experiment_variants() -> list[ExperimentVariant]:
-    return [
-        ExperimentVariant(key="control", weight=1),
-        ExperimentVariant(key="treatment", weight=1),
-    ]
 
 
 def _projected_variants(variants: list[ExperimentVariant]) -> list[VariantConfig]:
     return [VariantConfig(key=v.key, weight=v.weight) for v in variants]
 
 
+class ExperimentAnalysis(StrictModel):
+    """Authoritative metadata required by the experiment-analysis service."""
+
+    key: str = Field(..., pattern=RESOURCE_KEY_PATTERN)
+    flag_key: str = Field(..., pattern=RESOURCE_KEY_PATTERN)
+    status: Literal["scheduled", "running", "completed", "stopped"]
+    control_variant: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    variants: list[str] = Field(
+        ...,
+        min_length=2,
+        max_length=MAX_EXPERIMENT_VARIANTS,
+    )
+    metric_event: str = Field(..., min_length=1)
+    start_date: AwareDatetime
+    end_date: AwareDatetime
+    version: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def validate_analysis_contract(self):
+        if len(set(self.variants)) != len(self.variants):
+            raise ValueError("variants must contain unique keys")
+        if any(not is_identifier(variant) for variant in self.variants):
+            raise ValueError("variants must contain bounded non-empty keys")
+        if self.control_variant not in self.variants:
+            raise ValueError("control_variant must match a variant key")
+        if self.end_date <= self.start_date:
+            raise ValueError("end_date must be after start_date")
+        if self.end_date - self.start_date > MAX_EXPERIMENT_DURATION:
+            raise ValueError(
+                f"experiment duration must not exceed {MAX_EXPERIMENT_DURATION_DAYS} days"
+            )
+        return self
+
+
 class ExperimentCreate(StrictModel):
-    key: str = Field(..., min_length=1)
-    flag_key: str | None = Field(default=None, min_length=1)
-    status: ExperimentStatus = "draft"
+    key: str = Field(..., pattern=RESOURCE_KEY_PATTERN)
+    flag_key: str | None = Field(default=None, pattern=RESOURCE_KEY_PATTERN)
+    status: ExperimentCreateStatus = "draft"
     description: str = ""
     traffic_percentage: float = Field(default=100.0, ge=0.0, le=100.0)
-    start_date: str = ""
-    end_date: str = ""
-    variants: list[ExperimentVariant] = Field(default_factory=default_experiment_variants)
-    default_variant: str | None = Field(default=None, min_length=1)
+    start_date: AwareDatetime | None = None
+    end_date: AwareDatetime | None = None
+    variants: list[ExperimentVariant] = Field(
+        ...,
+        min_length=2,
+        max_length=MAX_EXPERIMENT_VARIANTS,
+    )
+    default_variant: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_LENGTH,
+    )
     primary_metric: ExperimentMetric | None = None
-    targeting_rules: list[GateRule] = Field(default_factory=list)
+    targeting_rules: list[GateRule] = Field(
+        default_factory=list,
+        max_length=MAX_RULES,
+    )
 
     @model_validator(mode="after")
     def validate_experiment(self):
         projected = _projected_variants(self.variants)
         validate_variant_weights(projected)
-        if self.default_variant is not None:
-            validate_variants(projected, self.default_variant)
+        validate_variants(projected, self.default_variant)
+        validate_experiment_lifecycle(
+            status=self.status,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            primary_metric=self.primary_metric,
+        )
         return self
 
 
 class ExperimentUpdate(StrictModel):
+    version: int = Field(..., ge=1)
     status: ExperimentStatus | None = None
     description: str | None = None
     traffic_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
-    start_date: str | None = None
-    end_date: str | None = None
-    variants: list[ExperimentVariant] | None = None
-    default_variant: str | None = Field(default=None, min_length=1)
+    start_date: AwareDatetime | None = None
+    end_date: AwareDatetime | None = None
+    variants: list[ExperimentVariant] | None = Field(
+        default=None,
+        min_length=2,
+        max_length=MAX_EXPERIMENT_VARIANTS,
+    )
+    default_variant: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_LENGTH,
+    )
     primary_metric: ExperimentMetric | None = None
-    targeting_rules: list[GateRule] | None = None
+    targeting_rules: list[GateRule] | None = Field(
+        default=None,
+        max_length=MAX_RULES,
+    )
 
     @model_validator(mode="after")
     def validate_experiment(self):
+        nullable_fields = {"start_date", "end_date", "primary_metric"}
+        for field in self.model_fields_set - nullable_fields:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} must not be null")
         if self.variants is not None:
             projected = _projected_variants(self.variants)
             validate_variant_weights(projected)
             if self.default_variant is not None:
                 validate_variants(projected, self.default_variant)
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.end_date <= self.start_date
+        ):
+            raise ValueError("end_date must be after start_date")
         return self
+
+
+def validate_experiment_lifecycle(
+    *,
+    status: str,
+    start_date: datetime | None,
+    end_date: datetime | None,
+    primary_metric: ExperimentMetric | None,
+    now: datetime | None = None,
+) -> None:
+    """Validate the complete experiment serving window and launch state."""
+    if end_date is not None and start_date is None:
+        raise ValueError("end_date requires start_date")
+    if start_date is not None and end_date is not None and end_date <= start_date:
+        raise ValueError("end_date must be after start_date")
+    if (
+        start_date is not None
+        and end_date is not None
+        and end_date - start_date > MAX_EXPERIMENT_DURATION
+    ):
+        raise ValueError(
+            f"experiment duration must not exceed {MAX_EXPERIMENT_DURATION_DAYS} days"
+        )
+    if status not in {"scheduled", "running"}:
+        return
+    if start_date is None or end_date is None:
+        raise ValueError(f"{status} experiments require start_date and end_date")
+    if primary_metric is None:
+        raise ValueError(f"{status} experiments require primary_metric")
+    current = now or datetime.now(timezone.utc)
+    if status == "scheduled" and start_date <= current:
+        raise ValueError("scheduled experiments require a future start_date")
+    if status == "running" and start_date > current:
+        raise ValueError("future experiments must use status 'scheduled'")
+    if status == "running" and end_date <= current:
+        raise ValueError("running experiments require a future end_date")

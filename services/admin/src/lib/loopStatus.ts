@@ -2,7 +2,7 @@
 //
 // Every loop surface — Decide, Watch, Learn, Ship, the experiment thread hub,
 // Overview — speaks these stages, mapped ONCE here from the various backend
-// states (run phase/status, experiment status, verdict). Pages never re-derive
+// states (run phase/status and experiment status). Pages never re-derive
 // colors; they call loopStatusMeta / <LoopStatusPill>.
 
 export type LoopStage =
@@ -65,29 +65,10 @@ export function runToLoopStage(status: string, phase = ''): LoopStage {
   if (status === 'waiting_approval') return 'awaiting_approval'
   if (status === 'failed' || status === 'completed_with_errors') return 'failed'
   if (status === 'completed' || status === 'approved') return 'done'
-  if (status === 'rejected') return 'rollback'
+  if (status === 'rejected') return 'done'
   if (status === 'running' || status === 'started') {
     if (phase.startsWith('code_implementation')) return 'building'
-    if (phase.startsWith('experiment_evaluation')) return 'running'
     return 'designing'
   }
   return 'designing'
-}
-
-// Experiment verdict → loop stage (Decided column, Learn, Ship).
-export function verdictToLoopStage(verdict: string): LoopStage {
-  switch (verdict) {
-    case 'ship':
-      return 'ship'
-    case 'rollback':
-      return 'rollback'
-    case 'iterate':
-      return 'iterate'
-    case 'extend':
-      return 'extend'
-    case 'immature':
-      return 'needs_data'
-    default:
-      return 'running'
-  }
 }

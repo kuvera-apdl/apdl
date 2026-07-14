@@ -12,7 +12,7 @@ import {
   ENDPOINT,
   MockEventSource,
   createTestConfig,
-  emptyFlagsResponse,
+  mockApiFetch,
 } from './helpers';
 
 const fetchMock = vi.fn();
@@ -23,10 +23,9 @@ describe('public SDK entrypoint', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fetchMock.mockReset();
-    fetchMock.mockResolvedValue(emptyFlagsResponse());
+    fetchMock.mockImplementation(mockApiFetch);
     MockEventSource.instances = [];
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubGlobal('EventSource', MockEventSource);
   });
 
   afterEach(async () => {
@@ -81,11 +80,17 @@ describe('public SDK entrypoint', () => {
       },
     });
 
+    await flushAsync();
     const source = MockEventSource.instances.at(-1);
     expect(source).toBeDefined();
     const sseUrl = new URL(source!.url);
     expect(`${sseUrl.origin}${sseUrl.pathname}`).toBe(`${ENDPOINT}/v1/stream`);
-    expect(sseUrl.searchParams.get('api_key')).toBe(CLIENT_KEY);
+    expect(sseUrl.search).toBe('');
+    expect(source!.init.headers).toMatchObject({
+      Accept: 'text/event-stream',
+      'X-API-Key': CLIENT_KEY,
+      'X-APDL-SDK': SDK_IDENTIFIER,
+    });
 
     client.track('public_api_event');
     await client.debug.flush();
@@ -112,3 +117,9 @@ describe('public SDK entrypoint', () => {
       .toThrow('config.apiKey is no longer supported');
   });
 });
+
+async function flushAsync(): Promise<void> {
+  for (let index = 0; index < 10; index += 1) {
+    await Promise.resolve();
+  }
+}

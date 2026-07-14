@@ -19,7 +19,7 @@ import { useQuery } from '@tanstack/react-query'
 import { listRuns, runResults } from '@/api/agents'
 import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
 import { useLive } from '@/core/live'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { EventCombobox } from '@/features/analytics/EventCombobox'
@@ -326,9 +326,9 @@ function ThroughputCard() {
   )
 }
 
-function daysSince(date: string): number | null {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
-  const start = new Date(`${date}T00:00:00`)
+function daysSince(date: string | null): number | null {
+  if (date === null) return null
+  const start = new Date(date)
   if (Number.isNaN(start.getTime())) return null
   return Math.max(0, Math.floor((Date.now() - start.getTime()) / 86_400_000))
 }
@@ -386,6 +386,8 @@ function ExperimentsCard() {
 
 function AgentsCard() {
   const { active, projectId } = useWorkspace()
+  const canRun = hasWorkspaceRole(active, 'agents:run')
+  const canApprove = hasWorkspaceRole(active, 'agents:approve')
 
   // The latest run is read from the server (GET /v1/agents/runs), the source of
   // truth for every browser and for runs a scheduler triggers — not from this
@@ -435,7 +437,9 @@ function AgentsCard() {
             to={`/agents/runs/${encodeURIComponent(latest.run_id)}`}
             className="block rounded-md border border-amber-400 bg-amber-50 p-3 font-medium text-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
           >
-            ⏳ Awaiting your approval — review the run →
+            {canApprove
+              ? '⏳ Awaiting your approval — review the run →'
+              : '⏳ Awaiting operator approval — view the run →'}
           </Link>
         ) : null}
         {latest ? (
@@ -463,9 +467,18 @@ function AgentsCard() {
             </ul>
           </div>
         ) : null}
-        <Link to="/agents/trigger" className="block text-sm font-medium underline underline-offset-4">
-          Trigger a run →
-        </Link>
+        {canRun ? (
+          <Link
+            to="/agents/trigger"
+            className="block text-sm font-medium underline underline-offset-4"
+          >
+            Trigger a run →
+          </Link>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Read-only agent access; starting runs requires agents:run.
+          </p>
+        )}
       </CardContent>
     </Card>
   )

@@ -26,12 +26,14 @@ batch-inserts into the `events` table.
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
   buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
   (`FLUSH_INTERVAL`), whichever comes first.
-- **Delivery:** at-least-once. New consumer groups start at `0-0`, so a stream's
+- **Delivery:** at-least-once transport with idempotent storage. New consumer
+  groups start at `0-0`, so a stream's
   existing backlog is consumed on first discovery. The writer periodically uses
   `XAUTOCLAIM` to take over stale Pending Entries List deliveries from prior
   consumers. Messages are XACKed only after ClickHouse accepts their rows. A
-  crash between insert and ACK may replay a row; the legacy table does not
-  provide exactly-once storage semantics.
+  crash between insert and ACK may replay an insert, but the stable client
+  `message_id` and `(project_id, message_id)` replacement key make supported
+  `FINAL` reads return that event exactly once.
 - **Tenant authority:** the project is derived only from a validated
   `events:raw:{project_id}` stream key. Conflicting project assertions inside a
   Redis message or its event JSON are rejected.
@@ -63,18 +65,23 @@ copy of the events table.
 
 **Tables**
 
-- `events` (001, MergeTree) — raw event stream; the writer's insert target
+- `events` (001, ReplacingMergeTree) — raw event stream, idempotent on
+  `(project_id, message_id)`; the writer's insert target
 - `sessions` (002, MergeTree) — session-level rollups
-- `experiment_exposures` (003, ReplacingMergeTree) — first exposure per user/experiment/variant
-- `feature_flag_exposures` (006, ReplacingMergeTree) — flag evaluation results projected from events
-- `frontend_health_events` (007, MergeTree) — frontend errors and web-vitals projected from events
+- `feature_flag_exposures` (006, ReplacingMergeTree) — idempotent flag
+  evaluation results projected from events
+- `frontend_health_events` (007, ReplacingMergeTree) — idempotent frontend
+  errors and web-vitals projected from events
 
 **Materialized views**
 
-- `event_counts_hourly_mv` / `event_counts_daily_mv` (004, SummingMergeTree) — event counts + unique users per project/event per hour/day
-- `experiment_metrics_mv` (004, AggregatingMergeTree) — hourly per-variant metric states (count, uniq users, revenue) by joining events to exposures
 - `feature_flag_exposures_mv` (006) — extracts flag fields from `events.properties` into `feature_flag_exposures`
 - `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
+
+Supported Query Service analytics read each ReplacingMergeTree with `FINAL` so
+retries are deduplicated before aggregation. Migration 004 removes the legacy
+SummingMergeTree count views because materialized views process retried insert
+blocks before source-table replacement and would permanently double count them.
 
 Every file in `clickhouse/migrations/` must be executable ClickHouse SQL. The
 runner fails if a PostgreSQL marker is found there instead of silently skipping

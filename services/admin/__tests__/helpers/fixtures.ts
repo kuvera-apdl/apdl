@@ -400,7 +400,7 @@ export function makeFlag(overrides: Partial<FlagConfig> = {}): FlagConfig {
         name: 'beta users',
         conditions: [
           { attribute: 'plan', operator: 'equals', value: 'pro' },
-          { attribute: 'beta_opt_in', operator: 'exists', value: null },
+          { attribute: 'beta_opt_in', operator: 'exists' },
         ],
         rollout: { percentage: 50, bucket_by: 'user_id' },
       },
@@ -408,7 +408,7 @@ export function makeFlag(overrides: Partial<FlagConfig> = {}): FlagConfig {
     fallthrough: { rollout: { percentage: 10, bucket_by: 'user_id' } },
     salt: 'fixture-salt',
     evaluation_mode: 'client',
-    auto_disable: true,
+    auto_disable: false,
     guardrails: [
       {
         metric: 'frontend_error_rate',
@@ -436,6 +436,7 @@ export function makeAuditEntry(overrides: Partial<FlagAuditEntry> = {}): FlagAud
     flag_key: 'checkout-cta',
     action: 'flag_updated',
     actor: 'kirill',
+    origin: 'manual',
     previous_version: 2,
     new_version: 3,
     before: { name: 'Old name', version: 2 },
@@ -454,8 +455,35 @@ export function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     name: 'demo',
     projectId: 'demo',
     actor: 'tester@example.com',
+    roles: [
+      'events:write',
+      'config:read',
+      'config:write',
+      'config:evaluate',
+      'query:read',
+      'agents:read',
+      'agents:run',
+      'agents:manage',
+      'agents:approve',
+    ],
     ...overrides,
   }
+}
+
+export function makeReadOnlyAgentWorkspace(
+  overrides: Partial<Workspace> = {},
+): Workspace {
+  return makeWorkspace({
+    roles: [
+      'events:write',
+      'config:read',
+      'config:write',
+      'config:evaluate',
+      'query:read',
+      'agents:read',
+    ],
+    ...overrides,
+  })
 }
 
 export function seedWorkspace(workspace: Workspace = makeWorkspace()): Workspace {

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS decisions_v2 (
     -- ---------- envelope ----------
     _id                UUID,
     _schema            LowCardinality(String),     -- flag_eval@1 | exposure@1 | agent_action@1 | personalization@1
-    _project_id        UInt32,
+    _project_id        String,
     _idempotency_key   String,
     _correlation_id    UUID,
     _source            LowCardinality(String),

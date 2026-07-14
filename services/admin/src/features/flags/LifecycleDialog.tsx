@@ -4,7 +4,7 @@ import { Loader2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 
-import { archiveFlagCurl, cleanupFlagCurl, disableFlagCurl, updateFlagCurl } from '@/api/config'
+import { archiveFlagCurl, cleanupFlagCurl, disableFlagCurl, transitionFlagCurl } from '@/api/config'
 import { ApiError } from '@/api/http'
 import type { FlagConfig, FlagDisable } from '@/api/types/flags'
 import { Button } from '@/components/ui/button'
@@ -24,7 +24,7 @@ import {
   useArchiveFlagMutation,
   useCleanupFlagMutation,
   useDisableFlagMutation,
-  useUpdateFlagMutation,
+  useTransitionFlagMutation,
 } from '@/features/flags/mutations'
 import { toCurl, type CurlSpec } from '@/lib/curl'
 import { formatPercent } from '@/lib/format'
@@ -77,7 +77,7 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
   const { active } = useWorkspace()
   const conn = active ? serviceConnection(active, 'config') : null
 
-  const updateMutation = useUpdateFlagMutation(flag.key)
+  const transitionMutation = useTransitionFlagMutation(flag.key)
   const disableMutation = useDisableFlagMutation(flag.key)
   const archiveMutation = useArchiveFlagMutation(flag.key)
   const cleanupMutation = useCleanupFlagMutation(flag.key)
@@ -88,7 +88,7 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
   const [confirmKey, setConfirmKey] = useState('')
 
   const submitting =
-    updateMutation.isPending ||
+    transitionMutation.isPending ||
     disableMutation.isPending ||
     archiveMutation.isPending ||
     cleanupMutation.isPending
@@ -96,13 +96,12 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
   if (!conn) return null
 
   const disableBody: FlagDisable = {
+    version: flag.version,
     reason: disableReason,
-    source: 'admin',
     evidence: note.trim() ? { note: note.trim() } : {},
   }
   const cleanupBody = {
     version: flag.version,
-    source: 'admin' as const,
     evidence: note.trim() ? { note: note.trim() } : {},
   }
 
@@ -110,16 +109,16 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
     setError(null)
     try {
       if (action === 'activate') {
-        await updateMutation.mutateAsync({ version: flag.version, state: 'active' })
+        await transitionMutation.mutateAsync({ version: flag.version, target_state: 'active' })
         toast.success(`"${flag.key}" activated`)
       } else if (action === 'deactivate') {
-        await updateMutation.mutateAsync({ version: flag.version, state: 'draft' })
+        await transitionMutation.mutateAsync({ version: flag.version, target_state: 'draft' })
         toast.success(`"${flag.key}" deactivated to draft`)
       } else if (action === 'disable') {
         await disableMutation.mutateAsync(disableBody)
         toast.success(`"${flag.key}" disabled — SDKs fall back to defaults`)
       } else if (action === 'archive') {
-        await archiveMutation.mutateAsync()
+        await archiveMutation.mutateAsync(flag.version)
         toast.success(`"${flag.key}" archived`)
       } else {
         const response = await cleanupMutation.mutateAsync(cleanupBody)
@@ -139,7 +138,10 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
         return {
           title: `Activate ${flag.key}?`,
           description: `Activating exposes ~${formatPercent(flag.fallthrough.rollout.percentage)} of fallthrough traffic (plus any rule rollouts) on the next SSE push.`,
-          curl: updateFlagCurl(conn, flag.key, { version: flag.version, state: 'active' }),
+          curl: transitionFlagCurl(conn, flag.key, {
+            version: flag.version,
+            target_state: 'active',
+          }),
           confirmLabel: 'Activate',
           destructive: false,
           disabled: false,
@@ -149,7 +151,10 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
           title: `Deactivate ${flag.key} to draft?`,
           description:
             'Paused by owner — distinct from the kill switch: no disable metadata is recorded, and the flag stops serving on the next SSE push.',
-          curl: updateFlagCurl(conn, flag.key, { version: flag.version, state: 'draft' }),
+          curl: transitionFlagCurl(conn, flag.key, {
+            version: flag.version,
+            target_state: 'draft',
+          }),
           confirmLabel: 'Deactivate',
           destructive: false,
           disabled: false,
@@ -169,7 +174,7 @@ export function LifecycleDialog({ flag, action, onClose }: LifecycleDialogProps)
           title: `Archive ${flag.key}?`,
           description:
             'Irreversible — archived is a terminal state. The flag stops serving and disappears from SDK payloads; history remains under "show archived".',
-          curl: archiveFlagCurl(conn, flag.key),
+          curl: archiveFlagCurl(conn, flag.key, flag.version),
           confirmLabel: 'Archive forever',
           destructive: true,
           disabled: confirmKey !== flag.key,

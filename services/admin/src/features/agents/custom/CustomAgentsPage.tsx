@@ -32,7 +32,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 export function CustomAgentsPage() {
@@ -40,6 +41,7 @@ export function CustomAgentsPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [toArchive, setToArchive] = useState<CustomAgent | null>(null)
+  const canManage = hasWorkspaceRole(active, 'agents:manage')
 
   const conn = active ? serviceConnection(active, 'agents') : null
 
@@ -68,19 +70,32 @@ export function CustomAgentsPage() {
       <PageHeader
         backTo={{ to: '/agents', label: 'Agent runs' }}
         title="Custom agents"
-        description="Project-scoped, read-only analysis agents: your prompts plus the query tools you allow, driven agentically by the model through the same supervisor pipeline as the built-ins. They never deploy anything."
+        description={
+          canManage
+            ? 'Project-scoped, read-only analysis agents: your prompts plus the query tools you allow, driven agentically by the model through the same supervisor pipeline as the built-ins. They never deploy anything.'
+            : 'Project-scoped custom-agent definitions. This workspace can inspect them but cannot create, edit, test, or archive them.'
+        }
         actions={
           <>
             {conn && projectId ? (
               <CurlButton spec={listCustomAgentsCurl(conn, projectId)} title="List custom agents" />
             ) : null}
-            <Button onClick={() => navigate('/agents/custom/new')}>
-              <Plus />
-              New custom agent
-            </Button>
+            {canManage ? (
+              <Button onClick={() => navigate('/agents/custom/new')}>
+                <Plus />
+                New custom agent
+              </Button>
+            ) : null}
           </>
         }
       />
+
+      {!canManage ? (
+        <AgentReadOnlyNote>
+          Custom-agent management requires agents:manage. Definitions remain visible for audit and
+          run-history context.
+        </AgentReadOnlyNote>
+      ) : null}
 
       <Card>
         <CardContent className="p-0">
@@ -95,12 +110,18 @@ export function CustomAgentsPage() {
             <EmptyState
               icon={<Puzzle className="h-8 w-8" />}
               title="No custom agents yet"
-              description="Compose an analysis agent from prompts and read-only data tools; it becomes selectable when triggering a run."
+              description={
+                canManage
+                  ? 'Compose an analysis agent from prompts and read-only data tools; it becomes selectable when triggering a run.'
+                  : 'No custom-agent definitions exist for this workspace.'
+              }
             >
-              <Button size="sm" onClick={() => navigate('/agents/custom/new')}>
-                <Plus />
-                New custom agent
-              </Button>
+              {canManage ? (
+                <Button size="sm" onClick={() => navigate('/agents/custom/new')}>
+                  <Plus />
+                  New custom agent
+                </Button>
+              ) : null}
             </EmptyState>
           ) : (
             <Table>
@@ -113,19 +134,23 @@ export function CustomAgentsPage() {
                   <TableHead>Produces</TableHead>
                   <TableHead>Order</TableHead>
                   <TableHead>Updated</TableHead>
-                  <TableHead className="w-24" />
+                  {canManage ? <TableHead className="w-24" /> : null}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {query.data.map((agent) => (
                   <TableRow key={agent.agent_id}>
                     <TableCell>
-                      <Link
-                        to={`/agents/custom/${encodeURIComponent(agent.agent_id)}/edit`}
-                        className="font-medium hover:underline"
-                      >
-                        {agent.display_name}
-                      </Link>
+                      {canManage ? (
+                        <Link
+                          to={`/agents/custom/${encodeURIComponent(agent.agent_id)}/edit`}
+                          className="font-medium hover:underline"
+                        >
+                          {agent.display_name}
+                        </Link>
+                      ) : (
+                        <span className="font-medium">{agent.display_name}</span>
+                      )}
                       {agent.description ? (
                         <p className="max-w-xs truncate text-xs text-muted-foreground">
                           {agent.description}
@@ -144,28 +169,30 @@ export function CustomAgentsPage() {
                     <TableCell>
                       <RelativeTime value={agent.updated_at} className="text-muted-foreground" />
                     </TableCell>
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Edit ${agent.display_name}`}
-                          onClick={() =>
-                            navigate(`/agents/custom/${encodeURIComponent(agent.agent_id)}/edit`)
-                          }
-                        >
-                          <Pencil />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Archive ${agent.display_name}`}
-                          onClick={() => setToArchive(agent)}
-                        >
-                          <Archive />
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {canManage ? (
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Edit ${agent.display_name}`}
+                            onClick={() =>
+                              navigate(`/agents/custom/${encodeURIComponent(agent.agent_id)}/edit`)
+                            }
+                          >
+                            <Pencil />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Archive ${agent.display_name}`}
+                            onClick={() => setToArchive(agent)}
+                          >
+                            <Archive />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    ) : null}
                   </TableRow>
                 ))}
               </TableBody>
@@ -174,29 +201,31 @@ export function CustomAgentsPage() {
         </CardContent>
       </Card>
 
-      <Dialog open={toArchive !== null} onOpenChange={(open) => !open && setToArchive(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Archive custom agent?</DialogTitle>
-            <DialogDescription>
-              &ldquo;{toArchive?.display_name}&rdquo; stops resolving in new and resumed runs
-              immediately. Its slug becomes reusable; past run results are kept.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setToArchive(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={archiveMutation.isPending}
-              onClick={() => toArchive && archiveMutation.mutate(toArchive)}
-            >
-              Archive
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {canManage ? (
+        <Dialog open={toArchive !== null} onOpenChange={(open) => !open && setToArchive(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Archive custom agent?</DialogTitle>
+              <DialogDescription>
+                &ldquo;{toArchive?.display_name}&rdquo; stops resolving in new and resumed runs
+                immediately. Its slug becomes reusable; past run results are kept.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setToArchive(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={archiveMutation.isPending}
+                onClick={() => toArchive && archiveMutation.mutate(toArchive)}
+              >
+                Archive
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   )
 }

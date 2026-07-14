@@ -2,9 +2,8 @@
 // subtleties live here and nowhere else:
 //   1. exists/not_exists conditions must OMIT the `value` key entirely — the
 //      server rejects an explicit null (Pydantic counts it in model_fields_set).
-//   2. PUT sends only changed fields (FlagUpdate is fully optional) plus the
-//      optimistic-lock version; `enabled` is never sent — the server derives
-//      it from `state`.
+//   2. PUT sends only non-lifecycle changes plus the optimistic-lock version;
+//      existing flag state changes use the dedicated transition/disable paths.
 import { z } from 'zod'
 
 import {
@@ -25,6 +24,15 @@ import type {
   GuardrailThreshold,
 } from '@/api/types/flags'
 import type { EvaluableFlag } from '@/core/evaluator/evaluate'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_MEMBERSHIP_VALUES,
+  MAX_RULES,
+  MAX_STRING_LENGTH,
+  isConditionValueValid,
+  isScalar,
+} from '@/core/evaluator/targetingContract'
 
 export const EXISTENCE_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['exists', 'not_exists'])
 export const LIST_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['in', 'not_in'])
@@ -38,38 +46,51 @@ export const GUARDRAIL_PAIRING: Record<GuardrailMetric, GuardrailThreshold> = {
 
 const conditionFormSchema = z
   .object({
-    attribute: z.string().trim().min(1, 'Attribute is required'),
+    attribute: z
+      .string()
+      .trim()
+      .min(1, 'Attribute is required')
+      .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
     operator: conditionOperatorSchema,
-    /** Raw text for scalar operators (numeric ops are validated as numbers). */
-    value: z.string(),
+    /** Preserve an existing JSON scalar until the user edits the text input. */
+    value: z.union([
+      z.string().max(MAX_STRING_LENGTH),
+      z.number().finite(),
+      z.boolean(),
+    ]),
     /** Chip list for in / not_in. */
-    values: z.array(z.string()),
+    values: z
+      .array(z.union([
+        z.string().max(MAX_STRING_LENGTH),
+        z.number().finite(),
+        z.boolean(),
+      ]))
+      .max(MAX_MEMBERSHIP_VALUES),
   })
   .superRefine((condition, ctx) => {
     if (EXISTENCE_OPERATORS.has(condition.operator)) return
     if (LIST_OPERATORS.has(condition.operator)) {
-      if (condition.values.length === 0) {
+      if (
+        condition.values.length === 0 ||
+        condition.values.length > MAX_MEMBERSHIP_VALUES ||
+        !condition.values.every(isScalar)
+      ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['values'],
-          message: 'Add at least one value',
+          message: `Add 1–${MAX_MEMBERSHIP_VALUES} scalar values`,
         })
       }
       return
     }
-    if (condition.value.trim() === '') {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Value is required' })
-      return
-    }
-    if (NUMERIC_OPERATORS.has(condition.operator) && !Number.isFinite(Number(condition.value))) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Must be a number' })
-    }
-    if (condition.operator === 'regex') {
-      try {
-        new RegExp(condition.value)
-      } catch {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['value'], message: 'Invalid regular expression' })
-      }
+    if (!isConditionValueValid(condition.operator, condition.value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value'],
+        message: NUMERIC_OPERATORS.has(condition.operator)
+          ? 'Use a finite number or canonical decimal'
+          : `Invalid ${condition.operator.replace(/_/g, ' ')} value`,
+      })
     }
   })
 
@@ -78,13 +99,17 @@ const rolloutFormSchema = z.object({
     .number({ invalid_type_error: 'Required' })
     .min(0, '0–100')
     .max(100, '0–100'),
-  bucket_by: z.string().trim().min(1, 'Required'),
+  bucket_by: z
+    .string()
+    .trim()
+    .min(1, 'Required')
+    .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
 })
 
 const ruleFormSchema = z.object({
-  id: z.string().min(1),
-  name: z.string(),
-  conditions: z.array(conditionFormSchema),
+  id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
+  name: z.string().max(MAX_STRING_LENGTH),
+  conditions: z.array(conditionFormSchema).max(MAX_CONDITIONS_PER_RULE),
   rollout: rolloutFormSchema,
 })
 
@@ -94,7 +119,11 @@ const guardrailFormSchema = z
     threshold: guardrailThresholdSchema,
     scope: z.string(),
     minimum_exposures: z.number({ invalid_type_error: 'Required' }).int('Whole number').min(0, '≥ 0'),
-    window_minutes: z.number({ invalid_type_error: 'Required' }).int('Whole number').min(1, '≥ 1'),
+    window_minutes: z
+      .number({ invalid_type_error: 'Required' })
+      .int('Whole number')
+      .min(1, '≥ 1')
+      .max(129_600, '≤ 129600'),
   })
   .superRefine((guardrail, ctx) => {
     if (guardrail.threshold !== GUARDRAIL_PAIRING[guardrail.metric]) {
@@ -108,8 +137,8 @@ const guardrailFormSchema = z
 
 export const flagFormSchema = z
   .object({
-    key: z.string().trim().min(1, 'Key is required'),
-    name: z.string().trim().min(1, 'Name is required'),
+    key: z.string().trim().min(1, 'Key is required').max(MAX_IDENTIFIER_LENGTH),
+    name: z.string().trim().min(1, 'Name is required').max(MAX_STRING_LENGTH),
     description: z.string(),
     owners: z.array(z.string().trim().min(1)),
     review_by: z
@@ -121,15 +150,15 @@ export const flagFormSchema = z
     variants: z
       .array(
         z.object({
-          key: z.string().trim().min(1, 'Variant key required'),
+          key: z.string().trim().min(1, 'Variant key required').max(MAX_IDENTIFIER_LENGTH),
           weight: z.number({ invalid_type_error: 'Required' }).int('Whole number').min(0, '≥ 0'),
         }),
       )
       .min(1, 'At least one variant'),
-    rules: z.array(ruleFormSchema),
+    rules: z.array(ruleFormSchema).max(MAX_RULES),
     fallthrough: z.object({ rollout: rolloutFormSchema }),
     evaluation_mode: evaluationModeSchema,
-    auto_disable: z.boolean(),
+    auto_disable: z.literal(false),
     guardrails: z.array(guardrailFormSchema),
   })
   .superRefine((flag, ctx) => {
@@ -186,7 +215,7 @@ export function emptyFormValues(): FlagFormValues {
     rules: [],
     fallthrough: { rollout: { percentage: 0, bucket_by: 'user_id' } },
     evaluation_mode: 'client',
-    auto_disable: true,
+    auto_disable: false,
     guardrails: [],
   }
 }
@@ -196,13 +225,15 @@ function conditionToForm(condition: GateCondition): ConditionFormValues {
     return { attribute: condition.attribute, operator: condition.operator, value: '', values: [] }
   }
   if (LIST_OPERATORS.has(condition.operator)) {
-    const values = Array.isArray(condition.value) ? condition.value.map(String) : []
+    const values = Array.isArray(condition.value)
+      ? condition.value.filter(isScalar)
+      : []
     return { attribute: condition.attribute, operator: condition.operator, value: '', values }
   }
   return {
     attribute: condition.attribute,
     operator: condition.operator,
-    value: condition.value === undefined || condition.value === null ? '' : String(condition.value),
+    value: isScalar(condition.value) ? condition.value : '',
     values: [],
   }
 }
@@ -247,7 +278,9 @@ export function conditionToWire(condition: ConditionFormValues): GateCondition {
     return {
       attribute: condition.attribute.trim(),
       operator: condition.operator,
-      value: Number(condition.value),
+      value: typeof condition.value === 'number'
+        ? condition.value
+        : Number(condition.value),
     }
   }
   return {
@@ -302,7 +335,7 @@ export function formToCreatePayload(values: FlagFormValues): FlagCreate {
     rules: rulesToWire(values),
     fallthrough: { rollout: { ...values.fallthrough.rollout } },
     evaluation_mode: values.evaluation_mode,
-    auto_disable: values.auto_disable,
+    auto_disable: false,
     guardrails: values.guardrails.map((guardrail) => ({ ...guardrail })),
   }
 }
@@ -315,9 +348,9 @@ export interface UpdatePlan {
 }
 
 /**
- * Changed-fields-only FlagUpdate against the loaded base flag. `enabled` is
- * derived server-side from `state`; review_by cannot be cleared through the
- * API today (exclude_none strips null) — an emptied field is left unchanged.
+ * Changed-fields-only FlagUpdate against the loaded base flag. Lifecycle state
+ * is intentionally ignored here and changed only through LifecycleDialog;
+ * review_by cannot be cleared through the API today (exclude_none strips null).
  */
 export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, version: number): UpdatePlan {
   const payload: FlagUpdate = { version }
@@ -329,7 +362,6 @@ export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, versi
 
   if (values.name.trim() !== base.name) add('name', values.name.trim())
   if (values.description !== base.description) add('description', values.description)
-  if (values.state !== base.state) add('state', values.state)
   if (!same(values.owners, base.owners)) add('owners', values.owners)
   if (values.review_by !== '' && values.review_by !== (base.review_by ?? '')) {
     add('review_by', values.review_by)
@@ -344,9 +376,8 @@ export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, versi
     add('default_variant', values.default_variant)
   }
 
-  // Compare both sides through the same lossy projection: the base's
-  // serialized conditions carry value:null for existence operators (omitted on
-  // the wire) and original scalar types (the editor round-trips via strings).
+  // Compare both sides through the same canonical wire projection so untouched
+  // conditions retain their JSON scalar types and presence values stay omitted.
   const baseRulesWire = base.rules.map((rule) => ({
     id: rule.id,
     name: rule.name,
@@ -360,7 +391,6 @@ export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, versi
   if (!same(fallthrough, base.fallthrough)) add('fallthrough', fallthrough)
 
   if (values.evaluation_mode !== base.evaluation_mode) add('evaluation_mode', values.evaluation_mode)
-  if (values.auto_disable !== base.auto_disable) add('auto_disable', values.auto_disable)
 
   const guardrails = values.guardrails.map((guardrail) => ({ ...guardrail }))
   if (!same(guardrails, base.guardrails)) add('guardrails', guardrails)

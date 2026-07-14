@@ -1,89 +1,113 @@
-"""Token-bucket rate limiter matching the C++ RateLimitMiddleware exactly.
+"""Redis-backed event/byte token bucket shared by every Ingestion process."""
 
-Uses in-memory buckets keyed by project or IP, with asyncio.Lock for
-concurrency safety. Refills tokens based on elapsed wall-clock time
-via time.monotonic().
-"""
+from __future__ import annotations
 
-import asyncio
 import json
 import math
-import time
-from dataclasses import dataclass, field
 
 from fastapi import Request
 from fastapi.responses import Response
 
-DEFAULT_CAPACITY = 1000.0
-DEFAULT_RATE = 100.0  # tokens per second
+DEFAULT_CAPACITY = 1_000
+DEFAULT_RATE = 100  # cost units per second
 
-_lock = asyncio.Lock()
-_buckets: dict[str, "TokenBucket"] = {}
+_TOKEN_BUCKET_LUA = """
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill_per_second = tonumber(ARGV[2])
+local cost = tonumber(ARGV[3])
+local ttl_seconds = tonumber(ARGV[4])
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local state = redis.call('HMGET', key, 'tokens', 'updated_at_ms')
+local tokens = tonumber(state[1]) or capacity
+local updated_at_ms = tonumber(state[2]) or now_ms
+local elapsed_ms = math.max(now_ms - updated_at_ms, 0)
+tokens = math.min(capacity, tokens + elapsed_ms * refill_per_second / 1000)
+
+if tokens < cost then
+  redis.call('HSET', key, 'tokens', tokens, 'updated_at_ms', now_ms)
+  redis.call('EXPIRE', key, ttl_seconds)
+  local retry_after = math.ceil((cost - tokens) / refill_per_second)
+  return {0, math.floor(tokens), math.max(retry_after, 1)}
+end
+
+tokens = tokens - cost
+redis.call('HSET', key, 'tokens', tokens, 'updated_at_ms', now_ms)
+redis.call('EXPIRE', key, ttl_seconds)
+return {1, math.floor(tokens), 0}
+"""
 
 
-@dataclass
-class TokenBucket:
-    tokens: float = DEFAULT_CAPACITY
-    last_refill: float = field(default_factory=time.monotonic)
-    rate: float = DEFAULT_RATE
-    capacity: float = DEFAULT_CAPACITY
+def request_cost(event_count: int, serialized_bytes: int) -> int:
+    """Charge one unit per event plus one unit per KiB received."""
+    return event_count + max(1, math.ceil(serialized_bytes / 1024))
 
 
-async def check_rate_limit(project_id: str, request: Request) -> Response | None:
-    """Check rate limit for a request. Returns None if allowed, or a 429 Response."""
-    # Determine bucket key
+async def check_rate_limit(
+    redis,
+    project_id: str,
+    request: Request,
+    *,
+    cost: int,
+) -> Response | None:
+    """Return ``None`` when allowed, otherwise a 429/503 JSON response."""
     if project_id:
-        bucket_key = f"project:{project_id}"
+        bucket_key = f"apdl:rate:project:{project_id}"
     else:
         client_ip = (
             request.headers.get("x-forwarded-for", "").split(",")[0].strip()
             or request.headers.get("x-real-ip", "")
             or (request.client.host if request.client else "")
         )
-        bucket_key = f"ip:{client_ip}"
+        bucket_key = f"apdl:rate:ip:{client_ip}"
 
-    async with _lock:
-        now = time.monotonic()
+    ttl_seconds = max(math.ceil(DEFAULT_CAPACITY / DEFAULT_RATE) * 2, 60)
+    try:
+        allowed, remaining, retry_after = await redis.eval(
+            _TOKEN_BUCKET_LUA,
+            1,
+            bucket_key,
+            DEFAULT_CAPACITY,
+            DEFAULT_RATE,
+            cost,
+            ttl_seconds,
+        )
+    except Exception:
+        return _json_response(
+            503,
+            {
+                "error": "service_unavailable",
+                "message": "Rate-limit authority is unavailable",
+            },
+        )
 
-        if bucket_key not in _buckets:
-            # Create a new bucket, consume one token immediately
-            bucket = TokenBucket(
-                tokens=DEFAULT_CAPACITY - 1.0,
-                last_refill=now,
-                rate=DEFAULT_RATE,
-                capacity=DEFAULT_CAPACITY,
-            )
-            _buckets[bucket_key] = bucket
-            return None
-
-        bucket = _buckets[bucket_key]
-
-        # Refill tokens based on elapsed time
-        elapsed = now - bucket.last_refill
-        bucket.tokens = min(bucket.capacity, bucket.tokens + elapsed * bucket.rate)
-        bucket.last_refill = now
-
-        # Try to consume one token
-        if bucket.tokens < 1.0:
-            # Calculate retry-after in seconds
-            deficit = 1.0 - bucket.tokens
-            retry_after = int(math.ceil(deficit / bucket.rate))
-            if retry_after < 1:
-                retry_after = 1
-
-            return Response(
-                content=json.dumps({
-                    "error": "rate_limited",
-                    "message": "Too many requests. Please retry after the Retry-After period.",
-                }),
-                status_code=429,
-                media_type="application/json",
-                headers={
-                    "Retry-After": str(retry_after),
-                    "X-RateLimit-Limit": str(int(bucket.capacity)),
-                    "X-RateLimit-Remaining": "0",
-                },
-            )
-
-        bucket.tokens -= 1.0
+    if int(allowed) == 1:
         return None
+
+    return _json_response(
+        429,
+        {
+            "error": "rate_limited",
+            "message": "Event and byte quota exceeded",
+        },
+        headers={
+            "Retry-After": str(max(int(retry_after), 1)),
+            "X-RateLimit-Limit": str(DEFAULT_CAPACITY),
+            "X-RateLimit-Remaining": str(max(int(remaining), 0)),
+        },
+    )
+
+
+def _json_response(
+    status_code: int,
+    content: dict,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Response:
+    return Response(
+        content=json.dumps(content),
+        status_code=status_code,
+        media_type="application/json",
+        headers=headers,
+    )

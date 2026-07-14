@@ -17,6 +17,7 @@ env_file_value() {
     awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ROOT_DIR/.env"
 }
 APDL_DEV_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
+APDL_DEV_CLIENT_KEY="${APDL_DEV_CLIENT_KEY:-$(env_file_value APDL_DEV_CLIENT_KEY)}"
 
 POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
 POSTGRES_MIGRATOR_SERVICE="${POSTGRES_MIGRATOR_SERVICE:-postgres-migrate}"
@@ -56,45 +57,88 @@ docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     "$POSTGRES_MIGRATOR_SERVICE"
 
 # Explicit local-development bootstrap. Production deployments should provision
-# credentials through their secret-management workflow and leave this unset.
-if [ -n "${APDL_DEV_API_KEY:-}" ]; then
-    if [[ ! "$APDL_DEV_API_KEY" =~ ^proj_([A-Za-z0-9]{1,64})_([A-Za-z0-9]{16,128})$ ]]; then
-        echo "APDL_DEV_API_KEY does not match proj_{project_id}_{secret}" >&2
+# credentials through their secret-management workflow and leave these unset.
+provision_dev_credential() {
+    local raw_key="$1"
+    local credential_kind="$2"
+    local credential_id="$3"
+    local roles="$4"
+    local project_id
+    local key_prefix
+    local key_hash
+
+    if [ "$credential_kind" = "confidential" ]; then
+        if [[ ! "$raw_key" =~ ^proj_([A-Za-z0-9]{1,64})_([A-Za-z0-9]{16,128})$ ]]; then
+            echo "APDL_DEV_API_KEY does not match proj_{project_id}_{secret}" >&2
+            exit 1
+        fi
+        project_id="${BASH_REMATCH[1]}"
+        key_prefix="proj_${project_id}_"
+    elif [ "$credential_kind" = "browser" ]; then
+        if [[ ! "$raw_key" =~ ^client_([A-Za-z0-9]{1,64})_([A-Za-z0-9]{16,128})$ ]]; then
+            echo "APDL_DEV_CLIENT_KEY does not match client_{project_id}_{token}" >&2
+            exit 1
+        fi
+        project_id="${BASH_REMATCH[1]}"
+        key_prefix="client_${project_id}_"
+    else
+        echo "Unsupported credential kind: $credential_kind" >&2
         exit 1
     fi
-    project_id="${BASH_REMATCH[1]}"
+
     if command -v sha256sum >/dev/null 2>&1; then
-        key_hash="$(printf %s "$APDL_DEV_API_KEY" | sha256sum | awk '{print $1}')"
+        key_hash="$(printf %s "$raw_key" | sha256sum | awk '{print $1}')"
     else
-        key_hash="$(printf %s "$APDL_DEV_API_KEY" | shasum -a 256 | awk '{print $1}')"
+        key_hash="$(printf %s "$raw_key" | shasum -a 256 | awk '{print $1}')"
     fi
     docker exec -i "$container_id" psql \
         -v ON_ERROR_STOP=1 \
-        -v credential_id="local-dev" \
+        -v credential_id="$credential_id" \
         -v project_id="$project_id" \
+        -v credential_kind="$credential_kind" \
+        -v key_prefix="$key_prefix" \
         -v key_hash="$key_hash" \
+        -v roles="$roles" \
         -U "$POSTGRES_USER" \
         -d "$POSTGRES_DB" >/dev/null <<'SQL'
-INSERT INTO auth_credentials (credential_id, project_id, key_hash, roles)
+INSERT INTO auth_credentials (
+    credential_id, project_id, credential_kind, key_prefix, key_hash, roles
+)
 VALUES (
     :'credential_id',
     :'project_id',
+    :'credential_kind',
+    :'key_prefix',
     :'key_hash',
-    ARRAY[
-        'events:write', 'config:read', 'config:write', 'config:evaluate',
-        'query:read', 'agents:read', 'agents:run', 'agents:manage',
-        'agents:approve'
-    ]
+    :'roles'::TEXT[]
 )
 ON CONFLICT (credential_id) DO UPDATE SET
     project_id = EXCLUDED.project_id,
+    credential_kind = EXCLUDED.credential_kind,
+    key_prefix = EXCLUDED.key_prefix,
     key_hash = EXCLUDED.key_hash,
     roles = EXCLUDED.roles,
     active = TRUE,
     expires_at = NULL,
     revoked_at = NULL;
 SQL
-    echo "  Provisioned explicit local-development credential for $project_id"
+    echo "  Provisioned $credential_kind local-development credential for $project_id"
+}
+
+if [ -n "${APDL_DEV_API_KEY:-}" ]; then
+    provision_dev_credential \
+        "$APDL_DEV_API_KEY" \
+        "confidential" \
+        "local-dev-confidential" \
+        "{events:write,config:read,config:write,config:evaluate,query:read,agents:read,agents:run,agents:manage,agents:approve}"
+fi
+
+if [ -n "${APDL_DEV_CLIENT_KEY:-}" ]; then
+    provision_dev_credential \
+        "$APDL_DEV_CLIENT_KEY" \
+        "browser" \
+        "local-dev-browser" \
+        "{events:write,config:read}"
 fi
 
 echo "==> PostgreSQL initialization complete"

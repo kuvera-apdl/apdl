@@ -1,6 +1,7 @@
 import type { ConsentState } from './config';
 import type { APDLApi } from './api';
 import type { ExperimentContext } from './types';
+import type { DeliveryReport } from './types';
 import type { FlagEvaluationResult } from '../flags/types';
 
 const GRANTED_CONSENT: ConsentState = {
@@ -26,6 +27,13 @@ function missingFlagResult(key: string): FlagEvaluationResult {
 
 const noop = (): void => {};
 const unsubscribe = (): void => {};
+const emptyDeliveryReport = (): DeliveryReport => Object.freeze({
+  delivered: 0,
+  persisted: 0,
+  permanentRejections: Object.freeze([]),
+  discardedForConsent: 0,
+  pending: Object.freeze([]),
+});
 
 /**
  * An inert client that satisfies {@link APDLApi} without doing any work.
@@ -54,7 +62,9 @@ export class NoopClient implements APDLApi {
     return unsubscribe;
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(): Promise<DeliveryReport> {
+    return emptyDeliveryReport();
+  }
 
   ui = {
     register: noop,
@@ -83,7 +93,7 @@ export class NoopClient implements APDLApi {
     enable: noop,
     disable: noop,
     getQueue: (): unknown[] => [],
-    flush: async (): Promise<void> => {},
+    flush: async (): Promise<DeliveryReport> => emptyDeliveryReport(),
   };
 }
 

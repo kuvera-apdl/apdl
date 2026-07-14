@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -35,71 +36,61 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
         return data.get("experiments", []) if isinstance(data, dict) else data
 
 
-# Maps loose LLM operators onto the Config service's strict ConditionOperator
-# set. Canonical operators map to themselves; anything not here is dropped.
-_CONDITION_OPERATOR_ALIASES = {
-    "equals": "equals", "not_equals": "not_equals", "gt": "gt", "gte": "gte",
-    "lt": "lt", "lte": "lte", "contains": "contains", "not_contains": "not_contains",
-    "starts_with": "starts_with", "ends_with": "ends_with", "regex": "regex",
-    "in": "in", "not_in": "not_in", "exists": "exists", "not_exists": "not_exists",
-    # common model aliases
-    "eq": "equals", "==": "equals", "equal": "equals",
-    "ne": "not_equals", "neq": "not_equals", "!=": "not_equals", "not_equal": "not_equals",
-    "greater_than": "gt", "greater": "gt",
-    "greater_than_or_equal": "gte", "greater_equal": "gte",
-    "less_than": "lt", "less": "lt", "less_than_or_equal": "lte", "less_equal": "lte",
-    "startswith": "starts_with", "endswith": "ends_with", "matches": "regex",
-    "is_null": "not_exists", "isnull": "not_exists", "null": "not_exists",
-    "is_absent": "not_exists", "absent": "not_exists",
-    "is_not_null": "exists", "isnotnull": "exists", "not_null": "exists",
-    "is_present": "exists", "present": "exists",
+_CONDITION_OPERATORS = {
+    "equals",
+    "not_equals",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+    "contains",
+    "not_contains",
+    "starts_with",
+    "ends_with",
+    "in",
+    "not_in",
+    "exists",
+    "not_exists",
 }
 _VALUELESS_OPERATORS = {"exists", "not_exists"}
 
 
-def _canonical_condition(condition: Any) -> dict[str, Any] | None:
-    """Project one loose LLM condition onto the strict ``GateCondition`` shape.
-
-    Keeps only ``attribute``/``operator``/``value`` (the model often adds a
-    ``description``, which the strict schema rejects), maps the operator onto the
-    canonical set, and drops the condition when the operator is unknown or a
-    value-taking operator has no value. ``exists``/``not_exists`` carry no value.
-    """
+def _strict_condition(condition: Any) -> dict[str, Any]:
+    """Validate one canonical condition without aliases or silent projection."""
     if not isinstance(condition, dict):
-        return None
-    attribute = condition.get("attribute") or condition.get("property") or condition.get("field")
+        raise ValueError("targeting conditions must be objects")
+    attribute = condition.get("attribute")
     if not isinstance(attribute, str) or not attribute.strip():
-        return None
-    operator = _CONDITION_OPERATOR_ALIASES.get(str(condition.get("operator", "equals")).strip().lower())
-    if operator is None:
-        return None
-    clean: dict[str, Any] = {"attribute": attribute.strip(), "operator": operator}
-    if operator not in _VALUELESS_OPERATORS:
-        value = condition.get("value")
-        if value is None:
-            return None
-        clean["value"] = value
-    return clean
+        raise ValueError("targeting condition attribute must be a non-empty string")
+    operator = condition.get("operator")
+    if operator not in _CONDITION_OPERATORS:
+        raise ValueError(f"unsupported targeting operator: {operator!r}")
+
+    expected_keys = (
+        {"attribute", "operator"}
+        if operator in _VALUELESS_OPERATORS
+        else {"attribute", "operator", "value"}
+    )
+    if set(condition) != expected_keys:
+        raise ValueError(
+            f"targeting operator {operator!r} requires exactly "
+            f"{sorted(expected_keys)}"
+        )
+    if operator not in _VALUELESS_OPERATORS and condition["value"] is None:
+        raise ValueError(f"targeting operator {operator!r} requires a non-null value")
+    return dict(condition)
 
 
 def _targeting_to_rules(targeting: dict[str, Any] | list | None) -> list[dict[str, Any]]:
-    """Canonicalize loose targeting conditions into the flag's GateRule shape.
-
-    The experiment-design output expresses targeting as a list of conditions;
-    the Config experiment schema requires canonical ``GateRule`` objects (each
-    with an ``id`` and a ``rollout``) whose conditions pass the strict
-    ``GateCondition`` validator. Each condition is projected onto that shape
-    (extra fields stripped, operator aliases mapped); conditions that can't be
-    canonicalized are dropped. Matching users are fully included; variant split
-    is by weight.
-    """
-    if isinstance(targeting, dict):
-        raw_conditions = targeting.get("conditions", [])
-    elif isinstance(targeting, list):
-        raw_conditions = targeting
-    else:
-        raw_conditions = []
-    conditions = [c for c in (_canonical_condition(rc) for rc in raw_conditions) if c is not None]
+    """Convert the one strict design shape into Config's canonical rule shape."""
+    if targeting is None:
+        return []
+    if not isinstance(targeting, dict) or set(targeting) != {"conditions"}:
+        raise ValueError("targeting must contain exactly one 'conditions' list")
+    raw_conditions = targeting["conditions"]
+    if not isinstance(raw_conditions, list):
+        raise ValueError("targeting.conditions must be a list")
+    conditions = [_strict_condition(condition) for condition in raw_conditions]
     if not conditions:
         return []
     return [
@@ -116,6 +107,7 @@ async def create_experiment_config(
     experiment_id: str,
     hypothesis: str,
     variants: list[dict[str, Any]],
+    default_variant: str,
     primary_metric: dict[str, str],
     secondary_metrics: list[dict[str, str]] | None = None,
     guardrail_metrics: list[dict[str, Any]] | None = None,
@@ -135,6 +127,7 @@ async def create_experiment_config(
         experiment_id: Unique experiment identifier (e.g. "exp_checkout_v2").
         hypothesis: The hypothesis being tested (stored as the description).
         variants: Variant definitions with "key", "weight", and optional "description".
+        default_variant: Explicit declared control variant key.
         primary_metric: Dict with "event", "type", and "direction".
         secondary_metrics: Optional additional metrics to track.
         guardrail_metrics: Metrics that should not degrade.
@@ -149,20 +142,48 @@ async def create_experiment_config(
     Returns:
         The created experiment configuration.
     """
+    if (
+        isinstance(estimated_duration_days, bool)
+        or not isinstance(estimated_duration_days, int)
+        or not 1 <= estimated_duration_days <= 90
+    ):
+        raise ValueError("estimated_duration_days must be an integer from 1 to 90")
+    if not isinstance(primary_metric, dict) or not primary_metric.get("event"):
+        raise ValueError("primary_metric.event is required for a running experiment")
+    if primary_metric.get("type", "conversion") != "conversion":
+        raise ValueError("primary_metric.type must be conversion")
+    if not 2 <= len(variants) <= 10:
+        raise ValueError("variants must contain between 2 and 10 variants")
+    if any(
+        not isinstance(variant, dict)
+        or isinstance(variant.get("weight"), bool)
+        or not isinstance(variant.get("weight"), int)
+        or variant["weight"] <= 0
+        for variant in variants
+    ):
+        raise ValueError("experiment variant weights must be positive integers")
+    variant_keys = [variant.get("key") for variant in variants]
+    if not isinstance(default_variant, str) or default_variant not in variant_keys:
+        raise ValueError("default_variant must match a variant key")
+
+    start_date = datetime.now(UTC)
+    end_date = start_date + timedelta(days=estimated_duration_days)
     payload: dict[str, Any] = {
         "key": experiment_id,
         "flag_key": flag_key or experiment_id,
         "status": "running",
         "description": hypothesis,
         "variants": variants,
+        "default_variant": default_variant,
         "traffic_percentage": traffic_percentage,
-    }
-    if isinstance(primary_metric, dict) and primary_metric.get("event"):
-        payload["primary_metric"] = {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "primary_metric": {
             "event": primary_metric["event"],
             "type": primary_metric.get("type", "conversion"),
             "direction": primary_metric.get("direction", "increase"),
-        }
+        },
+    }
     targeting_rules = _targeting_to_rules(targeting)
     if targeting_rules:
         payload["targeting_rules"] = targeting_rules
@@ -175,28 +196,6 @@ async def create_experiment_config(
         resp = await client.post(
             "/v1/admin/experiments",
             json=payload,
-            params={"project_id": project_id},
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-
-async def update_experiment_status(
-    project_id: str, experiment_id: str, status: str
-) -> dict[str, Any]:
-    """Transition an experiment's lifecycle status via the Config service.
-
-    Allowed transitions are enforced server-side (running → completed|stopped;
-    both terminal). Used by the evaluation agent to conclude experiments.
-    """
-    async with httpx.AsyncClient(
-        base_url=CONFIG_SERVICE_URL,
-        timeout=_TIMEOUT,
-        headers=service_headers(project_id),
-    ) as client:
-        resp = await client.put(
-            f"/v1/admin/experiments/{quote(experiment_id, safe='')}",
-            json={"status": status},
             params={"project_id": project_id},
         )
         resp.raise_for_status()
@@ -236,22 +235,13 @@ async def calculate_sample_size(
 
 async def get_experiment_results(
     experiment_id: str,
-    metric: str,
     project_id: str,
-    method: str = "frequentist",
-    flag_key: str | None = None,
 ) -> dict[str, Any]:
-    """Get statistical results for a running or completed experiment.
+    """Get authoritative read-only results for an experiment.
 
     Args:
         experiment_id: The experiment to analyse.
-        metric: The conversion/metric event to evaluate.
         project_id: Project ID.
-        method: Statistical method — "frequentist", "bayesian", or "sequential".
-        flag_key: Feature flag key whose canonical variant exposures back this
-            experiment. The query endpoint now requires it; defaults to
-            ``experiment_id``, matching ``create_experiment_config`` which keys
-            the underlying flag on the experiment id.
 
     Returns:
         Full experiment analysis results.
@@ -263,12 +253,7 @@ async def get_experiment_results(
     ) as client:
         resp = await client.get(
             f"/v1/query/experiment/{quote(experiment_id, safe='')}",
-            params={
-                "metric": metric,
-                "method": method,
-                "project_id": project_id,
-                "flag_key": flag_key or experiment_id,
-            },
+            params={"project_id": project_id},
         )
         resp.raise_for_status()
         return resp.json()

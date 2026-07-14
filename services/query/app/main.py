@@ -1,6 +1,5 @@
 """APDL Query Service — FastAPI application entry point."""
 
-import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,8 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth import PostgresAuthenticator, authenticate_request
-from app.clickhouse.client import ClickHouseClient
-from app.guardrails.monitor import run_guardrail_monitor
+from app.clickhouse.client import (
+    ClickHouseClient,
+    QueryBudgetExceeded,
+    QueryConcurrencyExceeded,
+)
 from app.routers import cohorts, events, experiments, funnels, guardrails, retention
 
 logger = logging.getLogger(__name__)
@@ -22,8 +24,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
     client = ClickHouseClient()
-    await client.connect()
     try:
+        await client.connect()
         postgres_url = os.environ.get(
             "POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl"
         )
@@ -35,18 +37,10 @@ async def lifespan(application: FastAPI):
     application.state.auth_pool = auth_pool
     application.state.authenticator = PostgresAuthenticator(auth_pool)
     logger.info("ClickHouse connection pool initialized")
-    monitor_task = _start_guardrail_monitor(client)
-    application.state.guardrail_monitor_task = monitor_task
     try:
         yield
     finally:
         try:
-            if monitor_task is not None:
-                monitor_task.cancel()
-                try:
-                    await monitor_task
-                except asyncio.CancelledError:
-                    pass
             await client.close()
         finally:
             await auth_pool.close()
@@ -76,30 +70,19 @@ app.include_router(experiments.router, dependencies=auth_dependencies)
 app.include_router(guardrails.router, dependencies=auth_dependencies)
 
 
-def _start_guardrail_monitor(client: ClickHouseClient) -> asyncio.Task | None:
-    enabled = os.getenv("GUARDRAIL_MONITOR_ENABLED", "false").lower() == "true"
-    project_ids = [
-        project_id.strip()
-        for project_id in os.getenv("GUARDRAIL_PROJECT_IDS", "").split(",")
-        if project_id.strip()
-    ]
-    if not enabled or not project_ids:
-        return None
-
-    interval_seconds = int(os.getenv("GUARDRAIL_MONITOR_INTERVAL_SECONDS", "60"))
-    config_service_url = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
-    logger.info(
-        "Starting guardrail monitor for %d projects every %ds",
-        len(project_ids),
-        interval_seconds,
+@app.exception_handler(QueryConcurrencyExceeded)
+async def query_concurrency_exceeded(_, exc: QueryConcurrencyExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"error": "query_concurrency_exceeded", "message": str(exc)},
     )
-    return asyncio.create_task(
-        run_guardrail_monitor(
-            ch_client=client,
-            config_service_url=config_service_url,
-            project_ids=project_ids,
-            interval_seconds=interval_seconds,
-        )
+
+
+@app.exception_handler(QueryBudgetExceeded)
+async def query_budget_exceeded(_, exc: QueryBudgetExceeded):
+    return JSONResponse(
+        status_code=503,
+        content={"error": "query_budget_exceeded", "message": str(exc)},
     )
 
 

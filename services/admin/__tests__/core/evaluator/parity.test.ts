@@ -8,14 +8,31 @@ import { resolve } from 'node:path'
 import { describe, expect, it, test } from 'vitest'
 
 import {
+  clientFlagConfigSchema,
+  gateConditionSchema,
+  gateRuleSchema,
+} from '../../../src/api/schemas/flags'
+import type { GateCondition } from '../../../src/api/types/flags'
+import {
   evaluateFlag,
   evaluateFlagDetailed,
+  matchesCondition,
   pickWeightedVariant,
+  resolveAttribute,
   type EvaluableFlag,
   type EvaluationContext,
   type EvaluationResult,
 } from '../../../src/core/evaluator/evaluate'
 import { hashBucket, percentageBucket } from '../../../src/core/evaluator/hash'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_MEMBERSHIP_VALUES,
+  MAX_RULES,
+  MAX_STRING_LENGTH,
+  NUMERIC_PATTERN,
+  SUPPORTED_OPERATORS,
+} from '../../../src/core/evaluator/targetingContract'
 
 interface HashFixture {
   flag_key: string
@@ -41,6 +58,38 @@ const fixtures: ParityFixtures = JSON.parse(
   readFileSync(resolve(process.cwd(), '../../fixtures/gates/parity.json'), 'utf8'),
 )
 
+interface TargetingCondition {
+  attribute: string
+  operator: string
+  value?: unknown
+}
+
+interface TargetingFixture {
+  fixture_schema_version: number
+  limits: Record<string, number>
+  numeric_pattern: string
+  condition_cases: Array<{
+    name: string
+    condition: TargetingCondition
+    context: EvaluationContext
+    expected_match: boolean
+  }>
+  invalid_condition_cases: Array<{
+    name: string
+    condition: TargetingCondition
+  }>
+  unit_cases: Array<{
+    name: string
+    bucket_by: string
+    context: EvaluationContext
+    expected_available: boolean
+  }>
+}
+
+const targetingFixtures: TargetingFixture = JSON.parse(
+  readFileSync(resolve(process.cwd(), '../../fixtures/gates/targeting.json'), 'utf8'),
+)
+
 describe('hash parity', () => {
   test('fixture file covers cases', () => {
     expect(fixtures.hash_cases.length).toBeGreaterThan(0)
@@ -61,6 +110,108 @@ describe('evaluation parity', () => {
       expect(evaluateFlag(fixture.flag, fixture.context)).toEqual(fixture.result)
     })
   }
+})
+
+describe('strict shared targeting contract', () => {
+  test('pins fixture metadata and the supported operator set', () => {
+    expect(targetingFixtures.fixture_schema_version).toBe(1)
+    expect(targetingFixtures.limits).toEqual({
+      max_rules: MAX_RULES,
+      max_conditions_per_rule: MAX_CONDITIONS_PER_RULE,
+      max_identifier_length: MAX_IDENTIFIER_LENGTH,
+      max_string_length: MAX_STRING_LENGTH,
+      max_membership_values: MAX_MEMBERSHIP_VALUES,
+    })
+    expect(targetingFixtures.numeric_pattern).toBe(NUMERIC_PATTERN)
+    expect(
+      new Set(targetingFixtures.condition_cases.map(({ condition }) => condition.operator)),
+    ).toEqual(SUPPORTED_OPERATORS)
+  })
+
+  for (const fixture of targetingFixtures.condition_cases) {
+    it(`matches shared condition case: ${fixture.name}`, () => {
+      expect(gateConditionSchema.safeParse(fixture.condition).success).toBe(true)
+      expect(
+        matchesCondition(
+          fixture.condition as GateCondition,
+          resolveAttribute(fixture.condition.attribute, fixture.context),
+        ),
+      ).toBe(fixture.expected_match)
+    })
+  }
+
+  for (const fixture of targetingFixtures.invalid_condition_cases) {
+    it(`fails closed for shared invalid condition: ${fixture.name}`, () => {
+      expect(gateConditionSchema.safeParse(fixture.condition).success).toBe(false)
+      expect(
+        matchesCondition(
+          fixture.condition as GateCondition,
+          resolveAttribute(fixture.condition.attribute, {
+            anonymous_id: 'fixture-unit',
+            attributes: { value: 'pro' },
+          }),
+        ),
+      ).toBe(false)
+    })
+  }
+
+  for (const fixture of targetingFixtures.unit_cases) {
+    it(`matches shared bucket unit case: ${fixture.name}`, () => {
+      const result = evaluateFlag(targetingFlag(undefined, fixture.bucket_by), fixture.context)
+      expect(result.reason).toBe(fixture.expected_available ? 'fallthrough' : 'error')
+      expect(result.rollout_bucket === null).toBe(!fixture.expected_available)
+      expect(result.variant_bucket === null).toBe(!fixture.expected_available)
+    })
+  }
+
+  test('enforces structural limits in API schemas and runtime evaluation', () => {
+    const tooManyRules = Array.from({ length: MAX_RULES + 1 }, (_, index) => ({
+      id: `rule-${index}`,
+      name: '',
+      conditions: [],
+      rollout: { percentage: 100, bucket_by: 'anonymous_id' },
+    }))
+    const tooManyConditions = Array.from(
+      { length: MAX_CONDITIONS_PER_RULE + 1 },
+      () => ({ attribute: 'value', operator: 'exists' }),
+    )
+
+    expect(
+      clientFlagConfigSchema.safeParse({ ...targetingFlag(), rules: tooManyRules }).success,
+    ).toBe(false)
+    expect(
+      gateRuleSchema.safeParse({
+        id: 'condition-limit',
+        name: '',
+        conditions: tooManyConditions,
+        rollout: { percentage: 100, bucket_by: 'anonymous_id' },
+      }).success,
+    ).toBe(false)
+    expect(
+      gateConditionSchema.safeParse({
+        attribute: 'a'.repeat(MAX_IDENTIFIER_LENGTH + 1),
+        operator: 'exists',
+      }).success,
+    ).toBe(false)
+    expect(
+      gateConditionSchema.safeParse({
+        attribute: 'value',
+        operator: 'equals',
+        value: 'x'.repeat(MAX_STRING_LENGTH + 1),
+      }).success,
+    ).toBe(false)
+    expect(
+      gateConditionSchema.safeParse({
+        attribute: 'value',
+        operator: 'in',
+        value: Array.from({ length: MAX_MEMBERSHIP_VALUES + 1 }, () => 'x'),
+      }).success,
+    ).toBe(false)
+    expect(evaluateFlag({ ...targetingFlag(), rules: tooManyRules }, {
+      anonymous_id: 'fixture-unit',
+      attributes: {},
+    }).reason).toBe('error')
+  })
 })
 
 describe('trace layer', () => {
@@ -111,3 +262,33 @@ describe('pickWeightedVariant', () => {
     ).toBe('b')
   })
 })
+
+function targetingFlag(
+  condition?: TargetingCondition,
+  bucketBy = 'anonymous_id',
+): EvaluableFlag {
+  return {
+    key: 'targeting-fixture',
+    enabled: true,
+    default_variant: 'control',
+    variants: [{ key: 'control', weight: 1 }],
+    salt: 'fixture-salt',
+    rules: condition === undefined
+      ? []
+      : [
+          {
+            id: 'fixture-rule',
+            name: '',
+            conditions: [condition as GateCondition],
+            rollout: { percentage: 100, bucket_by: 'anonymous_id' },
+          },
+        ],
+    fallthrough: {
+      rollout: {
+        percentage: condition === undefined ? 100 : 0,
+        bucket_by: bucketBy,
+      },
+    },
+    version: 1,
+  }
+}

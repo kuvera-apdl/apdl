@@ -12,7 +12,12 @@ export type {
 
 export type { APDLApi } from './core/api';
 
-export type { TrackEvent, EventContext, ExperimentContext } from './core/types';
+export type {
+  TrackEvent,
+  EventContext,
+  ExperimentContext,
+  DeliveryReport,
+} from './core/types';
 
 export type {
   FlagConfig,

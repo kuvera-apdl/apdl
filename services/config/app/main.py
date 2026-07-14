@@ -10,18 +10,47 @@ import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import outbox
 from app.auth import (
     AuthIdentity,
     PostgresAuthenticator,
     Principal,
     authenticate_request,
 )
-from app.experiments import expiry
-from app.routers import admin, evaluate, flags, stream
+from app.experiments import lifecycle
+from app.routers import admin, evaluate, experiments, flags, stream
 from app.schema import assert_schema_ready
 from app.sse.broadcaster import SSEBroadcaster
 
 logger = logging.getLogger(__name__)
+
+CONFIG_LOCK_NAMESPACE = 0x4150444C
+CONFIG_LOCK_ID = 0x434647
+
+
+async def _acquire_config_lock(pool):
+    """Hold one PostgreSQL session lock for the Config process lifetime."""
+    conn = await pool.acquire()
+    acquired = await conn.fetchval(
+        "SELECT pg_try_advisory_lock($1, $2)",
+        CONFIG_LOCK_NAMESPACE,
+        CONFIG_LOCK_ID,
+    )
+    if acquired:
+        return conn
+    await pool.release(conn)
+    raise RuntimeError(
+        "Another Config process holds the OSS single-replica database lock"
+    )
+
+
+async def _release_config_lock(pool, conn) -> None:
+    await conn.fetchval(
+        "SELECT pg_advisory_unlock($1, $2)",
+        CONFIG_LOCK_NAMESPACE,
+        CONFIG_LOCK_ID,
+    )
+    await pool.release(conn)
 
 
 @asynccontextmanager
@@ -35,63 +64,87 @@ async def lifespan(application: FastAPI):
 
     pg_pool = await asyncpg.create_pool(dsn=pg_dsn, min_size=2, max_size=pg_pool_size)
     logger.info("PostgreSQL connection pool initialized")
+    lock_conn = None
+    redis_client = None
+    broadcaster = None
+    outbox_task = None
+    lifecycle_task = None
+    try:
+        lock_conn = await _acquire_config_lock(pg_pool)
+        logger.info("Config single-replica database lock acquired")
 
-    # Schema authority belongs to pipeline/postgres/migrations. Application
-    # replicas validate it and fail closed instead of racing startup DDL.
-    async with pg_pool.acquire() as conn:
-        await assert_schema_ready(conn)
-    logger.info("Database schema migration verified")
+        # Schema authority belongs to pipeline/postgres/migrations. The app
+        # validates it and fails closed instead of racing startup DDL.
+        await assert_schema_ready(lock_conn)
+        logger.info("Database schema migration verified")
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    redis_client = aioredis.from_url(redis_url)
-    logger.info("Redis connection initialized")
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        redis_client = aioredis.from_url(redis_url)
+        logger.info("Redis connection initialized")
 
-    broadcaster = SSEBroadcaster()
-    await broadcaster.start()
-    logger.info("SSE broadcaster started")
+        broadcaster = SSEBroadcaster()
+        await broadcaster.start()
+        logger.info("SSE broadcaster started")
 
-    # Experiment expiry monitor: completes running experiments past their
-    # end_date (cascading to disable their backing flags). Nothing else acts on
-    # end_date, so without this they run forever.
-    expiry_task = _start_expiry_monitor(pg_pool, redis_client, broadcaster)
+        outbox_task = asyncio.create_task(
+            outbox.run_worker(pg_pool, redis_client, broadcaster)
+        )
+        logger.info("Config durable outbox worker started")
 
-    application.state.pg_pool = pg_pool
-    application.state.authenticator = PostgresAuthenticator(pg_pool)
-    application.state.redis = redis_client
-    application.state.broadcaster = broadcaster
-    application.state.expiry_task = expiry_task
+        lifecycle_task = _start_lifecycle_monitor(pg_pool)
 
-    yield
+        application.state.pg_pool = pg_pool
+        application.state.authenticator = PostgresAuthenticator(pg_pool)
+        application.state.redis = redis_client
+        application.state.broadcaster = broadcaster
+        application.state.outbox_task = outbox_task
+        application.state.lifecycle_task = lifecycle_task
 
-    if expiry_task is not None:
-        expiry_task.cancel()
-        try:
-            await expiry_task
-        except asyncio.CancelledError:
-            pass
-        logger.info("Experiment expiry monitor stopped")
+        yield
+    finally:
+        if lifecycle_task is not None:
+            lifecycle_task.cancel()
+            try:
+                await lifecycle_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Experiment lifecycle monitor stopped")
 
-    await broadcaster.stop()
-    logger.info("SSE broadcaster stopped")
+        if outbox_task is not None:
+            outbox_task.cancel()
+            try:
+                await outbox_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Config durable outbox worker stopped")
 
-    await redis_client.aclose()
-    logger.info("Redis connection closed")
+        if broadcaster is not None:
+            await broadcaster.stop()
+            logger.info("SSE broadcaster stopped")
 
-    await pg_pool.close()
-    logger.info("PostgreSQL connection pool closed")
+        if redis_client is not None:
+            await redis_client.aclose()
+            logger.info("Redis connection closed")
+
+        if lock_conn is not None:
+            await _release_config_lock(pg_pool, lock_conn)
+            logger.info("Config single-replica database lock released")
+
+        await pg_pool.close()
+        logger.info("PostgreSQL connection pool closed")
 
 
-def _start_expiry_monitor(pg_pool, redis_client, broadcaster) -> asyncio.Task | None:
-    if os.environ.get("EXPERIMENT_EXPIRY_ENABLED", "true").lower() != "true":
-        logger.info("Experiment expiry monitor disabled")
+def _start_lifecycle_monitor(pg_pool) -> asyncio.Task | None:
+    if os.environ.get("EXPERIMENT_LIFECYCLE_ENABLED", "true").lower() != "true":
+        logger.info("Experiment lifecycle monitor disabled")
         return None
-    interval_seconds = int(os.environ.get("EXPERIMENT_EXPIRY_INTERVAL_SECONDS", "300"))
-    logger.info("Starting experiment expiry monitor every %ds", interval_seconds)
+    interval_seconds = int(
+        os.environ.get("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", "300")
+    )
+    logger.info("Starting experiment lifecycle monitor every %ds", interval_seconds)
     return asyncio.create_task(
-        expiry.run_expiry_monitor(
+        lifecycle.run_lifecycle_monitor(
             pg_pool,
-            redis_client,
-            broadcaster,
             interval_seconds=interval_seconds,
         )
     )
@@ -115,6 +168,7 @@ auth_dependencies = [Depends(authenticate_request)]
 app.include_router(flags.router, dependencies=auth_dependencies)
 app.include_router(stream.router, dependencies=auth_dependencies)
 app.include_router(evaluate.router, dependencies=auth_dependencies)
+app.include_router(experiments.router, dependencies=auth_dependencies)
 app.include_router(admin.router, dependencies=auth_dependencies)
 
 

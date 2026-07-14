@@ -84,7 +84,7 @@ export function ExperimentListPage() {
         emptyState={
           <EmptyState
             title="No experiments yet"
-            description="An experiment is measured through a flag's exposures — create one and link a flag on its Results tab."
+            description="Results use each experiment's configured backing flag, metric, and analysis window."
           >
             <Button size="sm" asChild>
               <Link to="/experiments/new">

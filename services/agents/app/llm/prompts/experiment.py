@@ -32,7 +32,7 @@ code change (e.g. pure traffic/config change)>",
     {"key": "control", "weight": 50, "description": "..."},
     {"key": "treatment", "weight": 50, "description": "..."}
   ],
-  "primary_metric": {"event": "...", "type": "conversion|count|revenue", "direction": "increase|decrease"},
+  "primary_metric": {"event": "...", "type": "conversion", "direction": "increase|decrease"},
   "secondary_metrics": [...],
   "guardrail_metrics": [{"event": "...", "threshold": "...", "direction": "..."}],
   "targeting": {"conditions": [...]},
@@ -55,7 +55,7 @@ code change (e.g. pure traffic/config change)>",
       }
     },
     "evaluation_mode": "client",
-    "auto_disable": true
+    "auto_disable": false
   }
 }]
 ```
@@ -67,6 +67,7 @@ other field there; put per-variant descriptions in the top-level "variants".
 {"percentage": 0-100, "bucket_by": "<attribute>"} and never sets "variants" or "default_variant". Put \
 experiment targeting in the top-level "targeting", not in flag rules.
 - flag_config.fallthrough must contain only {"rollout": {"percentage": ..., "bucket_by": ...}}.
+- flag_config.auto_disable must be false; automatic guardrail mutation is unavailable in this release.
 
 Be conservative with experiment scope. Prefer smaller, focused experiments over large multi-factorial designs. \
 Always include guardrail metrics for error rate and latency."""

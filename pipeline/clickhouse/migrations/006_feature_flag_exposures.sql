@@ -1,6 +1,7 @@
 -- Migration 006: Feature flag exposure projection
 CREATE TABLE IF NOT EXISTS feature_flag_exposures (
     project_id           String,
+    message_id           String,
     flag_key             String,
     user_id              String,
     anonymous_id         String,
@@ -20,21 +21,13 @@ CREATE TABLE IF NOT EXISTS feature_flag_exposures (
     event_date           Date DEFAULT toDate(first_exposure)
 ) ENGINE = ReplacingMergeTree(first_exposure)
 PARTITION BY (project_id, toYYYYMM(event_date))
-ORDER BY (
-    project_id,
-    flag_key,
-    user_id,
-    anonymous_id,
-    session_id,
-    config_version,
-    variant,
-    page
-);
+ORDER BY (project_id, message_id);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS feature_flag_exposures_mv
 TO feature_flag_exposures
 AS SELECT
     project_id,
+    message_id,
     JSONExtractString(properties, 'flag_key') AS flag_key,
     user_id,
     anonymous_id,

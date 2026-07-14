@@ -1,25 +1,34 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
+import { deleteExperiment } from '../../src/api/experiments'
 import {
+  experimentCreateResponseSchema,
+  experimentCreateSchema,
+  experimentDeleteResponseSchema,
   experimentEntrySchema,
   experimentResultSchema,
+  experimentUpdateResponseSchema,
+  experimentUpdateSchema,
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import {
   buildCreate,
+  buildUpdate,
   emptyExperimentValues,
+  entryToFormValues,
   parseTargetingRules,
   validateExperimentForm,
   type ExperimentFormValues,
 } from '../../src/features/experiments/ExperimentForm'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
+import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
 const EXPERIMENT = {
@@ -34,17 +43,39 @@ const EXPERIMENT = {
     { key: 'treatment', weight: 1 },
   ],
   targeting_rules: [],
-  primary_metric: null,
-  start_date: '2026-06-01',
-  end_date: '',
+  primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
+  start_date: '2026-06-01T00:00:00+00:00',
+  end_date: '2026-07-01T00:00:00+00:00',
+  version: 2,
   created_at: '2026-06-01T00:00:00+00:00',
   updated_at: '2026-06-09T00:00:00+00:00',
 }
+
+let deleteRequestUrl = ''
+const updateBodies: Record<string, unknown>[] = []
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
     HttpResponse.json({ experiments: [EXPERIMENT], count: 1 }),
   ),
+  http.delete('http://config.test/v1/admin/experiments/:key', ({ request, params }) => {
+    deleteRequestUrl = request.url
+    return HttpResponse.json({
+      deleted: true,
+      key: String(params.key),
+      flag_key: 'checkout-test',
+      version: 3,
+    })
+  }),
+  http.put('*/api/projects/demo/config/v1/admin/experiments/:key', async ({ request, params }) => {
+    updateBodies.push((await request.json()) as Record<string, unknown>)
+    return HttpResponse.json({
+      updated: true,
+      key: String(params.key),
+      flag_key: 'checkout-test',
+      version: 3,
+    })
+  }),
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -54,6 +85,8 @@ afterAll(() => server.close())
 beforeEach(() => {
   localStorage.clear()
   seedWorkspace()
+  deleteRequestUrl = ''
+  updateBodies.length = 0
 })
 
 describe('experiment schemas', () => {
@@ -62,37 +95,168 @@ describe('experiment schemas', () => {
     // The record is canonical now — the flag link is required, not optional.
     const { flag_key: _flagKey, ...withoutFlagKey } = EXPERIMENT
     expect(experimentEntrySchema.safeParse(withoutFlagKey).success).toBe(false)
+    expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, status: 'scheduled' }).success).toBe(true)
+    expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, start_date: '2026-06-01' }).success).toBe(false)
   })
 
-  test('experiment results parse the CI tuple and nullable stats', () => {
+  test('write schemas require versions and response versions', () => {
+    const create = buildCreate({ ...emptyExperimentValues(), key: 'checkout-test' })
+    expect(experimentCreateSchema.safeParse(create).success).toBe(true)
+    expect(experimentCreateSchema.safeParse({ ...create, status: 'completed' }).success).toBe(false)
+    expect(experimentCreateSchema.safeParse({ ...create, status: 'stopped' }).success).toBe(false)
+    expect(experimentUpdateSchema.safeParse({ version: 2, description: 'updated' }).success).toBe(true)
+    expect(experimentUpdateSchema.safeParse({ description: 'updated' }).success).toBe(false)
+    expect(
+      experimentCreateResponseSchema.safeParse({
+        created: true,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        version: 1,
+      }).success,
+    ).toBe(true)
+    expect(
+      experimentUpdateResponseSchema.safeParse({
+        updated: true,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        version: 3,
+      }).success,
+    ).toBe(true)
+    expect(
+      experimentDeleteResponseSchema.safeParse({
+        deleted: true,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        version: 4,
+      }).success,
+    ).toBe(true)
+  })
+
+  test('write schemas mirror strict experiment variant and metric constraints', () => {
+    const valid = buildCreate({ ...emptyExperimentValues(), key: 'checkout' })
+    expect(experimentCreateSchema.safeParse(valid).success).toBe(true)
+
+    const { default_variant: _defaultVariant, ...missingDefault } = valid
+    expect(experimentCreateSchema.safeParse(missingDefault).success).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({
+        ...valid,
+        variants: [{ key: 'only', weight: 1 }],
+        default_variant: 'only',
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({
+        ...valid,
+        variants: Array.from({ length: 11 }, (_, index) => ({
+          key: `variant-${index}`,
+          weight: 1,
+        })),
+        default_variant: 'variant-0',
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({
+        ...valid,
+        variants: [
+          { key: 'control', weight: 0 },
+          { key: 'treatment', weight: 1 },
+        ],
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({
+        ...valid,
+        primary_metric: { event: 'revenue', type: 'revenue', direction: 'increase' },
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentUpdateSchema.safeParse({
+        version: 1,
+        variants: [{ key: 'only', weight: 1 }],
+      }).success,
+    ).toBe(false)
+    expect(experimentCreateSchema.safeParse({ ...valid, key: 'bad/key' }).success).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({ ...valid, flag_key: 'bad key' }).success,
+    ).toBe(false)
+  })
+
+  test('delete sends the optimistic version as a query parameter', async () => {
+    await expect(
+      deleteExperiment({ baseUrl: 'http://config.test', actor: 'tester' }, 'checkout-test', 2),
+    ).resolves.toMatchObject({ deleted: true, version: 3 })
+    expect(new URL(deleteRequestUrl).searchParams.get('version')).toBe('2')
+  })
+
+  test('experiment results discriminate ready and finite insufficient-data responses', () => {
+    const common = {
+      experiment_key: 'checkout-test',
+      flag_key: 'checkout-cta',
+      experiment_status: 'running',
+      control_variant: 'control',
+      metric_event: 'purchase',
+      start_date: '2026-06-01T00:00:00+00:00',
+      end_date: '2026-06-15T00:00:00+00:00',
+      config_version: 3,
+      arms: [
+        { variant: 'control', sample_size: 100, conversions: 10, conversion_rate: 0.1 },
+        { variant: 'treatment', sample_size: 100, conversions: 20, conversion_rate: 0.2 },
+      ],
+      crossover_actors: 1,
+      unknown_variant_actors: 0,
+    }
+    const ready = {
+      analysis_status: 'ready',
+      ...common,
+      significance_level: 0.05,
+      correction: 'bonferroni',
+      comparisons: [
+        {
+          control_variant: 'control',
+          treatment_variant: 'treatment',
+          control_rate: 0.1,
+          treatment_rate: 0.2,
+          rate_difference: 0.1,
+          confidence_interval: [0.02, 0.18],
+          raw_p_value: 0.01,
+          adjusted_p_value: 0.01,
+          is_significant: true,
+        },
+      ],
+    }
+    const insufficient = {
+      analysis_status: 'insufficient_data',
+      ...common,
+      reason: 'underpowered_arms',
+      minimum_sample_size_per_arm: 2,
+      underpowered_variants: ['treatment'],
+    }
+
+    expect(experimentResultSchema.safeParse(ready).success).toBe(true)
+    expect(experimentResultSchema.safeParse(insufficient).success).toBe(true)
+    expect(
+      experimentResultSchema.safeParse({
+        ...ready,
+        comparisons: [{ ...ready.comparisons[0], raw_p_value: Number.POSITIVE_INFINITY }],
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentResultSchema.safeParse({ ...insufficient, reason: 'not_enough_data' }).success,
+    ).toBe(false)
+    expect(
+      experimentResultSchema.safeParse({ ...ready, recommendation: 'Ship it' }).success,
+    ).toBe(false)
     expect(
       experimentResultSchema.safeParse({
         experiment_id: 'checkout-test',
         flag_key: 'checkout-cta',
         metric: 'purchase',
         method: 'frequentist',
-        variants: [{ variant: 'control', users: 100, mean: 0.1, stddev: 0.3, total: 10 }],
-        effect_size: 0.12,
-        confidence_interval: [-0.01, 0.25],
-        p_value: 0.04,
-        is_significant: true,
+        variants: [],
         recommendation: 'Ship it',
       }).success,
-    ).toBe(true)
-    expect(
-      experimentResultSchema.safeParse({
-        experiment_id: 'x',
-        flag_key: 'y',
-        metric: 'z',
-        method: 'bayesian',
-        variants: [],
-        effect_size: null,
-        confidence_interval: null,
-        p_value: null,
-        is_significant: false,
-        recommendation: 'Keep collecting data',
-      }).success,
-    ).toBe(true)
+    ).toBe(false)
   })
 })
 
@@ -128,7 +292,6 @@ describe('experiment form model', () => {
       ],
       default_variant: 'control',
       metricEvent: 'purchase',
-      metricType: 'conversion',
       metricDirection: 'increase',
       targetingRulesJson: '',
     }
@@ -138,8 +301,8 @@ describe('experiment form model', () => {
       status: 'running',
       description: 'd',
       traffic_percentage: 50,
-      start_date: '2026-06-01',
-      end_date: '',
+      start_date: '2026-06-01T00:00:00Z',
+      end_date: null,
       variants: [
         { key: 'control', weight: 1, description: 'Current' },
         { key: 'treatment', weight: 2 },
@@ -148,13 +311,48 @@ describe('experiment form model', () => {
       primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
       targeting_rules: [],
     })
+
+  })
+
+  test('buildUpdate diffs drafts and never sends frozen fields after draft', () => {
+    const draft = experimentEntrySchema.parse({
+      ...EXPERIMENT,
+      status: 'draft',
+      primary_metric: null,
+      start_date: null,
+      end_date: null,
+    })
+    const draftValues = entryToFormValues(draft)
+    draftValues.description = 'Changed'
+    draftValues.start_date = '2026-06-01'
+    expect(buildUpdate(draftValues, draft, 7)).toEqual({
+      version: 7,
+      description: 'Changed',
+      start_date: '2026-06-01T00:00:00Z',
+    })
+
+    const running = experimentEntrySchema.parse({
+      ...EXPERIMENT,
+      primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
+      end_date: '2026-07-01T00:00:00+00:00',
+    })
+    const stoppedValues = entryToFormValues(running)
+    stoppedValues.status = 'stopped'
+    stoppedValues.start_date = '2026-06-02'
+    stoppedValues.end_date = '2026-07-02'
+    stoppedValues.variants[1]!.weight = 2
+    stoppedValues.default_variant = 'treatment'
+    stoppedValues.metricEvent = 'checkout_completed'
+
+    expect(buildUpdate(stoppedValues, running)).toEqual({ version: 2, status: 'stopped' })
   })
 
   test('validateExperimentForm catches duplicate keys and an out-of-set default', () => {
-    expect(validateExperimentForm(emptyExperimentValues())).toEqual({})
+    const valid = { ...emptyExperimentValues(), key: 'experiment-1' }
+    expect(validateExperimentForm(valid)).toEqual({})
 
     const duplicate = {
-      ...emptyExperimentValues(),
+      ...valid,
       variants: [
         { key: 'a', weight: 1, description: '' },
         { key: 'a', weight: 1, description: '' },
@@ -162,8 +360,58 @@ describe('experiment form model', () => {
     }
     expect(validateExperimentForm(duplicate).variants).toBe('Variant keys must be unique')
 
-    const badDefault = { ...emptyExperimentValues(), default_variant: 'nope' }
+    const badDefault = { ...valid, default_variant: 'nope' }
     expect(validateExperimentForm(badDefault).default_variant).toBeTruthy()
+  })
+
+  test('validateExperimentForm enforces experiment variant and window bounds', () => {
+    const base = emptyExperimentValues()
+    expect(
+      validateExperimentForm({ ...base, variants: [base.variants[0]!] }).variants,
+    ).toBe('Add at least two variants')
+    expect(
+      validateExperimentForm({
+        ...base,
+        variants: Array.from({ length: 11 }, (_, index) => ({
+          key: `variant-${index}`,
+          weight: 1,
+          description: '',
+        })),
+      }).variants,
+    ).toBe('Experiments support at most 10 variants')
+    expect(
+      validateExperimentForm({
+        ...base,
+        variants: [
+          { key: 'control', weight: 1, description: '' },
+          { key: 'treatment', weight: 0, description: '' },
+        ],
+      }).variants,
+    ).toBe('Every variant weight must be a positive integer')
+
+    expect(
+      validateExperimentForm({
+        ...base,
+        start_date: '2026-01-01',
+        end_date: '2026-04-01',
+      }).dates,
+    ).toBeUndefined()
+    expect(
+      validateExperimentForm({
+        ...base,
+        start_date: '2026-01-01',
+        end_date: '2026-04-02',
+      }).dates,
+    ).toBe('Experiment duration must not exceed 90 days')
+  })
+
+  test('validateExperimentForm rejects path-unsafe experiment and flag keys', () => {
+    const base = emptyExperimentValues()
+    expect(validateExperimentForm({ ...base, key: 'bad/key' }).key).toBeTruthy()
+    expect(validateExperimentForm({ ...base, key: 'good.key-1', flagKey: 'bad key' }).flagKey)
+      .toBeTruthy()
+    expect(validateExperimentForm({ ...base, key: 'good.key-1', flagKey: 'flag_ok' }).key)
+      .toBeUndefined()
   })
 })
 
@@ -188,5 +436,46 @@ describe('ExperimentListPage', () => {
     expect(screen.getByText('100%')).toBeInTheDocument()
     // Sanity: row click target exists.
     await userEvent.hover(screen.getByText('checkout-test'))
+  })
+})
+
+describe('ExperimentDetailPage', () => {
+  test('running to stopped omits every Config-frozen field from the update request', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+              <Routes>
+                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    await screen.findByDisplayValue('CTA experiment')
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).toHaveValue('control')
+    expect(
+      screen.getByText(
+        "Statistical control for every comparison and the backing flag's fallback variant.",
+      ),
+    ).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'stopped')
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    expect(updateBodies[0]).toEqual({ version: 2, status: 'stopped' })
+    for (const field of [
+      'start_date',
+      'end_date',
+      'variants',
+      'default_variant',
+      'primary_metric',
+    ]) {
+      expect(updateBodies[0]).not.toHaveProperty(field)
+    }
   })
 })

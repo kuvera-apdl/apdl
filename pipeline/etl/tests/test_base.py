@@ -35,7 +35,7 @@ def test_happy_path_produces_row(ctx):
     assert result.target == "dummy_table"
     assert len(result.rows) == 1
     row = result.rows[0]
-    assert row["_project_id"] == 42
+    assert row["_project_id"] == "project42"
     assert row["_schema"] == "dummy.test@1"
     assert row["_received_at"] == ctx.received_at
     assert row["country"] == "FR"  # enrichment ran
@@ -54,7 +54,7 @@ def test_decode_failure_goes_to_dlq(ctx):
     result = _DummyTransform().process(raw, ctx)
     assert not result.ok
     assert result.dlq is not None
-    assert result.dlq.project_id == 42
+    assert result.dlq.project_id == "project42"
     assert result.dlq.table == "events_dlq_v2"
     assert "_unexpected" in result.dlq.raw_payload
 

@@ -16,6 +16,22 @@ export interface TrackEvent {
   sessionId: string;
 }
 
+/**
+ * Immutable outcome returned after an explicit event drain.
+ *
+ * A drain never silently forgets accepted events: retryable batches are either
+ * persisted for a later session or returned in `pending` when persistence also
+ * fails. Server-side permanent rejections are returned separately so callers
+ * can inspect what the ingestion boundary refused.
+ */
+export interface DeliveryReport {
+  readonly delivered: number;
+  readonly persisted: number;
+  readonly permanentRejections: readonly Readonly<TrackEvent>[];
+  readonly discardedForConsent: number;
+  readonly pending: readonly Readonly<TrackEvent>[];
+}
+
 export interface EventContext {
   browser?: {
     name: string;

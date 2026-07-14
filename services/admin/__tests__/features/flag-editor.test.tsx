@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import type { FlagConfig } from '../../src/api/types/flags'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
+import { SUPPORTED_OPERATORS } from '../../src/core/evaluator/targetingContract'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { FlagEditorPage } from '../../src/features/flags/editor/FlagEditorPage'
 import { makeFlag, seedWorkspace } from '../helpers/fixtures'
@@ -90,9 +91,26 @@ function renderEditor(initialPath: string) {
 }
 
 describe('FlagEditorPage — create', () => {
+  test('offers only canonical targeting operators and uses canonical decimal input', async () => {
+    renderEditor('/flags/new')
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Add rule' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Add condition' }))
+
+    const operator = screen.getByRole('combobox', { name: 'Operator' }) as HTMLSelectElement
+    expect(new Set(Array.from(operator.options, (option) => option.value))).toEqual(
+      SUPPORTED_OPERATORS,
+    )
+    expect(Array.from(operator.options, (option) => option.value)).not.toContain('regex')
+
+    await userEvent.selectOptions(operator, 'gte')
+    expect(screen.getByPlaceholderText('canonical decimal')).toHaveAttribute('type', 'text')
+  })
+
   test('creates a draft flag through the review sheet', async () => {
     renderEditor('/flags/new')
     await userEvent.type(await screen.findByPlaceholderText('checkout-cta'), 'brand-new')
+    expect(screen.queryByRole('switch', { name: /automatic-disable/i })).not.toBeInTheDocument()
     await userEvent.type(screen.getByPlaceholderText('Checkout CTA experiment'), 'Brand new flag')
     await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
 
@@ -109,6 +127,7 @@ describe('FlagEditorPage — create', () => {
       state: 'draft',
       enabled: false,
       default_variant: 'control',
+      auto_disable: false,
     })
   })
 
@@ -157,6 +176,8 @@ describe('FlagEditorPage — edit & version conflict', () => {
     currentFlags = [makeFlag()]
     renderEditor('/flags/checkout-cta/edit')
     await screen.findByDisplayValue('Checkout CTA experiment')
+    expect(screen.getByText(/Existing flag lifecycle changes use the dedicated actions/)).toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
     await waitFor(() => expect(screen.queryByText(/Update checkout-cta/)).not.toBeInTheDocument())
     expect(putBodies).toHaveLength(0)

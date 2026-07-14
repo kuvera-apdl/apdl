@@ -141,8 +141,6 @@ def test_ordered_rules_stop_after_first_match():
         (ConditionOperator.GT, 10, "not-a-number", False),
         (ConditionOperator.IN, ["a", "b"], "b", True),
         (ConditionOperator.NOT_IN, ["a", "b"], "c", True),
-        (ConditionOperator.REGEX, r"^p.o$", "pro", True),
-        (ConditionOperator.REGEX, "[", "pro", False),  # invalid regex -> False
     ],
 )
 def test_operators(operator, value, attr, expected):

@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
+import math
 import re
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 
 def _coerce_project_id(value: Any) -> str:
@@ -52,13 +60,6 @@ class TimeInterval(str, Enum):
     month = "1 MONTH"
 
 
-class AnalysisMethod(str, Enum):
-    """Statistical analysis method for experiment evaluation."""
-    frequentist = "frequentist"
-    bayesian = "bayesian"
-    sequential = "sequential"
-
-
 class GuardrailMetric(str, Enum):
     """Supported feature-flag guardrail metrics."""
     frontend_error_rate = "frontend_error_rate"
@@ -98,6 +99,8 @@ class DateRangeRequest(BaseModel):
     def check_date_range(self) -> "DateRangeRequest":
         if self.end_date < self.start_date:
             raise ValueError("end_date must be on or after start_date")
+        if (self.end_date - self.start_date).days > 90:
+            raise ValueError("query date range must not exceed 90 days")
         return self
 
 
@@ -105,8 +108,21 @@ class DateRangeRequest(BaseModel):
 # Event models
 # ---------------------------------------------------------------------------
 
+MAX_FILTER_MEMBERSHIP_VALUES = 100
+MAX_FILTER_STRING_LENGTH = 1_024
+
+
 def _is_filter_scalar(value: Any) -> bool:
-    return isinstance(value, str | int | float | bool) and value is not None
+    if isinstance(value, str):
+        return len(value) <= MAX_FILTER_STRING_LENGTH
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int | float):
+        try:
+            return math.isfinite(float(value))
+        except OverflowError:
+            return False
+    return False
 
 
 def _filter_value_kind(value: Any) -> str:
@@ -141,8 +157,16 @@ class EventPropertyFilter(BaseModel):
         if self.operator in {EventFilterOperator.in_, EventFilterOperator.not_in}:
             if not isinstance(self.value, list) or len(self.value) == 0:
                 raise ValueError(f"{self.operator.value} requires a non-empty list value")
+            if len(self.value) > MAX_FILTER_MEMBERSHIP_VALUES:
+                raise ValueError(
+                    f"{self.operator.value} accepts at most "
+                    f"{MAX_FILTER_MEMBERSHIP_VALUES} values"
+                )
             if not all(_is_filter_scalar(item) for item in self.value):
-                raise ValueError("list filter values must be strings, numbers, or booleans")
+                raise ValueError(
+                    "list filter values must be finite numbers, booleans, or strings "
+                    f"of at most {MAX_FILTER_STRING_LENGTH} characters"
+                )
 
             value_kinds = {_filter_value_kind(item) for item in self.value}
             if value_kinds - {"number"} and len(value_kinds) > 1:
@@ -152,6 +176,10 @@ class EventPropertyFilter(BaseModel):
         if self.operator == EventFilterOperator.contains:
             if not isinstance(self.value, str) or not self.value:
                 raise ValueError("contains requires a non-empty string value")
+            if len(self.value) > MAX_FILTER_STRING_LENGTH:
+                raise ValueError(
+                    f"contains accepts at most {MAX_FILTER_STRING_LENGTH} characters"
+                )
             return self
 
         if self.operator in {
@@ -160,12 +188,20 @@ class EventPropertyFilter(BaseModel):
             EventFilterOperator.lt,
             EventFilterOperator.lte,
         }:
-            if isinstance(self.value, bool) or not isinstance(self.value, int | float):
-                raise ValueError(f"{self.operator.value} requires a numeric value")
+            if (
+                isinstance(self.value, bool)
+                or not isinstance(self.value, int | float)
+                or not _is_filter_scalar(self.value)
+            ):
+                raise ValueError(
+                    f"{self.operator.value} requires a finite numeric value"
+                )
             return self
 
         if not _is_filter_scalar(self.value):
-            raise ValueError(f"{self.operator.value} requires a scalar value")
+            raise ValueError(
+                f"{self.operator.value} requires a bounded finite scalar value"
+            )
         return self
 
 
@@ -432,9 +468,9 @@ class CohortResponse(BaseModel):
 class GuardrailConfig(StrictModel):
     metric: GuardrailMetric
     threshold: GuardrailThreshold
-    scope: str = ""
+    scope: str = Field(default="", max_length=512)
     minimum_exposures: int = Field(default=0, ge=0)
-    window_minutes: int = Field(default=10, ge=1)
+    window_minutes: int = Field(default=10, ge=1, le=129_600)
 
     @model_validator(mode="after")
     def check_guardrail_shape(self) -> "GuardrailConfig":
@@ -450,13 +486,17 @@ class GuardrailConfig(StrictModel):
 
 
 class GuardrailVariantConfig(StrictModel):
-    key: str = Field(..., min_length=1)
+    key: str = Field(..., min_length=1, max_length=128)
     weight: int = Field(..., ge=0, strict=True)
 
 
 class GuardrailVariantContext(StrictModel):
-    default_variant: str = Field(..., min_length=1)
-    variants: list[GuardrailVariantConfig] = Field(..., min_length=1)
+    default_variant: str = Field(..., min_length=1, max_length=128)
+    variants: list[GuardrailVariantConfig] = Field(
+        ...,
+        min_length=1,
+        max_length=10,
+    )
 
     @model_validator(mode="after")
     def check_variant_context(self) -> "GuardrailVariantContext":
@@ -477,7 +517,7 @@ class GuardrailVariantContext(StrictModel):
 
 class GuardrailEvaluateRequest(GuardrailVariantContext):
     project_id: ProjectId
-    flag_key: str = Field(..., min_length=1)
+    flag_key: str = Field(..., min_length=1, max_length=128)
     guardrail: GuardrailConfig
 
 
@@ -492,32 +532,66 @@ class GuardrailEvaluateResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Experiment models
+# Experiment-analysis models
 # ---------------------------------------------------------------------------
 
-class ExperimentResultsRequest(StrictModel):
-    experiment_id: str = Field(..., min_length=1)
-    flag_key: str = Field(..., min_length=1)
-    metric: str = Field(..., min_length=1)
-    method: AnalysisMethod = AnalysisMethod.frequentist
+class _FiniteExperimentModel(StrictModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
-class VariantResult(BaseModel):
+class ExperimentArmResult(_FiniteExperimentModel):
     variant: str
-    users: int
-    mean: float
-    stddev: float
-    total: float
+    sample_size: int = Field(..., ge=0)
+    conversions: int = Field(..., ge=0)
+    conversion_rate: float = Field(..., ge=0.0, le=1.0)
 
 
-class ExperimentResult(BaseModel):
-    experiment_id: str
-    flag_key: str
-    metric: str
-    method: str
-    variants: list[VariantResult]
-    effect_size: float | None = None
-    confidence_interval: tuple[float, float] | None = None
-    p_value: float | None = None
+class ExperimentComparison(_FiniteExperimentModel):
+    control_variant: str
+    treatment_variant: str
+    control_rate: float = Field(..., ge=0.0, le=1.0)
+    treatment_rate: float = Field(..., ge=0.0, le=1.0)
+    rate_difference: float = Field(..., ge=-1.0, le=1.0)
+    confidence_interval: tuple[float, float]
+    raw_p_value: float = Field(..., ge=0.0, le=1.0)
+    adjusted_p_value: float = Field(..., ge=0.0, le=1.0)
     is_significant: bool
-    recommendation: str
+
+
+class _ExperimentAnalysisBase(_FiniteExperimentModel):
+    experiment_key: str
+    flag_key: str
+    experiment_status: Literal["scheduled", "running", "completed", "stopped"]
+    control_variant: str
+    metric_event: str
+    start_date: AwareDatetime
+    end_date: AwareDatetime
+    config_version: int = Field(..., ge=1)
+    arms: list[ExperimentArmResult]
+    crossover_actors: int = Field(..., ge=0)
+    unknown_variant_actors: int = Field(..., ge=0)
+
+
+class ExperimentAnalysisReady(_ExperimentAnalysisBase):
+    analysis_status: Literal["ready"] = "ready"
+    significance_level: float = Field(default=0.05, gt=0.0, lt=1.0)
+    correction: Literal["bonferroni"] = "bonferroni"
+    comparisons: list[ExperimentComparison]
+
+
+class ExperimentAnalysisInsufficient(_ExperimentAnalysisBase):
+    analysis_status: Literal["insufficient_data"] = "insufficient_data"
+    reason: Literal[
+        "experiment_not_started",
+        "no_exposures",
+        "underpowered_arms",
+        "non_finite_statistics",
+    ]
+    minimum_sample_size_per_arm: int = Field(default=2, ge=2)
+    underpowered_variants: list[str]
+
+
+ExperimentAnalysisResponse = Annotated[
+    ExperimentAnalysisReady | ExperimentAnalysisInsufficient,
+    Field(discriminator="analysis_status"),
+]

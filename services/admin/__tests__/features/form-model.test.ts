@@ -6,6 +6,7 @@ import { describe, expect, test } from 'vitest'
 import { flagCreateSchema } from '../../src/api/schemas/flags'
 import {
   emptyFormValues,
+  flagFormSchema,
   flagToFormValues,
   formToCreatePayload,
   formToEvaluable,
@@ -27,8 +28,30 @@ describe('formToCreatePayload', () => {
     const payload = formToCreatePayload(baseValues())
     expect(payload.enabled).toBe(false)
     expect(payload.state).toBe('draft')
+    expect(payload.auto_disable).toBe(false)
     expect('review_by' in payload).toBe(false)
     expect(flagCreateSchema.safeParse(payload).success).toBe(true)
+  })
+
+  test('keeps automatic disabling unavailable', () => {
+    expect(emptyFormValues().auto_disable).toBe(false)
+    expect(flagFormSchema.safeParse({ ...baseValues(), auto_disable: true }).success).toBe(false)
+  })
+
+  test('rejects guardrail windows longer than 90 days', () => {
+    const values = baseValues()
+    values.guardrails = [
+      {
+        metric: 'frontend_error_rate',
+        threshold: '2x_baseline',
+        scope: '',
+        minimum_exposures: 0,
+        window_minutes: 129_601,
+      },
+    ]
+    expect(flagFormSchema.safeParse(values).success).toBe(false)
+    values.guardrails[0]!.window_minutes = 129_600
+    expect(flagFormSchema.safeParse(values).success).toBe(true)
   })
 
   test('active state derives enabled=true', () => {
@@ -64,20 +87,21 @@ describe('formToCreatePayload', () => {
 
 describe('formToUpdatePlan', () => {
   test('an untouched form produces no changes (existence conditions included)', () => {
-    const flag = makeFlag() // has an `exists` condition serialized as value:null
+    const flag = makeFlag()
     const plan = formToUpdatePlan(flagToFormValues(flag), flag, flag.version)
     expect(plan.changedFields).toEqual([])
     expect(plan.payload).toEqual({ version: 3 })
   })
 
-  test('sends only the changed fields, never enabled', () => {
+  test('sends only config fields and ignores lifecycle state changes', () => {
     const flag = makeFlag()
     const values = flagToFormValues(flag)
     values.name = 'Renamed'
     values.state = 'draft'
     const plan = formToUpdatePlan(values, flag, flag.version)
-    expect(plan.changedFields.sort()).toEqual(['name', 'state'])
-    expect(plan.payload).toEqual({ version: 3, name: 'Renamed', state: 'draft' })
+    expect(plan.changedFields).toEqual(['name'])
+    expect(plan.payload).toEqual({ version: 3, name: 'Renamed' })
+    expect('state' in plan.payload).toBe(false)
     expect('enabled' in plan.payload).toBe(false)
   })
 

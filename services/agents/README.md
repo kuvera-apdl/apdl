@@ -7,11 +7,23 @@ FastAPI service on port **8083**.
 
 Closes the product loop autonomously: agents **read analytics** from the Query
 Service (funnels, retention, event counts), **reason** over them with an LLM to
-produce insights, and **act** — creating experiments, flags, and server-driven
-UI configs through the Config Service. Every action passes a safety validator
-and an autonomy gate before deployment, is written to an audit log, and
-deployed experiments can be auto-rolled-back on metric degradation. Insights
-are persisted to pgvector memory so later runs build on earlier findings.
+produce insights, and **act** through bounded experiment and feature-proposal
+workflows. Every action passes a safety validator and an autonomy gate before
+deployment and is written to an audit log. Experiment results are read-only in
+the OSS developer preview: autonomous evaluation, stopping, shipping, and
+rollback are disabled. Insights are persisted to pgvector memory so later runs
+build on earlier findings.
+
+The `personalization` graph is disabled in 0.3.0. Config has no canonical
+UI-config storage/delivery API, so the trigger API rejects that graph, it is
+hidden from definitions, and custom agents cannot select UI-config tools.
+
+Execution is enabled only for operator-provisioned projects in the OSS
+developer preview. Projects created through the public workspace flow retain
+read-only definitions, run history, results, and audit access, but cannot
+trigger runs, manage/test custom agents, or approve work. This is enforced from
+canonical project provenance even when a credential incorrectly contains an
+execution role.
 
 A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): it
 resolves the requested agents from a registry, runs them in pipeline order,
@@ -21,7 +33,9 @@ dict between them.
 ## API
 
 All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
-management, and approval operations use distinct project-scoped roles.
+management, and approval operations use distinct project-scoped roles. The
+`agents:run`, `agents:manage`, and `agents:approve` roles are honored only for
+operator-provisioned projects (`admin_projects.created_by IS NULL`).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -57,7 +71,8 @@ Agents self-register via `@register_agent` and run in `order`:
 |------|------|----------|----------|--------------|
 | `behavior_analysis` | reasoning | — | `insights` | Plans + runs analytics queries, synthesises insights |
 | `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment and deploys it through the safety gate |
-| `personalization` | fast | `insights` | `personalizations` | Generates segment-targeted server-driven UI configs |
+| `experiment_evaluation` | reasoning | — | — | **Disabled**; experiment results require human interpretation |
+| `personalization` | fast | `insights` | `personalizations` | **Disabled**; no Config storage or delivery contract exists |
 | `feature_proposal` | reasoning | `insights` | `feature_proposals` | Proposes new features; always requires human approval |
 
 Scaffold a new agent with `scripts/new_agent.py`.
@@ -72,30 +87,35 @@ provider on failure. Defaults are overridable per slot
 
 ## Autonomy & safety
 
+These levels apply only to operator-provisioned projects. Self-created projects
+cannot start or resume an Agents execution at any autonomy level.
+
 Every acting agent funnels its safety result through `gate_action`
 (`app/framework/gating.py`):
 
 | Level | Behavior |
 |-------|----------|
 | L1 | Suggest only — never mutates anything, even if safety passes |
-| L2 | Auto-applies safe low-impact actions (e.g. targeted UI configs); everything else is queued for human approval |
+| L2 | Holds every safety-passing action for human approval |
 | L3 | Auto-deploys validated **low-risk** actions; medium/high risk goes to approval |
-| L4 | Full autonomy — still routes non-low-risk and always-approve actions (feature proposals) to approval |
+| L4 | Full autonomy — deploys every safety-passing action except always-approve actions such as feature proposals |
 
 Actions that fail safety validation always halt.
 
 - **Safety validator** (`app/safety/validator.py`) — per-action-type rate
-  limits (5 experiments, 20 flag updates, 30 UI configs, 3 proposals per hour),
-  conflict detection, blast-radius checks (variant weights ≤ 100%, control
-  group ≥ 10%, UI configs must be targeted), and guardrail checks (experiments
-  need guardrail metrics, a primary metric, and a hypothesis; proposals need
+  limits, conflict detection, blast-radius checks (including variant weights ≤
+  100% and a control group ≥ 10%), and guardrail checks (experiments need
+  guardrail metrics, a primary metric, and a hypothesis; proposals need
   documented risks and success criteria). Outputs a `low`/`medium`/`high` risk level.
 - **Audit log** (`app/safety/audit.py`) — every step, decision, safety result,
   and approval is written to the `agent_audit_log` table in PostgreSQL.
-- **Auto-rollback** (`app/safety/rollback.py`) — monitors deployed experiments
-  against a baseline and disables the experiment's flag via the Config Service
-  if error rate (+0.5 pp), p95 latency (+20%), or the primary metric (−2 pp)
-  degrades past thresholds.
+- **Rollback assessment** (`app/safety/rollback.py`) — may calculate a read-only
+  degradation assessment. It never mutates Config state in this release.
+
+When upgrading an existing deployment to migration 014, stop the Agents
+service before applying PostgreSQL migrations. The migration fails existing
+self-created-project work and reopens its exact proposal claims, but it cannot
+cancel an already in-flight provider HTTP call inside a still-running process.
 
 ## Memory
 
@@ -112,7 +132,9 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 - `clickhouse.py` — Query Service: event counts, timeseries, funnels, retention
 - `flags.py` — Config Service admin API: list/create/update flags, evaluate gates
 - `experiments.py` — list active experiments, create experiment config + its flag, fetch results
-- `ui_config.py` — create/update server-driven UI configs
+
+`ui_config.py` remains only as code for the parked personalization prototype;
+no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 
 ## Configuration
 
@@ -120,7 +142,7 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 |----------|---------|---------|
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Runs, audit log, pgvector memory |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
-| `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag/experiment/UI-config CRUD |
+| `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |

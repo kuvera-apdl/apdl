@@ -27,7 +27,7 @@ def test_unrouted_schema_goes_to_dlq(ctx):
 def test_missing_schema_key_goes_to_dlq(ctx):
     loader = CollectingLoader()
     pipe = EtlPipeline(loader)
-    result = pipe.process_record({"_project_id": 42, "payload": {}}, ctx)
+    result = pipe.process_record({"_project_id": "project42", "payload": {}}, ctx)
     assert not result.ok
     assert pipe.stats["unrouted"] == 1
 

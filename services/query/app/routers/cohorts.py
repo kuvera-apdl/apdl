@@ -45,8 +45,13 @@ async def cohort_comparison(body: CohortRequest, request: Request) -> CohortResp
 
     # Group rows by cohort_value
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    total_users_by_cohort: dict[str, int] = {}
     for row in rows:
         cohort_val = row.get("cohort_value", "unknown")
+        total_users = int(row["total_users"])
+        existing_total = total_users_by_cohort.setdefault(cohort_val, total_users)
+        if existing_total != total_users:
+            raise RuntimeError("cohort query returned inconsistent total_users")
         day = row.get("day")
         if hasattr(day, "isoformat"):
             day = day.isoformat()
@@ -61,12 +66,11 @@ async def cohort_comparison(body: CohortRequest, request: Request) -> CohortResp
     cohorts = []
     for cohort_value, timeseries in sorted(grouped.items()):
         total_events = sum(p["event_count"] for p in timeseries)
-        total_users = sum(p["unique_users"] for p in timeseries)
         cohorts.append(
             {
                 "cohort_value": cohort_value,
                 "total_events": total_events,
-                "total_users": total_users,
+                "total_users": total_users_by_cohort[cohort_value],
                 "timeseries": timeseries,
             }
         )

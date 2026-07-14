@@ -3,9 +3,11 @@ import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, test } from 'vitest'
 
 import {
+  hasWorkspaceRole,
   serviceBaseUrl,
   serviceConnection,
   useWorkspace,
+  workspacesForIdentity,
   WorkspaceProvider,
 } from '../../src/core/workspace'
 import { makeWorkspace } from '../helpers/fixtures'
@@ -43,5 +45,29 @@ describe('WorkspaceProvider', () => {
       baseUrl: '/api/projects/demo/agents',
       actor: 'tester@example.com',
     })
+  })
+
+  test('carries each membership role into its workspace without widening access', () => {
+    const [workspace] = workspacesForIdentity({
+      user_id: '20000000-0000-4000-8000-000000000002',
+      email: 'member@example.com',
+      projects: [
+        {
+          project_id: 'selfcreated',
+          roles: ['events:write', 'config:read', 'query:read', 'agents:read'],
+        },
+      ],
+    })
+
+    expect(workspace?.roles).toEqual([
+      'events:write',
+      'config:read',
+      'query:read',
+      'agents:read',
+    ])
+    expect(hasWorkspaceRole(workspace, 'agents:read')).toBe(true)
+    expect(hasWorkspaceRole(workspace, 'agents:run')).toBe(false)
+    expect(hasWorkspaceRole(workspace, 'agents:manage')).toBe(false)
+    expect(hasWorkspaceRole(workspace, 'agents:approve')).toBe(false)
   })
 })

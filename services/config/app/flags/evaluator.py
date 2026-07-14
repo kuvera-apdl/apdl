@@ -1,8 +1,22 @@
 """Canonical feature flag evaluation engine."""
 
 import logging
-import re
 from typing import Any
+
+from app.flags.targeting_contract import (
+    MAX_CONDITIONS_PER_RULE,
+    MAX_RULES,
+    NUMERIC_OPERATORS,
+    PRESENCE_OPERATORS,
+    SUPPORTED_OPERATORS,
+    is_bounded_string,
+    is_condition_value_valid,
+    is_identifier,
+    is_membership_list,
+    is_scalar,
+    parse_numeric,
+    scalar_equal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +78,18 @@ def matches_condition(condition: dict, ctx: dict) -> bool:
 
     attribute = condition.get("attribute")
     operator = condition.get("operator")
-    if not isinstance(attribute, str) or not isinstance(operator, str):
+    if (
+        not is_identifier(attribute)
+        or not isinstance(operator, str)
+        or operator not in SUPPORTED_OPERATORS
+    ):
+        return False
+
+    has_value = "value" in condition
+    if operator in PRESENCE_OPERATORS:
+        if has_value:
+            return False
+    elif not has_value or not is_condition_value_valid(operator, condition["value"]):
         return False
 
     exists, actual = _resolve_attribute(attribute, ctx)
@@ -72,33 +97,35 @@ def matches_condition(condition: dict, ctx: dict) -> bool:
         return exists and actual is not None
     if operator == "not_exists":
         return not exists or actual is None
-    if not exists or "value" not in condition:
+    if not exists:
         return False
 
     expected = condition["value"]
-    actual_value = str(actual)
 
     if operator == "equals":
-        return actual_value == str(expected)
+        return scalar_equal(actual, expected)
     if operator == "not_equals":
-        return actual_value != str(expected)
+        return is_scalar(actual) and not scalar_equal(actual, expected)
     if operator == "contains":
-        return isinstance(expected, str) and expected in actual_value
+        return is_bounded_string(actual) and expected in actual
     if operator == "not_contains":
-        return isinstance(expected, str) and expected not in actual_value
+        return is_bounded_string(actual) and expected not in actual
     if operator == "starts_with":
-        return isinstance(expected, str) and actual_value.startswith(expected)
+        return is_bounded_string(actual) and actual.startswith(expected)
     if operator == "ends_with":
-        return isinstance(expected, str) and actual_value.endswith(expected)
+        return is_bounded_string(actual) and actual.endswith(expected)
     if operator == "in":
-        return isinstance(expected, list) and actual in expected
+        return is_scalar(actual) and is_membership_list(expected) and any(
+            scalar_equal(actual, item) for item in expected
+        )
     if operator == "not_in":
-        return not isinstance(expected, list) or actual not in expected
-    if operator in {"gt", "gte", "lt", "lte"}:
-        try:
-            actual_number = float(actual)
-            expected_number = float(expected)
-        except (TypeError, ValueError):
+        return is_scalar(actual) and is_membership_list(expected) and not any(
+            scalar_equal(actual, item) for item in expected
+        )
+    if operator in NUMERIC_OPERATORS:
+        actual_number = parse_numeric(actual)
+        expected_number = parse_numeric(expected)
+        if actual_number is None or expected_number is None:
             return False
 
         if operator == "gt":
@@ -108,31 +135,36 @@ def matches_condition(condition: dict, ctx: dict) -> bool:
         if operator == "lt":
             return actual_number < expected_number
         return actual_number <= expected_number
-    if operator == "regex":
-        if not isinstance(expected, str):
-            return False
-        try:
-            return bool(re.search(expected, actual_value))
-        except re.error:
-            logger.warning("Invalid regex in flag rule: %s", expected)
-            return False
-
     logger.debug("Unknown operator '%s' in flag rule", operator)
     return False
 
 
 def matches_rule(rule: dict, ctx: dict) -> bool:
     conditions = rule.get("conditions", [])
-    if not isinstance(conditions, list):
+    if not isinstance(conditions, list) or len(conditions) > MAX_CONDITIONS_PER_RULE:
         return False
     return all(matches_condition(condition, ctx) for condition in conditions)
 
 
 def _unit_id(ctx: dict, bucket_by: str) -> str:
+    if not is_identifier(bucket_by):
+        return ""
     exists, value = _resolve_attribute(bucket_by, ctx)
-    if exists and value is not None:
-        return str(value)
+    if exists and is_identifier(value):
+        return value
     return ""
+
+
+def _rules_within_limits(rules: Any) -> bool:
+    if not isinstance(rules, list) or len(rules) > MAX_RULES:
+        return False
+    for rule in rules:
+        if not isinstance(rule, dict) or not is_identifier(rule.get("id")):
+            return False
+        conditions = rule.get("conditions")
+        if not isinstance(conditions, list) or len(conditions) > MAX_CONDITIONS_PER_RULE:
+            return False
+    return True
 
 
 def _base_result(flag: dict) -> dict:
@@ -223,7 +255,12 @@ def evaluate(flag: dict, ctx: dict) -> dict:
         result["reason"] = "disabled"
         return result
 
-    for rule in flag.get("rules", []):
+    rules = flag.get("rules", [])
+    if not _rules_within_limits(rules):
+        result["reason"] = "error"
+        return result
+
+    for rule in rules:
         if not isinstance(rule, dict) or not matches_rule(rule, ctx):
             continue
 

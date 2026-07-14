@@ -151,6 +151,9 @@ lint-sdk-python:
 test-ingestion:
 	cd services/ingestion && .venv/bin/python -m pytest -v
 
+test-packed-sdk-contract:
+	./scripts/test-packed-sdk-contract.sh
+
 lint-ingestion:
 	cd services/ingestion && .venv/bin/ruff check app/
 

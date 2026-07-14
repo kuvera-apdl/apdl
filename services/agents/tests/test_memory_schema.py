@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
-from app.schema import MIGRATION_NAME, REQUIRED_COLUMNS, assert_schema_ready
+from app.schema import (
+    MIGRATION_NAME,
+    MIGRATION_VERSION,
+    REQUIRED_COLUMNS,
+    assert_schema_ready,
+)
 
 
 class FakeConn:
@@ -44,6 +49,12 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
+def test_startup_requires_self_registered_agent_gate_migration():
+    assert MIGRATION_VERSION == 14
+    assert MIGRATION_NAME == "014_disable_self_registered_agents.sql"
+    assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
+
+
 @pytest.mark.asyncio
 async def test_rejects_missing_migration_ledger():
     with pytest.raises(RuntimeError, match="migration ledger is missing"):
@@ -54,6 +65,13 @@ async def test_rejects_missing_migration_ledger():
 async def test_rejects_incomplete_schema_at_startup():
     columns = REQUIRED_COLUMNS - {("agent_runs", "status")}
     with pytest.raises(RuntimeError, match="agent_runs.status"):
+        await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_project_provenance_column_at_startup():
+    columns = REQUIRED_COLUMNS - {("admin_projects", "created_by")}
+    with pytest.raises(RuntimeError, match="admin_projects.created_by"):
         await assert_schema_ready(FakeConn(columns=columns))
 
 

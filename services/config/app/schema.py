@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 6
-MIGRATION_NAME = "006_config.sql"
+MIGRATION_VERSION = 13
+MIGRATION_NAME = "013_disable_automatic_guardrails.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -19,11 +19,13 @@ REQUIRED_COLUMNS = frozenset(
         ("flags", "rules"),
         ("flags", "fallthrough"),
         ("flags", "evaluation_mode"),
+        ("flags", "auto_disable"),
         ("flags", "guardrails"),
         ("flags", "version"),
         ("flag_audit_log", "project_id"),
         ("flag_audit_log", "flag_key"),
         ("flag_audit_log", "evidence"),
+        ("flag_audit_log", "origin"),
         ("experiments", "key"),
         ("experiments", "project_id"),
         ("experiments", "status"),
@@ -32,6 +34,20 @@ REQUIRED_COLUMNS = frozenset(
         ("experiments", "variants_json"),
         ("experiments", "targeting_rules_json"),
         ("experiments", "primary_metric_json"),
+        ("experiments", "start_date"),
+        ("experiments", "end_date"),
+        ("experiments", "version"),
+        ("config_outbox", "id"),
+        ("config_outbox", "project_id"),
+        ("config_outbox", "kind"),
+        ("config_outbox", "dedup_key"),
+        ("config_outbox", "payload"),
+        ("config_outbox", "attempts"),
+        ("config_outbox", "available_at"),
+        ("config_outbox", "claimed_at"),
+        ("config_outbox", "processed_at"),
+        ("config_outbox", "last_error"),
+        ("config_outbox", "created_at"),
     }
 )
 

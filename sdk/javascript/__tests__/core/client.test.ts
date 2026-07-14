@@ -2,19 +2,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
 import { SDK_IDENTIFIER } from '../../src/core/constants';
+import type { TrackEvent } from '../../src/core/types';
 import {
   CLIENT_KEY,
   ENDPOINT,
   MockEventSource,
   createTestConfig,
-  emptyFlagsResponse,
+  mockApiFetch,
 } from '../helpers';
 
 // Mock fetch globally
-const fetchMock = vi.fn().mockResolvedValue(emptyFlagsResponse());
+const fetchMock = vi.fn(mockApiFetch);
 
 vi.stubGlobal('fetch', fetchMock);
-vi.stubGlobal('EventSource', MockEventSource);
 
 describe('APDLClient', () => {
   let client: APDLClient;
@@ -59,14 +59,47 @@ describe('APDLClient', () => {
       });
     });
 
-    it('should open the SSE stream from the config endpoint with client key query auth', () => {
+    it('should open the SSE stream with header auth and no credential in the URL', async () => {
+      await flushAsync();
       const source = MockEventSource.instances.at(-1);
       expect(source).toBeDefined();
 
       const url = new URL(source!.url);
       expect(`${url.origin}${url.pathname}`).toBe(`${ENDPOINT}/v1/stream`);
-      expect(url.searchParams.get('api_key')).toBe(CLIENT_KEY);
-      expect(url.searchParams.has('project_id')).toBe(false);
+      expect(url.search).toBe('');
+      expect(source!.init.headers).toMatchObject({
+        Accept: 'text/event-stream',
+        'X-API-Key': CLIENT_KEY,
+        'X-APDL-SDK': SDK_IDENTIFIER,
+      });
+    });
+
+    it('should not queue sensitive DOM data with default auto-capture', async () => {
+      const defaultConfig = createTestConfig();
+      delete defaultConfig.autoCapture;
+      const defaultClient = new APDLClient(defaultConfig);
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.value = 'default-client-password';
+      document.body.append(input);
+
+      try {
+        for (let index = 0; index < 3; index += 1) {
+          input.dispatchEvent(new MouseEvent('click', {
+            bubbles: true,
+            composed: true,
+          }));
+        }
+
+        const queued = defaultClient.debug.getQueue() as TrackEvent[];
+        const serialized = JSON.stringify(queued);
+        expect(serialized).not.toContain('default-client-password');
+        expect(queued.map((event) => event.event)).not.toContain('$click');
+        expect(queued.map((event) => event.event)).not.toContain('$rage_click');
+      } finally {
+        input.remove();
+        await defaultClient.shutdown();
+      }
     });
 
     it('should throw on missing endpoint', () => {
@@ -84,7 +117,7 @@ describe('APDLClient', () => {
     it('should throw when client key does not match the APDL format', () => {
       expect(() => resolveConfig(createTestConfig({
         auth: { clientKey: 'bad_key' },
-      }))).toThrow('proj_{project_id}_{secret}');
+      }))).toThrow('client_{project_id}_{token}');
     });
 
     it.each([
@@ -207,15 +240,17 @@ describe('APDLClient', () => {
       expect(client.debug.flush).toBeTypeOf('function');
     });
 
-    it('should keep the SSE connection open while typed heartbeats arrive', () => {
+    it('should keep the SSE connection open while typed heartbeats arrive', async () => {
+      await flushAsync();
       const source = MockEventSource.instances.at(-1);
       expect(source).toBeDefined();
 
-      source?.onopen?.(new Event('open'));
       vi.advanceTimersByTime(30000);
       source?.emit('heartbeat', '{}');
+      await flushAsync();
       vi.advanceTimersByTime(30000);
       source?.emit('heartbeat', '{}');
+      await flushAsync();
       vi.advanceTimersByTime(30000);
 
       expect(MockEventSource.instances).toHaveLength(1);
@@ -251,6 +286,21 @@ describe('APDLClient', () => {
       const queue = client.debug.getQueue();
       expect(queue[0]).toHaveProperty('sessionId');
       expect(typeof (queue[0] as Record<string, unknown>).sessionId).toBe('string');
+    });
+
+    it('should apply built-in PII scrubbers in standard privacy mode', () => {
+      client.track('pii_event', {
+        email: 'contact alice@example.com',
+        card: '4111 1111 1111 1111',
+        ssn: '123-45-6789',
+      });
+
+      const event = client.debug.getQueue()[0] as TrackEvent;
+      expect(event.properties).toEqual({
+        email: 'contact [REDACTED]',
+        card: '[REDACTED]',
+        ssn: '[REDACTED]',
+      });
     });
   });
 
@@ -299,7 +349,8 @@ describe('APDLClient', () => {
       expect(queue.length).toBe(1);
       expect(queue[0]).toMatchObject({
         type: 'page',
-        event: 'Home',
+        event: 'page',
+        properties: { name: 'Home' },
       });
     });
 
@@ -446,7 +497,7 @@ describe('APDLClient', () => {
       await experimentClient.shutdown();
     });
 
-    it('should include stable experiment context metadata on exposure events', async () => {
+    it('should not leak targeting context into exposure events', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({
@@ -474,13 +525,8 @@ describe('APDLClient', () => {
       expect(exposures).toHaveLength(1);
       expect(exposures[0].properties).toMatchObject({
         flag_key: 'context-exposure-flag',
-        experiment_context: {
-          attributes: {
-            plan: 'pro',
-            region: 'us',
-          },
-        },
       });
+      expect(exposures[0].properties).not.toHaveProperty('experiment_context');
 
       await experimentClient.shutdown();
     });
@@ -570,9 +616,11 @@ describe('APDLClient', () => {
         data: JSON.stringify({
           type: 'flag_update',
           action: 'flag_created',
+          version: 1,
           flag: makeFlag('listener-flag'),
         }),
       }));
+      await flushAsync();
 
       expect(callback).toHaveBeenCalledTimes(1);
       expect(callback).toHaveBeenCalledWith('treatment');
@@ -582,6 +630,7 @@ describe('APDLClient', () => {
         data: JSON.stringify({
           type: 'flag_update',
           action: 'flag_updated',
+          version: 2,
           flag: {
             ...makeFlag('listener-flag'),
             enabled: false,
@@ -589,6 +638,7 @@ describe('APDLClient', () => {
           },
         }),
       }));
+      await flushAsync();
 
       expect(callback).toHaveBeenCalledTimes(1);
       await variantClient.shutdown();
@@ -596,9 +646,10 @@ describe('APDLClient', () => {
 
     it('should restore cached flags in standard localStorage mode', () => {
       localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 2,
-        project_id: 'apdl',
+        schema_version: 3,
+        project_id: 'local_storage',
         flags: [makeFlag('cached-flag')],
+        versions: { 'cached-flag': 1 },
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
@@ -614,19 +665,21 @@ describe('APDLClient', () => {
 
     it('should scope cached flags by project ID derived from the client key', () => {
       localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 2,
-        project_id: 'apdl',
+        schema_version: 3,
+        project_id: 'local_storage',
         flags: [makeFlag('apdl-only')],
+        versions: { 'apdl-only': 1 },
       }));
       localStorage.setItem(flagStorageKey('projectb'), JSON.stringify({
-        schema_version: 2,
-        project_id: 'projectb',
+        schema_version: 3,
+        project_id: 'local_storage',
         flags: [makeFlag('projectb-only')],
+        versions: { 'projectb-only': 1 },
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
       const projectClient = new APDLClient(createTestConfig({
-        auth: { clientKey: 'proj_projectb_0123456789abcdef' },
+        auth: { clientKey: 'client_projectb_0123456789abcdef' },
         persistence: 'localStorage',
         privacyMode: 'standard',
       }));
@@ -642,9 +695,10 @@ describe('APDLClient', () => {
 
     it('should preserve restored flags when initial fetch returns malformed config', async () => {
       localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 2,
-        project_id: 'apdl',
+        schema_version: 3,
+        project_id: 'local_storage',
         flags: [makeFlag('cached-flag')],
+        versions: { 'cached-flag': 1 },
       }));
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -686,9 +740,10 @@ describe('APDLClient', () => {
 
     it('should not restore cached flags in strict privacy mode', () => {
       localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 2,
-        project_id: 'apdl',
+        schema_version: 3,
+        project_id: 'local_storage',
         flags: [makeFlag('cached-flag')],
+        versions: { 'cached-flag': 1 },
       }));
       fetchMock.mockRejectedValueOnce(new Error('offline'));
 
@@ -744,6 +799,44 @@ describe('APDLClient', () => {
       });
       expect(exposures[0].properties?.rollout_bucket).toBeTypeOf('number');
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
+    });
+
+    it('should preserve JSON attribute types for public flag evaluation', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('typed-attributes', {
+            rules: [{
+              id: 'typed-rule',
+              name: '',
+              conditions: [
+                { attribute: 'is_beta', operator: 'equals', value: false },
+                { attribute: 'seat_count', operator: 'equals', value: 3 },
+              ],
+              rollout: { percentage: 100, bucket_by: 'user_id' },
+            }],
+            fallthrough: {
+              rollout: { percentage: 0, bucket_by: 'user_id' },
+            },
+          })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const typedClient = new APDLClient(createTestConfig());
+      await flushAsync();
+
+      typedClient.identify('user_123', { is_beta: false });
+      typedClient.experiments.setContext({ attributes: { seat_count: 3 } });
+
+      expect(typedClient.getVariantDetails('typed-attributes')).toMatchObject({
+        reason: 'rule_match',
+        rule_id: 'typed-rule',
+        variant: 'treatment',
+      });
+      await typedClient.shutdown();
     });
 
     it('should send canonical exposure payloads to ingestion', async () => {
@@ -1012,6 +1105,7 @@ describe('APDLClient', () => {
         data: JSON.stringify({
           type: 'flag_update',
           action: 'flag_updated',
+          version: 2,
           flag: {
             ...makeFlag('checkout-flag'),
             enabled: false,
@@ -1019,6 +1113,7 @@ describe('APDLClient', () => {
           },
         }),
       }));
+      await flushAsync();
 
       window.dispatchEvent(new ErrorEvent('error', {
         message: 'Checkout exploded',
@@ -1109,6 +1204,76 @@ describe('APDLClient', () => {
       const queue = client.debug.getQueue();
       expect(queue.length).toBe(0);
     });
+
+    it('should clear accepted events and stop auto-capture until consent is regranted', async () => {
+      const captureClient = new APDLClient(createTestConfig({
+        autoCapture: {
+          pageViews: false,
+          clicks: true,
+          formSubmissions: false,
+          inputChanges: false,
+          scrollDepth: false,
+          rage_clicks: false,
+          frontend_errors: false,
+          web_vitals: false,
+        },
+      }));
+      const button = document.createElement('button');
+      document.body.append(button);
+
+      captureClient.track('accepted_before_revocation');
+      captureClient.consent.update({ analytics: false });
+      expect(captureClient.debug.getQueue()).toEqual([]);
+
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(captureClient.debug.getQueue()).toEqual([]);
+
+      captureClient.consent.update({ analytics: true });
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect((captureClient.debug.getQueue() as TrackEvent[]).map((event) => event.event))
+        .toEqual(['$click']);
+
+      button.remove();
+      await captureClient.shutdown();
+    });
+
+    it('should namespace browser identity, session, consent, and flags by project', async () => {
+      localStorage.setItem('apdl_anonymous_id', 'legacy-anonymous-id');
+      localStorage.setItem('apdl_session', JSON.stringify({ id: 'legacy-session' }));
+      localStorage.setItem('apdl_consent', JSON.stringify({
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      }));
+      localStorage.setItem('apdl_flags', JSON.stringify({ flags: ['legacy'] }));
+
+      const projectA = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+      }));
+      const projectB = new APDLClient(createTestConfig({
+        auth: { clientKey: 'client_projectb_0123456789abcdef' },
+        persistence: 'localStorage',
+      }));
+      projectA.track('project_a');
+      projectB.track('project_b');
+      await flushAsync();
+
+      for (const prefix of [
+        'apdl_anonymous_id',
+        'apdl_session',
+        'apdl_consent',
+        'apdl_flags',
+      ]) {
+        expect(localStorage.getItem(`${prefix}_apdl`)).not.toBeNull();
+        expect(localStorage.getItem(`${prefix}_projectb`)).not.toBeNull();
+      }
+      expect(localStorage.getItem('apdl_anonymous_id_apdl'))
+        .not.toBe('legacy-anonymous-id');
+      expect(projectA.consent.get().analytics).toBe(true);
+      expect(projectB.consent.get().analytics).toBe(true);
+
+      await Promise.all([projectA.shutdown(), projectB.shutdown()]);
+    });
   });
 
   describe('debug namespace', () => {
@@ -1131,10 +1296,18 @@ describe('APDLClient', () => {
   });
 
   describe('shutdown()', () => {
-    it('should gracefully shut down', async () => {
+    it('should join callers, drain accepted events, and reject tracking after shutdown', async () => {
       client.track('before_shutdown');
-      await client.shutdown();
-      // No errors thrown
+      const first = client.shutdown();
+      const second = client.shutdown();
+
+      expect(second).toBe(first);
+      expect(() => client.track('after_shutdown')).toThrow('client is shut down');
+      expect(() => client.identify('after_shutdown')).toThrow('client is shut down');
+      expect(() => client.group('after_shutdown')).toThrow('client is shut down');
+      expect(() => client.page('after_shutdown')).toThrow('client is shut down');
+      expect(() => client.reset()).toThrow('client is shut down');
+      await expect(first).resolves.toMatchObject({ delivered: 1, pending: [] });
     });
   });
 });

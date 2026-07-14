@@ -1,26 +1,35 @@
 # Authentication and tenant authorization
 
-APDL uses one canonical API-key contract across ingestion, config, query,
-agents, and codegen. Send the credential in `X-API-Key`:
+APDL has two strict credential kinds. Send either one only in `X-API-Key`:
 
 ```text
-proj_{project_id}_{secret}
+proj_{project_id}_{secret}     # confidential service credential
+client_{project_id}_{token}   # browser-safe public client credential
 ```
 
-Project IDs are 1-64 alphanumeric characters and secrets are 16-128
-alphanumeric characters.
+Project IDs are 1-64 alphanumeric characters; secrets and tokens are 16-128
+alphanumeric characters. Confidential credentials may carry any canonical
+service role. Browser credentials always carry exactly `events:write` and
+`config:read`; PostgreSQL rejects a browser credential with any other role.
+Consequently a browser credential cannot mutate flags, evaluate trusted
+server-side gates, run queries or agents, or reach Codegen. Only Ingestion and
+Config recognize the `client_` wire format; every other service requires a
+confidential `proj_` credential.
 
-The embedded project ID is a client-side hint, not authority. Each service
-hashes the complete key with SHA-256, looks up that hash in PostgreSQL, verifies
-it with a constant-time comparison, and derives the credential ID, project,
-roles, revocation state, and expiry from the stored record. Authentication also
-rejects a key whose embedded project differs from its stored project, preventing
-misprovisioned keys from splitting client and server tenant state. Any other
-caller-supplied `project_id` is an assertion that must equal the verified
-record's project.
+The embedded project ID is a client-side hint, not authority. Services hash the
+complete key with SHA-256, look up that hash in PostgreSQL, verify it with a
+constant-time comparison, and derive the credential ID, project, roles,
+revocation state, and expiry from the stored record. PostgreSQL stores and
+constrains the kind and non-secret prefix; Ingestion and Config, the two services
+that accept browser keys, also revalidate the wire prefix, stored kind, stored
+prefix, project, and browser role ceiling. Any other caller-supplied
+`project_id` is an assertion that must equal the verified record's project.
 
-`GET /v1/stream` temporarily also accepts `api_key` in the query string for the
-existing EventSource clients. No other route accepts query-string credentials.
+No route accepts credentials from a URL or query parameter. Config streaming
+uses the same `X-API-Key` header as `GET /v1/flags`; browser clients must use a
+header-capable streaming request rather than native `EventSource`, which cannot
+set request headers. This prevents credentials from entering URLs, proxy access
+logs, referrers, and browser history.
 
 The Config service exposes `GET /v1/auth/me` for credential introspection. It
 returns the verified `credential_id`, `project_id`, and sorted `roles`; it never
@@ -68,10 +77,13 @@ An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
 the `admin_projects` record and the creator's `admin_user_projects` membership
 in one transaction, and returns the refreshed identity. The creator receives
-the canonical project roles; another user cannot claim an existing project ID.
-Database triggers also register project IDs introduced by operator membership
-or service-credential provisioning, and foreign keys keep both registries tied
-to the canonical project row.
+the core ingestion, Config, and Query roles plus read-only Agents access;
+`agents:run`, `agents:manage`, and `agents:approve` are not granted. Another
+user cannot claim an existing project ID. Database triggers also register
+project IDs introduced by operator membership or service-credential
+provisioning. Those operator projects have no creator, while a self-created
+project permanently retains its creator provenance; deleting the creator is
+rejected instead of silently converting the project into an operator project.
 
 For projects without an operator-configured key in `APDL_SERVICE_API_KEYS`, the
 Admin API mints a random five-minute credential for each proxied request. Only
@@ -79,6 +91,21 @@ the SHA-256 hash is stored in `auth_credentials`; the raw key remains in memory
 for the upstream call and the row is deleted after the response or SSE stream
 closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
+
+Agents execution is available only to operator-provisioned projects whose
+canonical `admin_projects.created_by` is null. Self-created projects retain
+`agents:read`, but the Admin proxy will not mint an execution credential for
+them and the Agents service independently rejects execution roles even if a
+long-lived credential was manually overprivileged. PostgreSQL also rejects new
+`agent_runs` rows for self-created or unknown projects.
+
+Experiment analysis uses synchronous credential delegation: after Query has
+authenticated a confidential `X-API-Key` and enforced `query:read` for its
+project, it forwards that same header to Config's read-only analysis
+projection. Config independently reauthenticates the credential and derives
+the tenant only from it. Query never accepts or selects a second Config key;
+the Admin API keeps an ephemeral proxy credential alive until the nested
+Query-to-Config request and outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
@@ -98,10 +125,15 @@ sessions.
 | `agents:manage` | Create, test, update, and archive custom agents |
 | `agents:approve` | Approve or reject gated agent actions |
 
-## Provision a credential
+The three Agents execution roles are valid only for operator-provisioned
+projects. Self-created projects are restricted to `agents:read` at membership,
+credential, service-authorization, and run-storage boundaries.
+
+## Provision credentials
 
 Apply the PostgreSQL migrations first with `make migrate-postgres`. Generate a
-key, hash the full key, and insert only the hash:
+key, hash the full key, and insert only the hash. A confidential service
+credential declares its kind and non-secret prefix explicitly:
 
 ```bash
 api_key="proj_acme_$(openssl rand -hex 24)"
@@ -112,22 +144,53 @@ psql "$POSTGRES_URL" \
   -v credential_id="$credential_id" \
   -v project_id="acme" \
   -v key_hash="$key_hash" <<'SQL'
-INSERT INTO auth_credentials (credential_id, project_id, key_hash, roles)
+INSERT INTO auth_credentials (
+  credential_id, project_id, credential_kind, key_prefix, key_hash, roles
+)
 VALUES (
   :'credential_id',
   :'project_id',
+  'confidential',
+  'proj_acme_',
   :'key_hash',
-  ARRAY['events:write', 'config:read']
+  ARRAY['config:write', 'config:evaluate']
 );
 SQL
 
 printf 'API key (shown once): %s\n' "$api_key"
 ```
 
-Service principals receive only the roles they need. In production, the Admin
-API, internal agents, and the query guardrail monitor read one JSON object from
-`APDL_SERVICE_API_KEYS`, keyed by project, so each automated call uses a
-tenant-scoped credential. Agent-to-Codegen calls use that same project scope:
+A browser key uses the `client_` prefix and the exact browser role set:
+
+```bash
+client_key="client_acme_$(openssl rand -hex 24)"
+key_hash="$(printf %s "$client_key" | shasum -a 256 | awk '{print $1}')"
+credential_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+psql "$POSTGRES_URL" \
+  -v credential_id="$credential_id" \
+  -v key_hash="$key_hash" <<'SQL'
+INSERT INTO auth_credentials (
+  credential_id, project_id, credential_kind, key_prefix, key_hash, roles
+)
+VALUES (
+  :'credential_id',
+  'acme',
+  'browser',
+  'client_acme_',
+  :'key_hash',
+  ARRAY['events:write', 'config:read']
+);
+SQL
+
+printf 'Browser key (shown once): %s\n' "$client_key"
+```
+
+Service principals receive only the roles they need. Internal agents read one
+JSON object from `APDL_SERVICE_API_KEYS`, keyed by project, so each automated
+call uses a tenant-scoped credential. Agent-to-Codegen calls use that same
+project scope. Automatic guardrail mutation is disabled in the OSS developer
+preview:
 
 ```text
 APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
@@ -142,10 +205,11 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 - Set `expires_at` for short-lived credentials. Expired records are rejected.
 - Never store the plaintext key in PostgreSQL or logs.
 
-`APDL_DEV_API_KEY` is the only local-development credential setting. When set,
-`scripts/init-postgres.sh` derives its project from the key, provisions
-its hash with all roles, and the smoke test and internal services reuse it.
-Production deployments must leave it unset, set `APDL_SERVICE_API_KEYS` for
-internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS
-origin, and provision least-privilege credentials through their normal
-secret-management workflow.
+For local development, `APDL_DEV_API_KEY` provisions one confidential key with
+all canonical roles and `APDL_DEV_CLIENT_KEY` provisions one browser key with
+exactly `events:write` and `config:read`. `scripts/init-postgres.sh` derives and
+stores each kind, project, non-secret prefix, and hash. Production deployments
+must leave both settings unset, set `APDL_SERVICE_API_KEYS` only to confidential
+project keys for internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure
+an exact HTTPS origin, and provision least-privilege credentials through their
+normal secret-management workflow.

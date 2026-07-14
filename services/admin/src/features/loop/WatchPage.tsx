@@ -16,7 +16,8 @@ import { RelativeTime } from '@/components/shared/RelativeTime'
 import { StageBoard, type BoardColumn } from '@/components/shared/StageBoard'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { runToLoopStage, type LoopStage } from '@/lib/loopStatus'
 
 // Which loop stages fall in each board column.
@@ -24,11 +25,12 @@ const COLUMNS: { key: string; title: string; stages: LoopStage[] }[] = [
   { key: 'active', title: 'Working', stages: ['designing'] },
   { key: 'decide', title: 'Awaiting you', stages: ['awaiting_approval'] },
   { key: 'building', title: 'Building', stages: ['building'] },
-  { key: 'done', title: 'Recently done', stages: ['done', 'ship', 'rollback', 'iterate', 'failed'] },
+  { key: 'done', title: 'Recently done', stages: ['done', 'failed'] },
 ]
 
 export function WatchPage() {
   const { active, projectId } = useWorkspace()
+  const canRun = hasWorkspaceRole(active, 'agents:run')
   const navigate = useNavigate()
   const conn = active ? serviceConnection(active, 'agents') : null
 
@@ -43,7 +45,7 @@ export function WatchPage() {
   const runs = runsQuery.data?.runs ?? []
 
   const staged = runs.map((run) => ({ run, stage: runToLoopStage(run.status, run.phase) }))
-  const active_ = staged.filter((s) => !['done', 'ship', 'rollback', 'iterate', 'failed'].includes(s.stage))
+  const active_ = staged.filter((s) => !['done', 'failed'].includes(s.stage))
   const columns: BoardColumn<{ run: RunStatus; stage: LoopStage }>[] = COLUMNS.map((col) => ({
     key: col.key,
     title: col.title,
@@ -61,14 +63,22 @@ export function WatchPage() {
         title="Watch"
         description={runsQuery.data ? pulse : 'What the loop is doing right now.'}
         actions={
-          <Button size="sm" asChild>
-            <Link to="/agents/trigger">
-              <Play />
-              Run loop
-            </Link>
-          </Button>
+          canRun ? (
+            <Button size="sm" asChild>
+              <Link to="/agents/trigger">
+                <Play />
+                Run loop
+              </Link>
+            </Button>
+          ) : null
         }
       />
+
+      {!canRun ? (
+        <AgentReadOnlyNote>
+          Loop activity is read-only. Starting a run requires agents:run.
+        </AgentReadOnlyNote>
+      ) : null}
 
       {runsQuery.isPending ? (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -91,14 +101,20 @@ export function WatchPage() {
       {runsQuery.data && runs.length === 0 ? (
         <EmptyState
           title="The loop hasn't run yet"
-          description="Run the loop to watch it analyze, design, build, and measure."
+          description={
+            canRun
+              ? 'Run the loop to watch it analyze, design, build, and measure.'
+              : 'No agent-run history exists for this read-only workspace.'
+          }
         >
-          <Button size="sm" asChild>
-            <Link to="/agents/trigger">
-              <Play />
-              Run loop
-            </Link>
-          </Button>
+          {canRun ? (
+            <Button size="sm" asChild>
+              <Link to="/agents/trigger">
+                <Play />
+                Run loop
+              </Link>
+            </Button>
+          ) : null}
         </EmptyState>
       ) : null}
 

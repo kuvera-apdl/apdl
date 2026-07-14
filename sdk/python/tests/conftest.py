@@ -14,6 +14,7 @@ from apdl.flags.models import (
     RolloutConfig,
     VariantConfig,
 )
+from apdl.transport import TransportOutcome
 
 
 def binary_variants() -> list[VariantConfig]:
@@ -62,15 +63,25 @@ def make_rule(
 class RecordingTransport:
     """Fake transport capturing posts and returning a scriptable result."""
 
-    def __init__(self, *, ok: bool = True, flags: Any = None) -> None:
-        self.ok = ok
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        outcome: TransportOutcome | None = None,
+        flags: Any = None,
+    ) -> None:
+        self.outcome = outcome or (
+            TransportOutcome.ACCEPTED if ok else TransportOutcome.RETRYABLE
+        )
         self.flags = flags
         self.posts: list[tuple[str, Any]] = []
         self.closed = False
+        self.close_calls = 0
+        self.retries_cancelled = False
 
-    def post_json(self, url: str, payload: Any) -> bool:
+    def post_json(self, url: str, payload: Any) -> TransportOutcome:
         self.posts.append((url, payload))
-        return self.ok
+        return self.outcome
 
     def get_json(self, url: str) -> Any:
         return self.flags
@@ -80,7 +91,11 @@ class RecordingTransport:
         return {}
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
+
+    def cancel_retries(self) -> None:
+        self.retries_cancelled = True
 
     # Convenience: every event posted across all batches, flattened.
     def all_events(self) -> list[dict[str, Any]]:

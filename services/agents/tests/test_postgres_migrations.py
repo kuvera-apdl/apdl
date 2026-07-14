@@ -7,6 +7,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 POSTGRES_MIGRATIONS = ROOT / "pipeline" / "postgres" / "migrations"
 CLICKHOUSE_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
+AUTH_CREDENTIALS_SQL = (
+    POSTGRES_MIGRATIONS / "001_auth_credentials.sql"
+).read_text()
 AGENTS_CORE_SQL = (POSTGRES_MIGRATIONS / "004_agents_core.sql").read_text()
 OBSERVABILITY_SQL = (POSTGRES_MIGRATIONS / "005_agent_observability.sql").read_text()
 CONFIG_SQL = (POSTGRES_MIGRATIONS / "006_config.sql").read_text()
@@ -50,6 +53,26 @@ def test_clickhouse_directory_contains_no_postgres_migrations():
         assert "target: postgresql" not in sql
         assert "not clickhouse" not in sql
         assert "create extension if not exists vector" not in sql
+
+
+def test_auth_credentials_enforce_confidential_and_browser_kinds():
+    credentials = _table_definition(AUTH_CREDENTIALS_SQL, "auth_credentials")
+
+    assert "credential_kind TEXT NOT NULL" in credentials
+    assert "credential_kind IN ('confidential', 'browser')" in credentials
+    assert "key_prefix = 'proj_' || project_id || '_'" in credentials
+    assert "key_prefix = 'client_' || project_id || '_'" in credentials
+    assert "credential_kind = 'browser'" in credentials
+    assert "('events:write' = ANY(roles))::INT" in credentials
+    assert "('agents:approve' = ANY(roles))::INT" in credentials
+    assert "cardinality(roles) = 2" in credentials
+    assert "roles @> ARRAY[" in credentials
+    assert "roles <@ ARRAY[" in credentials
+
+    assert "APDL_DEV_CLIENT_KEY" in POSTGRES_RUNNER
+    assert '"local-dev-confidential"' in POSTGRES_RUNNER
+    assert '"local-dev-browser"' in POSTGRES_RUNNER
+    assert "credential_kind, key_prefix, key_hash, roles" in POSTGRES_RUNNER
 
 
 def test_agents_core_migration_matches_the_running_service_contracts():

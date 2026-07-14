@@ -1,12 +1,10 @@
-"""asyncpg-based PostgreSQL store for flags and experiments.
+"""Read-only asyncpg projections for flags and experiments.
 
-All operations use parameterized queries to prevent SQL injection.
+All writes belong to :mod:`app.store.mutations`, which commits the domain row,
+audit record, and durable outbox intent in one transaction.
 """
 
 import json
-import logging
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_VARIANTS = [
     {"key": "control", "weight": 1},
@@ -24,7 +22,7 @@ FLAG_COLUMNS = """
 EXPERIMENT_COLUMNS = """
     key, project_id, status, description, flag_key, default_variant,
     variants_json, targeting_rules_json, primary_metric_json,
-    traffic_percentage, start_date, end_date, created_at, updated_at
+    traffic_percentage, start_date, end_date, version, created_at, updated_at
 """
 
 
@@ -81,8 +79,9 @@ def _row_to_experiment(row) -> dict:
         "targeting_rules_json": row["targeting_rules_json"],
         "primary_metric_json": row["primary_metric_json"],
         "traffic_percentage": float(row["traffic_percentage"]),
-        "start_date": row["start_date"],
-        "end_date": row["end_date"],
+        "start_date": str(row["start_date"]) if row["start_date"] else None,
+        "end_date": str(row["end_date"]) if row["end_date"] else None,
+        "version": row["version"],
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
     }
@@ -125,212 +124,6 @@ async def get_flag(
     return _row_to_flag(row)
 
 
-async def create_flag(pool, flag: dict) -> dict | None:
-    """Insert a new flag. Returns the inserted row, or None on failure."""
-    sql = """
-        INSERT INTO flags (
-            key, project_id, name, state, owners, review_by, enabled,
-            description, default_variant, variants, rules, fallthrough, salt,
-            evaluation_mode, auto_disable, guardrails
-        )
-        VALUES (
-            $1, $2, $3, $4, $5::jsonb, $6, $7,
-            $8, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb
-        )
-        RETURNING
-            key, project_id, name, state, owners, review_by, enabled,
-            description, default_variant, variants, rules, fallthrough, salt,
-            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
-            disabled_at, version, created_at, updated_at, archived_at
-    """
-    try:
-        row = await pool.fetchrow(
-            sql,
-            flag["key"],
-            flag["project_id"],
-            flag["name"],
-            flag.get("state", "draft"),
-            json.dumps(flag.get("owners", []), separators=(",", ":")),
-            flag.get("review_by"),
-            flag.get("enabled", False),
-            flag.get("description", ""),
-            flag.get("default_variant", "control"),
-            json.dumps(flag.get("variants", DEFAULT_VARIANTS), separators=(",", ":")),
-            json.dumps(flag.get("rules", []), separators=(",", ":")),
-            json.dumps(
-                flag.get("fallthrough", DEFAULT_FALLTHROUGH),
-                separators=(",", ":"),
-            ),
-            flag["salt"],
-            flag.get("evaluation_mode", "client"),
-            flag.get("auto_disable", True),
-            json.dumps(flag.get("guardrails", []), separators=(",", ":")),
-        )
-        return _row_to_flag(row)
-    except Exception as exc:
-        logger.error("createFlag failed: %s", exc)
-        return None
-
-
-async def update_flag(pool, flag: dict, expected_version: int) -> dict | None:
-    """Update an existing flag using optimistic versioning."""
-    sql = """
-        UPDATE flags SET
-            name = $4,
-            state = $5,
-            owners = $6::jsonb,
-            review_by = $7,
-            enabled = $8,
-            description = $9,
-            default_variant = $10,
-            variants = $11::jsonb,
-            rules = $12::jsonb,
-            fallthrough = $13::jsonb,
-            evaluation_mode = $14,
-            auto_disable = $15,
-            guardrails = $16::jsonb,
-            version = version + 1,
-            updated_at = NOW()
-        WHERE project_id = $1
-          AND key = $2
-          AND version = $3
-          AND archived_at IS NULL
-        RETURNING
-            key, project_id, name, state, owners, review_by, enabled,
-            description, default_variant, variants, rules, fallthrough, salt,
-            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
-            disabled_at, version, created_at, updated_at, archived_at
-    """
-    try:
-        row = await pool.fetchrow(
-            sql,
-            flag["project_id"],
-            flag["key"],
-            expected_version,
-            flag["name"],
-            flag["state"],
-            json.dumps(flag["owners"], separators=(",", ":")),
-            flag.get("review_by"),
-            flag["enabled"],
-            flag["description"],
-            flag["default_variant"],
-            json.dumps(flag["variants"], separators=(",", ":")),
-            json.dumps(flag["rules"], separators=(",", ":")),
-            json.dumps(flag["fallthrough"], separators=(",", ":")),
-            flag["evaluation_mode"],
-            flag["auto_disable"],
-            json.dumps(flag["guardrails"], separators=(",", ":")),
-        )
-        return _row_to_flag(row) if row is not None else None
-    except Exception as exc:
-        logger.error("updateFlag failed: %s", exc)
-        return None
-
-
-async def archive_flag(
-    pool,
-    project_id: str,
-    key: str,
-    *,
-    expected_version: int | None = None,
-) -> dict | None:
-    """Soft-archive a flag. Returns the archived row if it existed."""
-    version_filter = "" if expected_version is None else " AND version = $3"
-    sql = """
-        UPDATE flags SET
-            state = 'archived',
-            enabled = false,
-            archived_at = NOW(),
-            version = version + 1,
-            updated_at = NOW()
-        WHERE project_id = $1 AND key = $2 AND archived_at IS NULL
-    """ + version_filter + """
-        RETURNING
-            key, project_id, name, state, owners, review_by, enabled,
-            description, default_variant, variants, rules, fallthrough, salt,
-            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
-            disabled_at, version, created_at, updated_at, archived_at
-    """
-    try:
-        args = (project_id, key) if expected_version is None else (project_id, key, expected_version)
-        row = await pool.fetchrow(sql, *args)
-        return _row_to_flag(row) if row is not None else None
-    except Exception as exc:
-        logger.error("archiveFlag failed: %s", exc)
-        return None
-
-
-async def disable_flag(
-    pool,
-    *,
-    project_id: str,
-    key: str,
-    reason: str,
-    source: str,
-) -> dict | None:
-    """Disable an enabled flag and record disable metadata."""
-    sql = """
-        UPDATE flags SET
-            state = 'disabled',
-            enabled = false,
-            disabled_reason = $3,
-            disabled_by = $4,
-            disabled_at = NOW(),
-            version = version + 1,
-            updated_at = NOW()
-        WHERE project_id = $1
-          AND key = $2
-          AND enabled = true
-          AND archived_at IS NULL
-        RETURNING
-            key, project_id, name, state, owners, review_by, enabled,
-            description, default_variant, variants, rules, fallthrough, salt,
-            evaluation_mode, auto_disable, guardrails, disabled_reason, disabled_by,
-            disabled_at, version, created_at, updated_at, archived_at
-    """
-    try:
-        row = await pool.fetchrow(sql, project_id, key, reason, source)
-        return _row_to_flag(row) if row is not None else None
-    except Exception as exc:
-        logger.error("disableFlag failed: %s", exc)
-        return None
-
-
-async def create_flag_audit_entry(
-    pool,
-    *,
-    project_id: str,
-    flag_key: str,
-    action: str,
-    actor: str,
-    before: dict | None,
-    after: dict | None,
-    reason: str = "",
-    evidence: dict | None = None,
-) -> None:
-    """Append a flag audit event."""
-    sql = """
-        INSERT INTO flag_audit_log (
-            project_id, flag_key, action, actor, previous_version,
-            new_version, before, after, evidence, reason
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10)
-    """
-    await pool.execute(
-        sql,
-        project_id,
-        flag_key,
-        action,
-        actor,
-        before.get("version") if before else None,
-        after.get("version") if after else None,
-        json.dumps(before, separators=(",", ":")) if before else None,
-        json.dumps(after, separators=(",", ":")) if after else None,
-        json.dumps(evidence or {}, separators=(",", ":")),
-        reason,
-    )
-
-
 async def get_flag_audit_entries(
     pool,
     project_id: str,
@@ -340,7 +133,7 @@ async def get_flag_audit_entries(
 ) -> list[dict]:
     """Fetch recent audit entries for a flag."""
     sql = """
-        SELECT id, project_id, flag_key, action, actor, previous_version,
+        SELECT id, project_id, flag_key, action, actor, origin, previous_version,
                new_version, before, after, evidence, reason, created_at
         FROM flag_audit_log
         WHERE project_id = $1 AND flag_key = $2
@@ -355,6 +148,7 @@ async def get_flag_audit_entries(
             "flag_key": row["flag_key"],
             "action": row["action"],
             "actor": row["actor"],
+            "origin": row["origin"],
             "previous_version": row["previous_version"],
             "new_version": row["new_version"],
             "before": _json_field(row["before"], None),
@@ -377,19 +171,16 @@ async def get_experiments(pool, project_id: str) -> list[dict]:
     return [_row_to_experiment(r) for r in rows]
 
 
-async def get_running_experiments_with_end_date(pool) -> list[dict]:
-    """Fetch every running experiment that has a non-empty end_date, all projects.
-
-    The end_date is free-text, so date comparison happens in Python (see
-    app.experiments.expiry); this only narrows the scan to running experiments
-    that could possibly have expired.
-    """
+async def get_due_experiments(pool, now) -> list[dict]:
+    """Return scheduled starts and running completions due at ``now``."""
     sql = (
         f"SELECT {EXPERIMENT_COLUMNS} FROM experiments "
-        "WHERE status = 'running' AND end_date <> '' ORDER BY project_id, key"
+        "WHERE (status = 'scheduled' AND start_date <= $1) "
+        "   OR (status = 'running' AND end_date <= $1) "
+        "ORDER BY project_id, key"
     )
-    rows = await pool.fetch(sql)
-    return [_row_to_experiment(r) for r in rows]
+    rows = await pool.fetch(sql, now)
+    return [_row_to_experiment(row) for row in rows]
 
 
 async def get_experiment(pool, project_id: str, key: str) -> dict | None:
@@ -399,83 +190,3 @@ async def get_experiment(pool, project_id: str, key: str) -> dict | None:
     if row is None:
         return None
     return _row_to_experiment(row)
-
-
-async def create_experiment(pool, exp: dict) -> bool:
-    """Insert a new experiment. Returns True on success."""
-    sql = """
-        INSERT INTO experiments (
-            key, project_id, status, description, flag_key, default_variant,
-            variants_json, targeting_rules_json, primary_metric_json,
-            traffic_percentage, start_date, end_date
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-    """
-    try:
-        await pool.execute(
-            sql,
-            exp["key"],
-            exp["project_id"],
-            exp.get("status", "draft"),
-            exp.get("description", ""),
-            exp.get("flag_key", ""),
-            exp.get("default_variant", "control"),
-            exp.get("variants_json", "[]"),
-            exp.get("targeting_rules_json", "[]"),
-            exp.get("primary_metric_json", "{}"),
-            exp.get("traffic_percentage", 100.0),
-            exp.get("start_date", ""),
-            exp.get("end_date", ""),
-        )
-        return True
-    except Exception as exc:
-        logger.error("createExperiment failed: %s", exc)
-        return False
-
-
-async def update_experiment(pool, exp: dict) -> bool:
-    """Update an existing experiment. Returns True if a row was modified."""
-    sql = """
-        UPDATE experiments SET
-            status = $3,
-            description = $4,
-            default_variant = $5,
-            variants_json = $6,
-            targeting_rules_json = $7,
-            primary_metric_json = $8,
-            traffic_percentage = $9,
-            start_date = $10,
-            end_date = $11,
-            updated_at = NOW()
-        WHERE project_id = $1 AND key = $2
-    """
-    try:
-        result = await pool.execute(
-            sql,
-            exp["project_id"],
-            exp["key"],
-            exp.get("status", "draft"),
-            exp.get("description", ""),
-            exp.get("default_variant", "control"),
-            exp.get("variants_json", "[]"),
-            exp.get("targeting_rules_json", "[]"),
-            exp.get("primary_metric_json", "{}"),
-            exp.get("traffic_percentage", 100.0),
-            exp.get("start_date", ""),
-            exp.get("end_date", ""),
-        )
-        return result.endswith("1")
-    except Exception as exc:
-        logger.error("updateExperiment failed: %s", exc)
-        return False
-
-
-async def delete_experiment(pool, project_id: str, key: str) -> bool:
-    """Delete an experiment. Returns True if a row was deleted."""
-    sql = "DELETE FROM experiments WHERE project_id = $1 AND key = $2"
-    try:
-        result = await pool.execute(sql, project_id, key)
-        return result.endswith("1")
-    except Exception as exc:
-        logger.error("deleteExperiment failed: %s", exc)
-        return False

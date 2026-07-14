@@ -58,7 +58,19 @@ describe('resolveConfig env defaults and fail-soft validation', () => {
         { endpoint: ENDPOINT, auth: { clientKey: 'bad_key' } },
         { strict: false }
       )
-    ).toThrow('proj_{project_id}_{secret}');
+    ).toThrow('client_{project_id}_{token}');
+  });
+
+  it('rejects the legacy proj_ browser credential shape', () => {
+    expect(() =>
+      resolveConfig(
+        {
+          endpoint: ENDPOINT,
+          auth: { clientKey: 'proj_apdl_0123456789abcdef' },
+        },
+        { strict: false }
+      )
+    ).toThrow('client_{project_id}_{token}');
   });
 
   it('still rejects removed config fields in non-strict mode', () => {

@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app.schema import MIGRATION_NAME, REQUIRED_COLUMNS, assert_schema_ready
+from app.schema import (
+    MIGRATION_NAME,
+    MIGRATION_VERSION,
+    REQUIRED_COLUMNS,
+    assert_schema_ready,
+)
 
 
 class FakeConn:
@@ -18,11 +23,13 @@ class FakeConn:
         self.ledger_exists = ledger_exists
         self.migration_name = migration_name
         self.columns = set(columns)
+        self.migration_version = None
 
     async def fetchval(self, sql: str, *args):
         if "to_regclass" in sql:
             return self.ledger_exists
         if "apdl_schema_migrations" in sql:
+            self.migration_version = args[0]
             return self.migration_name
         raise AssertionError(sql)
 
@@ -36,7 +43,11 @@ class FakeConn:
 
 @pytest.mark.asyncio
 async def test_accepts_complete_migrated_schema():
-    await assert_schema_ready(FakeConn())
+    conn = FakeConn()
+
+    await assert_schema_ready(conn)
+
+    assert conn.migration_version == MIGRATION_VERSION
 
 
 @pytest.mark.asyncio
@@ -46,9 +57,35 @@ async def test_rejects_missing_required_migration():
 
 
 @pytest.mark.asyncio
+async def test_rejects_previous_config_migration_as_not_release_ready():
+    with pytest.raises(RuntimeError, match=MIGRATION_NAME):
+        await assert_schema_ready(
+            FakeConn(migration_name="012_config_atomic_mutations.sql")
+        )
+
+
+@pytest.mark.asyncio
 async def test_rejects_incomplete_schema_at_startup():
     columns = REQUIRED_COLUMNS - {("flags", "fallthrough")}
     with pytest.raises(RuntimeError, match="flags.fallthrough"):
+        await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_atomic_mutation_columns():
+    columns = REQUIRED_COLUMNS - {
+        ("experiments", "version"),
+        ("flag_audit_log", "origin"),
+        ("config_outbox", "dedup_key"),
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "config_outbox.dedup_key, experiments.version, "
+            "flag_audit_log.origin"
+        ),
+    ):
         await assert_schema_ready(FakeConn(columns=columns))
 
 
@@ -57,4 +94,4 @@ def test_config_startup_executes_no_postgres_ddl():
     startup = main_source[main_source.index("async def lifespan") :]
     assert "conn.execute(CREATE_" not in startup
     assert "conn.execute(MIGRATE_" not in startup
-    assert "await assert_schema_ready(conn)" in startup
+    assert "await assert_schema_ready(lock_conn)" in startup
