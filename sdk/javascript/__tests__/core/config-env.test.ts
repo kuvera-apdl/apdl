@@ -52,6 +52,20 @@ describe('resolveConfig env defaults and fail-soft validation', () => {
     expect(resolved?.endpoint).toBe(ENDPOINT);
   });
 
+  it('rejects malformed explicit values instead of falling back to valid env values', () => {
+    vi.stubEnv('NEXT_PUBLIC_APDL_URL', ENDPOINT);
+    vi.stubEnv('NEXT_PUBLIC_APDL_CLIENT_KEY', CLIENT_KEY);
+
+    expect(() => resolveConfig(
+      { endpoint: '/relative', auth: { clientKey: CLIENT_KEY } },
+      { strict: false }
+    )).toThrow('endpoint must be an absolute HTTP(S) origin');
+    expect(() => resolveConfig(
+      { endpoint: ENDPOINT, auth: { clientKey: '' } },
+      { strict: false }
+    )).toThrow('auth.clientKey is required');
+  });
+
   it('still throws on a malformed client key in non-strict mode', () => {
     expect(() =>
       resolveConfig(

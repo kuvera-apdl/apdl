@@ -7,6 +7,8 @@ export type {
   APDLAuthConfig,
   AutoCaptureConfig,
   ConsentState,
+  PersistenceMode,
+  PrivacyMode,
   ResolvedConfig,
 } from './core/config';
 

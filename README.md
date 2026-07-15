@@ -130,7 +130,7 @@ const apdl = APDL.init({
     clientKey: 'client_demo_0123456789abcdef0123456789abcdef',
   },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
-  privacyMode: 'standard',              // 'standard' | 'cookieless' | 'strict'
+  privacyMode: 'standard',              // 'standard' | 'cookieless'
 });
 
 apdl.track('purchase_completed', { product_id: 'sku-123', revenue: 49.99 });

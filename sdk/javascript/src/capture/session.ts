@@ -1,4 +1,5 @@
 import { generateId } from '../core/types';
+import type { PersistenceMode } from '../core/config';
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -16,15 +17,14 @@ interface SessionData {
  */
 export class SessionManager {
   private session: SessionData;
-  private persistence: 'localStorage' | 'memory';
+  private persistence: PersistenceMode;
   private storageKey: string;
 
   constructor(
-    persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage',
+    persistence: PersistenceMode = 'localStorage',
     projectId: string
   ) {
-    // Cookies are not used for session storage; fall back to localStorage
-    this.persistence = persistence === 'memory' ? 'memory' : 'localStorage';
+    this.persistence = persistence;
     this.storageKey = `apdl_session_${projectId}`;
     this.session = this.restore() ?? this.createSession();
   }

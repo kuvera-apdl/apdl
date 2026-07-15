@@ -136,7 +136,10 @@ export class APDLClient implements APDLApi {
     this.transport = new Transport(this.config.auth.clientKey, {
       debug: this.config.debug,
     });
-    this.storage = new OfflineStorage({ projectId: this.config.projectId });
+    this.storage = new OfflineStorage({
+      projectId: this.config.projectId,
+      persistence: this.config.persistence,
+    });
     this.eventQueue = new EventQueue(
       this.config,
       this.transport,

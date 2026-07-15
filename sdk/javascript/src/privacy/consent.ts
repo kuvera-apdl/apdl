@@ -1,4 +1,4 @@
-import type { ConsentState } from '../core/config';
+import type { ConsentState, PersistenceMode } from '../core/config';
 
 type ConsentCategory = keyof ConsentState;
 type ConsentCallback = (state: ConsentState) => void;
@@ -11,12 +11,12 @@ type ConsentCallback = (state: ConsentState) => void;
 export class ConsentManager {
   private state: ConsentState;
   private listeners: Set<ConsentCallback> = new Set();
-  private persistence: 'localStorage' | 'cookie' | 'memory';
+  private persistence: PersistenceMode;
   private storageKey: string;
 
   constructor(
     initialState: ConsentState,
-    persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage',
+    persistence: PersistenceMode = 'localStorage',
     projectId: string
   ) {
     this.persistence = persistence;

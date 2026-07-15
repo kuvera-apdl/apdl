@@ -1,4 +1,5 @@
 import type { TrackEvent } from './types';
+import type { PersistenceMode } from './config';
 import {
   assertSerializedEventSize,
   canonicalizeTrackEvent,
@@ -28,6 +29,7 @@ const OFFLINE_RECORD_FIELDS = new Set([
 
 export interface OfflineStorageScope {
   projectId: string;
+  persistence?: PersistenceMode;
 }
 
 interface StoredOfflineEvent {
@@ -61,7 +63,8 @@ export class OfflineStorage {
     }
 
     this.ownerId = `project:${scope.projectId}`;
-    this.dbPromise = this.openDB();
+    this.useMemory = scope.persistence === 'memory';
+    this.dbPromise = this.useMemory ? null : this.openDB();
   }
 
   private openDB(): Promise<IDBDatabase | null> | null {

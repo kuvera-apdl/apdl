@@ -121,6 +121,41 @@ describe('APDLClient', () => {
     });
 
     it.each([
+      'api.example.com',
+      'ftp://api.example.com',
+      'https://user:secret@api.example.com',
+      'https://api.example.com/v1',
+      'https://api.example.com?tenant=secret',
+      'https://api.example.com/#fragment',
+    ])('should reject endpoint values that are not an HTTP(S) origin: %s', (endpoint) => {
+      expect(() => resolveConfig(createTestConfig({ endpoint })))
+        .toThrow('endpoint must be an absolute HTTP(S) origin');
+    });
+
+    it.each([
+      ['batchSize', 0, 'between 1 and 100'],
+      ['batchSize', 101, 'between 1 and 100'],
+      ['batchSize', 1.5, 'between 1 and 100'],
+      ['batchSize', Number.NaN, 'between 1 and 100'],
+      ['flushInterval', 99, 'between 100 and 3600000'],
+      ['flushInterval', 3_600_001, 'between 100 and 3600000'],
+      ['maxQueueSize', 0, 'between 1 and 100000'],
+      ['maxQueueSize', Number.POSITIVE_INFINITY, 'between 1 and 100000'],
+    ])('should reject invalid numeric config %s=%s', (field, value, message) => {
+      const config = { ...createTestConfig(), [field]: value };
+      expect(() => resolveConfig(config as unknown as APDLConfig)).toThrow(message);
+    });
+
+    it.each([
+      ['privacyMode', 'strict', 'privacyMode must be one of: standard, cookieless'],
+      ['persistence', 'cookie', 'persistence must be one of: localStorage, memory'],
+      ['debug', 'true', 'debug is required and must be a boolean'],
+    ])('should reject unsupported config %s=%s', (field, value, message) => {
+      const config = { ...createTestConfig(), [field]: value };
+      expect(() => resolveConfig(config as unknown as APDLConfig)).toThrow(message);
+    });
+
+    it.each([
       ['apiKey', CLIENT_KEY],
       ['host', ENDPOINT],
       ['configHost', ENDPOINT],
@@ -735,28 +770,6 @@ describe('APDLClient', () => {
         source: null,
       });
       expect(warn).not.toHaveBeenCalled();
-      warn.mockRestore();
-    });
-
-    it('should not restore cached flags in strict privacy mode', () => {
-      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 3,
-        project_id: 'local_storage',
-        flags: [makeFlag('cached-flag')],
-        versions: { 'cached-flag': 1 },
-      }));
-      fetchMock.mockRejectedValueOnce(new Error('offline'));
-
-      const strictClient = new APDLClient(createTestConfig({
-        persistence: 'localStorage',
-        privacyMode: 'strict',
-      }));
-      strictClient.identify('user_123');
-
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(strictClient.getVariant('cached-flag')).toBeNull();
-      expect(strictClient.getVariantDetails('cached-flag').reason).toBe('not_found');
-      expect(warn).toHaveBeenCalledTimes(1);
       warn.mockRestore();
     });
 
@@ -1462,6 +1475,21 @@ describe('APDLClient', () => {
       expect(projectB.consent.get().analytics).toBe(true);
 
       await Promise.all([projectA.shutdown(), projectB.shutdown()]);
+    });
+
+    it('should keep identity, session, consent, flags, and offline storage in memory mode', async () => {
+      localStorage.clear();
+      const memoryClient = new APDLClient(createTestConfig({
+        persistence: 'memory',
+      }));
+      memoryClient.identify('memory-user');
+      memoryClient.consent.update({ analytics: false });
+      memoryClient.reset();
+
+      expect(Object.keys(localStorage).filter((key) => key.startsWith('apdl_')))
+        .toEqual([]);
+
+      await memoryClient.shutdown();
     });
   });
 

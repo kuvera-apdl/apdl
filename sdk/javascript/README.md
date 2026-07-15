@@ -120,7 +120,7 @@ The SDK uses one initialization contract:
 
 | Field | Required | Description |
 |---|---:|---|
-| `endpoint` | Yes¹ | Base URL of the APDL gateway. The SDK posts events to `/v1/events` and reads flags + SSE from `/v1/flags` and `/v1/stream` on this one origin. |
+| `endpoint` | Yes¹ | Absolute HTTP(S) origin of the APDL gateway, with no credentials, path, query, or fragment. The SDK posts events to `/v1/events` and reads flags + SSE from `/v1/flags` and `/v1/stream` on this one origin. |
 | `auth.clientKey` | Yes¹ | Browser-safe APDL client key used for service authentication and project identification. |
 
 ¹ Resolved from the env conventions above when omitted. If still absent, `init()`
@@ -143,13 +143,19 @@ Optional fields include:
 | Field | Description |
 |---|---|
 | `autoCapture` | `true`, `false`, or a per-signal capture config. |
-| `batchSize` | Number of events to send per batch. |
-| `flushInterval` | Queue flush interval in milliseconds. |
-| `privacyMode` | `'standard'`, `'cookieless'`, or `'strict'`. |
+| `batchSize` | Integer events per batch, from 1 through 100. |
+| `flushInterval` | Integer queue flush interval from 100 through 3,600,000 milliseconds. |
+| `privacyMode` | `'standard'` or `'cookieless'`. |
 | `consent` | Initial consent state for `analytics`, `personalization`, and `experiments`. |
-| `persistence` | `'localStorage'`, `'cookie'`, or `'memory'`. |
-| `maxQueueSize` | Maximum events owned in memory. A new event is rejected synchronously when full; an already accepted event is never evicted to make room. |
+| `persistence` | `'localStorage'` for project-scoped browser storage or `'memory'` for no browser storage. |
+| `maxQueueSize` | Integer maximum from 1 through 100,000 events owned in memory. A new event is rejected synchronously when full; an already accepted event is never evicted to make room. |
 | `debug` | Enables SDK diagnostics when `true`. |
+
+Configuration is validated at runtime for JavaScript and parsed-JSON callers.
+Unknown fields, malformed types, non-finite or fractional numeric values,
+out-of-range values, and unsupported enum members fail during initialization.
+The former `persistence: 'cookie'` and `privacyMode: 'strict'` values are not
+implemented and are rejected instead of being mapped to different behavior.
 
 Automatic click and rage-click events contain structural element metadata only.
 They never include DOM text, form-control values, URLs, IDs, or CSS classes.
@@ -303,7 +309,7 @@ apdl.privacy.removeScrubber(scrubSsn);
 
 Baseline email, payment-card, and SSN scrubbers run in every privacy mode.
 `privacyMode: 'cookieless'` additionally derives a daily-rotating anonymous ID
-with no client-side persistence; `'strict'` disables persisted flag caching.
+without persisting that identifier.
 
 Revoking analytics consent is an immediate delivery fence: the SDK aborts the
 active analytics request when possible, clears its in-memory queue and this
@@ -311,11 +317,21 @@ project's IndexedDB queue, and stops analytics auto-capture and health capture.
 No retained event is restored or sent across a revoke/regrant boundary.
 Regranting consent starts capture again for new events only.
 
-Browser persistence is project-scoped. Anonymous identity, session, consent,
-flag cache, and offline event records use the project ID derived from the client
-key, so two APDL projects on one origin cannot restore each other's state.
+Experiment consent is also fail-closed. Denial returns a `null` assignment with
+reason `consent_denied`, suppresses and removes exposures, clears experiment
+context and flag caches, and prevents the initial flag fetch and SSE stream.
+Regranting starts from a fresh authoritative flag snapshot. Personalization
+denial prevents slot discovery and rendering and removes already rendered SDK
+components; regranting resumes discovery for application-owned UI configs.
 
-Failed analytics deliveries may be retained in IndexedDB for up to seven days.
+With `persistence: 'localStorage'`, browser persistence is project-scoped.
+Anonymous identity, session, consent, flag cache, and offline event records use
+the project ID derived from the client key, so two APDL projects on one origin
+cannot restore each other's state. `persistence: 'memory'` does not read or
+write localStorage and does not open IndexedDB; all state ends with the client.
+
+With `persistence: 'localStorage'`, failed analytics deliveries may be retained
+in IndexedDB for up to seven days.
 Each record is scoped to the canonical project ID derived from the client key;
 the key itself is never persisted. A client cannot drain or clear another
 project's records on the same origin, and current analytics consent is checked
