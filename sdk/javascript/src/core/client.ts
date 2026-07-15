@@ -505,21 +505,31 @@ export class APDLClient implements APDLApi {
       return;
     }
 
-    this.featureFlagExposureKeys.add(dedupeKey);
-    this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
-      flag_key: result.key,
-      variant: result.variant,
-      reason: result.reason,
-      rule_id: result.rule_id,
-      rollout_bucket: result.rollout_bucket,
-      variant_bucket: result.variant_bucket,
-      rollout_percentage: result.rollout_percentage,
-      bucket_by: result.bucket_by,
-      config_version: result.config_version,
-      source: result.source,
-      page,
-      component,
-    });
+    try {
+      this.manualCapture.trackEvent(FEATURE_FLAG_EXPOSURE_EVENT, {
+        flag_key: result.key,
+        variant: result.variant,
+        reason: result.reason,
+        rule_id: result.rule_id,
+        rollout_bucket: result.rollout_bucket,
+        variant_bucket: result.variant_bucket,
+        rollout_percentage: result.rollout_percentage,
+        bucket_by: result.bucket_by,
+        config_version: result.config_version,
+        source: result.source,
+        page,
+        component,
+      });
+      this.featureFlagExposureKeys.add(dedupeKey);
+    } catch (error) {
+      // Assignment is product control flow; optional telemetry must never make
+      // it fail. Leave the key eligible for a later retry and surface the
+      // enqueue failure so operators can observe queue pressure or shutdowns.
+      console.warn(
+        `APDL: Failed to enqueue exposure for feature flag '${result.key}'`,
+        error
+      );
+    }
   }
 
   private warnMissingFlag(result: FlagEvaluationResult): void {

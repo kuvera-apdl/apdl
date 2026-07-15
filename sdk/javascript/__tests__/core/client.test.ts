@@ -801,6 +801,43 @@ describe('APDLClient', () => {
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
     });
 
+    it('should return assignments and retry exposure telemetry after queue pressure', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('queue-pressure-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const flaggedClient = new APDLClient(createTestConfig({
+        batchSize: 2,
+        maxQueueSize: 1,
+      }));
+      await flushAsync();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      flaggedClient.track('fills_queue');
+      expect(() => flaggedClient.getVariant('queue-pressure-flag'))
+        .not.toThrow();
+      expect(flaggedClient.getVariantDetails('queue-pressure-flag').variant)
+        .toBe('control');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledWith(
+        "APDL: Failed to enqueue exposure for feature flag 'queue-pressure-flag'",
+        expect.objectContaining({ message: 'APDL: event queue is full' })
+      );
+
+      await flaggedClient.debug.flush();
+      expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('control');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
+
+      warn.mockRestore();
+      await flaggedClient.shutdown();
+    });
+
     it('should preserve JSON attribute types for public flag evaluation', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
