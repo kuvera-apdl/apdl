@@ -174,10 +174,12 @@ async def merge_changeset(
             status_code=409,
             detail=f"Changeset is '{changeset.status.value}', not mergeable.",
         )
-    # "passed" = CI green; "none" = the repo has no CI configured, so there is no
-    # gate to clear (sync_ci_status records this). Any other value (pending /
-    # failed / unset) still blocks the merge.
-    if changeset.ci_status not in ("passed", "none"):
+    # "passed" = CI green; "none" = the repo has no CI configured; "no_report" =
+    # CI evidence existed but nothing ever reported within the pending deadline
+    # (sync_ci_status records all three). In each case there is no CI verdict
+    # left to wait on. Any other value (pending / failed / unset) still blocks
+    # the merge.
+    if changeset.ci_status not in ("passed", "none", "no_report"):
         raise HTTPException(status_code=409, detail="Merge requires green CI.")
     if changeset.pr_number is None:
         raise HTTPException(status_code=409, detail="Changeset has no open pull request.")
@@ -206,7 +208,14 @@ async def merge_changeset(
                 exc_info=True,
             )
             live = None
-        if live in ("failed", "pending"):
+        # Block on a live failure, or on a live pending that is OBSERVED (real
+        # runs/statuses executing on the ref right now). An *inferred* pending —
+        # no actual reports, just phantom suites / dormant workflows (see
+        # github.checks.CIStatus) — must not re-block a gate the sync already
+        # resolved as none/no_report, or the merge wedges on CI that will never
+        # report. Plain-string readers default to observed (conservative).
+        live_observed = bool(getattr(live, "observed", True))
+        if live == "failed" or (live == "pending" and live_observed):
             raise HTTPException(
                 status_code=409,
                 detail=(

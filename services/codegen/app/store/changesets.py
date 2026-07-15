@@ -50,6 +50,14 @@ def _prompts_from_row(row: asyncpg.Record) -> list[dict[str, Any]]:
     return value or []
 
 
+def _optional_column(row: asyncpg.Record, key: str) -> Any:
+    """A column's value, ``None`` for rows that predate it (old test fakes)."""
+    try:
+        return row[key]
+    except KeyError:
+        return None
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -63,6 +71,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         pr_number=row["pr_number"],
         pr_node_id=row["pr_node_id"],
         ci_status=row["ci_status"],
+        ci_awaiting_since=_optional_column(row, "ci_awaiting_since"),
         merge_sha=row["merge_sha"],
         diff_stat=loads_jsonb(row["diff_stat"]),
         prompts=_prompts_from_row(row),
@@ -252,14 +261,20 @@ async def mark_pr_open(
     diff_stat: dict[str, Any],
     node_id: str = "",
 ) -> Changeset | None:
-    """Transition ``pushing → pr_open`` and persist the branch + PR identifiers."""
+    """Transition ``pushing → pr_open`` and persist the branch + PR identifiers.
+
+    Also stamps ``ci_awaiting_since``: the PR being open is the moment the
+    changeset starts awaiting CI, and this anchor (unlike ``updated_at``) is
+    never refreshed by later transitions — the CI sync's grace window and
+    pending deadline measure from here.
+    """
     return await _guarded_update(
         pool,
         changeset_id,
         ChangesetStatus.pr_open,
         set_clause=(
             "branch = $3, pr_url = $4, pr_number = $5, "
-            "pr_node_id = $6, diff_stat = $7::jsonb"
+            "pr_node_id = $6, diff_stat = $7::jsonb, ci_awaiting_since = now()"
         ),
         params=(branch, pr_url, pr_number, node_id, json.dumps(diff_stat)),
     )

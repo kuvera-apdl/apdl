@@ -73,6 +73,7 @@ class FakeConn:
                 "pr_number": None,
                 "pr_node_id": None,
                 "ci_status": None,
+                "ci_awaiting_since": None,
                 "merge_sha": None,
                 "task": args[5],
                 "diff_stat": "{}",
@@ -109,6 +110,8 @@ class FakeConn:
                 row["pr_number"] = args[4]
                 row["pr_node_id"] = args[5]
                 row["diff_stat"] = args[6]
+                # ci_awaiting_since = now() in the real SQL — the CI-wait anchor.
+                row["ci_awaiting_since"] = datetime.now(timezone.utc)
             elif "merge_sha" in query:
                 # mark_merged: (id, status, merge_sha)
                 row["status"] = args[1]
@@ -204,6 +207,7 @@ class FakePool:
         *,
         status: str = "queued",
         ci_status: str | None = None,
+        ci_awaiting_since: datetime | None = None,
         pr_number: int | None = None,
         pr_node_id: str | None = None,
         branch: str | None = None,
@@ -222,6 +226,7 @@ class FakePool:
             "pr_number": pr_number,
             "pr_node_id": pr_node_id,
             "ci_status": ci_status,
+            "ci_awaiting_since": ci_awaiting_since,
             "merge_sha": merge_sha,
             "task": '{"title": "t", "spec": "spec spec spec"}',
             "diff_stat": "{}",

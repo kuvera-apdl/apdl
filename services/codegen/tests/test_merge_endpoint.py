@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.github.app_auth import InstallationToken
+from app.github.checks import CIStatus
 from app.github.pulls import MergeResult
 from app.main import app
 from app.routers import changesets
@@ -83,8 +84,26 @@ async def test_merge_succeeds_when_repo_has_no_ci(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_merge_succeeds_when_ci_never_reported(monkeypatch):
+    # ci_status="no_report" means CI evidence existed but nothing ever reported
+    # within the pending deadline — there is no verdict left to wait on, so the
+    # (human/policy-gated) merge is allowed, like "none".
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets", installation_id=7)
+    pool.add_changeset(
+        "cs_nr", "demo", status="ci_passed", ci_status="no_report", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_nr/merge", json={})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "merged"
+    assert calls["merge"]["number"] == 5
+
+
+@pytest.mark.asyncio
 async def test_merge_refused_when_ci_pending(monkeypatch):
-    # "pending" must still block — only "passed"/"none" clear the gate.
+    # "pending" must still block — only "passed"/"none"/"no_report" clear the gate.
     _patch_merge(monkeypatch)
     pool = FakePool()
     pool.add_connection("demo")
@@ -150,6 +169,40 @@ async def test_merge_proceeds_when_live_ci_confirms(monkeypatch):
     )
     async with _client(pool, live_ci="passed") as client:
         resp = await client.post("/v1/changesets/cs_live2/merge", json={})
+    assert resp.status_code == 200
+    assert calls["merge"]["number"] == 5
+
+
+@pytest.mark.asyncio
+async def test_merge_refused_when_live_ci_pending_is_observed(monkeypatch):
+    # A live OBSERVED pending — real runs executing on the ref right now (e.g.
+    # a push since the stored result) — blocks the merge. Plain strings from the
+    # reader default to observed, the conservative reading.
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_lp", "demo", status="ci_passed", ci_status="passed", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool, live_ci="pending") as client:
+        resp = await client.post("/v1/changesets/cs_lp/merge", json={})
+    assert resp.status_code == 409
+    assert "merge" not in calls
+
+
+@pytest.mark.asyncio
+async def test_merge_proceeds_when_live_ci_pending_is_only_inferred(monkeypatch):
+    # A live INFERRED pending (phantom app suites / dormant workflows — nothing
+    # actually reported on the ref) must not re-block a gate the sync already
+    # resolved: that CI is never going to report, and the merge would wedge.
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_li", "demo", status="ci_passed", ci_status="no_report", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool, live_ci=CIStatus("pending", observed=False)) as client:
+        resp = await client.post("/v1/changesets/cs_li/merge", json={})
     assert resp.status_code == 200
     assert calls["merge"]["number"] == 5
 

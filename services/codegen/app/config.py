@@ -300,6 +300,24 @@ def codegen_ci_sync_max_age_seconds() -> int:
     return max(0, int(os.getenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", str(7 * 24 * 3600))))
 
 
+def codegen_ci_pending_timeout() -> int:
+    """Deadline (default 1800s) for CI that never actually reports. ``0`` disables.
+
+    An *inferred* ``pending`` — no commit status or check run has ever appeared
+    on the ref; the "CI is coming" verdict rests only on circumstantial evidence
+    (live check-suites, the repo having active workflows) — can be wrong forever:
+    an active deploy-on-main workflow never runs on PR branches, and an installed
+    app's phantom suite never completes. Without a deadline such a changeset sits
+    in ``ci_running`` permanently and the merge gate never clears. Once a
+    changeset has awaited CI this long with nothing *observed*, the sync resolves
+    it to ``ci_passed`` with ``ci_status="no_report"`` — honestly recorded, so
+    the console/audit shows the gate cleared because CI never reported, not
+    because it passed. An observed ``pending`` (real CI executing) is NEVER
+    timed out by this.
+    """
+    return max(0, int(os.getenv("CODEGEN_CI_PENDING_TIMEOUT", "1800")))
+
+
 def codegen_ci_none_grace_seconds() -> int:
     """Grace window (default 300s) before a ``none`` CI result clears the gate.
 
