@@ -12,7 +12,8 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 - Replaced permissive JavaScript SDK configuration with one strict runtime
   contract and removed unsupported cookie persistence and strict privacy modes;
-  memory persistence now avoids all browser storage, including IndexedDB.
+  memory persistence now avoids all browser storage, including IndexedDB, and
+  reports retryable delivery failures as pending rather than persisted.
 - Reduced default browser context and every reserved auto-capture signal to
   query-free, fragment-free property allowlists enforced outside custom hooks.
 - Removed the disconnected JavaScript `ui_config` SSE handler; UI rendering is

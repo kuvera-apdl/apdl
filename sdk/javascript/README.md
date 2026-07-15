@@ -332,6 +332,8 @@ Anonymous identity, session, consent, flag cache, and offline event records use
 the project ID derived from the client key, so two APDL projects on one origin
 cannot restore each other's state. `persistence: 'memory'` does not read or
 write localStorage and does not open IndexedDB; all state ends with the client.
+Retryable delivery failures therefore remain in `DeliveryReport.pending` for
+an explicit same-session retry instead of being reported as persisted.
 
 With `persistence: 'localStorage'`, failed analytics deliveries may be retained
 in IndexedDB for up to seven days.
