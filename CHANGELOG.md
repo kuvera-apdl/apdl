@@ -15,6 +15,8 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
   memory persistence now avoids all browser storage, including IndexedDB.
 - Reduced default browser context and every reserved auto-capture signal to
   query-free, fragment-free property allowlists enforced outside custom hooks.
+- Removed the disconnected JavaScript `ui_config` SSE handler; UI rendering is
+  local-only until Config owns a canonical storage and distribution contract.
 
 ## [0.3.0] - 2026-07-13
 

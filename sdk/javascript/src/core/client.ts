@@ -220,7 +220,6 @@ export class APDLClient implements APDLApi {
     );
     this.sseHandlers = new SSEHandlers(
       this.flagCache,
-      this.slotManager,
       this.config.debug
     );
     this.sseConnection.onMessage((msg) => {
