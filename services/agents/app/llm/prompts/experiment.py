@@ -75,8 +75,13 @@ Current active experiments:
 Baseline metrics:
 {baseline_metrics}
 
+You have read-only analytics tools. Before finalizing the design, verify your premises with a \
+few focused queries: confirm the primary metric event exists and measure its current baseline \
+(volume / conversion) so required_sample_size_per_variant and estimated_duration_days rest on \
+real numbers, not guesses. Keep it to a handful of calls.
+
 Design a rigorous A/B experiment to test the hypothesis derived from this insight.
-Return ONLY the JSON experiment design, no other text."""
+When done, return ONLY the JSON experiment design, no other text."""
 
 
 SAFETY_REVIEW_PROMPT = """Review the following experiment design for safety concerns:

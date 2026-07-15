@@ -35,11 +35,10 @@ CREATE TABLE IF NOT EXISTS custom_agents (
     tools                JSONB NOT NULL DEFAULT '[]',
     requires             JSONB NOT NULL DEFAULT '[]',
     produces             TEXT NOT NULL,
-    parse_as             TEXT NOT NULL DEFAULT 'object'
-                         CHECK (parse_as IN ('object', 'list')),
     memory_query         TEXT,
     memory_top_k         INTEGER NOT NULL DEFAULT 5,
     pipeline_order       INTEGER NOT NULL DEFAULT 100,
+    max_tool_steps       INTEGER NOT NULL DEFAULT 8,
     status               TEXT NOT NULL DEFAULT 'active'
                          CHECK (status IN ('active', 'archived')),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -54,6 +53,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_agents_project_slug
     ON custom_agents (project_id, slug) WHERE status = 'active';
 """
 
+# Idempotent forward migration for databases that booted an older build
+# (the table DDL above is CREATE IF NOT EXISTS, so it never alters).
+CUSTOM_AGENTS_MIGRATE_DDL = """
+ALTER TABLE custom_agents
+    ADD COLUMN IF NOT EXISTS max_tool_steps INTEGER NOT NULL DEFAULT 8;
+"""
+
 
 class SlugConflictError(Exception):
     """Another active custom agent in the project already uses this slug."""
@@ -61,8 +67,9 @@ class SlugConflictError(Exception):
 
 _COLUMNS = (
     "agent_id, project_id, slug, display_name, description, system_prompt, "
-    "user_prompt_template, model_tier, tools, requires, produces, parse_as, "
-    "memory_query, memory_top_k, pipeline_order, status, created_at, updated_at"
+    "user_prompt_template, model_tier, tools, requires, produces, "
+    "memory_query, memory_top_k, pipeline_order, max_tool_steps, status, "
+    "created_at, updated_at"
 )
 
 # Fields writable via create/update — everything else is server-managed.
@@ -76,12 +83,30 @@ _SPEC_FIELDS = (
     "tools",
     "requires",
     "produces",
-    "parse_as",
     "memory_query",
     "memory_top_k",
     "pipeline_order",
+    "max_tool_steps",
 )
 _JSONB_FIELDS = {"tools", "requires"}
+
+
+def _normalize_tools(value: Any) -> list[str]:
+    """Coerce the tools column to a list of tool names.
+
+    Rows written before the agentic rework stored ``[{"tool": name, "params":
+    {...}}, ...]``; the params are obsolete (the model now chooses them at run
+    time) but the selection itself survives as the allowed-tools list.
+    """
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for entry in value:
+        if isinstance(entry, str):
+            names.append(entry)
+        elif isinstance(entry, dict) and isinstance(entry.get("tool"), str):
+            names.append(entry["tool"])
+    return names
 
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
@@ -101,6 +126,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
                 logger.error("custom_agents.%s malformed for %s", key, out.get("agent_id"))
                 value = []
         out[key] = value if isinstance(value, list) else []
+    out["tools"] = _normalize_tools(out["tools"])
     return out
 
 
@@ -128,8 +154,8 @@ async def create_custom_agent(
                 INSERT INTO custom_agents
                     (agent_id, project_id, slug, display_name, description,
                      system_prompt, user_prompt_template, model_tier, tools,
-                     requires, produces, parse_as, memory_query, memory_top_k,
-                     pipeline_order)
+                     requires, produces, memory_query, memory_top_k,
+                     pipeline_order, max_tool_steps)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb,
                         $11, $12, $13, $14, $15)
                 RETURNING {_COLUMNS}
@@ -214,8 +240,9 @@ async def update_custom_agent(
                 SET slug = $2, display_name = $3, description = $4,
                     system_prompt = $5, user_prompt_template = $6,
                     model_tier = $7, tools = $8::jsonb, requires = $9::jsonb,
-                    produces = $10, parse_as = $11, memory_query = $12,
-                    memory_top_k = $13, pipeline_order = $14, updated_at = now()
+                    produces = $10, memory_query = $11,
+                    memory_top_k = $12, pipeline_order = $13,
+                    max_tool_steps = $14, updated_at = now()
                 WHERE agent_id = $1
                 RETURNING {_COLUMNS}
                 """,

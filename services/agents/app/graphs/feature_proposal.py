@@ -93,6 +93,11 @@ class FeatureProposalAgent(BaseAgent):
     requires = ("insights",)
     produces = "feature_proposals"
     parse_as = "list"
+    # A premise-checking budget: verify the events a proposal's success
+    # criteria depend on actually fire (and at what magnitude) before the
+    # proposal becomes a work order for the coding agent.
+    agentic_tools = ("discover_events", "query_events", "query_funnel", "query_breakdown")
+    max_tool_steps = 4
 
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]

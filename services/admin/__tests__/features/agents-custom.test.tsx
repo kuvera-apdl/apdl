@@ -26,15 +26,15 @@ function makeCustomAgent(overrides: Partial<CustomAgent> = {}): CustomAgent {
     display_name: 'Churn watch',
     description: 'Watches churn signals',
     system_prompt: 'You are a churn analyst.',
-    user_prompt_template: 'Analyse {tool_results}',
+    user_prompt_template: 'Analyse churn for {project_id}',
     model_tier: 'fast',
-    tools: [{ tool: 'discover_events', params: { limit: 50 } }],
+    tools: ['discover_events'],
     requires: [],
     produces: 'churn_signals',
-    parse_as: 'list',
     memory_query: null,
     memory_top_k: 5,
     pipeline_order: 60,
+    max_tool_steps: 8,
     status: 'active',
     created_at: '2026-07-01T10:00:00+00:00',
     updated_at: '2026-07-01T10:00:00+00:00',
@@ -104,8 +104,16 @@ const server = setupServer(
       prompt: 'Analyse [...]',
       raw_response: '[{"signal": "activation drop"}]',
       parsed_output: [{ signal: 'activation drop' }],
-      tool_results: [{ tool: 'discover_events', params: {}, result: { events: ['signup'] } }],
-      timings_ms: { gather: 12, llm: 900, total: 950 },
+      tool_results: [
+        {
+          tool: 'discover_events',
+          params: { limit: 5 },
+          result: '{"events": ["signup"]}',
+          error: null,
+          elapsed_ms: 12,
+        },
+      ],
+      timings_ms: { llm: 900, total: 950 },
     })
   }),
   http.get(`${BASE}/v1/agents/custom/:agentId`, ({ params }) => {
@@ -203,7 +211,8 @@ describe('CustomAgentWizardPage', () => {
     )
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
-    // Step 3: Data tools — pick one from the live catalog.
+    // Step 3: Data tools — default allows the whole catalog; limit to one.
+    await userEvent.click(await screen.findByRole('radio', { name: /limit tools/i }))
     await userEvent.click(await screen.findByRole('checkbox', { name: /discover_events/ }))
     await userEvent.click(screen.getByRole('button', { name: /next/i }))
 
@@ -243,10 +252,10 @@ describe('CustomAgentWizardPage', () => {
       display_name: 'Churn watch',
       system_prompt: 'You are a churn analyst.',
       model_tier: 'reasoning',
-      tools: [{ tool: 'discover_events', params: {} }],
+      tools: ['discover_events'],
+      max_tool_steps: 8,
       requires: [],
       produces: 'churn_signals',
-      parse_as: 'list',
       memory_query: null,
       pipeline_order: 100,
     })

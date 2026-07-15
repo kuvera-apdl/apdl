@@ -1,15 +1,26 @@
-"""CustomAgent — a read-only analysis agent hydrated from a ``custom_agents`` row.
+"""CustomAgent — a read-only, agentic analysis agent hydrated from a ``custom_agents`` row.
 
 Built-in agents are classes; custom agents are data. A definition authored in
-the admin console (prompts + tool selection + tier + pipeline position)
-becomes a ``CustomAgent`` instance whose attributes shadow the ``BaseAgent``
-ClassVars, so the whole Template Method lifecycle — memory retrieval, LLM
-call, shape-enforcing parse, supervisor persistence — is reused unchanged.
+the admin console (prompts + allowed-tool selection + tier + pipeline
+position) becomes a ``CustomAgent`` instance whose attributes shadow the
+``BaseAgent`` ClassVars, so the whole Template Method lifecycle — memory
+retrieval, the bounded tool loop, shape-enforcing parse, supervisor
+persistence — is reused unchanged.
 
-Deliberate omissions define the v1 safety contract:
+Custom agents are agentic: ``tools`` names which catalog tools the reasoning
+model MAY call (an empty selection allows the whole catalog); the model picks
+concrete parameters at run time inside the framework's tool loop. There is no
+pre-baked query list — the agent investigates.
 
-- no ``act`` override → no side effects, never ``needs_approval``, so a
-  custom agent can never gate a run or reach the deploy paths;
+Deliberate omissions define the safety contract:
+
+- every reachable tool comes from the read-only catalog, with params
+  validated per call and ``project_id``/date-window injected from the run
+  context (see :mod:`app.framework.tool_catalog`) — a custom agent cannot
+  acquire side effects or read another project's data no matter what its
+  definition or its model says;
+- no ``act`` override → no deploy paths, never ``needs_approval``, so a
+  custom agent can never gate a run;
 - no ``memory_entries`` override → custom agents read long-term memory
   (``memory_query``) but never write it, keeping the store curated by
   built-ins only;
@@ -22,15 +33,12 @@ Deliberate omissions define the v1 safety contract:
 from __future__ import annotations
 
 import json
-import logging
 import re
 from typing import Any
 
 from app.framework.base import BaseAgent
 from app.framework.context import AgentContext
-from app.framework.tool_catalog import validate_tool_selection
-
-logger = logging.getLogger(__name__)
+from app.framework.tool_catalog import TOOL_CATALOG, validate_tool_names
 
 #: State keys a custom agent must never produce: supervisor seed keys, keys
 #: the run loop reads (``errors``, counter sources), BaseAgent working keys
@@ -40,6 +48,7 @@ RESERVED_STATE_KEYS = frozenset(
         "project_id",
         "context",
         "tool_results",
+        "tool_trace",
         "output",
         "errors",
         "insights",
@@ -53,10 +62,11 @@ RESERVED_STATE_KEYS = frozenset(
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 _MAX_PROMPT = 20_000
+_MAX_TOOL_STEPS_DEFAULT = 8
 
 #: Placeholders always available to ``user_prompt_template`` (plus one per
 #: ``requires`` key).
-BASE_PLACEHOLDERS = ("context", "tool_results", "project_id", "time_range_days")
+BASE_PLACEHOLDERS = ("context", "project_id", "time_range_days")
 
 
 def render_template(template: str, variables: dict[str, str]) -> str:
@@ -72,7 +82,7 @@ def render_template(template: str, variables: dict[str, str]) -> str:
 
 
 class CustomAgent(BaseAgent):
-    """A user-defined, read-only analysis agent (see module docstring)."""
+    """A user-defined, read-only, agentic analysis agent (see module docstring)."""
 
     def __init__(self, definition: dict[str, Any]) -> None:
         self.definition = definition
@@ -87,9 +97,18 @@ class CustomAgent(BaseAgent):
         self.memory_top_k = int(definition.get("memory_top_k", 5))
         self.requires = tuple(definition.get("requires") or ())
         self.produces = definition["produces"]
-        self.parse_as = definition.get("parse_as", "object")
+        # Custom output is always a list of findings — everything downstream
+        # (result persistence, the run-results endpoint, the console cards)
+        # flattens to lists, and parse() coerces a single object to [obj].
+        self.parse_as = "list"
         self.user_prompt_template = definition["user_prompt_template"]
-        self.tool_specs = list(definition.get("tools") or ())
+        # Allowed tools: an empty selection means the full catalog — the
+        # wizard default. The stored subset only ever narrows.
+        allowed = [t for t in (definition.get("tools") or ()) if isinstance(t, str)]
+        self.agentic_tools = tuple(allowed) if allowed else tuple(TOOL_CATALOG)
+        self.max_tool_steps = int(
+            definition.get("max_tool_steps", _MAX_TOOL_STEPS_DEFAULT)
+        )
 
     def requirements_met(self, state: dict[str, Any]) -> bool:
         """Shadow the BaseAgent *classmethod*, which reads ``cls.requires``.
@@ -99,41 +118,17 @@ class CustomAgent(BaseAgent):
         """
         return all(state.get(key) for key in self.requires)
 
-    async def gather(
-        self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Run the selected catalog tools sequentially.
-
-        Per-tool failures are captured into the results (and the prompt) so a
-        single flaky query degrades the analysis instead of killing the agent
-        — mirroring how behavior_analysis isolates its query errors.
-        """
-        # Import here, not at module top: tests monkeypatch
-        # app.framework.tool_catalog.run_tool and late binding honors that.
-        from app.framework import tool_catalog
-
-        results: list[dict[str, Any]] = []
-        for spec in self.tool_specs:
-            name = spec.get("tool")
-            params = spec.get("params") or {}
-            try:
-                output = await tool_catalog.run_tool(ctx, name, params)
-                results.append({"tool": name, "params": params, "result": output})
-            except Exception as exc:
-                logger.error("[%s] custom tool %s failed: %s", self.name, name, exc)
-                results.append({"tool": name, "params": params, "error": str(exc)})
-        return {"tool_results": results}
-
     def build_prompt(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> str | None:
         variables = {
             "context": working.get("context") or "",
-            "tool_results": json.dumps(
-                working.get("tool_results", []), indent=2, default=str
-            ),
             "project_id": ctx.project_id,
             "time_range_days": str(ctx.time_range_days),
+            # Legacy placeholder from the pre-agentic era (static tool results
+            # were rendered into the prompt). Data now arrives via the tool
+            # loop; substitute empty so old templates don't leak "{tool_results}".
+            "tool_results": "",
         }
         # Upstream outputs this agent declared as requirements are addressable
         # by their state key: requires=["insights"] enables an {insights}
@@ -176,8 +171,6 @@ def validate_definition(
 
     if fields.get("model_tier") not in ("fast", "reasoning"):
         errors.append("model_tier must be 'fast' or 'reasoning'")
-    if fields.get("parse_as") not in ("object", "list"):
-        errors.append("parse_as must be 'object' or 'list'")
 
     memory_query = fields.get("memory_query")
     if memory_query is not None and len(memory_query) > 500:
@@ -188,13 +181,17 @@ def validate_definition(
     pipeline_order = fields.get("pipeline_order", 100)
     if not isinstance(pipeline_order, int) or not 0 <= pipeline_order <= 1000:
         errors.append("pipeline_order must be an integer between 0 and 1000")
+    max_tool_steps = fields.get("max_tool_steps", _MAX_TOOL_STEPS_DEFAULT)
+    if not isinstance(max_tool_steps, int) or not 1 <= max_tool_steps <= 16:
+        errors.append("max_tool_steps must be an integer between 1 and 16")
 
+    # Allowed-tool names; empty = whole catalog (the default).
     tools = fields.get("tools") or []
-    if not isinstance(tools, list) or len(tools) > 8:
-        errors.append("tools must be a list of at most 8 selections")
+    if not isinstance(tools, list):
+        errors.append("tools must be a list of catalog tool names")
     else:
         try:
-            validate_tool_selection(tools)
+            validate_tool_names(tools)
         except ValueError as exc:
             errors.append(str(exc))
 

@@ -16,15 +16,15 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "display_name": "Churn watch",
         "description": "Watches churn signals",
         "system_prompt": "You are a churn analyst.",
-        "user_prompt_template": "Analyse {tool_results}",
+        "user_prompt_template": "Analyse churn",
         "model_tier": "fast",
-        "tools": [{"tool": "discover_events", "params": {"limit": 50}}],
+        "tools": ["discover_events", "query_events"],
         "requires": [],
         "produces": "churn_signals",
-        "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 60,
+        "max_tool_steps": 8,
     }
     base.update(overrides)
     return base
@@ -89,11 +89,23 @@ def test_ddl_enforces_active_slug_uniqueness_only():
 
 
 def test_row_to_dict_parses_jsonb_strings_and_tolerates_garbage():
-    row = _row(tools=json.dumps([{"tool": "list_flags", "params": {}}]), requires="not-json")
+    row = _row(tools=json.dumps(["list_flags"]), requires="not-json")
     out = store._row_to_dict(row)
-    assert out["tools"] == [{"tool": "list_flags", "params": {}}]
+    assert out["tools"] == ["list_flags"]
     # Malformed JSONB degrades to [] instead of raising.
     assert out["requires"] == []
+
+
+def test_row_to_dict_normalizes_legacy_tool_dicts_to_names():
+    # Rows written before the agentic rework stored {"tool", "params"} dicts;
+    # the params are obsolete but the selection survives as allowed names.
+    row = _row(
+        tools=json.dumps(
+            [{"tool": "list_flags", "params": {}}, "discover_events", {"bogus": 1}]
+        )
+    )
+    out = store._row_to_dict(row)
+    assert out["tools"] == ["list_flags", "discover_events"]
 
 
 @pytest.mark.asyncio
@@ -110,7 +122,7 @@ async def test_create_serializes_jsonb_fields_as_strings():
     tools_arg = args[8]  # $9::jsonb
     requires_arg = args[9]  # $10::jsonb
     assert isinstance(tools_arg, str) and isinstance(requires_arg, str)
-    assert json.loads(tools_arg) == [{"tool": "discover_events", "params": {"limit": 50}}]
+    assert json.loads(tools_arg) == ["discover_events", "query_events"]
     assert json.loads(requires_arg) == []
 
 

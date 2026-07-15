@@ -15,12 +15,12 @@ project's data.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from app.framework.context import AgentContext
 from app.tools import clickhouse
@@ -262,33 +262,48 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
 }
 
 
-def validate_tool_selection(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate a definition's tool selection against the catalog.
+def validate_tool_names(tools: list[Any]) -> list[str]:
+    """Validate an allowed-tools selection (names only) against the catalog.
 
-    Returns the normalized selection (validated params re-dumped). Raises
-    ``ValueError`` whose message aggregates every per-tool problem so the
-    wizard can show them all at once.
+    Custom agents are agentic: the definition stores which catalog tools the
+    reasoning model MAY call, not pre-baked invocations — params are chosen by
+    the model at run time and validated per call in :func:`run_tool`. Returns
+    the deduplicated names in catalog order (a stable, author-independent
+    order). Raises ``ValueError`` aggregating every problem so the wizard can
+    show them all at once.
     """
     errors: list[str] = []
-    normalized: list[dict[str, Any]] = []
+    selected: set[str] = set()
     for index, entry in enumerate(tools):
-        name = entry.get("tool") if isinstance(entry, dict) else None
-        if not isinstance(name, str) or name not in TOOL_CATALOG:
-            errors.append(f"tools[{index}]: unknown tool {name!r}")
+        if not isinstance(entry, str) or entry not in TOOL_CATALOG:
+            errors.append(f"tools[{index}]: unknown tool {entry!r}")
             continue
-        params = entry.get("params") or {}
-        try:
-            model = TOOL_CATALOG[name].params_model.model_validate(params)
-        except ValidationError as exc:
-            problems = "; ".join(
-                f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()
-            )
-            errors.append(f"tools[{index}] ({name}): {problems}")
-            continue
-        normalized.append({"tool": name, "params": model.model_dump(exclude_none=True)})
+        selected.add(entry)
     if errors:
         raise ValueError("; ".join(errors))
-    return normalized
+    return [name for name in TOOL_CATALOG if name in selected]
+
+
+def llm_tool_schemas(tool_names: Sequence[str]) -> list[dict[str, Any]]:
+    """Neutral function-calling specs for the given catalog tools.
+
+    The shape is what :func:`app.llm.router.chat_completion_with_tools`
+    consumes: ``{"name", "description", "parameters"}`` with parameters as a
+    JSON schema. Unknown names raise — callers validate selections first.
+    """
+    schemas: list[dict[str, Any]] = []
+    for name in tool_names:
+        spec = TOOL_CATALOG.get(name)
+        if spec is None:
+            raise ValueError(f"Unknown tool '{name}'")
+        schemas.append(
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.params_model.model_json_schema(),
+            }
+        )
+    return schemas
 
 
 def _date_window(ctx: AgentContext) -> tuple[str, str]:

@@ -142,7 +142,6 @@ def _custom_row(slug: str, project_id: str = "demo") -> dict[str, Any]:
         "tools": "[]",
         "requires": "[]",
         "produces": "custom_out",
-        "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 60,

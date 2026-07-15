@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 
 from app.framework import base as framework_base
-from app.framework import tool_catalog
+from app.framework import tool_loop
 from app.graphs import supervisor
+from app.llm.router import ToolCompletion
 
 
 def _definition(**overrides: Any) -> dict[str, Any]:
@@ -19,15 +20,15 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "display_name": "Churn watch",
         "description": "",
         "system_prompt": "You are a churn analyst.",
-        "user_prompt_template": "Data: {tool_results}",
+        "user_prompt_template": "Analyse {project_id}",
         "model_tier": "fast",
-        "tools": [],
+        "tools": ["discover_events"],
         "requires": [],
         "produces": "churn_signals",
-        "parse_as": "list",
         "memory_query": None,
         "memory_top_k": 5,
         "pipeline_order": 15,
+        "max_tool_steps": 4,
     }
     base.update(overrides)
     return base
@@ -116,18 +117,15 @@ async def test_custom_agent_runs_in_pipeline_order_and_persists(monkeypatch):
 
     llm_calls: list[str] = []
 
-    async def fake_chat(model_tier, messages, **kwargs):
+    # Custom agents are agentic: their reasoning call goes through the tool
+    # loop. Answer with text immediately (no tool calls) to finish in one round.
+    async def fake_chat_with_tools(model_tier, messages, tools=None, **kwargs):
         llm_calls.append(model_tier)
-        return '[{"signal": "activation drop"}]'
+        return ToolCompletion(text='[{"signal": "activation drop"}]')
 
-    monkeypatch.setattr(framework_base, "chat_completion", fake_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat_with_tools)
 
     custom_ran_at: dict[str, int] = {}
-
-    async def fake_run_tool(ctx, name, params):
-        return {}
-
-    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
 
     original_build = supervisor.CustomAgent.build_prompt
 
@@ -199,6 +197,7 @@ async def test_custom_agent_with_unmet_requires_is_skipped(monkeypatch):
         raise AssertionError("skipped agent must not call the LLM")
 
     monkeypatch.setattr(framework_base, "chat_completion", fail_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fail_chat)
 
     pool = _FakePool()
     await supervisor.run_supervisor(
@@ -230,6 +229,7 @@ async def test_resume_skips_completed_custom_agent(monkeypatch):
         raise AssertionError("completed custom agent must not re-run on resume")
 
     monkeypatch.setattr(framework_base, "chat_completion", fail_chat)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fail_chat)
 
     prior = [
         {

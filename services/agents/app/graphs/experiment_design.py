@@ -153,6 +153,11 @@ class ExperimentDesignAgent(BaseAgent):
     requires = ("insights",)
     produces = "experiment_designs"
     parse_as = "object"
+    # A small verification budget: enough to measure real baselines for the
+    # events the design hinges on (sample-size math was previously guesswork
+    # over "(to be determined)"), not enough to re-run behavior analysis.
+    agentic_tools = ("discover_events", "query_events", "query_timeseries", "query_breakdown")
+    max_tool_steps = 4
 
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
@@ -174,7 +179,10 @@ class ExperimentDesignAgent(BaseAgent):
             insight=json.dumps(insight, default=str),
             context=working.get("context", ""),
             active_experiments=json.dumps(working.get("active_experiments", []), default=str),
-            baseline_metrics="(to be determined from query data)",
+            baseline_metrics=(
+                "(unknown — use your analytics tools to measure the current "
+                "rate/volume of the primary metric event before sizing the experiment)"
+            ),
         )
 
     async def act(

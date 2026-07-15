@@ -34,6 +34,8 @@ from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
 from app.framework.context import AgentContext, AgentResult, MemoryEntry
+from app.framework.tool_catalog import llm_tool_schemas
+from app.framework.tool_loop import run_tool_loop
 from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
 
@@ -61,6 +63,13 @@ class BaseAgent(ABC):
     produces: ClassVar[str] = "output"
     #: Shape of the parsed LLM output — "object" or "list".
     parse_as: ClassVar[str] = "object"
+    #: Catalog tools the reasoning model may call itself (agentic mode). When
+    #: non-empty, the single reasoning call becomes a bounded tool loop — the
+    #: model queries the warehouse on its own before answering. Empty keeps
+    #: the classic one-shot call over ``gather``-ed data.
+    agentic_tools: ClassVar[tuple[str, ...]] = ()
+    #: Max tool rounds before the loop forces a final answer.
+    max_tool_steps: ClassVar[int] = 8
 
     # --- lifecycle hooks (override as needed) -------------------------------
 
@@ -154,6 +163,18 @@ class BaseAgent(ABC):
         prompt = self.build_prompt(ctx, state, working)
         if prompt is None:
             output = self.empty_output()
+        elif self.agentic_tools:
+            loop_result = await run_tool_loop(
+                ctx,
+                agent_name=self.name,
+                system_prompt=self.system_prompt,
+                user_prompt=prompt,
+                tool_schemas=llm_tool_schemas(self.agentic_tools),
+                model_tier=self.model_tier,
+                max_steps=self.max_tool_steps,
+            )
+            working["tool_trace"] = loop_result.trace
+            output = self.parse(loop_result.text)
         else:
             response = await chat_completion(
                 model_tier=self.model_tier,
