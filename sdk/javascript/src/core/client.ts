@@ -568,10 +568,14 @@ export class APDLClient implements APDLApi {
       // Assignment is product control flow; optional telemetry must never make
       // it fail. Leave the key eligible for a later retry and surface the
       // enqueue failure so operators can observe queue pressure or shutdowns.
-      console.warn(
-        `APDL: Failed to enqueue exposure for feature flag '${result.key}'`,
-        error
-      );
+      try {
+        console.warn(
+          `APDL: Failed to enqueue exposure for feature flag '${result.key}'`,
+          error
+        );
+      } catch {
+        // Diagnostics are also best-effort and cannot affect assignment.
+      }
     }
   }
 

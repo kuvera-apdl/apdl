@@ -834,6 +834,14 @@ describe('APDLClient', () => {
       expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('control');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
 
+      warn.mockImplementation(() => {
+        throw new Error('diagnostic logger failed');
+      });
+      expect(() => flaggedClient.getVariant('queue-pressure-flag', {
+        component: 'logger-failure',
+      })).not.toThrow();
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
+
       warn.mockRestore();
       await flaggedClient.shutdown();
     });
