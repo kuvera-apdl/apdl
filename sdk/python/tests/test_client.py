@@ -152,6 +152,29 @@ def test_exposure_logged_once_per_identity_version_variant():
     assert isinstance(exposures[0]["session_id"], str) and exposures[0]["session_id"]
 
 
+def test_exposure_queue_failure_does_not_change_variant_or_commit_dedupe():
+    transport = RecordingTransport()
+    client = make_client(transport, log_exposures=True, max_queue_size=1)
+    client.set_flags([make_flag("g")])
+    client.track("queue_filler", user_id="u1")
+
+    expected = client.get_variant("g", user_id="u1", log_exposure=False)
+    assert client.get_variant("g", user_id="u1") == expected
+    assert client.pending_events == 1
+
+    client.flush()
+    assert client.get_variant("g", user_id="u1") == expected
+    client.flush()
+    client.shutdown()
+
+    exposures = [
+        event
+        for event in transport.all_events()
+        if event["event"] == FEATURE_FLAG_EXPOSURE_EVENT
+    ]
+    assert len(exposures) == 1
+
+
 def test_exposure_carries_page_and_component():
     transport = RecordingTransport()
     client = make_client(transport, log_exposures=True)
