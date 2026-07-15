@@ -32,6 +32,25 @@ async def test_create_and_get_connection():
 
 
 @pytest.mark.asyncio
+async def test_delete_connection():
+    pool = FakePool()
+    pool.add_connection("demo")
+    async with _client(pool) as client:
+        resp = await client.delete("/v1/connections/demo")
+        assert resp.status_code == 204
+
+        got = await client.get("/v1/connections/demo")
+        assert got.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_connection_404():
+    async with _client(FakePool()) as client:
+        resp = await client.delete("/v1/connections/nope")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_unknown_connection_404():
     async with _client(FakePool()) as client:
         resp = await client.get("/v1/connections/nope")
@@ -61,6 +80,79 @@ async def test_create_connection_rejects_unknown_field():
             },
         )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_connection_resolves_omitted_installation_id(monkeypatch):
+    import app.routers.connections as connections_router
+
+    async def fake_resolve(repo):
+        assert repo == "acme/widgets"
+        return 987
+
+    monkeypatch.setattr(connections_router, "resolve_installation_id", fake_resolve)
+    async with _client(FakePool()) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "repo": "acme/widgets"},
+        )
+    assert resp.status_code == 201
+    assert resp.json()["installation_id"] == 987
+
+
+@pytest.mark.asyncio
+async def test_create_connection_422_when_app_not_installed(monkeypatch):
+    import httpx
+
+    import app.routers.connections as connections_router
+
+    async def fake_resolve(repo):
+        request = httpx.Request("GET", "https://api.github.com/repos/x/installation")
+        raise httpx.HTTPStatusError(
+            "404", request=request, response=httpx.Response(404, request=request)
+        )
+
+    monkeypatch.setattr(connections_router, "resolve_installation_id", fake_resolve)
+    async with _client(FakePool()) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "repo": "acme/uninstalled"},
+        )
+    assert resp.status_code == 422
+    assert "not installed" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_create_connection_503_without_app_credentials(monkeypatch):
+    import app.routers.connections as connections_router
+
+    async def fake_resolve(repo):
+        raise ValueError("GitHub App ID and private key are required to mint a JWT.")
+
+    monkeypatch.setattr(connections_router, "resolve_installation_id", fake_resolve)
+    async with _client(FakePool()) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "repo": "acme/widgets"},
+        )
+    assert resp.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_create_connection_explicit_id_skips_resolution(monkeypatch):
+    import app.routers.connections as connections_router
+
+    async def explode(repo):  # pragma: no cover - must not be called
+        raise AssertionError("resolution must be skipped when the id is explicit")
+
+    monkeypatch.setattr(connections_router, "resolve_installation_id", explode)
+    async with _client(FakePool()) as client:
+        resp = await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "installation_id": 42, "repo": "acme/widgets"},
+        )
+    assert resp.status_code == 201
+    assert resp.json()["installation_id"] == 42
 
 
 @pytest.mark.asyncio

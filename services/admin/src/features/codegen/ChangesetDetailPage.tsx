@@ -8,9 +8,15 @@ import { AlertTriangle, ChevronRight, ExternalLink, GitBranch } from 'lucide-rea
 import { Link, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { abandonChangeset, getChangeset, mergeChangeset, revertChangeset } from '@/api/codegen'
+import {
+  abandonChangeset,
+  getChangeset,
+  mergeChangeset,
+  retryChangeset,
+  revertChangeset,
+} from '@/api/codegen'
 import { ApiError } from '@/api/http'
-import { TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
+import { RETRYABLE_CHANGESET_STATUSES, TERMINAL_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset, ChangesetPrompt } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -217,7 +223,15 @@ export function ChangesetDetailPage() {
     },
     onError: onError('Revert failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending
+  const retry = useMutation({
+    mutationFn: () => retryChangeset(serviceConnection(ws, 'codegen'), ws.internalToken, id),
+    onSuccess: () => {
+      toast.success('Retry started')
+      invalidate()
+    },
+    onError: onError('Retry failed'),
+  })
+  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
 
   if (query.isPending) {
     return (
@@ -240,6 +254,7 @@ export function ChangesetDetailPage() {
   const mergeable =
     (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
     (cs.ci_status === 'passed' || cs.ci_status === 'none')
+  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
   const files = statNumber(cs.diff_stat, 'files')
   const additions = statNumber(cs.diff_stat, 'additions')
   const deletions = statNumber(cs.diff_stat, 'deletions')
@@ -268,9 +283,15 @@ export function ChangesetDetailPage() {
             </Button>
           ) : (
             <>
-              <Button size="sm" disabled={busy || !mergeable} onClick={() => merge.mutate()}>
-                Merge
-              </Button>
+              {retryable ? (
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => retry.mutate()}>
+                  Retry
+                </Button>
+              ) : (
+                <Button size="sm" disabled={busy || !mergeable} onClick={() => merge.mutate()}>
+                  Merge
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"

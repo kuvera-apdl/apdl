@@ -78,6 +78,21 @@ TERMINAL_STATUSES: frozenset[ChangesetStatus] = frozenset(
     status for status, nxt in ALLOWED_TRANSITIONS.items() if not nxt
 )
 
+#: Failed outcomes a run can be *retried* from — a retry re-enqueues the same
+#: task on a fresh changeset (new branch + PR) because the lifecycle cannot move
+#: a terminal row backwards. ``merged`` is excluded (roll a landed change back
+#: with /revert, not /retry); in-flight statuses are excluded (still running).
+#: ``ci_failed`` is included even though it is technically non-terminal: its PR
+#: is red and stuck, and a clean re-attempt is the natural next step.
+RETRYABLE_STATUSES: frozenset[ChangesetStatus] = frozenset(
+    {
+        ChangesetStatus.tests_failed,
+        ChangesetStatus.ci_failed,
+        ChangesetStatus.error,
+        ChangesetStatus.abandoned,
+    }
+)
+
 #: Statuses from which a CI poll/webhook sync can still advance a changeset (its
 #: PR is open and CI may report or be re-run). The single source of truth shared
 #: by the sync (``jobs.ci``) and the poller's "what to sweep" query (``store``).

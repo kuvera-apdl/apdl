@@ -20,7 +20,9 @@ class ConnectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1)
-    installation_id: int = Field(ge=1)
+    #: Omit to have the service resolve the live installation id from the repo
+    #: slug (the id also self-heals at token-mint time, so it is a cache hint).
+    installation_id: int | None = Field(default=None, ge=1)
     #: ``owner/name`` slug of the target repository.
     repo: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
     default_base_branch: str = "main"

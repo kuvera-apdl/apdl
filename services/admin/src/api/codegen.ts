@@ -1,8 +1,21 @@
 // Codegen-service client. Guarded by the shared internal token (not the project
 // API key), passed via the X-APDL-Internal-Token header.
-import { request, type ServiceConnection } from './http'
-import { changesetListSchema, changesetSchema, mergeRequestSchema } from './schemas/codegen'
-import type { Changeset, MergeRequest } from './types/codegen'
+import { ApiError, request, type ServiceConnection } from './http'
+import {
+  accessibleRepoListSchema,
+  changesetListSchema,
+  changesetSchema,
+  mergeRequestSchema,
+  repoConnectionCreateSchema,
+  repoConnectionSchema,
+} from './schemas/codegen'
+import type {
+  AccessibleRepo,
+  Changeset,
+  MergeRequest,
+  RepoConnection,
+  RepoConnectionCreate,
+} from './types/codegen'
 
 function authHeaders(internalToken: string): Record<string, string> | undefined {
   return internalToken ? { 'X-APDL-Internal-Token': internalToken } : undefined
@@ -66,12 +79,81 @@ export function abandonChangeset(
   })
 }
 
+/** Resolve a project's repo binding; `null` means "not connected" (404). */
+export async function getRepoConnection(
+  conn: ServiceConnection,
+  internalToken: string,
+  projectId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<RepoConnection | null> {
+  try {
+    return await request(conn, `/v1/connections/${encodeURIComponent(projectId)}`, {
+      schema: repoConnectionSchema,
+      headers: authHeaders(internalToken),
+      signal: options.signal,
+    })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+}
+
+export function connectRepo(
+  conn: ServiceConnection,
+  internalToken: string,
+  body: RepoConnectionCreate,
+): Promise<RepoConnection> {
+  return request(conn, '/v1/connections', {
+    method: 'POST',
+    body: repoConnectionCreateSchema.parse(body),
+    schema: repoConnectionSchema,
+    headers: authHeaders(internalToken),
+  })
+}
+
+/** Every repo the APDL GitHub App can reach — the connect form's picker options. */
+export function listAccessibleRepos(
+  conn: ServiceConnection,
+  internalToken: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<AccessibleRepo[]> {
+  return request(conn, '/v1/github/repos', {
+    schema: accessibleRepoListSchema,
+    headers: authHeaders(internalToken),
+    signal: options.signal,
+  })
+}
+
+export function disconnectRepo(
+  conn: ServiceConnection,
+  internalToken: string,
+  projectId: string,
+): Promise<void> {
+  return request(conn, `/v1/connections/${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+    headers: authHeaders(internalToken),
+  })
+}
+
 export function revertChangeset(
   conn: ServiceConnection,
   internalToken: string,
   changesetId: string,
 ): Promise<Changeset> {
   return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/revert`, {
+    method: 'POST',
+    schema: changesetSchema,
+    headers: authHeaders(internalToken),
+  })
+}
+
+/** Re-run a failed changeset; returns the NEW changeset enqueued for the retry. */
+export function retryChangeset(
+  conn: ServiceConnection,
+  internalToken: string,
+  changesetId: string,
+): Promise<Changeset> {
+  return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/retry`, {
     method: 'POST',
     schema: changesetSchema,
     headers: authHeaders(internalToken),

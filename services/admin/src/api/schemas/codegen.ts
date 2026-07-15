@@ -48,6 +48,17 @@ export const TERMINAL_CHANGESET_STATUSES = new Set<string>([
   'error',
 ])
 
+// Failed outcomes the codegen service will re-run via POST /{id}/retry (mirrors
+// RETRYABLE_STATUSES in services/codegen/app/models/changeset.py). A retry
+// enqueues a fresh changeset carrying the same task; `merged` rolls back with
+// /revert instead, and in-flight statuses are still running.
+export const RETRYABLE_CHANGESET_STATUSES = new Set<string>([
+  'tests_failed',
+  'ci_failed',
+  'error',
+  'abandoned',
+])
+
 export const changesetSchema = z
   .object({
     changeset_id: z.string(),
@@ -77,3 +88,44 @@ export const mergeRequestSchema = z
     merge_method: z.enum(['squash', 'merge', 'rebase']),
   })
   .strict()
+
+// Repo connection registry (services/codegen/app/models/connection.py):
+// binds a project to a GitHub App installation + repository.
+export const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+export const repoConnectionSchema = z
+  .object({
+    project_id: z.string(),
+    installation_id: z.number().int(),
+    repo: z.string(),
+    default_base_branch: z.string(),
+    policy: z.record(z.unknown()),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .strict()
+
+export const repoConnectionCreateSchema = z
+  .object({
+    project_id: z.string().min(1),
+    // Omitted → the codegen service resolves the live installation id from the
+    // repo slug (and 422s cleanly if the App is not installed on it).
+    installation_id: z.number().int().min(1).optional(),
+    repo: z.string().regex(REPO_SLUG_PATTERN, 'Format: owner/name'),
+    default_base_branch: z.string().min(1),
+  })
+  .strict()
+
+// One repository the APDL GitHub App can reach (codegen GET /v1/github/repos —
+// mirrors AccessibleRepo in services/codegen/app/github/installations.py).
+export const accessibleRepoSchema = z
+  .object({
+    repo: z.string(),
+    installation_id: z.number().int(),
+    account: z.string(),
+    default_branch: z.string(),
+    private: z.boolean(),
+  })
+  .strict()
+
+export const accessibleRepoListSchema = z.array(accessibleRepoSchema)

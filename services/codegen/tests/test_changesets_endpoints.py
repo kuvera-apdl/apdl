@@ -137,6 +137,43 @@ async def test_revert_unknown_changeset_404():
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize("status", ["tests_failed", "ci_failed", "error", "abandoned"])
+@pytest.mark.asyncio
+async def test_retry_failed_changeset_enqueues_same_task(status):
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_bad", "demo", status=status, base_branch="develop")
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_bad/retry")
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["changeset_id"].startswith("cs_")
+    assert body["changeset_id"] != "cs_bad"
+    assert body["status"] == "queued"
+    # Same task, same base branch — re-run verbatim, with a lineage marker.
+    assert body["task"]["title"] == "t"
+    assert body["task"]["spec"] == "spec spec spec"
+    assert body["base_branch"] == "develop"
+    assert body["task"]["context"]["retry_of"] == "cs_bad"
+
+
+@pytest.mark.parametrize("status", ["merged", "queued", "pr_open", "ci_passed"])
+@pytest.mark.asyncio
+async def test_retry_non_failed_changeset_409(status):
+    pool = FakePool()
+    pool.add_changeset("cs_x", "demo", status=status)
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_x/retry")
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_retry_unknown_changeset_404():
+    async with _client(FakePool()) as client:
+        resp = await client.post("/v1/changesets/cs_nope/retry")
+    assert resp.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_abandon_open_pr_closes_it_on_github(monkeypatch):
     """Abandoning a changeset with an open PR closes that PR on GitHub."""

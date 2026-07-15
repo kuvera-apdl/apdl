@@ -37,7 +37,7 @@ from app.github.checks import get_ci_status
 from app.github.pulls import mark_ready_for_review, open_pull_request
 from app.jobs.ci_poller import run_ci_poller
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
-from app.routers import changesets, connections, webhooks
+from app.routers import changesets, connections, github, webhooks
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -191,6 +191,7 @@ app.add_middleware(
 
 app.include_router(connections.router)
 app.include_router(changesets.router)
+app.include_router(github.router)
 app.include_router(webhooks.router)
 
 
