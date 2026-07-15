@@ -35,6 +35,8 @@ interface DeliveryAccumulator {
   discardedForConsent: number;
 }
 
+const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
+
 /**
  * Batching event queue with offline fallback.
  * Collects events, batches them, and sends via Transport.
@@ -92,6 +94,15 @@ export class EventQueue {
     if (!this.consentManager.isGranted('analytics')) {
       if (this.config.debug) {
         console.debug('APDL: Event dropped — analytics consent not granted');
+      }
+      return;
+    }
+    if (
+      event.event === FEATURE_FLAG_EXPOSURE_EVENT
+      && !this.consentManager.isGranted('experiments')
+    ) {
+      if (this.config.debug) {
+        console.debug('APDL: Exposure dropped — experiments consent not granted');
       }
       return;
     }
@@ -232,6 +243,10 @@ export class EventQueue {
             const canonical = canonicalizeTrackEvent(
               sanitizeAutoCaptureEvent(event)
             );
+            if (!this.isConsentGrantedForEvent(canonical)) {
+              this.consentDiscardedSinceReport += 1;
+              continue;
+            }
             assertSerializedEventSize(this.toIngestionEvent(canonical));
             this.queue.push(canonical);
           } catch (err) {
@@ -261,6 +276,34 @@ export class EventQueue {
     this.queue.splice(0);
     this.activeDeliveryController?.abort();
 
+    const clear = async () => {
+      await this.storage.clear();
+    };
+    const fence = this.consentFence.then(clear, clear);
+    this.consentFence = fence;
+    this.consentFencePending = true;
+    const markSettled = () => {
+      if (this.consentFence === fence) {
+        this.consentFencePending = false;
+      }
+    };
+    void fence.then(markSettled, markSettled);
+    return fence;
+  }
+
+  /** Removes pending experiment exposures and fences any in-flight batch. */
+  revokeExperimentsConsent(): Promise<void> {
+    this.consentEpoch += 1;
+    const retained = this.queue.filter(
+      (event) => event.event !== FEATURE_FLAG_EXPOSURE_EVENT
+    );
+    this.consentDiscardedSinceReport += this.queue.length - retained.length;
+    this.queue = retained;
+    this.activeDeliveryController?.abort();
+
+    // IndexedDB uses the canonical event envelope and has no purpose index.
+    // Clearing this project's offline queue is the only fail-closed way to
+    // guarantee that a retained exposure cannot cross a revocation boundary.
     const clear = async () => {
       await this.storage.clear();
     };
@@ -539,6 +582,10 @@ export class EventQueue {
         canonical = canonicalizeTrackEvent(
           sanitizeAutoCaptureEvent(queued)
         );
+        if (!this.isConsentGrantedForEvent(canonical)) {
+          this.consentDiscardedSinceReport += 1;
+          continue;
+        }
         ingestionEvent = this.toIngestionEvent(canonical);
         assertSerializedEventSize(ingestionEvent);
       } catch (err) {
@@ -570,6 +617,12 @@ export class EventQueue {
 
     if (events.length === 0) return null;
     return { events, payload: { events: ingestionEvents } };
+  }
+
+  private isConsentGrantedForEvent(event: TrackEvent): boolean {
+    if (!this.consentManager.isGranted('analytics')) return false;
+    return event.event !== FEATURE_FLAG_EXPOSURE_EVENT
+      || this.consentManager.isGranted('experiments');
   }
 }
 

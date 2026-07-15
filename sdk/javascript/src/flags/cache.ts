@@ -210,6 +210,29 @@ export class FlagCache {
     return this.version;
   }
 
+  /** Removes every in-memory flag, tombstone, and persisted cache entry. */
+  clear(): void {
+    this.flags.clear();
+    this.sources.clear();
+    this.invalidSources.clear();
+    this.authoritativeVersions.clear();
+    this.version++;
+    this.removePersisted();
+    this.notifyListeners([]);
+  }
+
+  /** Enables or disables browser persistence without restoring stale data. */
+  setPersistenceEnabled(enabled: boolean): void {
+    if (enabled === this.persistEnabled) return;
+
+    this.persistEnabled = enabled;
+    if (enabled) {
+      this.persistFlags();
+    } else {
+      this.removePersisted();
+    }
+  }
+
   /**
    * Registers a callback to be called when flags change.
    * Returns an unsubscribe function.
@@ -258,6 +281,16 @@ export class FlagCache {
       localStorage.setItem(this.storageKey, JSON.stringify(persisted));
     } catch {
       // Storage may be unavailable or full; keep the in-memory cache.
+    }
+  }
+
+  private removePersisted(): void {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(this.storageKey);
+      }
+    } catch {
+      // Storage may be unavailable; the in-memory cache is already cleared.
     }
   }
 

@@ -76,6 +76,9 @@ export class APDLClient implements APDLApi {
   private activeFlagStatesByPage: Map<string, Map<string, ActiveFlagState>> = new Map();
   private experimentContext: ExperimentContext = { attributes: {} };
   private analyticsCaptureEnabled = false;
+  private personalizationEnabled = false;
+  private experimentsEnabled = false;
+  private flagDistributionEpoch = 0;
   private isShutDown = false;
   private shutdownPromise: Promise<DeliveryReport> | null = null;
 
@@ -123,6 +126,9 @@ export class APDLClient implements APDLApi {
       this.config.persistence,
       this.config.projectId
     );
+    this.analyticsCaptureEnabled = this.consentManager.isGranted('analytics');
+    this.personalizationEnabled = this.consentManager.isGranted('personalization');
+    this.experimentsEnabled = this.consentManager.isGranted('experiments');
     this.scrubber = new Scrubber();
 
     // Core transport
@@ -167,6 +173,9 @@ export class APDLClient implements APDLApi {
       persist: this.shouldPersistFlagCache(),
       storageKey: this.flagStorageKey(),
     });
+    if (!this.experimentsEnabled) {
+      this.flagCache.clear();
+    }
     this.flagEvaluator = new FlagEvaluator(this.flagCache);
 
     // Wire up flag change notifications to per-key listeners
@@ -179,9 +188,10 @@ export class APDLClient implements APDLApi {
       this.contextCollector,
       () => this.activeFlagSnapshot()
     );
-    this.analyticsCaptureEnabled = this.consentManager.isGranted('analytics');
     this.consentManager.onUpdate((state) => {
       this.handleAnalyticsConsent(state.analytics);
+      this.handlePersonalizationConsent(state.personalization);
+      this.handleExperimentsConsent(state.experiments);
     });
 
     // UI subsystem
@@ -209,7 +219,11 @@ export class APDLClient implements APDLApi {
       this.slotManager,
       this.config.debug
     );
-    this.sseConnection.onMessage((msg) => this.sseHandlers.handle(msg));
+    this.sseConnection.onMessage((msg) => {
+      if (this.consentManager.isGranted('experiments')) {
+        this.sseHandlers.handle(msg);
+      }
+    });
 
     // Public namespace bindings
     this.ui = {
@@ -217,6 +231,9 @@ export class APDLClient implements APDLApi {
         this.componentRegistry.register(definition);
       },
       render: (uiConfig: UIConfig, target: HTMLElement) => {
+        if (!this.consentManager.isGranted('personalization')) {
+          return null;
+        }
         return this.uiRenderer.render(uiConfig, target);
       },
       onSlotUpdate: (callback: (slotId: string, element: HTMLElement) => void) => {
@@ -238,10 +255,16 @@ export class APDLClient implements APDLApi {
 
     this.experiments = {
       setContext: (context: ExperimentContext) => {
-        this.experimentContext = this.normalizeExperimentContext(context);
+        const normalized = this.normalizeExperimentContext(context);
+        if (!this.consentManager.isGranted('experiments')) {
+          return;
+        }
+        this.experimentContext = normalized;
         this.onEvaluationContextChanged();
       },
-      getContext: () => this.copyExperimentContext(this.experimentContext),
+      getContext: () => this.consentManager.isGranted('experiments')
+        ? this.copyExperimentContext(this.experimentContext)
+        : { attributes: {} },
       clearContext: () => {
         this.experimentContext = { attributes: {} };
         this.onEvaluationContextChanged();
@@ -322,7 +345,10 @@ export class APDLClient implements APDLApi {
    * Evaluates a feature flag and returns explanation details.
    */
   getVariantDetails(key: string, options?: FlagEvaluationOptions): FlagEvaluationResult {
-    const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+    const result = this.evaluateFlag(key);
+    if (result.reason === 'consent_denied') {
+      return result;
+    }
     this.warnMissingFlag(result);
     this.rememberActiveFlag(result, options);
     this.logFeatureFlagExposure(result, options);
@@ -377,17 +403,13 @@ export class APDLClient implements APDLApi {
       this.healthCapture.start();
     }
 
-    // Start slot manager
-    this.slotManager.start();
+    if (this.personalizationEnabled) {
+      this.slotManager.start();
+    }
 
-    // Establish the initial snapshot before opening the update stream. This
-    // gives SSE updates a deterministic baseline and avoids an older fetch
-    // response overwriting a newer streamed configuration.
-    void this.fetchInitialFlags().finally(() => {
-      if (!this.isShutDown) {
-        this.sseConnection.connect();
-      }
-    });
+    if (this.experimentsEnabled) {
+      this.startFlagDistribution();
+    }
 
     // Handle cookieless mode
     if (this.config.privacyMode === 'cookieless') {
@@ -395,7 +417,22 @@ export class APDLClient implements APDLApi {
     }
   }
 
-  private async fetchInitialFlags(): Promise<void> {
+  private startFlagDistribution(): void {
+    const epoch = ++this.flagDistributionEpoch;
+    void this.fetchInitialFlags(epoch).finally(() => {
+      if (
+        !this.isShutDown
+        && this.consentManager.isGranted('experiments')
+        && epoch === this.flagDistributionEpoch
+      ) {
+        this.sseConnection.connect();
+      }
+    });
+  }
+
+  private async fetchInitialFlags(epoch: number): Promise<void> {
+    if (!this.consentManager.isGranted('experiments')) return;
+
     try {
       const url = `${this.config.endpoint}/v1/flags`;
       const response = await fetch(url, {
@@ -407,6 +444,12 @@ export class APDLClient implements APDLApi {
 
       if (response.ok) {
         const data = await response.json();
+        if (
+          epoch !== this.flagDistributionEpoch
+          || !this.consentManager.isGranted('experiments')
+        ) {
+          return;
+        }
         const result = parseFlagConfigResult(data);
         if (result !== null) {
           if (result.flags.length > 0 || result.invalid_keys.length === 0) {
@@ -570,7 +613,7 @@ export class APDLClient implements APDLApi {
 
   private notifyFlagListeners(): void {
     for (const [key, listeners] of this.variantChangeListeners) {
-      const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+      const result = this.evaluateFlag(key);
       for (const listener of listeners) {
         try {
           listener(result.variant);
@@ -613,7 +656,7 @@ export class APDLClient implements APDLApi {
   private refreshActiveFlagStates(): void {
     for (const [page, states] of Array.from(this.activeFlagStatesByPage.entries())) {
       for (const key of Array.from(states.keys())) {
-        const result = this.flagEvaluator.evaluate(key, this.getEvalContext());
+        const result = this.evaluateFlag(key);
         if (result.variant === null || result.reason === 'not_found' || result.reason === 'invalid_config') {
           states.delete(key);
         } else {
@@ -671,7 +714,8 @@ export class APDLClient implements APDLApi {
 
   private shouldPersistFlagCache(): boolean {
     return this.config.privacyMode === 'standard'
-      && this.config.persistence === 'localStorage';
+      && this.config.persistence === 'localStorage'
+      && this.consentManager.isGranted('experiments');
   }
 
   private flagStorageKey(): string {
@@ -695,6 +739,59 @@ export class APDLClient implements APDLApi {
 
     this.autoCapture.start();
     this.healthCapture.start();
+  }
+
+  private handlePersonalizationConsent(granted: boolean): void {
+    if (this.isShutDown || granted === this.personalizationEnabled) return;
+
+    this.personalizationEnabled = granted;
+    if (!granted) {
+      this.uiRenderer.cleanupAll();
+      this.slotManager.pause();
+      return;
+    }
+
+    this.slotManager.start();
+  }
+
+  private handleExperimentsConsent(granted: boolean): void {
+    if (this.isShutDown || granted === this.experimentsEnabled) return;
+
+    this.experimentsEnabled = granted;
+    if (!granted) {
+      this.flagDistributionEpoch++;
+      this.sseConnection.disconnect();
+      this.flagCache.setPersistenceEnabled(false);
+      this.flagCache.clear();
+      void this.eventQueue.revokeExperimentsConsent();
+      this.featureFlagExposureKeys.clear();
+      this.activeFlagStatesByPage.clear();
+      this.experimentContext = { attributes: {} };
+      return;
+    }
+
+    this.flagCache.setPersistenceEnabled(this.shouldPersistFlagCache());
+    this.startFlagDistribution();
+    this.onEvaluationContextChanged();
+  }
+
+  private evaluateFlag(key: string): FlagEvaluationResult {
+    if (!this.consentManager.isGranted('experiments')) {
+      return {
+        key,
+        variant: null,
+        reason: 'consent_denied',
+        rule_id: null,
+        rollout_bucket: null,
+        variant_bucket: null,
+        rollout_percentage: null,
+        bucket_by: null,
+        config_version: null,
+        source: null,
+      };
+    }
+
+    return this.flagEvaluator.evaluate(key, this.getEvalContext());
   }
 
   private assertActive(): void {
