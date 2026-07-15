@@ -7,6 +7,8 @@ import { CohortsPage } from '@/features/analytics/CohortsPage'
 import { EventsExplorerPage } from '@/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '@/features/analytics/FunnelsPage'
 import { RetentionPage } from '@/features/analytics/RetentionPage'
+import { CustomAgentsPage } from '@/features/agents/custom/CustomAgentsPage'
+import { CustomAgentWizardPage } from '@/features/agents/custom/CustomAgentWizardPage'
 import { RunMonitorPage } from '@/features/agents/RunMonitorPage'
 import { RunsPage } from '@/features/agents/RunsPage'
 import { TriggerPage } from '@/features/agents/TriggerPage'
@@ -61,6 +63,9 @@ export function createRouter() {
             { path: '/experiments/:key', element: <ExperimentDetailPage /> },
             { path: '/agents', element: <RunsPage /> },
             { path: '/agents/trigger', element: <TriggerPage /> },
+            { path: '/agents/custom', element: <CustomAgentsPage /> },
+            { path: '/agents/custom/new', element: <CustomAgentWizardPage /> },
+            { path: '/agents/custom/:agentId/edit', element: <CustomAgentWizardPage /> },
             { path: '/agents/runs/:runId', element: <RunMonitorPage /> },
             { path: '/codegen', element: <ChangesetsPage /> },
             { path: '/codegen/:id', element: <ChangesetDetailPage /> },

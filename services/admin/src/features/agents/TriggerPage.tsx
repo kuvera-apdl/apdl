@@ -5,41 +5,60 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { triggerRun, triggerRunCurl } from '@/api/agents'
+import { listAgentDefinitions, triggerRun, triggerRunCurl } from '@/api/agents'
 import { ApiError } from '@/api/http'
-import type { AnalysisType } from '@/api/types/agents'
 import { CurlButton } from '@/components/shared/CurlButton'
+import { Badge } from '@/components/ui/badge'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { queryKeys } from '@/core/queryClient'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { AUTONOMY_LEVELS, MATRIX_ROWS, type GateOutcome } from '@/features/agents/gatingMatrix'
 import { trackRun } from '@/features/agents/runHistory'
 import { cn } from '@/lib/utils'
+import { useQuery } from '@tanstack/react-query'
 
-const ANALYSIS_TYPES: { type: AnalysisType; label: string; description: string }[] = [
+interface AnalysisOption {
+  type: string
+  label: string
+  description: string
+  isCustom: boolean
+}
+
+// Static fallback: shown until /definitions responds, and kept when the
+// endpoint is unavailable (older agents service) — console convention.
+const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
   {
     type: 'behavior_analysis',
     label: 'Behavior analysis',
     description: 'Reads event history and produces insights — the input every other agent needs.',
+    isCustom: false,
   },
   {
     type: 'experiment_design',
     label: 'Experiment design',
     description: 'Turns insights into experiment designs with flags and variants.',
+    isCustom: false,
   },
   {
     type: 'personalization',
     label: 'Personalization',
     description: 'Proposes UI-config personalizations from insights.',
+    isCustom: false,
   },
   {
     type: 'feature_proposal',
     label: 'Feature proposals',
     description: 'Drafts prioritized feature proposals — always requires approval.',
+    isCustom: false,
   },
 ]
+
+// code_implementation is deliberately absent from the manual trigger list —
+// it runs via the approval flow. Filter it out of the live listing too.
+const HIDDEN_AGENTS = new Set(['code_implementation'])
 
 const OUTCOME_STYLES: Record<GateOutcome, string> = {
   halt: 'text-muted-foreground',
@@ -50,8 +69,8 @@ const OUTCOME_STYLES: Record<GateOutcome, string> = {
 export function TriggerPage() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
-  const [selected, setSelected] = useState<Set<AnalysisType>>(
-    () => new Set<AnalysisType>(['behavior_analysis']),
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set<string>(['behavior_analysis']),
   )
   const [timeRangeDays, setTimeRangeDays] = useState(7)
   const [autonomyLevel, setAutonomyLevel] = useState(2)
@@ -59,7 +78,25 @@ export function TriggerPage() {
 
   const conn = active ? serviceConnection(active, 'agents') : null
 
-  const toggleType = (type: AnalysisType) => {
+  const definitionsQuery = useQuery({
+    queryKey:
+      active && projectId ? queryKeys.agentDefinitions(active.id, projectId) : ['agent-defs-idle'],
+    enabled: Boolean(conn && projectId),
+    queryFn: ({ signal }) => listAgentDefinitions(conn!, projectId!, { signal }),
+  })
+
+  const analysisTypes: AnalysisOption[] = definitionsQuery.data
+    ? definitionsQuery.data.agents
+        .filter((agent) => !HIDDEN_AGENTS.has(agent.name))
+        .map((agent) => ({
+          type: agent.name,
+          label: agent.display_name,
+          description: agent.description,
+          isCustom: agent.is_custom,
+        }))
+    : BUILTIN_ANALYSIS_TYPES
+
+  const toggleType = (type: string) => {
     setSelected((previous) => {
       const next = new Set(previous)
       if (next.has(type)) next.delete(type)
@@ -73,7 +110,9 @@ export function TriggerPage() {
       ? {
           project_id: projectId,
           trigger_type: 'manual' as const,
-          analysis_types: ANALYSIS_TYPES.map((entry) => entry.type).filter((type) => selected.has(type)),
+          analysis_types: analysisTypes
+            .map((entry) => entry.type)
+            .filter((type) => selected.has(type)),
           time_range_days: timeRangeDays,
           autonomy_level: autonomyLevel,
         }
@@ -124,7 +163,7 @@ export function TriggerPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          {ANALYSIS_TYPES.map((entry) => (
+          {analysisTypes.map((entry) => (
             <label
               key={entry.type}
               className="flex cursor-pointer items-start gap-3 rounded-md border p-3 has-[:checked]:border-foreground"
@@ -136,7 +175,14 @@ export function TriggerPage() {
                 className="mt-1 accent-foreground"
               />
               <span>
-                <span className="block text-sm font-medium">{entry.label}</span>
+                <span className="block text-sm font-medium">
+                  {entry.label}
+                  {entry.isCustom ? (
+                    <Badge variant="secondary" className="ml-2">
+                      custom
+                    </Badge>
+                  ) : null}
+                </span>
                 <span className="block text-xs text-muted-foreground">{entry.description}</span>
               </span>
             </label>

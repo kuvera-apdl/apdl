@@ -30,4 +30,13 @@ export const queryKeys = {
   experiments: (wsId: string) => [wsId, 'experiments'] as const,
   changesets: (wsId: string) => [wsId, 'changesets'] as const,
   changeset: (wsId: string, id: string) => [wsId, 'changeset', id] as const,
+  // One prefix covers list, detail, and the combined definitions listing —
+  // a custom-agent write invalidates all three.
+  customAgentsPrefix: (wsId: string) => [wsId, 'custom-agents'] as const,
+  customAgents: (wsId: string, projectId: string) =>
+    [wsId, 'custom-agents', 'list', projectId] as const,
+  customAgent: (wsId: string, projectId: string, agentId: string) =>
+    [wsId, 'custom-agents', 'detail', projectId, agentId] as const,
+  agentDefinitions: (wsId: string, projectId: string) =>
+    [wsId, 'custom-agents', 'definitions', projectId] as const,
 }

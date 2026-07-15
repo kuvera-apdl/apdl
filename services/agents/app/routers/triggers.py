@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.framework.registry import is_registered
 from app.graphs.supervisor import run_supervisor
+from app.store.custom_agents import fetch_active_by_slugs
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -58,16 +59,21 @@ async def trigger_agent_run(
     Creates a run record in PostgreSQL and launches the supervisor graph
     as a background task.
     """
+    pool: asyncpg.Pool = request.app.state.pg_pool
+
+    # Names not in the built-in registry may still be the project's custom
+    # agents — resolve those before rejecting. Reject up front — otherwise
+    # the caller gets a 200 "started" for a run the supervisor will only
+    # skip through.
     unknown = sorted({t for t in body.analysis_types if not is_registered(t)})
     if unknown:
-        # Reject up front — otherwise the caller gets a 200 "started" for a
-        # run the supervisor will only skip through.
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown analysis_types: {unknown}",
-        )
-
-    pool: asyncpg.Pool = request.app.state.pg_pool
+        custom = await fetch_active_by_slugs(pool, body.project_id, unknown)
+        still_unknown = sorted(set(unknown) - set(custom))
+        if still_unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown analysis_types: {still_unknown}",
+            )
 
     # One pipeline per project at a time: concurrent runs duplicate LLM spend
     # and can deploy duplicate experiments from the same insight. (Runs parked

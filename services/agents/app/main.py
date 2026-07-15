@@ -13,7 +13,8 @@ from fastapi.responses import JSONResponse
 
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
-from app.routers import approvals, runs, status, triggers
+from app.routers import approvals, custom_agents, runs, status, triggers
+from app.store.custom_agents import CUSTOM_AGENTS_DDL, CUSTOM_AGENTS_INDEX_DDL
 from app.store.proposals import FEATURE_PROPOSALS_DDL
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,8 @@ async def lifespan(application: FastAPI):
             );
         """)
         await conn.execute(FEATURE_PROPOSALS_DDL)
+        await conn.execute(CUSTOM_AGENTS_DDL)
+        await conn.execute(CUSTOM_AGENTS_INDEX_DDL)
 
     # Crash/restart reconciliation. Supervisor runs live only as in-process
     # background tasks, so at startup every run still marked in-flight is
@@ -172,6 +175,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# custom_agents first: it owns static shapes (/custom/*, /definitions) that
+# must win over the run routers' /{run_id}/... wildcards.
+app.include_router(custom_agents.router)
 app.include_router(triggers.router)
 app.include_router(status.router)
 app.include_router(approvals.router)

@@ -15,6 +15,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Puzzle,
   Settings,
   Sparkles,
   Sun,
@@ -89,7 +90,14 @@ const NAV_GROUPS: NavGroup[] = [
         to: '/agents',
         label: 'Agent runs',
         icon: Bot,
-        isActive: (path) => path === '/agents' || path.startsWith('/agents/'),
+        isActive: (path) =>
+          (path === '/agents' || path.startsWith('/agents/')) && !path.startsWith('/agents/custom'),
+      },
+      {
+        to: '/agents/custom',
+        label: 'Custom agents',
+        icon: Puzzle,
+        isActive: (path) => path.startsWith('/agents/custom'),
       },
       {
         to: '/codegen',

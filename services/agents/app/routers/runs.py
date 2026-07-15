@@ -43,6 +43,9 @@ class RunResults(BaseModel):
     personalizations: list[Any]
     feature_proposals: list[Any]
     changesets: list[Any]
+    #: Outputs of user-defined custom agents, keyed by their ``produces``
+    #: (validation guarantees those never collide with the fixed keys above).
+    custom_outputs: dict[str, list[Any]] = {}
 
 
 class RunAuditResponse(BaseModel):
@@ -123,6 +126,7 @@ async def get_run_results(run_id: str, request: Request) -> RunResults:
         )
 
     payload: dict[str, list[Any]] = {key: [] for key in RESULT_KEYS}
+    custom_outputs: dict[str, list[Any]] = {}
     for row in rows:
         output = row["output"]
         if isinstance(output, str):
@@ -132,13 +136,18 @@ async def get_run_results(run_id: str, request: Request) -> RunResults:
             except (json.JSONDecodeError, ValueError):
                 logger.error("[%s] Skipping malformed %s result row", run_id, row["produces"])
                 continue
-        if row["produces"] in payload and isinstance(output, list):
+        if not isinstance(output, list):
+            continue
+        if row["produces"] in payload:
             # Extend, don't overwrite — two agents can persist under the same
             # produces key (PK is run_id+agent_name), and the approval path
             # already merges across rows.
             payload[row["produces"]].extend(output)
+        else:
+            # A custom agent's produces key — surface it instead of dropping it.
+            custom_outputs.setdefault(row["produces"], []).extend(output)
 
-    return RunResults(run_id=run_id, **payload)
+    return RunResults(run_id=run_id, custom_outputs=custom_outputs, **payload)
 
 
 @router.get("/{run_id}/audit", response_model=RunAuditResponse)
