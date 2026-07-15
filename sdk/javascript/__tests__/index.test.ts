@@ -74,6 +74,7 @@ describe('public SDK entrypoint', () => {
     clients.push(client);
 
     expect(fetchMock).toHaveBeenCalledWith(`${ENDPOINT}/v1/flags`, {
+      signal: expect.any(AbortSignal),
       headers: {
         'X-API-Key': CLIENT_KEY,
         'X-APDL-SDK': SDK_IDENTIFIER,

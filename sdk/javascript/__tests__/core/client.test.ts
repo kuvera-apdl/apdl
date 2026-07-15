@@ -1336,6 +1336,35 @@ describe('APDLClient', () => {
       await experimentClient.shutdown();
     });
 
+    it('should abort an in-flight flag fetch when experiment consent is revoked', async () => {
+      let resolveRequest!: (value: unknown) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRequest = resolve;
+      }));
+      const experimentClient = new APDLClient(createTestConfig());
+      const [, request] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+
+      expect(request.signal?.aborted).toBe(false);
+      experimentClient.consent.update({ experiments: false });
+      expect(request.signal?.aborted).toBe(true);
+
+      resolveRequest({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('late-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      await flushAsync();
+
+      expect(experimentClient.getVariantDetails('late-flag'))
+        .toMatchObject({ variant: null, reason: 'consent_denied', source: null });
+      await experimentClient.shutdown();
+    });
+
     it('should not retain experiment context while experiment consent is denied', async () => {
       await flushAsync();
       const existingStreamCount = MockEventSource.instances.length;

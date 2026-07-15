@@ -79,6 +79,7 @@ export class APDLClient implements APDLApi {
   private personalizationEnabled = false;
   private experimentsEnabled = false;
   private flagDistributionEpoch = 0;
+  private flagFetchController: AbortController | null = null;
   private isShutDown = false;
   private shutdownPromise: Promise<DeliveryReport> | null = null;
 
@@ -383,6 +384,9 @@ export class APDLClient implements APDLApi {
     if (this.shutdownPromise !== null) return this.shutdownPromise;
 
     this.isShutDown = true;
+    this.flagDistributionEpoch++;
+    this.flagFetchController?.abort();
+    this.flagFetchController = null;
     this.autoCapture.stop();
     this.healthCapture.stop();
     this.sseConnection.disconnect();
@@ -418,8 +422,14 @@ export class APDLClient implements APDLApi {
   }
 
   private startFlagDistribution(): void {
+    this.flagFetchController?.abort();
+    const controller = new AbortController();
+    this.flagFetchController = controller;
     const epoch = ++this.flagDistributionEpoch;
-    void this.fetchInitialFlags(epoch).finally(() => {
+    void this.fetchInitialFlags(epoch, controller.signal).finally(() => {
+      if (this.flagFetchController === controller) {
+        this.flagFetchController = null;
+      }
       if (
         !this.isShutDown
         && this.consentManager.isGranted('experiments')
@@ -430,12 +440,13 @@ export class APDLClient implements APDLApi {
     });
   }
 
-  private async fetchInitialFlags(epoch: number): Promise<void> {
+  private async fetchInitialFlags(epoch: number, signal: AbortSignal): Promise<void> {
     if (!this.consentManager.isGranted('experiments')) return;
 
     try {
       const url = `${this.config.endpoint}/v1/flags`;
       const response = await fetch(url, {
+        signal,
         headers: {
           [API_KEY_HEADER]: this.config.auth.clientKey,
           [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
@@ -445,7 +456,9 @@ export class APDLClient implements APDLApi {
       if (response.ok) {
         const data = await response.json();
         if (
-          epoch !== this.flagDistributionEpoch
+          this.isShutDown
+          || signal.aborted
+          || epoch !== this.flagDistributionEpoch
           || !this.consentManager.isGranted('experiments')
         ) {
           return;
@@ -459,7 +472,10 @@ export class APDLClient implements APDLApi {
           }
         }
       }
-    } catch {
+    } catch (error) {
+      if (signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+        return;
+      }
       if (this.config.debug) {
         console.warn('APDL: Failed to fetch initial flags');
       }
@@ -764,6 +780,8 @@ export class APDLClient implements APDLApi {
     this.experimentsEnabled = granted;
     if (!granted) {
       this.flagDistributionEpoch++;
+      this.flagFetchController?.abort();
+      this.flagFetchController = null;
       this.sseConnection.disconnect();
       this.flagCache.setPersistenceEnabled(false);
       this.flagCache.clear();
