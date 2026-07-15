@@ -34,28 +34,107 @@ CREATE TABLE IF NOT EXISTS feature_proposals (
 """
 
 
+def _text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, default=str) if value else ""
+
+
+def _as_bullets(value: Any) -> list[str]:
+    """Render a proposal list field as markdown bullet bodies."""
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [_text(value)] if value else []
+
+
+def _impl_notes(impl: Any) -> str:
+    """Render ``implementation_spec`` as readable markdown, not a JSON blob.
+
+    The raw ``json.dumps`` this replaces reached the coding agent verbatim and
+    read as noise at best — and its ``dependencies`` list (often organizational)
+    as a mandate to descope the change to nothing. Known fields become labeled
+    bullets; unknown fields still surface (serialized) so no detail is dropped.
+    """
+    if not impl:
+        return ""
+    if not isinstance(impl, dict):
+        return _text(impl)
+    labeled = (
+        ("components_affected", "Components affected"),
+        ("technical_considerations", "Technical considerations"),
+        ("dependencies", "In-repo prerequisites"),
+    )
+    parts: list[str] = []
+    for key, label in labeled:
+        bullets = _as_bullets(impl.get(key))
+        if bullets:
+            parts.append(f"**{label}:**\n" + "\n".join(f"- {b}" for b in bullets))
+    effort = str(impl.get("estimated_effort") or "").strip()
+    if effort:
+        parts.append(f"**Estimated effort:** {effort}")
+    rest = {
+        k: v
+        for k, v in impl.items()
+        if k not in {key for key, _ in labeled} and k != "estimated_effort" and v
+    }
+    if rest:
+        parts.append(json.dumps(rest, default=str))
+    return "\n\n".join(parts)
+
+
+def _acceptance_criteria(value: Any) -> list[str]:
+    """Render ``success_criteria`` entries as checkable bullet bodies."""
+    criteria: list[str] = []
+    for item in value if isinstance(value, list) else []:
+        if isinstance(item, dict):
+            metric = str(item.get("metric") or "").strip()
+            target = str(item.get("target") or "").strip()
+            timeframe = str(item.get("timeframe") or "").strip()
+            text = " — ".join(p for p in (metric, target) if p)
+            if text and timeframe:
+                text = f"{text} (within {timeframe})"
+            if text:
+                criteria.append(text)
+        elif str(item).strip():
+            criteria.append(str(item).strip())
+    return criteria
+
+
 def _spec_of(proposal: dict[str, Any]) -> str:
-    """Build a codegen spec from an LLM proposal.
+    """Build a codegen spec from an LLM proposal, rendered as a markdown work order.
 
     Real proposals carry ``proposed_solution`` / ``implementation_spec`` /
     ``problem_statement`` rather than ``spec`` / ``description``; fall back
-    across all of them (and append the structured ``implementation_spec``) so a
-    proposal is never silently dropped for an empty spec — the cause of the
-    "claimed 0 proposals" handoff failure.
+    across all of them so a proposal is never silently dropped for an empty spec
+    — the cause of the "claimed 0 proposals" handoff failure. The structured
+    fields are rendered as readable sections (this text is what the coding agent
+    executes and what the PR body shows), never a raw JSON dump.
     """
-
-    def _text(value: Any) -> str:
-        if isinstance(value, str):
-            return value.strip()
-        return json.dumps(value, default=str) if value else ""
-
     prose = ""
     for key in ("proposed_solution", "spec", "description", "problem_statement"):
         prose = _text(proposal.get(key))
         if prose:
             break
-    detail = _text(proposal.get("implementation_spec"))
-    return "\n\n".join(part for part in (prose, detail) if part)
+    if not prose:
+        return ""
+
+    sections: list[str] = []
+    problem = _text(proposal.get("problem_statement"))
+    if problem and problem != prose:
+        sections.append(f"## Problem\n{problem}")
+        sections.append(f"## What to build\n{prose}")
+    else:
+        sections.append(prose)
+
+    notes = _impl_notes(proposal.get("implementation_spec"))
+    if notes:
+        sections.append(f"## Implementation notes\n{notes}")
+    criteria = _acceptance_criteria(proposal.get("success_criteria"))
+    if criteria:
+        sections.append(
+            "## Acceptance criteria\n" + "\n".join(f"- {c}" for c in criteria)
+        )
+    return "\n\n".join(sections)
 
 
 async def enqueue_proposals(
@@ -146,6 +225,31 @@ async def claim_proposals(
                     [c["proposal_id"] for c in claimed],
                 )
     return claimed
+
+
+async def list_recent_proposals(
+    pool: asyncpg.Pool, project_id: str, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Recent proposals (any status) for grounding the next proposal run.
+
+    The feature-proposal prompt shows these as "already proposed or in flight"
+    so the LLM stops re-proposing the same three themes every run — insights
+    barely change between runs, so without this list every run rediscovers the
+    same features and each becomes a duplicate PR.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT proposal_id, title, status
+            FROM feature_proposals
+            WHERE project_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            project_id,
+            limit,
+        )
+    return [dict(r) for r in rows]
 
 
 async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] | None:

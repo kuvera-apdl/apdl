@@ -134,6 +134,74 @@ def codegen_conventions_enabled() -> bool:
     return os.getenv("CODEGEN_CONVENTIONS", "true").lower() != "false"
 
 
+def codegen_sdk_reference_enabled() -> bool:
+    """Attach the APDL SDK integration reference for the repo's SDK (default on).
+
+    Loads ``app/editor/sdk_reference.py`` as an Aider ``--read`` file, but only
+    the reference for an SDK the repo actually depends on (``@apdl-oss/sdk`` for
+    JS, ``apdl`` for Python). The SDK lives in ``node_modules`` / site-packages,
+    which is outside Aider's repo map, so without this the agent cannot see the
+    real ``track``/``identify`` call path and guesses (e.g. a ``window.apdl``
+    global the SDK never reads). It joins the cacheable static prefix like the
+    conventions. Set to "false" to disable.
+    """
+    return os.getenv("CODEGEN_SDK_REFERENCE", "true").lower() != "false"
+
+
+def codegen_helper_model() -> str:
+    """LiteLLM model id for the auxiliary calls (brief compile + diff review).
+
+    Defaults to the editing model so a single ``CODEGEN_MODEL`` configures the
+    whole pipeline; override with ``CODEGEN_HELPER_MODEL`` to run the auxiliary
+    steps on a cheaper/faster model than the editor.
+    """
+    return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
+
+
+def codegen_llm_timeout() -> float:
+    """Per-auxiliary-LLM-call timeout, seconds (brief compile / diff review)."""
+    return float(os.getenv("CODEGEN_LLM_TIMEOUT", "240"))
+
+
+def codegen_brief_enabled() -> bool:
+    """Compile the task spec into a repo-grounded engineering brief (default on).
+
+    Approved feature proposals arrive written at product altitude — they can
+    reference organizational actions and infrastructure the connected repo does
+    not have. A pre-edit LLM pass translates the spec into a work order grounded
+    in the actual repo (concrete files, explicit descoping of non-repo asks,
+    checkable acceptance criteria) before the editing agent sees it. Skipped
+    silently when LiteLLM or the provider key is absent. Set "false" to hand the
+    raw spec to the editor unchanged.
+    """
+    return os.getenv("CODEGEN_BRIEF", "true").lower() != "false"
+
+
+def codegen_review_enabled() -> bool:
+    """Review the produced diff against the spec before pushing (default on).
+
+    The verification command only proves the change *builds*; it happily passes
+    a two-line diff that implements none of the spec (the observed nav-link-to-a-
+    404 failure). A post-edit LLM review judges whether the diff plausibly
+    delivers the spec's repo-implementable core and that new surfaces are
+    reachable; a rejection feeds one retry with the reviewer's instructions,
+    then fails the changeset. Skipped silently when LiteLLM or the provider key
+    is absent. Set "false" to disable.
+    """
+    return os.getenv("CODEGEN_REVIEW", "true").lower() != "false"
+
+
+def codegen_edit_retries() -> int:
+    """Extra editing rounds after a verification or review failure (default 1).
+
+    A failed verify/review re-invokes the agent with the failure output appended
+    instead of terminally failing the changeset — most first-round failures
+    (a bad import, a skipped requirement) are fixable with the error in hand.
+    Floor of 0 (fail on the first failure, the pre-existing behavior).
+    """
+    return max(0, int(os.getenv("CODEGEN_EDIT_RETRIES", "1")))
+
+
 def codegen_workdir() -> str:
     """Base directory for throwaway changeset workdirs (defaults to the tempdir)."""
     return os.getenv("CODEGEN_WORKDIR") or tempfile.gettempdir()
@@ -157,6 +225,47 @@ def codegen_agent_timeout() -> int:
 def codegen_test_timeout() -> int:
     """Repo test-command timeout, seconds."""
     return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
+
+
+def codegen_job_budget() -> int:
+    """Wall-clock budget for one FULL changeset pipeline, seconds.
+
+    The agent timeout (``CODEGEN_TIMEOUT``) bounds a *single* aider invocation;
+    a whole job is clone + (1 + retries) × (aider + verify) + push. This derived
+    budget is what must bound anything wrapping the pipeline as a unit: the
+    sandbox container's ``docker run`` (killing it at the bare agent timeout
+    truncates legitimate retry rounds) and the stale-changeset sweep deadline.
+    Override explicitly with ``CODEGEN_JOB_BUDGET`` if the derivation doesn't
+    fit (e.g. a huge clone).
+    """
+    override = os.getenv("CODEGEN_JOB_BUDGET", "")
+    if override.strip():
+        return max(1, int(override))
+    rounds = 1 + codegen_edit_retries()
+    return rounds * (codegen_agent_timeout() + codegen_test_timeout()) + 2 * codegen_git_timeout()
+
+
+def codegen_stale_sweep_interval() -> int:
+    """Seconds between periodic stale-changeset sweeps (default 300; 0 disables).
+
+    The sweep fails active-state changesets whose ``updated_at`` is older than
+    ``2 × codegen_job_budget()`` — orphans of a crashed/restarted process that
+    the startup sweep was too early to catch. See ``jobs.runner.run_stale_sweeper``.
+    """
+    return max(0, int(os.getenv("CODEGEN_STALE_SWEEP_INTERVAL", "300")))
+
+
+def codegen_require_verify() -> bool:
+    """Refuse to open a PR that could not be verified locally (default on).
+
+    When on (the default), a changeset for which no verification command could be
+    established — no test/build/typecheck gate for the repo — fails as
+    ``tests_failed`` instead of opening an unverified PR. This is the fail-closed
+    posture: an unverifiable change is worse than no change, and a green-looking
+    draft with a broken build erodes trust in the loop. Set to "false" only for
+    exotic repos with no detectable gate, where a human reviews every PR.
+    """
+    return os.getenv("CODEGEN_REQUIRE_VERIFY", "true").lower() != "false"
 
 
 def codegen_max_concurrent_jobs() -> int:

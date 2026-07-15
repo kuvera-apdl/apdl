@@ -19,7 +19,7 @@ import asyncpg
 
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
-from app.models.changeset import ChangesetStatus, TaskSpec
+from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
 from app.store import changesets as store
@@ -119,11 +119,24 @@ async def _execute_changeset_job(
             return
 
         base_branch = changeset.base_branch or connection.default_base_branch
-        await store.transition_changeset(pool, changeset_id, ChangesetStatus.cloning)
+        # The queued → cloning transition doubles as the job's claim: it is
+        # row-locked and state-machine-checked, so exactly one worker wins.
+        # Losing the claim (a duplicate enqueue, a concurrent replica) is a
+        # clean no-op, not an error that would corrupt the winner's run.
+        try:
+            await store.transition_changeset(pool, changeset_id, ChangesetStatus.cloning)
+        except InvalidTransition:
+            logger.info(
+                "Changeset %s is already claimed by another job; skipping.",
+                changeset_id,
+            )
+            return
         token = await mint_token(connection.installation_id, connection.repo)
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
+        policy = connection.policy if isinstance(connection.policy, dict) else {}
+        revert_sha = changeset.task.context.get("revert_sha")
         result = await editor.implement(
             EditRequest(
                 repo=connection.repo,
@@ -133,11 +146,9 @@ async def _execute_changeset_job(
                 title=changeset.task.title,
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
-                test_cmd=(
-                    connection.policy.get("test_cmd")
-                    if isinstance(connection.policy, dict)
-                    else None
-                ),
+                test_cmd=policy.get("test_cmd"),
+                gates_policy=policy.get("gates"),
+                revert_sha=revert_sha if isinstance(revert_sha, str) else None,
             )
         )
 
@@ -149,11 +160,14 @@ async def _execute_changeset_job(
             )
             return
 
+        # Backstop only: the editor already ran these gates on the FULL diff
+        # before pushing. This re-check (on the possibly capped diff_text)
+        # guards editors that don't gate themselves (e.g. a fake/custom Editor).
         gate = evaluate_pre_push(
             diff_stat=result.diff_stat,
             changed_paths=result.changed_paths,
             diff_text=result.diff_text,
-            policy=connection.policy.get("gates") if isinstance(connection.policy, dict) else None,
+            policy=policy.get("gates"),
         )
         if not gate.passed:
             await store.transition_changeset(
@@ -191,3 +205,47 @@ async def _execute_changeset_job(
             )
         except Exception:
             logger.exception("Could not mark changeset %s errored", changeset_id)
+
+
+async def run_stale_sweeper(
+    pool: asyncpg.Pool,
+    *,
+    interval_seconds: int,
+    older_than_seconds: int,
+    error: str,
+) -> None:
+    """Periodically fail active-state changesets that stopped moving.
+
+    The startup sweep only catches orphans that are already old enough when the
+    process boots; a changeset orphaned shortly *before* a restart would
+    otherwise sit in ``cloning``/``editing``/… until some much later restart.
+    This loop re-runs the same sweep forever so any row past the deadline is
+    surfaced within one interval of aging out. A live job never trips it as long
+    as ``older_than_seconds`` exceeds the per-job pipeline budget.
+    """
+    logger.info(
+        "Stale-changeset sweeper started (interval=%ss, deadline=%ss)",
+        interval_seconds,
+        older_than_seconds,
+    )
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                swept = await store.fail_stale_changesets(
+                    pool, older_than_seconds=older_than_seconds, error=error
+                )
+                if swept:
+                    logger.warning(
+                        "Swept %d stale changeset(s) to error: %s",
+                        len(swept),
+                        ", ".join(swept),
+                    )
+            except Exception:
+                logger.warning(
+                    "Stale-changeset sweep errored; retrying next interval",
+                    exc_info=True,
+                )
+    except asyncio.CancelledError:
+        logger.info("Stale-changeset sweeper stopped")
+        raise

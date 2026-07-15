@@ -26,6 +26,14 @@ class EditRequest:
     #: Repo test command for the agent's test loop + the post-edit verify.
     #: ``None`` lets the engine auto-detect from the repo (e.g. pytest/npm test).
     test_cmd: str | None = None
+    #: Connection-policy overrides for the pre-push gates (``policy["gates"]``).
+    #: The engine evaluates the gates on the FULL diff before it pushes, so a
+    #: violating branch never reaches the remote.
+    gates_policy: dict[str, Any] | None = None
+    #: Merge-commit SHA to revert deterministically (``git revert``) instead of
+    #: asking the agent to reconstruct the revert from prose. The agent is still
+    #: invoked afterwards if verification fails on the reverted tree.
+    revert_sha: str | None = None
 
 
 @dataclass

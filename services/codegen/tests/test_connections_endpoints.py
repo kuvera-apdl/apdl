@@ -61,3 +61,62 @@ async def test_create_connection_rejects_unknown_field():
             },
         )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_repo_context_endpoint_serves_document(monkeypatch):
+    import app.routers.connections as connections_router
+
+    class _Token:
+        token = "ghs_tok"
+
+    async def fake_mint(installation_id, repo):
+        assert repo == "acme/widgets"
+        return _Token()
+
+    async def fake_fetch(*, repo, branch, token):
+        assert (repo, branch, token) == ("acme/widgets", "main", "ghs_tok")
+        return {"repo": repo, "branch": branch, "framework": "Next.js (App Router)"}
+
+    monkeypatch.setattr(connections_router, "mint_token_for_repo", fake_mint)
+    monkeypatch.setattr(connections_router, "fetch_repo_context", fake_fetch)
+
+    pool = FakePool()
+    async with _client(pool) as client:
+        await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "installation_id": 42, "repo": "acme/widgets"},
+        )
+        resp = await client.get("/v1/connections/demo/repo-context")
+
+    assert resp.status_code == 200
+    assert resp.json()["framework"] == "Next.js (App Router)"
+
+
+@pytest.mark.asyncio
+async def test_repo_context_endpoint_404_without_connection():
+    async with _client(FakePool()) as client:
+        resp = await client.get("/v1/connections/nope/repo-context")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_repo_context_endpoint_502_on_github_failure(monkeypatch):
+    import httpx
+
+    import app.routers.connections as connections_router
+
+    async def fake_mint(installation_id, repo):
+        raise httpx.ConnectError("github down")
+
+    monkeypatch.setattr(connections_router, "mint_token_for_repo", fake_mint)
+
+    pool = FakePool()
+    async with _client(pool) as client:
+        await client.post(
+            "/v1/connections",
+            json={"project_id": "demo", "installation_id": 42, "repo": "acme/widgets"},
+        )
+        resp = await client.get("/v1/connections/demo/repo-context")
+
+    assert resp.status_code == 502

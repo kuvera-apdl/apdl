@@ -147,6 +147,16 @@ services:
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
       # "false" to disable.
       CODEGEN_CACHE_PROMPTS: ${CODEGEN_CACHE_PROMPTS:-true}
+      # Auxiliary LLM passes around the edit (both default on, fail-open):
+      # CODEGEN_BRIEF compiles the spec into a repo-grounded work order before
+      # the edit; CODEGEN_REVIEW judges the diff against the spec before the
+      # push. CODEGEN_HELPER_MODEL overrides the model for these passes
+      # (defaults to CODEGEN_MODEL); CODEGEN_EDIT_RETRIES bounds the feedback
+      # rounds after a verify/review failure.
+      CODEGEN_BRIEF: ${CODEGEN_BRIEF:-true}
+      CODEGEN_REVIEW: ${CODEGEN_REVIEW:-true}
+      CODEGEN_HELPER_MODEL: ${CODEGEN_HELPER_MODEL:-}
+      CODEGEN_EDIT_RETRIES: ${CODEGEN_EDIT_RETRIES:-1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}

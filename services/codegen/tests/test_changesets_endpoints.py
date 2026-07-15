@@ -89,7 +89,10 @@ async def test_create_changeset_rejects_unknown_field():
 async def test_revert_merged_changeset_enqueues_a_revert():
     pool = FakePool()
     pool.add_connection("demo")
-    pool.add_changeset("cs_orig", "demo", status="merged", pr_number=7, branch="apdl/x")
+    pool.add_changeset(
+        "cs_orig", "demo", status="merged", pr_number=7, branch="apdl/x",
+        merge_sha="deadbeef123",
+    )
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_orig/revert")
     assert resp.status_code == 202
@@ -100,6 +103,22 @@ async def test_revert_merged_changeset_enqueues_a_revert():
     assert body["task"]["title"].startswith("Revert:")
     assert "#7" in body["task"]["spec"]
     assert body["task"]["context"]["reverts_changeset"] == "cs_orig"
+    # The recorded merge SHA rides along so the editor reverts deterministically.
+    assert body["task"]["context"]["revert_sha"] == "deadbeef123"
+    assert "deadbeef123" in body["task"]["spec"]
+
+
+@pytest.mark.asyncio
+async def test_revert_without_recorded_sha_falls_back_to_prose():
+    # A changeset merged before merge_sha existed still gets a revert task —
+    # just without the deterministic target.
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_old", "demo", status="merged", pr_number=3, branch="apdl/y")
+    async with _client(pool) as client:
+        resp = await client.post("/v1/changesets/cs_old/revert")
+    assert resp.status_code == 202
+    assert "revert_sha" not in resp.json()["task"]["context"]
 
 
 @pytest.mark.asyncio

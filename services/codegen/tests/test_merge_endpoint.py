@@ -12,8 +12,18 @@ from app.routers import changesets
 from tests.fakes import FakePool
 
 
-def _client(pool: FakePool) -> AsyncClient:
+def _client(pool: FakePool, *, live_ci: str | None = None) -> AsyncClient:
     app.state.pg_pool = pool
+    # ci_deps is set explicitly: other test modules leave it on the shared app
+    # object, and the merge endpoint uses it for the live CI re-check.
+    if live_ci is None:
+        app.state.ci_deps = None
+    else:
+
+        async def get_status(repo: str, ref: str, token: str) -> str:
+            return live_ci
+
+        app.state.ci_deps = {"get_status": get_status, "mint_token": None, "mark_ready": None}
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -47,7 +57,10 @@ async def test_merge_succeeds_when_ci_green(monkeypatch):
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_m1/merge", json={})
     assert resp.status_code == 200
-    assert resp.json()["status"] == "merged"
+    body = resp.json()
+    assert body["status"] == "merged"
+    # The merge commit SHA is recorded — it is the deterministic /revert target.
+    assert body["merge_sha"] == "abc123"
     assert calls["merge"]["repo"] == "acme/widgets"
     assert calls["merge"]["number"] == 5
     assert calls["installation_id"] == 7
@@ -107,6 +120,38 @@ async def test_merge_refused_in_non_mergeable_state(monkeypatch):
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_m3/merge", json={})
     assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_merge_refused_when_live_ci_disagrees(monkeypatch):
+    # The stored ci_status says green, but the branch moved since it was
+    # recorded and live CI reports failed — the stale stored status must not
+    # authorize the merge.
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_live", "demo", status="ci_passed", ci_status="passed", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool, live_ci="failed") as client:
+        resp = await client.post("/v1/changesets/cs_live/merge", json={})
+    assert resp.status_code == 409
+    assert "stale" in resp.json()["detail"]
+    assert "merge" not in calls  # GitHub merge was never attempted
+
+
+@pytest.mark.asyncio
+async def test_merge_proceeds_when_live_ci_confirms(monkeypatch):
+    calls = _patch_merge(monkeypatch)
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_live2", "demo", status="ci_passed", ci_status="passed", pr_number=5, branch="apdl/x"
+    )
+    async with _client(pool, live_ci="passed") as client:
+        resp = await client.post("/v1/changesets/cs_live2/merge", json={})
+    assert resp.status_code == 200
+    assert calls["merge"]["number"] == 5
 
 
 @pytest.mark.asyncio

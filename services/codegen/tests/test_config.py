@@ -106,3 +106,25 @@ def test_ci_sync_max_age_env_override_and_floor(monkeypatch):
     assert config.codegen_ci_sync_max_age_seconds() == 3600
     monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "-5")
     assert config.codegen_ci_sync_max_age_seconds() == 0
+
+
+def test_job_budget_derives_from_the_inner_timeouts(monkeypatch):
+    monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
+    monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
+    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "600")
+    monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    # (1 + retries) × (agent + verify) + clone/push slack
+    assert config.codegen_job_budget() == 2 * (1800 + 600) + 2 * 300
+
+
+def test_job_budget_env_override_wins(monkeypatch):
+    monkeypatch.setenv("CODEGEN_JOB_BUDGET", "7200")
+    assert config.codegen_job_budget() == 7200
+
+
+def test_stale_sweep_interval_default_and_disable(monkeypatch):
+    monkeypatch.delenv("CODEGEN_STALE_SWEEP_INTERVAL", raising=False)
+    assert config.codegen_stale_sweep_interval() == 300
+    monkeypatch.setenv("CODEGEN_STALE_SWEEP_INTERVAL", "0")
+    assert config.codegen_stale_sweep_interval() == 0

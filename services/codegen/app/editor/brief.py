@@ -1,0 +1,163 @@
+"""Spec → engineering-brief compilation (the pre-edit auxiliary LLM pass).
+
+Approved feature proposals arrive written at product altitude: they can demand
+organizational actions ("stakeholder sign-off", "alert the data engineering
+team") and infrastructure the connected repository does not have (ETL pipelines,
+Slack webhooks). Handing that raw text to the editing agent forces it to guess a
+repo-shaped interpretation mid-edit — the observed failure modes are fabricated
+in-memory "pipelines", and near-empty diffs when the agent reads the unmet
+dependencies as a reason to descope to nothing.
+
+This pass does the interpretation *before* the edit, with the actual clone in
+hand: it translates the spec into a work order grounded in this repository —
+concrete files to touch, explicit descoping decisions for anything that cannot
+be code here, and acceptance criteria a reviewer can check in the repo. The
+brief replaces the spec in the agent's message; the original spec remains the
+contract the post-edit review judges against.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from app.editor.llm import CompleteFn
+
+logger = logging.getLogger(__name__)
+
+#: Path cap for the repo digest. Enough to show a real app's full shape; a
+#: monorepo overflows and the digest says so rather than silently truncating.
+_DIGEST_MAX_PATHS = 400
+#: Directory names that never help the brief (dependencies, build output, VCS).
+_DIGEST_EXCLUDE_DIRS = frozenset(
+    {".git", "node_modules", "dist", "build", ".next", ".venv", "venv",
+     "__pycache__", "vendor", "target", ".turbo", "coverage"}
+)
+#: A brief shorter than this cannot be a real work order; fall back to the spec.
+_MIN_BRIEF_CHARS = 200
+
+BRIEF_SYSTEM = """\
+You compile approved product feature proposals into precise engineering briefs
+for an automated coding agent. The agent can ONLY edit files in the one
+repository described below — it cannot contact people, configure external
+services, or touch other systems. Your brief is the agent's entire understanding
+of the task.
+
+Write the brief as a work order with exactly these sections:
+
+## Goal
+One paragraph: the user-visible outcome this change delivers in THIS repository.
+
+## Scope decisions
+The proposal may ask for things that cannot be code in this repository
+(organizational actions, external infrastructure, human sign-off). List each
+such item and rule on it explicitly: either translate it into the closest
+in-repo equivalent, or descope it in one line ("out of scope: X — requires Y").
+NEVER let an unimplementable item silently shrink the implementable core; the
+agent must still build everything that CAN be built here.
+
+## Implementation plan
+Concrete and repo-grounded: which existing files to modify, which new files to
+create (with paths that follow the repo's conventions), and how each piece is
+wired into a reachable path (route, page, layout, registration). Name real
+files from the repository digest — never invent paths for frameworks the repo
+does not use.
+
+## Acceptance criteria
+A numbered checklist a reviewer can verify by reading the diff and running the
+repo's verification command. Each criterion must be observable in this
+repository (a route that renders, an event that fires, a function with given
+behavior) — never an organizational outcome.
+
+Rules:
+- Preserve the proposal's full implementable intent. The brief may narrow HOW,
+  never quietly narrow WHAT.
+- Stay within the repository's existing stack and dependencies.
+- Plain markdown only. No preamble before "## Goal", nothing after the criteria.
+"""
+
+
+def build_repo_digest(repo_dir: Path) -> str:
+    """A compact, bounded description of the cloned repo for the brief prompt.
+
+    File paths (noise dirs excluded, capped), the package manifest's scripts and
+    dependency names when present, and the README head — enough grounding to
+    name real files without shipping the whole tree.
+    """
+    paths: list[str] = []
+    truncated = False
+    for path in sorted(repo_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(repo_dir)
+        if any(part in _DIGEST_EXCLUDE_DIRS for part in rel.parts):
+            continue
+        if len(paths) >= _DIGEST_MAX_PATHS:
+            truncated = True
+            break
+        paths.append(str(rel))
+
+    sections = ["### Files", "\n".join(paths) or "(empty repository)"]
+    if truncated:
+        sections.append(f"(file list truncated at {_DIGEST_MAX_PATHS} paths)")
+
+    package_json = repo_dir / "package.json"
+    if package_json.is_file():
+        try:
+            manifest = json.loads(
+                package_json.read_text(encoding="utf-8", errors="ignore")
+            )
+        except ValueError:
+            manifest = {}
+        scripts = manifest.get("scripts") or {}
+        deps = sorted(
+            {**(manifest.get("dependencies") or {}),
+             **(manifest.get("devDependencies") or {})}
+        )
+        if scripts:
+            sections.append("### package.json scripts\n" + json.dumps(scripts, indent=2))
+        if deps:
+            sections.append("### Installed packages\n" + ", ".join(deps))
+
+    for readme_name in ("README.md", "README.rst", "README"):
+        readme = repo_dir / readme_name
+        if readme.is_file():
+            try:
+                head = readme.read_text(encoding="utf-8", errors="ignore")[:2000]
+            except OSError:
+                break
+            sections.append(f"### README (head)\n{head}")
+            break
+
+    return "\n\n".join(sections)
+
+
+async def compile_brief(
+    *,
+    title: str,
+    spec: str,
+    repo_digest: str,
+    verification_context: str,
+    complete: CompleteFn,
+) -> str | None:
+    """Compile the spec into a repo-grounded brief; ``None`` means "use the spec".
+
+    Fail-open by design: an unavailable or degenerate compilation must never
+    block the changeset — the raw spec is what would have run anyway.
+    """
+    user = (
+        f"# Approved proposal\n\n## Title\n{title.strip()}\n\n"
+        f"## Spec\n{spec.strip()}\n\n"
+        f"# Repository digest\n\n{repo_digest.strip()}\n\n"
+        f"# Repository verification\n\n{verification_context.strip()}"
+    )
+    brief = await complete(BRIEF_SYSTEM, user)
+    if brief is None or len(brief) < _MIN_BRIEF_CHARS or "## Goal" not in brief:
+        logger.warning(
+            "Brief compilation produced no usable brief for %r; "
+            "falling back to the raw spec.",
+            title,
+        )
+        return None
+    return brief

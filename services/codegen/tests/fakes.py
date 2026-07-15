@@ -65,6 +65,7 @@ class FakeConn:
                 "pr_number": None,
                 "pr_node_id": None,
                 "ci_status": None,
+                "merge_sha": None,
                 "task": args[5],
                 "diff_stat": "{}",
                 "error": None,
@@ -100,6 +101,10 @@ class FakeConn:
                 row["pr_number"] = args[4]
                 row["pr_node_id"] = args[5]
                 row["diff_stat"] = args[6]
+            elif "merge_sha" in query:
+                # mark_merged: (id, status, merge_sha)
+                row["status"] = args[1]
+                row["merge_sha"] = args[2]
             elif "ci_status" in query:
                 # set_ci_status: (id, status, ci_status)
                 row["status"] = args[1]
@@ -167,7 +172,11 @@ class FakePool:
         return _Acquire(self.conn)
 
     def add_connection(
-        self, project_id: str, repo: str = "acme/widgets", installation_id: int = 1
+        self,
+        project_id: str,
+        repo: str = "acme/widgets",
+        installation_id: int = 1,
+        policy: str = "{}",
     ) -> None:
         """Seed a repo connection so changeset creation is permitted."""
         self.store["connections"][project_id] = {
@@ -175,7 +184,7 @@ class FakePool:
             "installation_id": installation_id,
             "repo": repo,
             "default_base_branch": "main",
-            "policy": "{}",
+            "policy": policy,
             "created_at": _T0,
             "updated_at": _T0,
         }
@@ -191,6 +200,7 @@ class FakePool:
         pr_node_id: str | None = None,
         branch: str | None = None,
         base_branch: str = "main",
+        merge_sha: str | None = None,
     ) -> None:
         """Seed a changeset row in an arbitrary lifecycle state (for endpoint tests)."""
         self.store["changesets"][changeset_id] = {
@@ -204,6 +214,7 @@ class FakePool:
             "pr_number": pr_number,
             "pr_node_id": pr_node_id,
             "ci_status": ci_status,
+            "merge_sha": merge_sha,
             "task": '{"title": "t", "spec": "spec spec spec"}',
             "diff_stat": "{}",
             "error": None,

@@ -3,6 +3,7 @@
 // actions (merge on green CI, abandon un-merged, revert a merged change).
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import { abandonChangeset, listChangesets, mergeChangeset, revertChangeset } from '@/api/codegen'
@@ -138,7 +139,11 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert }: RowProps) {
 
   return (
     <TableRow>
-      <TableCell className="font-medium">{cs.task.title}</TableCell>
+      <TableCell className="font-medium">
+        <Link to={`/codegen/${cs.changeset_id}`} className="hover:underline">
+          {cs.task.title}
+        </Link>
+      </TableCell>
       <TableCell>
         <ChangesetStatusPill status={cs.status} />
       </TableCell>

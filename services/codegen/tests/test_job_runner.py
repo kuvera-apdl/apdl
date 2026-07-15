@@ -165,6 +165,55 @@ async def test_job_blocks_on_pre_push_gate_violation():
 
 
 @pytest.mark.asyncio
+async def test_job_backs_off_when_already_claimed():
+    # The queued → cloning transition is the claim; a duplicate job (double
+    # enqueue, concurrent replica) must not touch the winner's changeset.
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_claimed", "demo", status="cloning")
+
+    editor = FakeEditor()
+
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError("PR should not be opened")
+
+    await run_changeset_job(
+        pool, "cs_claimed", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
+
+    final = await store.get_changeset(pool, "cs_claimed")
+    assert final.status == ChangesetStatus.cloning  # winner's state untouched
+    assert final.error is None
+    assert editor.last_request is None  # the loser never ran the editor
+
+
+@pytest.mark.asyncio
+async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
+    pool = FakePool()
+    pool.add_connection(
+        "demo", policy='{"test_cmd": "make ci", "gates": {"max_files": 5}}'
+    )
+    task = {**_TASK, "context": {"revert_sha": "cafebabe"}}
+    await store.create_changeset(
+        pool, changeset_id="cs_pol00001", project_id="demo",
+        run_id=None, base_branch=None, task=task,
+    )
+
+    editor = FakeEditor(EditResult(success=True, diff_stat={"files": 1}))
+
+    async def open_pr(**kwargs) -> PullRequest:
+        return PullRequest(url="https://github.com/acme/widgets/pull/2", number=2)
+
+    await run_changeset_job(
+        pool, "cs_pol00001", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
+
+    assert editor.last_request.test_cmd == "make ci"
+    assert editor.last_request.gates_policy == {"max_files": 5}
+    assert editor.last_request.revert_sha == "cafebabe"
+
+
+@pytest.mark.asyncio
 async def test_job_abandoned_when_automation_disabled(monkeypatch):
     monkeypatch.setenv("CODEGEN_KILL_SWITCH", "true")
     pool = FakePool()

@@ -71,6 +71,21 @@ async def get_changeset(changeset_id: str) -> dict[str, Any]:
     return await _get(f"/v1/changesets/{changeset_id}")
 
 
+async def get_repo_context(project_id: str) -> dict[str, Any]:
+    """Compact facts about the project's connected repo (stack, layout, scripts).
+
+    Grounds the feature-proposal prompt in what the repository actually is, so
+    specs name real files and stay inside the repo's capabilities instead of
+    demanding infrastructure it does not have.
+    """
+    return await _get(f"/v1/connections/{project_id}/repo-context")
+
+
+async def list_changesets(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """List the project's changesets (newest first), incl. task title + PR state."""
+    return await _get(f"/v1/changesets?project_id={project_id}&limit={limit}")
+
+
 async def merge_changeset(changeset_id: str, merge_method: str = "squash") -> dict[str, Any]:
     """Merge a changeset's PR. codegen enforces green CI; APDL gates the call."""
     return await _post(f"/v1/changesets/{changeset_id}/merge", {"merge_method": merge_method})

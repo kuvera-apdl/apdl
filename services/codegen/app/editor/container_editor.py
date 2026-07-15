@@ -34,6 +34,7 @@ import json
 import logging
 import os
 
+from app.config import codegen_job_budget
 from app.editor.base import EditRequest, EditResult
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,26 @@ _SECRET_ENV_FORWARD: tuple[str, ...] = (
     "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
     "COHERE_API_KEY", "TOGETHERAI_API_KEY", "FIREWORKS_API_KEY", "XAI_API_KEY",
     "OLLAMA_API_BASE", "AZURE_API_KEY", "AZURE_API_BASE", "AZURE_API_VERSION",
+)
+
+# Editor knobs (non-secret) forwarded into the sandbox so the AiderEditor
+# inside behaves EXACTLY like the in-process one — an operator's timeouts,
+# fail-closed posture, and auxiliary-pass toggles must not silently revert to
+# defaults just because CODEGEN_SANDBOX=docker. Unset values fall back to the
+# same defaults in both places.
+_CONFIG_ENV_FORWARD: tuple[str, ...] = (
+    "CODEGEN_BRIEF",
+    "CODEGEN_REVIEW",
+    "CODEGEN_HELPER_MODEL",
+    "CODEGEN_EDIT_RETRIES",
+    "CODEGEN_REQUIRE_VERIFY",
+    "CODEGEN_CACHE_PROMPTS",
+    "CODEGEN_CONVENTIONS",
+    "CODEGEN_SDK_REFERENCE",
+    "CODEGEN_TIMEOUT",
+    "CODEGEN_TEST_TIMEOUT",
+    "CODEGEN_GIT_TIMEOUT",
+    "CODEGEN_LLM_TIMEOUT",
 )
 
 
@@ -80,7 +101,10 @@ class ContainerAiderEditor:
         self._cpus = os.getenv("CODEGEN_SANDBOX_CPUS", "2")
         self._pids = os.getenv("CODEGEN_SANDBOX_PIDS", "512")
         self._network = os.getenv("CODEGEN_SANDBOX_NETWORK", "")  # "" → docker default
-        self._timeout = int(os.getenv("CODEGEN_TIMEOUT", "1800"))
+        # The container runs the WHOLE pipeline (clone + retry rounds of
+        # aider + verify + push), so its wall-clock cap is the derived job
+        # budget — capping at the bare agent timeout kills legitimate retries.
+        self._timeout = codegen_job_budget()
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
@@ -120,6 +144,13 @@ class ContainerAiderEditor:
         ]
         if request.test_cmd:
             argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
+        if request.gates_policy is not None:
+            argv += ["-e", f"CS_GATES_POLICY={json.dumps(request.gates_policy)}"]
+        if request.revert_sha:
+            argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
+        for key in _CONFIG_ENV_FORWARD:
+            if os.environ.get(key):
+                argv += ["-e", f"{key}={os.environ[key]}"]
         # Secrets by NAME only → docker reads the value from our env, never argv.
         argv += ["-e", "GH_TOKEN"]
         for key in self._present_secret_keys():

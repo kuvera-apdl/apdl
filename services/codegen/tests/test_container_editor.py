@@ -46,6 +46,36 @@ def test_docker_argv_omits_test_cmd_when_unset():
     assert "CS_TEST_CMD" not in argv
 
 
+def test_docker_argv_passes_gates_policy_and_revert_sha():
+    req = _req(gates_policy={"max_files": 5}, revert_sha="cafebabe")
+    argv = " ".join(ContainerAiderEditor()._docker_argv(req))
+    assert 'CS_GATES_POLICY={"max_files": 5}' in argv
+    assert "CS_REVERT_SHA=cafebabe" in argv
+
+
+def test_docker_argv_forwards_editor_config(monkeypatch):
+    # The sandboxed AiderEditor must behave exactly like the in-process one:
+    # operator knobs (fail-closed posture, timeouts, pass toggles) ride along.
+    monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
+    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "900")
+    monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
+    argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
+    assert "CODEGEN_REQUIRE_VERIFY=false" in argv
+    assert "CODEGEN_TEST_TIMEOUT=900" in argv
+    assert "CODEGEN_CONVENTIONS=false" in argv
+
+
+def test_container_timeout_covers_the_full_job_budget(monkeypatch):
+    # The container runs the WHOLE pipeline (retry rounds included); capping it
+    # at the bare agent timeout would kill legitimate retries mid-run.
+    monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
+    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "600")
+    monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
+    assert ContainerAiderEditor()._timeout == 2 * (1800 + 600) + 2 * 300
+
+
 def test_secrets_are_passed_by_name_not_value(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secretvalue")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")

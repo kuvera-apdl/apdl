@@ -15,9 +15,68 @@ from typing import Any
 
 from app.framework import AgentContext, BaseAgent, MemoryEntry, register_agent
 from app.llm.prompts.feature import FEATURE_PROPOSAL_PROMPT, FEATURE_PROPOSAL_SYSTEM
+from app.store.proposals import list_recent_proposals
+from app.tools.code import get_repo_context, list_changesets
 from app.tools.experiments import get_active_experiments, get_experiment_results
 
 logger = logging.getLogger(__name__)
+
+
+def _render_repo_capabilities(context: dict[str, Any]) -> str:
+    """Render codegen's repo-context document for the proposal prompt.
+
+    An empty context (codegen down, no connection) degrades to an explicit
+    warning rather than a silent blank, so the LLM knows it is proposing blind
+    and should stay conservative.
+    """
+    if not context:
+        return (
+            "(repository context unavailable — propose only small, conservative "
+            "changes that any web application could implement)"
+        )
+    lines = [
+        f"Repository: {context.get('repo', '?')} (branch {context.get('branch', '?')})",
+        f"Stack: {context.get('framework', 'unknown')}",
+        f"Test script present: {'yes' if context.get('has_test_script') else 'no'}",
+    ]
+    scripts = context.get("scripts") or {}
+    if scripts:
+        lines.append("package.json scripts: " + ", ".join(sorted(scripts)))
+    readme = str(context.get("readme_excerpt") or "").strip()
+    if readme:
+        lines.append(f"README (excerpt):\n{readme}")
+    paths = context.get("paths") or []
+    if paths:
+        listing = "\n".join(paths)
+        if context.get("paths_truncated"):
+            listing += "\n(file list truncated)"
+        lines.append(f"Files:\n{listing}")
+    return "\n".join(lines)
+
+
+def _render_existing_work(
+    proposals: list[dict[str, Any]], changesets: list[dict[str, Any]]
+) -> str:
+    """One line per prior proposal / changeset, deduped by title, for the prompt."""
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def _add(title: str, detail: str) -> None:
+        key = title.strip().lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        lines.append(f"- {title.strip()} ({detail})")
+
+    for proposal in proposals:
+        _add(str(proposal.get("title") or ""), f"proposal, {proposal.get('status', '?')}")
+    for changeset in changesets:
+        task = changeset.get("task") or {}
+        detail = f"changeset, {changeset.get('status', '?')}"
+        if changeset.get("pr_url"):
+            detail += f", {changeset['pr_url']}"
+        _add(str(task.get("title") or ""), detail)
+    return "\n".join(lines) if lines else "(none)"
 
 
 @register_agent
@@ -64,9 +123,41 @@ class FeatureProposalAgent(BaseAgent):
                 return None
 
         fetched = await asyncio.gather(*[_fetch_result(e) for e in active])
+
+        # Repo grounding: what the connected repository actually is. Proposals
+        # written blind demand infrastructure the repo does not have; the coding
+        # agent downstream then fabricates or descopes (the observed junk-PR
+        # failure modes). Fetch failures degrade to an explicit "unavailable".
+        repo_context: dict[str, Any] = {}
+        try:
+            fetched_context = await get_repo_context(ctx.project_id)
+            if isinstance(fetched_context, dict):
+                repo_context = fetched_context
+        except Exception as exc:
+            logger.warning("Could not fetch repo context: %s", exc)
+
+        # Dedup grounding: what was already proposed or is already in flight.
+        # Insights barely change between runs, so without this every run
+        # re-proposes the same themes and each becomes a duplicate PR.
+        recent_proposals: list[dict[str, Any]] = []
+        try:
+            recent_proposals = await list_recent_proposals(ctx.pool, ctx.project_id)
+        except Exception as exc:
+            logger.warning("Could not list recent proposals: %s", exc)
+        changesets: list[dict[str, Any]] = []
+        try:
+            listed = await list_changesets(ctx.project_id)
+            if isinstance(listed, list):
+                changesets = listed
+        except Exception as exc:
+            logger.warning("Could not list changesets: %s", exc)
+
         return {
             "active_experiments": active,
             "experiment_results": [r for r in fetched if r is not None],
+            "repo_context": repo_context,
+            "recent_proposals": recent_proposals,
+            "changesets": changesets,
         }
 
     def build_prompt(
@@ -76,7 +167,11 @@ class FeatureProposalAgent(BaseAgent):
             experiment_results=json.dumps(working.get("experiment_results", []), default=str),
             insights=json.dumps(state.get("insights", []), default=str),
             context=working.get("context", ""),
-            capabilities="(determined from project configuration)",
+            capabilities=_render_repo_capabilities(working.get("repo_context") or {}),
+            existing_work=_render_existing_work(
+                working.get("recent_proposals") or [],
+                working.get("changesets") or [],
+            ),
         )
 
     async def act(

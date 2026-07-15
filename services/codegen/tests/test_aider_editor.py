@@ -10,17 +10,45 @@ from pathlib import Path
 
 import pytest
 
+import app.editor.aider_editor as aider_editor
 from app.editor.aider_editor import (
     AiderEditor,
+    _RepoProbe,
     _agent_env,
     _basic_auth_header,
     _build_message,
+    _capability_preamble,
     _detect_test_cmd,
     _model_settings_yaml,
+    _npm_verify_cmd,
     _parse_numstat,
+    _probe_repo,
+    _repo_has_test_runner,
+    _tail,
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
+
+
+def test_tail_returns_full_text_when_under_limit():
+    assert _tail("short error", limit=800) == "short error"
+
+
+def test_tail_snaps_to_line_boundary_and_marks_truncation():
+    # A long first line then a clean second line; the tail budget lands inside
+    # the first line, so the excerpt must drop that partial line, not begin
+    # mid-word, and must announce how much was dropped.
+    text = "verification failed: apdl-oss/sdk/dist/apdl.esm.js\n" + "x" * 50 + "\nreal error line"
+    out = _tail(text, limit=20)
+    assert out.startswith("[…truncated ")
+    body = out.split("\n", 1)[1]
+    # No partial leading line survived: the body starts at a real line boundary.
+    assert "apdl-oss/sdk" not in body
+    assert body.endswith("real error line")
+
+
+def test_tail_strips_before_measuring():
+    assert _tail("   hi   ", limit=800) == "hi"
 
 
 def test_parse_numstat_sums_files_and_lines():
@@ -72,6 +100,81 @@ def test_detect_test_cmd_npm_skips_without_test_or_build(tmp_path):
 
 def test_detect_test_cmd_none_when_unknown(tmp_path):
     assert _detect_test_cmd(tmp_path) is None
+
+
+def test_npm_verify_chains_build_and_test_with_typecheck(tmp_path):
+    # test + build present → install, then the build (its own type-check), then test.
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "next build", "test": "vitest run"}}'
+    )
+    assert _npm_verify_cmd(tmp_path / "package.json") == (
+        "npm install --no-audit --no-fund --silent && npm run build && npm test --silent"
+    )
+
+
+def test_npm_verify_adds_tsc_typecheck_when_no_build_script(tmp_path):
+    # A TS repo with tests but no build script still gets a type gate — a missing
+    # import must not slip past unit tests (the PR #7 failure mode).
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    (tmp_path / "tsconfig.json").write_text("{}")
+    assert _npm_verify_cmd(tmp_path / "package.json") == (
+        "npm install --no-audit --no-fund --silent "
+        "&& npx --no-install tsc --noEmit && npm test --silent"
+    )
+
+
+def test_npm_verify_none_when_nothing_to_check(tmp_path):
+    # No build, no tsconfig, no test → nothing meaningful to verify.
+    (tmp_path / "package.json").write_text('{"scripts": {"lint": "eslint"}}')
+    assert _npm_verify_cmd(tmp_path / "package.json") is None
+
+
+def test_has_test_runner_via_test_script(tmp_path):
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    assert _repo_has_test_runner(tmp_path) is True
+
+
+def test_has_test_runner_via_dev_dependency(tmp_path):
+    # A runner installed but not scripted still counts as "the repo can test".
+    (tmp_path / "package.json").write_text('{"devDependencies": {"vitest": "^1.0.0"}}')
+    assert _repo_has_test_runner(tmp_path) is True
+
+
+def test_has_test_runner_false_for_next_app_without_tests(tmp_path):
+    # The PR #7 repo shape: build/lint scripts, no runner anywhere.
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"build": "next build", "lint": "eslint"}}'
+    )
+    assert _repo_has_test_runner(tmp_path) is False
+
+
+def test_capability_preamble_warns_when_no_runner():
+    text = _capability_preamble(has_test_runner=False, verify_cmd="npm run build")
+    assert "NO test framework" in text
+    assert "npm run build" in text
+    assert "do NOT import a test library" in text.lower() or "not import a test" in text.lower()
+
+
+def test_capability_preamble_invites_tests_when_runner_present():
+    text = _capability_preamble(has_test_runner=True, verify_cmd="npm test")
+    assert "HAS a test framework" in text
+    assert "ALREADY depends on" in text
+
+
+def test_probe_repo_prefers_override_cmd_but_keeps_repo_runner_signal(tmp_path):
+    # A Next.js app (no runner) with an operator-supplied gate command.
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "next build"}}')
+    probe = _probe_repo(tmp_path, override_cmd="make ci")
+    assert probe.verify_cmd == "make ci"  # override wins as the gate
+    assert probe.has_test_runner is False  # signal still read from the repo
+    assert "NO test framework" in probe.preamble
+
+
+def test_build_message_prepends_preamble():
+    msg = _build_message("Do the thing.", ["keep it small"], preamble="## Context\nrepo has no tests")
+    assert msg.startswith("## Context\nrepo has no tests")
+    assert msg.endswith("Constraints:\n- keep it small")
+    assert "Do the thing." in msg
 
 
 def test_build_message_appends_constraints():
@@ -197,6 +300,495 @@ async def test_aider_argv_reads_conventions_by_default(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_aider_argv_omits_conventions_when_disabled(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
+    # Also silence the SDK reference so the only --read source is conventions.
+    monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     argv = await _capture_aider_argv(editor, monkeypatch)
     assert "--read" not in argv
+
+
+def _fake_probe_with_refs(refs):
+    """A probe with no verify context but the given SDK references."""
+    return _RepoProbe(
+        verify_cmd=None, has_test_runner=False, preamble="", sdk_references=refs
+    )
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_reads_matching_sdk_reference(monkeypatch, tmp_path):
+    # A repo whose manifest calls for the JS SDK gets its reference --read in,
+    # written outside the clone (so it never enters the diff) with the real body.
+    monkeypatch.setenv("CODEGEN_KEEP_WORKDIR", "true")
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _fake_probe_with_refs((("APDL_SDK_JS.md", "JS REF BODY"),)),
+    )
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+
+    read_paths = [Path(argv[i + 1]) for i, a in enumerate(argv) if a == "--read"]
+    js_ref = next(p for p in read_paths if p.name == "APDL_SDK_JS.md")
+    assert "repo" not in js_ref.parts  # outside repo_dir → not in the diff
+    assert js_ref.read_text(encoding="utf-8") == "JS REF BODY"
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_sdk_reference_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _fake_probe_with_refs((("APDL_SDK_JS.md", "JS REF BODY"),)),
+    )
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+
+    read_names = [Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--read"]
+    assert "APDL_SDK_JS.md" not in read_names
+
+
+@pytest.mark.asyncio
+async def test_aider_argv_omits_sdk_reference_when_repo_has_none(monkeypatch, tmp_path):
+    # No APDL SDK in the repo ⇒ no reference attached (the faked clone is empty).
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    read_names = [Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--read"]
+    assert not any(n.startswith("APDL_SDK_") for n in read_names)
+
+
+@pytest.mark.asyncio
+async def test_aider_message_carries_verification_context(monkeypatch, tmp_path):
+    # The per-repo testing reality must reach the agent's message. The clone is
+    # faked (empty), so the probe reports no runner and no verify command.
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    argv = await _capture_aider_argv(editor, monkeypatch)
+    message = argv[argv.index("--message") + 1]
+    assert "Repository verification context" in message
+    assert "NO test framework" in message
+
+
+@pytest.mark.asyncio
+async def test_implement_fails_closed_when_unverifiable(monkeypatch, tmp_path):
+    """No detectable gate + CODEGEN_REQUIRE_VERIFY on ⇒ no PR, clean failure."""
+    monkeypatch.delenv("CODEGEN_REQUIRE_VERIFY", raising=False)  # default: on
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+
+    async def fake_git(*_args, **_kwargs):
+        return 0, ""  # clone / checkout / config succeed
+
+    async def fake_exec(_argv, **_kwargs):
+        return 0, "done"  # aider "succeeds" (empty clone → nothing to verify)
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", fake_exec)
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/widgets", base_branch="main", branch="apdl/x",
+            token="ghs_tok", title="x", spec="do a thing",
+        )
+    )
+
+    assert result.success is False
+    assert "unverified" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_path):
+    """CODEGEN_REQUIRE_VERIFY=false ⇒ the unverifiable-repo path no longer blocks.
+
+    It fails later for a different reason (the faked clone has no diff), proving
+    the fail-closed guard was bypassed rather than the run stopping at it.
+    """
+    monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+
+    async def fake_git(*_args, **_kwargs):
+        return 0, ""
+
+    async def fake_exec(_argv, **_kwargs):
+        return 0, "done"
+
+    monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_exec", fake_exec)
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/widgets", base_branch="main", branch="apdl/x",
+            token="ghs_tok", title="x", spec="do a thing",
+        )
+    )
+
+    assert result.success is False
+    assert "unverified" not in (result.error or "")
+    assert "no changes" in (result.error or "")
+
+
+# --- The edit loop: brief → aider → verify → review, with feedback retries ----
+
+
+def _request(test_cmd: str | None = "make test") -> EditRequest:
+    return EditRequest(
+        repo="acme/widgets", base_branch="main", branch="apdl/x",
+        token="ghs_tok", title="Bot filter", spec="Build a bot filter.",
+        test_cmd=test_cmd,
+    )
+
+
+class _Pipeline:
+    """Scripted git/aider/test doubles that drive implement() end-to-end."""
+
+    def __init__(self, editor, monkeypatch, *, test_results=None, diff_text=None):
+        self.aider_messages: list[str] = []
+        self.pushed = False
+        self.git_calls: list[list[str]] = []
+        self._test_results = list(test_results or [])
+        self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
+
+        async def fake_git(cwd, args, **_kwargs):
+            self.git_calls.append(list(args))
+            if args[0] == "diff" and "--name-only" in args:
+                return 0, "app/x.ts\n"
+            if args[0] == "diff" and "--numstat" in args:
+                return 0, "5\t1\tapp/x.ts\n"
+            if args[0] == "diff":
+                return 0, self._diff_text
+            if args[0] == "rev-list":
+                return 0, "abc123 parent1\n"  # single-parent commit
+            if args[0] == "push":
+                self.pushed = True
+            return 0, ""  # clone / checkout / config / fetch / revert
+
+        async def fake_exec(argv, **_kwargs):
+            self.aider_messages.append(argv[argv.index("--message") + 1])
+            return 0, "aider ok"
+
+        async def fake_run_tests(_repo_dir, _test_cmd):
+            return self._test_results.pop(0) if self._test_results else (True, "")
+
+        monkeypatch.setattr(editor, "_git", fake_git)
+        monkeypatch.setattr(editor, "_exec", fake_exec)
+        monkeypatch.setattr(editor, "_run_tests", fake_run_tests)
+
+
+def _routing_complete(brief_reply=None, review_replies=None):
+    """One completer serving both auxiliary passes, routed by system prompt."""
+    replies = list(review_replies or [])
+
+    async def complete(system: str, _user: str):
+        if "engineering briefs" in system:
+            return brief_reply
+        return replies.pop(0) if replies else '{"approved": true}'
+
+    return complete
+
+
+_BRIEF = (
+    "## Goal\nShip the bot filter.\n\n## Scope decisions\n- none\n\n"
+    "## Implementation plan\n- edit app/x.ts\n\n## Acceptance criteria\n1. filter works"
+) + "." * 200
+
+
+@pytest.mark.asyncio
+async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path):
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert len(pipeline.aider_messages) == 1
+    assert "Ship the bot filter." in pipeline.aider_messages[0]
+    assert "Build a bot filter." not in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_edit_loop_keeps_raw_spec_when_brief_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert "Build a bot filter." in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_retries_with_the_failing_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch,
+        test_results=[(False, "Module not found: hashBucket"), (True, "")],
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert len(pipeline.aider_messages) == 2
+    retry = pipeline.aider_messages[1]
+    assert "FAILED the verification command" in retry
+    assert "hashBucket" in retry
+    assert "do not revert" in retry
+
+
+@pytest.mark.asyncio
+async def test_verify_failure_exhausts_retries_then_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "boom one"), (False, "boom two")]
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "verification failed" in (result.error or "")
+    assert "boom two" in (result.error or "")
+    assert len(pipeline.aider_messages) == 2
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    rejected = (
+        '{"approved": false, "problems": ["link targets a route that does not exist"],'
+        ' "fix_instructions": "Create the page and wire it in."}'
+    )
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected, '{"approved": true}']),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert len(pipeline.aider_messages) == 2
+    retry = pipeline.aider_messages[1]
+    assert "REJECTED" in retry
+    assert "Create the page and wire it in." in retry
+
+
+@pytest.mark.asyncio
+async def test_review_rejection_without_retries_fails_the_changeset(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "0")
+    rejected = '{"approved": false, "problems": ["a token diff"], "fix_instructions": "x"}'
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected]),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "quality review rejected" in (result.error or "")
+    assert "a token diff" in (result.error or "")
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
+    """No LiteLLM / no key ⇒ both auxiliary passes skip and the edit still ships."""
+    monkeypatch.setattr(aider_editor, "resolve_completer", lambda: None)
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert "Build a bot filter." in pipeline.aider_messages[0]
+
+
+# --- Pre-push gates run inside the editor, BEFORE anything reaches the remote --
+
+
+@pytest.mark.asyncio
+async def test_secret_in_diff_blocks_the_push_itself(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch,
+        diff_text="diff --git a/.env.local b/.env.local\n+AWS_KEY=AKIAIOSFODNN7EXAMPLE",
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    assert "gate" in (result.error or "").lower()
+    # The branch never left the sandbox — this is the point of gating pre-push.
+    assert pipeline.pushed is False
+
+
+@pytest.mark.asyncio
+async def test_gates_honor_the_connection_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)  # numstat reports 6 changed lines
+
+    request = _request()
+    request.gates_policy = {"max_lines": 5}
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert "exceeding" in (result.error or "")
+    assert pipeline.pushed is False
+
+
+# --- The verify subprocess must not see provider keys -------------------------
+
+
+def test_test_env_strips_llm_provider_keys(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xyz")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xyz")
+    monkeypatch.setenv("HOME", "/home/codegen")
+
+    env = aider_editor._test_env()
+
+    # Untrusted repo code (npm postinstall, test files) runs under this env.
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["HOME"] == "/home/codegen"
+    assert "PATH" in env
+
+
+# --- Retry messages keep the original work order ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_retry_keeps_the_task_and_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "boom"), (True, "")]
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    retry = pipeline.aider_messages[1]
+    # A fresh aider process has no chat history: the retry must re-carry the
+    # task and the repo context, not just the failure.
+    assert "Build a bot filter." in retry
+    assert "Repository verification context" in retry
+    assert "FAILED the verification command" in retry
+
+
+@pytest.mark.asyncio
+async def test_brief_message_does_not_duplicate_the_preamble(monkeypatch, tmp_path):
+    # The brief is compiled WITH the verification context as input; prepending
+    # it again would put the same block in the message twice.
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert "Repository verification context" not in pipeline.aider_messages[0]
+
+
+# --- Deterministic revert ------------------------------------------------------
+
+
+def _revert_request() -> EditRequest:
+    request = _request()
+    request.revert_sha = "abc123"
+    request.spec = "Revert pull request #7."
+    return request
+
+
+@pytest.mark.asyncio
+async def test_revert_applies_git_revert_without_invoking_the_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+    assert pipeline.aider_messages == []  # the revert is mechanical, not prose
+    reverts = [c for c in pipeline.git_calls if c[0] == "revert"]
+    assert reverts == [["revert", "--no-edit", "abc123"]]
+    # The target commit was fetched into the shallow clone first.
+    assert any(c[0] == "fetch" and "abc123" in c for c in pipeline.git_calls)
+
+
+@pytest.mark.asyncio
+async def test_revert_falls_back_to_the_agent_when_verification_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor, monkeypatch, test_results=[(False, "type error after revert"), (True, "")]
+    )
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    # One agent round: repair the reverted tree with the failure in hand.
+    assert len(pipeline.aider_messages) == 1
+    assert "type error after revert" in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_revert_skips_the_quality_review(monkeypatch, tmp_path):
+    # A mechanical revert's diff is not judged against the spec — a reviewer
+    # rejection here would be noise, not signal.
+    rejected = '{"approved": false, "problems": ["looks weird"], "fix_instructions": "x"}'
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(review_replies=[rejected]),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is True
+    assert pipeline.pushed is True
+
+
+@pytest.mark.asyncio
+async def test_revert_conflict_fails_cleanly(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    async def conflicting_git(cwd, args, **_kwargs):
+        pipeline.git_calls.append(list(args))
+        if args[0] == "rev-list":
+            return 0, "abc123 parent1\n"
+        if args[0] == "revert" and "--abort" not in args:
+            return 1, "error: could not revert abc123"
+        return 0, ""
+
+    monkeypatch.setattr(editor, "_git", conflicting_git)
+
+    result = await editor.implement(_revert_request())
+
+    assert result.success is False
+    assert "conflicts" in (result.error or "")
+    assert pipeline.pushed is False
+    # The conflicted revert was aborted, not left half-applied.
+    assert ["revert", "--abort"] in pipeline.git_calls
