@@ -47,7 +47,7 @@ async def get_run_status(run_id: str, request: Request) -> RunStatus:
         run_id=row["run_id"],
         project_id=row["project_id"],
         status=row["status"],
-        phase=row["phase"],
+        phase=row["phase"] or "initializing",
         insights_count=row["insights_count"],
         experiments_count=row["experiments_count"],
         started_at=row["started_at"].isoformat(),

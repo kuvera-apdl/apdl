@@ -792,3 +792,97 @@ async def test_revert_conflict_fails_cleanly(monkeypatch, tmp_path):
     assert pipeline.pushed is False
     # The conflicted revert was aborted, not left half-applied.
     assert ["revert", "--abort"] in pipeline.git_calls
+
+
+# --- The prompt transcript (EditResult.prompts → admin console) ---------------
+
+
+@pytest.mark.asyncio
+async def test_prompt_transcript_records_brief_edit_and_review(monkeypatch, tmp_path):
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert [p["stage"] for p in result.prompts] == ["brief", "edit", "review"]
+    brief, edit, review = result.prompts
+
+    assert brief["system"].startswith("You compile approved product feature proposals")
+    assert "Build a bot filter." in brief["user"]  # the raw spec
+    assert "# Repository digest" in brief["user"]
+    assert brief["notes"] is None
+
+    # The agent's message carries the compiled brief; the transcript is honest
+    # that the system prompt at this step is Aider's own, not APDL-authored.
+    assert edit["system"] is None
+    assert "Ship the bot filter." in edit["user"]
+    assert "Aider's built-in editing prompt" in edit["notes"]
+
+    assert review["system"].startswith("You review a code change")
+    assert "Build a bot filter." in review["user"]  # judged against the ORIGINAL spec
+    assert "```diff" in review["user"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
+    """An unusable brief still leaves its prompt recorded, with the fallback noted."""
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(
+        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply="too short"),
+    )
+    _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    brief = result.prompts[0]
+    assert brief["stage"] == "brief"
+    assert "no usable brief" in brief["notes"]
+    # The edit ran on the raw spec.
+    assert "Build a bot filter." in result.prompts[1]["user"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_transcript_survives_failure_and_records_retries(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    _Pipeline(
+        editor, monkeypatch,
+        test_results=[(False, "Module not found: hashBucket"), (False, "still red")],
+    )
+
+    result = await editor.implement(_request())
+
+    assert result.success is False
+    labels = [p["label"] for p in result.prompts]
+    assert labels == ["Edit instruction (attempt 1)", "Edit instruction (attempt 2)"]
+    # The retry message the transcript records is the one the agent actually got:
+    # the original work order plus the failing output.
+    assert "hashBucket" in result.prompts[1]["user"]
+    assert "Build a bot filter." in result.prompts[1]["user"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_transcript_lists_attached_context_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _fake_probe_with_refs((("APDL_SDK_JS.md", "JS REF BODY"),)),
+    )
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request(test_cmd=None))
+
+    edit = next(p for p in result.prompts if p["stage"] == "edit")
+    assert "CONVENTIONS.md" in edit["notes"]
+    assert "APDL_SDK_JS.md" in edit["notes"]

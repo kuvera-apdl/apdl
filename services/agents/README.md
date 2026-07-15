@@ -96,9 +96,10 @@ Actions that fail safety validation always halt.
 ## Memory
 
 `app/memory/pgvector_store.py` stores agent insights/designs as text in the
-`agent_memory` table with 1536-dim OpenAI `text-embedding-3-small` embeddings
-(ivfflat cosine index). Agents retrieve project-scoped, semantically similar
-prior memories at the start of a run, with optional metadata filters.
+`agent_memory` table with local fastembed embeddings (384-dim
+`BAAI/bge-small-en-v1.5` by default, ivfflat cosine index — no API key
+needed). Agents retrieve project-scoped, semantically similar prior memories
+at the start of a run, with optional metadata filters.
 
 ## Tools
 
@@ -116,12 +117,12 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Runs, audit log, pgvector memory |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag/experiment/UI-config CRUD |
-| `OPENAI_API_KEY` | — | OpenAI provider **and** memory embeddings |
+| `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Model overrides |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_INTERNAL_TOKEN` | — | Trusted server-side gate evaluation |
 
 At least one of the four LLM credentials is required.

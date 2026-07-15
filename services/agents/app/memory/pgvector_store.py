@@ -91,9 +91,15 @@ class PgVectorStore:
         if metadata_filter:
             filter_parts = []
             for key, value in metadata_filter.items():
-                param_idx = len(params) + 1
-                filter_parts.append(f"metadata->>'{key}' = ${param_idx}")
-                params.append(str(value))
+                # Both key and value are parameterized — interpolating the key
+                # into the SQL string would be an injection vector. Values are
+                # compared against jsonb ->> text output, so non-strings need
+                # their JSON text form ('true', not 'True').
+                key_idx = len(params) + 1
+                params.append(key)
+                value_idx = len(params) + 1
+                params.append(value if isinstance(value, str) else json.dumps(value))
+                filter_parts.append(f"metadata->>(${key_idx}::text) = ${value_idx}")
             filter_clause = "AND " + " AND ".join(filter_parts)
 
         sql = f"""
@@ -130,15 +136,19 @@ class PgVectorStore:
 
         return results
 
-    async def delete(self, entry_id: int) -> bool:
-        """Delete a memory entry by ID.
+    async def delete(self, project_id: str, entry_id: int) -> bool:
+        """Delete a memory entry by ID, scoped to its project.
+
+        Every other method is project-scoped; an unscoped delete wired to an
+        API would be a cross-tenant delete.
 
         Returns:
             True if a row was deleted, False if the ID was not found.
         """
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "DELETE FROM agent_memory WHERE id = $1",
+                "DELETE FROM agent_memory WHERE id = $1 AND project_id = $2",
                 entry_id,
+                project_id,
             )
         return result == "DELETE 1"

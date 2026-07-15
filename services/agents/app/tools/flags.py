@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -178,7 +179,9 @@ async def update_flag(
         payload["auto_disable"] = auto_disable
     if guardrails is not None:
         payload["guardrails"] = guardrails
-    return await _put(f"/v1/admin/flags/{key}", payload, params={"project_id": project_id})
+    # Flag keys are LLM-authored: quote the path segment so a key containing
+    # '/' or '?' cannot reroute the PUT to a different admin endpoint.
+    return await _put(f"/v1/admin/flags/{quote(key, safe='')}", payload, params={"project_id": project_id})
 
 
 async def evaluate_gate(

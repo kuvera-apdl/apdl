@@ -107,7 +107,8 @@ def test_register_requires_name():
         (2, True, "low", GateDecision.approve),  # L2 routes to approval
         (3, True, "low", GateDecision.deploy),   # L3 auto-deploys low risk
         (3, True, "high", GateDecision.approve), # L3 still approves risky
-        (4, True, "high", GateDecision.approve),
+        (4, True, "high", GateDecision.deploy),  # L4 full autonomy deploys risky
+        (4, False, "low", GateDecision.halt),    # ...but never a failed safety check
     ],
 )
 def test_gate_action(autonomy, passed, risk, expected):

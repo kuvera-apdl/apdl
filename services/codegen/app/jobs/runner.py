@@ -152,6 +152,19 @@ async def _execute_changeset_job(
             )
         )
 
+        # Persist the prompt transcript regardless of outcome — a failed run is
+        # exactly when an operator wants to see what the model was told.
+        # Best-effort: a transcript write must never sink an otherwise good run.
+        if result.prompts:
+            try:
+                await store.set_prompts(pool, changeset_id, result.prompts)
+            except Exception:
+                logger.warning(
+                    "Could not persist the prompt transcript for changeset %s",
+                    changeset_id,
+                    exc_info=True,
+                )
+
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.testing)
         if not result.success:
             await store.transition_changeset(

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 from app.memory.pgvector_store import PgVectorStore
@@ -121,6 +122,29 @@ async def lifespan(application: FastAPI):
         """)
         await conn.execute(FEATURE_PROPOSALS_DDL)
 
+    # Crash/restart reconciliation. Supervisor runs live only as in-process
+    # background tasks, so at startup every run still marked in-flight is
+    # definitionally dead (a deploy/OOM killed it mid-run) — without this it
+    # would sit at 'started'/'running'/'resuming' forever, and the proposals
+    # it claimed would stay 'implementing', permanently excluded from claims.
+    async with pool.acquire() as conn:
+        orphaned_runs = await conn.execute(
+            """
+            UPDATE agent_runs
+            SET status = 'failed', phase = 'orphaned', updated_at = now()
+            WHERE status IN ('started', 'running')
+               OR (phase = 'resuming' AND status IN ('approved', 'rejected'))
+            """
+        )
+        reclaimed = await conn.execute(
+            "UPDATE feature_proposals SET status = 'approved', updated_at = now() "
+            "WHERE status = 'implementing'"
+        )
+    if not orphaned_runs.endswith(" 0"):
+        logger.warning("Startup reconciliation: %s orphaned run(s) marked failed", orphaned_runs)
+    if not reclaimed.endswith(" 0"):
+        logger.warning("Startup reconciliation: %s stale proposal claim(s) re-approved", reclaimed)
+
     vector_store = PgVectorStore(pool)
     application.state.vector_store = vector_store
 
@@ -137,10 +161,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# No cookie/session auth is used, so credentialed CORS is never needed — and
+# combining allow_credentials with a wildcard origin makes Starlette echo any
+# Origin back, letting arbitrary websites make credentialed requests.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -166,5 +193,7 @@ async def readiness_check():
             await conn.fetchval("SELECT 1")
         return {"status": "ready"}
     except Exception as exc:
+        # 503 so LB/K8s probes (which key on the status code) stop routing
+        # here; the raw exception stays in the logs — it can carry DSN details.
         logger.error("Readiness check failed: %s", exc)
-        return {"status": "not_ready", "error": str(exc)}
+        return JSONResponse(status_code=503, content={"status": "not_ready"})

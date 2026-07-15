@@ -148,6 +148,11 @@ class Changeset(BaseModel):
     #: Merge commit SHA recorded at merge time; the deterministic revert target.
     merge_sha: str | None = None
     diff_stat: dict[str, Any] = Field(default_factory=dict)
+    #: Ordered transcript of the LLM prompts the run sent (brief compilation,
+    #: each edit instruction, each diff review) — see
+    #: :class:`app.editor.base.EditResult`. Empty for runs that predate prompt
+    #: recording or that never reached the editing stage.
+    prompts: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     created_at: datetime
     updated_at: datetime

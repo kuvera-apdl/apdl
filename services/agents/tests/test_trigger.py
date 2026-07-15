@@ -19,6 +19,10 @@ class _FakeConn:
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
 
+    async def fetchval(self, query: str, *args: Any):
+        # No active run exists — the concurrency guard passes.
+        return None
+
 
 class _Acquire:
     def __init__(self, conn: _FakeConn) -> None:

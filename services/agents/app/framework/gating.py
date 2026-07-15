@@ -54,6 +54,12 @@ def gate_action(
     if always_require_approval:
         return GateDecision.approve
 
+    # L4 is full autonomy (the documented contract): any action that passed
+    # safety deploys. Without this branch L4 behaved identically to L2/L3,
+    # routing everything non-low-risk to approval.
+    if autonomy_level >= 4:
+        return GateDecision.deploy
+
     risk = safety_result.get("risk_level", "high")
     if autonomy_level >= 3 and risk == "low":
         return GateDecision.deploy

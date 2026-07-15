@@ -96,10 +96,10 @@ Consider:
 
 Return a JSON object:
 ```json
-{
+{{
   "approved": true|false,
   "concerns": ["..."],
   "risk_level": "low|medium|high",
   "recommendations": ["..."]
-}
+}}
 ```"""

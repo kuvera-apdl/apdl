@@ -18,7 +18,17 @@ const sample = {
   pr_number: 1,
   pr_node_id: 'PR_1',
   ci_status: 'passed',
+  merge_sha: null,
   diff_stat: { files: 2, additions: 30 },
+  prompts: [
+    {
+      stage: 'edit',
+      label: 'Edit instruction (attempt 1)',
+      system: null,
+      user: 'Implement a toggle.',
+      notes: "The system prompt for this step is Aider's built-in editing prompt (not authored by APDL).",
+    },
+  ],
   error: null,
   created_at: '2026-06-17T12:00:00Z',
   updated_at: '2026-06-17T12:05:00Z',
@@ -35,6 +45,18 @@ describe('codegen schemas', () => {
 
   it('rejects unknown fields (strict)', () => {
     expect(changesetSchema.safeParse({ ...sample, extra: true }).success).toBe(false)
+  })
+
+  it('parses the prompt transcript', () => {
+    const parsed = changesetSchema.parse(sample)
+    expect(parsed.prompts).toHaveLength(1)
+    expect(parsed.prompts[0].stage).toBe('edit')
+    expect(parsed.prompts[0].system).toBeNull()
+  })
+
+  it('rejects unknown prompt fields (strict)', () => {
+    const bad = { ...sample, prompts: [{ ...sample.prompts[0], extra: true }] }
+    expect(changesetSchema.safeParse(bad).success).toBe(false)
   })
 
   it('validates the merge method', () => {

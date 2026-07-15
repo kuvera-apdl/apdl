@@ -88,11 +88,17 @@ class BehaviorAnalysisAgent(BaseAgent):
         )
 
     def parse(self, response: str) -> Any:
-        insights = parse_llm_json(
-            response,
-            [{"title": "Raw analysis", "description": response, "confidence": "low"}],
-        )
-        return insights if isinstance(insights, list) else [insights]
+        # Unparseable synthesis means no insights — not a fabricated "Raw
+        # analysis" pseudo-insight, which would satisfy downstream
+        # requires=("insights",), get stored to vector memory, and could seed
+        # an experiment design off unparsed prose.
+        insights = parse_llm_json(response, None)
+        if insights is None:
+            logger.warning("Synthesis output was unparseable; producing no insights")
+            return []
+        if not isinstance(insights, list):
+            insights = [insights]
+        return [i for i in insights if isinstance(i, dict)]
 
     def memory_entries(
         self,
@@ -154,9 +160,21 @@ class BehaviorAnalysisAgent(BaseAgent):
             logger.warning("event discovery failed: %s", exc)
             return []
 
+    #: The LLM controls plan size — cap it, and bound concurrency so a large
+    #: plan doesn't fire dozens of simultaneous requests at the query service.
+    max_planned_queries = 12
+    query_concurrency = 5
+
     async def _run_queries(
         self, ctx: AgentContext, queries: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        if len(queries) > self.max_planned_queries:
+            logger.warning(
+                "Analysis plan had %d queries; running only the first %d",
+                len(queries), self.max_planned_queries,
+            )
+            queries = queries[: self.max_planned_queries]
+        semaphore = asyncio.Semaphore(self.query_concurrency)
         end = date.today()
         start = end - timedelta(days=ctx.time_range_days)
         start_str, end_str = start.isoformat(), end.isoformat()
@@ -169,6 +187,10 @@ class BehaviorAnalysisAgent(BaseAgent):
             return value
 
         async def _run_one(q: dict) -> dict[str, Any]:
+            async with semaphore:
+                return await _run_one_inner(q)
+
+        async def _run_one_inner(q: dict) -> dict[str, Any]:
             query_type = q.get("type")
             try:
                 if query_type is None:

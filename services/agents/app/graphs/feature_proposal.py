@@ -196,19 +196,8 @@ class FeatureProposalAgent(BaseAgent):
         output: Any,
         action: dict[str, Any],
     ) -> list[MemoryEntry]:
-        # Proposals are persisted only once a human approves them (set by the
-        # approvals endpoint, which re-runs storage with state["approved"]).
-        if not state.get("approved"):
-            return []
-        return [
-            MemoryEntry(
-                content=json.dumps(proposal, default=str),
-                metadata={
-                    "type": "feature_proposal",
-                    "proposal_id": proposal.get("proposal_id", ""),
-                    "priority": proposal.get("priority", "P2"),
-                    "status": "approved",
-                },
-            )
-            for proposal in output
-        ]
+        # Un-reviewed proposals are never persisted: the approvals endpoint
+        # stores each proposal to vector memory at the moment a human approves
+        # it (see routers/approvals.py), so memory only carries proposals that
+        # cleared the gate.
+        return []

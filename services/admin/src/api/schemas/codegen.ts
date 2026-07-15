@@ -2,6 +2,19 @@
 // changeset status is a plain string on the wire; the UI maps known values.
 import { z } from 'zod'
 
+// One LLM prompt the run actually sent (brief compilation, an edit instruction
+// handed to the coding agent, or a pre-push diff review). `system` is null for
+// the edit stage: Aider supplies its own built-in system prompt there.
+export const changesetPromptSchema = z
+  .object({
+    stage: z.string(),
+    label: z.string(),
+    system: z.string().nullable(),
+    user: z.string(),
+    notes: z.string().nullable(),
+  })
+  .strict()
+
 export const taskSpecSchema = z
   .object({
     title: z.string(),
@@ -48,7 +61,9 @@ export const changesetSchema = z
     pr_number: z.number().int().nullable(),
     pr_node_id: z.string().nullable(),
     ci_status: z.string().nullable(),
+    merge_sha: z.string().nullable(),
     diff_stat: z.record(z.unknown()),
+    prompts: z.array(changesetPromptSchema),
     error: z.string().nullable(),
     created_at: z.string(),
     updated_at: z.string(),

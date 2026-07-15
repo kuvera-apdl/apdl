@@ -44,14 +44,18 @@ class PersonalizationAgent(BaseAgent):
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> dict[str, Any]:
         end = date.today()
-        start = end - timedelta(days=7)
+        start = end - timedelta(days=ctx.time_range_days)
         start_str, end_str = start.isoformat(), end.isoformat()
 
         async def _fetch_breakdown(prop: str) -> dict | None:
             try:
                 result = await query_breakdown(
                     project_id=ctx.project_id,
-                    selector={"event_name": "page_view", "filters": []},
+                    # Real ingested data names pageviews "page" (the JS SDK's
+                    # name, standardized project-wide) — "page_view" matched
+                    # nothing, so every breakdown came back empty and the
+                    # personalization prompt ran blind.
+                    selector={"event_name": "page", "filters": []},
                     property_name=prop,
                     start_date=start_str,
                     end_date=end_str,

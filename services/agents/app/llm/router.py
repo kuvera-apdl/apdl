@@ -20,6 +20,10 @@ from google.genai import types as genai_types
 
 logger = logging.getLogger(__name__)
 
+#: Per-request timeout. Without one, SDK defaults (~10 min) mean a hung
+#: provider stalls an agent run for up to 10 minutes per fallback rung.
+_REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
+
 # ---------------------------------------------------------------------------
 # Lazy-initialised clients
 # ---------------------------------------------------------------------------
@@ -33,21 +37,28 @@ _local_client: openai.AsyncOpenAI | None = None
 def _get_openai() -> openai.AsyncOpenAI:
     global _openai_client
     if _openai_client is None:
-        _openai_client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        _openai_client = openai.AsyncOpenAI(
+            api_key=os.getenv("OPENAI_API_KEY", ""), timeout=_REQUEST_TIMEOUT
+        )
     return _openai_client
 
 
 def _get_anthropic() -> anthropic.AsyncAnthropic:
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+        _anthropic_client = anthropic.AsyncAnthropic(
+            api_key=os.getenv("ANTHROPIC_API_KEY", ""), timeout=_REQUEST_TIMEOUT
+        )
     return _anthropic_client
 
 
 def _get_google() -> genai.Client:
     global _google_client
     if _google_client is None:
-        _google_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
+        _google_client = genai.Client(
+            api_key=os.getenv("GOOGLE_API_KEY", ""),
+            http_options=genai_types.HttpOptions(timeout=int(_REQUEST_TIMEOUT * 1000)),
+        )
     return _google_client
 
 
@@ -57,6 +68,7 @@ def _get_local() -> openai.AsyncOpenAI:
         _local_client = openai.AsyncOpenAI(
             base_url=os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1"),
             api_key="local",  # local servers don't require a real key
+            timeout=_REQUEST_TIMEOUT,
         )
     return _local_client
 
@@ -116,10 +128,21 @@ def _provider_available(provider: str) -> bool:
 # Provider-specific completion functions
 # ---------------------------------------------------------------------------
 
+def _is_openai_reasoning_model(model: str) -> bool:
+    return model.startswith(("gpt-5", "o1", "o3", "o4"))
+
+
 async def _openai_completion(
     model: str, messages: list[dict[str, str]], **kwargs: Any,
 ) -> str:
     client = _get_openai()
+    if _is_openai_reasoning_model(model):
+        # Reasoning-family models 400 on `max_tokens` (they take
+        # `max_completion_tokens`) and on any non-default temperature — the
+        # tier defaults would otherwise make this rung fail on every call.
+        if "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        kwargs.pop("temperature", None)
     resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
     return resp.choices[0].message.content or ""
 
@@ -144,7 +167,10 @@ async def _anthropic_completion(
         max_tokens=max_tokens,
         **kwargs,
     )
-    return resp.content[0].text
+    # content can be empty (e.g. refusal) or lead with a non-text block —
+    # indexing [0].text would raise and misreport it as a provider failure.
+    parts = [block.text for block in resp.content if getattr(block, "text", None)]
+    return "\n".join(parts)
 
 
 async def _google_completion(
@@ -214,6 +240,11 @@ async def chat_completion(
     Raises:
         RuntimeError: If all providers fail.
     """
+    if model_tier not in _TIER_DEFAULTS:
+        raise ValueError(
+            f"Unknown model_tier {model_tier!r} — expected one of {sorted(_TIER_DEFAULTS)}"
+        )
+
     models = _tier_models(model_tier)
     if not models:
         raise RuntimeError(
@@ -230,7 +261,11 @@ async def chat_completion(
         model = entry["model"]
         fn = _PROVIDER_FN[provider]
         try:
-            return await fn(model, messages, **merged)
+            result = await fn(model, messages, **merged)
+            # Visible at info level so a permanently-failing primary (every
+            # call silently landing on a fallback rung) is observable.
+            logger.info("LLM call ok (provider=%s, model=%s)", provider, model)
+            return result
         except Exception as exc:
             logger.warning("LLM call failed (provider=%s, model=%s): %s", provider, model, exc)
             last_exc = exc

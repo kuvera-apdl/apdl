@@ -26,7 +26,12 @@ from app.llm.prompts.experiment import (
 )
 from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
-from app.safety.validator import ActionType, AgentAction, SafetyValidator
+from app.safety.validator import (
+    ActionType,
+    AgentAction,
+    SafetyValidator,
+    _max_rollout_percentage,
+)
 from app.tools.experiments import create_experiment_config, get_active_experiments
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,21 @@ def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
         flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
 
 
+def _designed_traffic_percentage(flag_config: dict[str, Any]) -> float:
+    """The traffic share the safety validator judged for this design.
+
+    Uses the validator's own helper (max over fallthrough AND rule rollouts) so
+    deploy and blast-radius check read the identical number — reading only the
+    fallthrough here left a bypass where a rules-only rollout passed the check
+    at 10% and deployed at 100%. A design with no rollout anywhere cannot have
+    passed the blast-radius gate; 100% is only a fallback for ungated callers.
+    """
+    percentage = _max_rollout_percentage(flag_config)
+    if percentage is None:
+        return 100.0
+    return float(min(max(percentage, 0.0), 100.0))
+
+
 async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
     """Create a running experiment (and its canonical backing flag) from a design.
 
@@ -92,6 +112,8 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
     """
     try:
         flag_config = experiment.get("flag_config", {})
+        if not isinstance(flag_config, dict):
+            flag_config = {}
         experiment_id = experiment.get("experiment_id", "")
         flag_key = flag_config.get("key") or experiment_id
         variants = experiment.get("variants") or flag_config.get("variants", [])
@@ -108,6 +130,7 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
             targeting=experiment.get("targeting"),
             estimated_duration_days=experiment.get("estimated_duration_days", 14),
             flag_key=flag_key,
+            traffic_percentage=_designed_traffic_percentage(flag_config),
         )
         logger.info("Experiment %s deployed successfully", experiment_id)
         return True
@@ -181,7 +204,19 @@ class ExperimentDesignAgent(BaseAgent):
         }
 
         if decision is GateDecision.deploy:
-            meta["deployed"] = await self._deploy(ctx, output)
+            deployed = await self._deploy(ctx, output)
+            meta["deployed"] = deployed
+            if not deployed:
+                # deploy_experiment swallows HTTP failures into False; without
+                # this the run would end "completed" while the auto-approved
+                # experiment silently doesn't exist.
+                message = f"experiment deploy failed: {meta['experiment_id'] or '(no id)'}"
+                state.setdefault("errors", []).append(message)
+                await ctx.audit.log(
+                    ctx.run_id,
+                    "deploy_failed",
+                    {"experiment_id": meta["experiment_id"], "agent": self.name},
+                )
         return meta
 
     def finalize(self, output: Any, action: dict[str, Any]) -> Any:
@@ -194,13 +229,16 @@ class ExperimentDesignAgent(BaseAgent):
 
     @staticmethod
     def _pick_insight(insights: list[dict]) -> dict | None:
+        insights = [i for i in insights if isinstance(i, dict)]
         if not insights:
             return None
         experiment_insights = [
             i
             for i in insights
             if i.get("action_type") == "experiment"
-            or i.get("recommended_action", "").lower().startswith("experiment")
+            # str() guards a present-but-null recommended_action, which would
+            # crash build_prompt and fail the whole agent.
+            or str(i.get("recommended_action") or "").lower().startswith("experiment")
         ]
         return (experiment_insights or insights)[0]
 
@@ -228,6 +266,11 @@ class ExperimentDesignAgent(BaseAgent):
                 ],
             )
             parsed = parse_llm_json(review)
+            if not isinstance(parsed, dict):
+                # Fail-open by design (a flaky fast-tier provider must not
+                # block every experiment), but observably so.
+                logger.warning("LLM safety review output was unparseable — review skipped")
+                parsed = None
             if parsed and not parsed.get("approved", True):
                 result["checks"].append({
                     "name": "llm_safety_review",

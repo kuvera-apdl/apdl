@@ -36,13 +36,24 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from app import config
 from app.editor.base import EditRequest, EditResult
-from app.editor.brief import build_repo_digest, compile_brief
+from app.editor.brief import (
+    BRIEF_SYSTEM,
+    build_brief_user,
+    build_repo_digest,
+    compile_brief,
+)
 from app.editor.conventions import CONVENTIONS_MD
 from app.editor.llm import CompleteFn, resolve_completer
-from app.editor.review import ReviewVerdict, review_change
+from app.editor.review import (
+    REVIEW_SYSTEM,
+    ReviewVerdict,
+    build_review_user,
+    review_change,
+)
 from app.editor.sdk_reference import detect_sdk_references
 from app.safety.gates import evaluate_pre_push
 
@@ -448,9 +459,14 @@ class AiderEditor:
         repo_dir = work / "repo"
         header = _basic_auth_header(request.token)
         clone_url = f"https://github.com/{request.repo}.git"
+        # Prompt transcript for the operator UI (see EditResult.prompts). Every
+        # exit path — fail() or success — carries whatever was recorded so far.
+        prompts: list[dict[str, Any]] = []
 
         def fail(error: str) -> EditResult:
-            return EditResult(success=False, branch=request.branch, error=error)
+            return EditResult(
+                success=False, branch=request.branch, error=error, prompts=prompts
+            )
 
         try:
             # 1. Clone the base branch with a one-shot auth header (the token is
@@ -489,16 +505,35 @@ class AiderEditor:
             task_text = request.spec
             brief_used = False
             if need_brief and complete is not None:
+                repo_digest = build_repo_digest(repo_dir)
+                brief_prompt = {
+                    "stage": "brief",
+                    "label": "Brief compilation (spec → engineering brief)",
+                    "system": BRIEF_SYSTEM,
+                    "user": build_brief_user(
+                        title=request.title,
+                        spec=request.spec,
+                        repo_digest=repo_digest,
+                        verification_context=probe.preamble,
+                    ),
+                    "notes": None,
+                }
+                prompts.append(brief_prompt)
                 brief = await compile_brief(
                     title=request.title,
                     spec=request.spec,
-                    repo_digest=build_repo_digest(repo_dir),
+                    repo_digest=repo_digest,
                     verification_context=probe.preamble,
                     complete=complete,
                 )
                 if brief:
                     task_text = brief
                     brief_used = True
+                else:
+                    brief_prompt["notes"] = (
+                        "Compilation produced no usable brief; the raw spec was "
+                        "handed to the editing agent instead."
+                    )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
@@ -556,12 +591,35 @@ class AiderEditor:
             initial_message = _build_message(
                 task_text, request.constraints, "" if brief_used else probe.preamble
             )
+            # What the agent reads besides the message, for the transcript: its
+            # own built-in system prompt plus any --read context files above.
+            context_files = [Path(argv[i + 1]).name
+                             for i, a in enumerate(argv) if a == "--read"]
+            edit_notes = (
+                "The system prompt for this step is Aider's built-in editing "
+                "prompt (not authored by APDL)."
+            )
+            if context_files:
+                edit_notes += (
+                    " Read-only context files attached: "
+                    + ", ".join(context_files) + "."
+                )
             message = initial_message
             retries_left = self._edit_retries
             base = request.base_branch
             out = ""
+            edit_attempt = 0
+            review_round = 0
             while True:
                 if agent_pending:
+                    edit_attempt += 1
+                    prompts.append({
+                        "stage": "edit",
+                        "label": f"Edit instruction (attempt {edit_attempt})",
+                        "system": None,
+                        "user": message,
+                        "notes": edit_notes,
+                    })
                     rc, out = await self._exec(
                         [*argv, "--message", message],
                         cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout,
@@ -624,6 +682,18 @@ class AiderEditor:
                 # (see app.editor.review). A deterministic revert's diff is
                 # mechanically derived, so it is not judged.
                 if need_review and complete is not None:
+                    review_round += 1
+                    prompts.append({
+                        "stage": "review",
+                        "label": f"Diff review (round {review_round})",
+                        "system": REVIEW_SYSTEM,
+                        "user": build_review_user(
+                            spec=request.spec,
+                            diff_text=diff_text,
+                            changed_paths=changed_paths,
+                        ),
+                        "notes": None,
+                    })
                     verdict = await review_change(
                         spec=request.spec,
                         diff_text=diff_text,
@@ -680,6 +750,7 @@ class AiderEditor:
                 diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
+                prompts=prompts,
             )
         finally:
             if not keep:

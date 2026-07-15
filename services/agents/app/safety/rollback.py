@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from urllib.parse import quote
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,7 @@ class ExperimentRollbackMonitor:
         flag_key: str,
         baseline: MetricSnapshot,
         primary_metric_event: str = "purchase",
+        default_variant: str = "control",
     ) -> RollbackDecision:
         """Evaluate whether an experiment should be rolled back.
 
@@ -87,16 +90,33 @@ class ExperimentRollbackMonitor:
             flag_key: The feature flag controlling the experiment.
             baseline: Pre-experiment metric snapshot.
             primary_metric_event: Event name for the primary metric.
+            default_variant: The control/baseline variant key — treatment
+                metrics are read from the other variants.
 
         Returns:
             A RollbackDecision indicating whether rollback is needed.
         """
         reasons: list[str] = []
 
-        # Fetch current experiment results
+        # Fetch current experiment results. A fetch failure returns None and
+        # must NOT trigger rollback: fabricated zero metrics would make any
+        # positive baseline look like total degradation, disabling a healthy
+        # experiment because the query service blipped.
         current = await self._fetch_current_metrics(
-            project_id, experiment_id, flag_key, primary_metric_event
+            project_id, experiment_id, flag_key, primary_metric_event, default_variant
         )
+        if current is None:
+            logger.warning(
+                "Cannot evaluate rollback for experiment %s — current metrics "
+                "unavailable; skipping this evaluation.",
+                experiment_id,
+            )
+            return RollbackDecision(
+                should_rollback=False,
+                reasons=["Current metrics unavailable — evaluation skipped."],
+                baseline=baseline,
+                current=None,
+            )
 
         # Check error rate
         error_delta = current.error_rate - baseline.error_rate
@@ -159,7 +179,7 @@ class ExperimentRollbackMonitor:
                 base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
             ) as client:
                 resp = await client.post(
-                    f"/v1/admin/flags/{flag_key}/disable",
+                    f"/v1/admin/flags/{quote(flag_key, safe='')}/disable",
                     params={"project_id": project_id},
                     json={
                         "reason": "experiment_rollback",
@@ -183,8 +203,13 @@ class ExperimentRollbackMonitor:
         experiment_id: str,
         flag_key: str,
         primary_metric_event: str,
-    ) -> MetricSnapshot:
+        default_variant: str = "control",
+    ) -> MetricSnapshot | None:
         """Fetch current metric values from the query service.
+
+        Returns None when metrics are unavailable (fetch failed, or no
+        treatment variant data yet) — the caller must treat that as
+        "cannot evaluate", never as zeros.
 
         In a production system, error_rate and p95_latency would come from
         a monitoring system (e.g., Prometheus). Here we approximate using
@@ -195,7 +220,7 @@ class ExperimentRollbackMonitor:
                 base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT
             ) as client:
                 resp = await client.get(
-                    f"/v1/query/experiment/{experiment_id}",
+                    f"/v1/query/experiment/{quote(experiment_id, safe='')}",
                     params={
                         "metric": primary_metric_event,
                         "project_id": project_id,
@@ -205,15 +230,16 @@ class ExperimentRollbackMonitor:
                 resp.raise_for_status()
                 data = resp.json()
 
-            # Extract treatment variant metrics
+            # Extract treatment variant metrics — "treatment" is any variant
+            # other than the experiment's declared control.
             variants = data.get("variants", [])
-            treatment_variants = [v for v in variants if v.get("variant") != "control"]
+            treatment_variants = [v for v in variants if v.get("variant") != default_variant]
 
-            if treatment_variants:
-                treatment = treatment_variants[0]
-                primary_value = treatment.get("mean", 0.0)
-            else:
-                primary_value = 0.0
+            if not treatment_variants:
+                # No exposure data yet — indistinguishable from a broken
+                # experiment only by fabricating numbers, so don't.
+                return None
+            primary_value = treatment_variants[0].get("mean", 0.0)
 
             # Error rate and latency would come from a monitoring stack.
             # For this implementation, we return placeholder values that
@@ -226,4 +252,4 @@ class ExperimentRollbackMonitor:
 
         except Exception as exc:
             logger.error("Failed to fetch current metrics: %s", exc)
-            return MetricSnapshot()
+            return None
