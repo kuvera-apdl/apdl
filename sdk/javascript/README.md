@@ -157,12 +157,15 @@ out-of-range values, and unsupported enum members fail during initialization.
 The former `persistence: 'cookie'` and `privacyMode: 'strict'` values are not
 implemented and are rejected instead of being mapped to different behavior.
 
-Automatic click and rage-click events contain structural element metadata only.
-They never include DOM text, form-control values, URLs, IDs, or CSS classes.
-Known credential, one-time-code, file, and payment controls identified from
-native types and semantic hints are excluded entirely. Page and referrer context
-is also omitted from these events so URL parameters, fragments, paths, and page
-titles cannot disclose secrets. Use manual events when an application needs an
+Automatic events use fixed property allowlists enforced before and after custom
+scrubbers. Clicks contain only bounded tag and coordinate metadata; form submits
+contain only the HTTP method; input changes contain only tag, type, and a value
+presence boolean. DOM text, form values/actions/names/IDs, CSS metadata, page
+titles, query strings, fragments, and full referrers are not collected. Browser
+context contains a query-free HTTP(S) URL and path, while click and rage-click
+context omits page location entirely. Known credential, one-time-code, file,
+and payment controls identified from native types and semantic hints are
+excluded from click capture. Use manual events when an application needs an
 explicitly chosen semantic label.
 
 ## Local Development Endpoints

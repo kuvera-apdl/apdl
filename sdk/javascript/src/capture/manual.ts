@@ -75,19 +75,14 @@ export class ManualCapture {
     this.queue.enqueue(event);
   }
 
-  /**
-   * Tracks a page view with URL, title, and referrer.
-   */
+  /** Tracks a page view with a query-free URL and path. */
   pageView(name?: string, properties?: Record<string, unknown>): void {
     const context = this.contextCollector.collect();
 
     const pageProps: Record<string, unknown> = {
       ...(properties ?? {}),
       url: context.page?.url ?? '',
-      title: context.page?.title ?? '',
       path: context.page?.path ?? '',
-      search: context.page?.search ?? '',
-      referrer: context.referrer ?? '',
     };
 
     if (name) {

@@ -389,14 +389,29 @@ describe('APDLClient', () => {
       });
     });
 
-    it('should include page URL context', () => {
+    it('should include only query-free allowlisted page metadata', () => {
+      window.history.pushState({}, '', '/account/reset?token=query-secret#fragment-secret');
+      document.title = 'Password reset for Alice';
       client.page();
 
       const queue = client.debug.getQueue();
-      const event = queue[0] as Record<string, unknown>;
-      const props = event.properties as Record<string, unknown>;
-      expect(props).toHaveProperty('url');
-      expect(props).toHaveProperty('title');
+      const event = queue[0] as TrackEvent;
+      expect(event.properties).toEqual({
+        url: `${window.location.origin}/account/reset`,
+        path: '/account/reset',
+      });
+      expect(event.context).toMatchObject({
+        page: {
+          url: `${window.location.origin}/account/reset`,
+          title: '',
+          path: '/account/reset',
+          search: '',
+        },
+      });
+      expect(event.context).not.toHaveProperty('referrer');
+      expect(JSON.stringify(event)).not.toContain('query-secret');
+      expect(JSON.stringify(event)).not.toContain('fragment-secret');
+      expect(JSON.stringify(event)).not.toContain('Password reset for Alice');
     });
   });
 

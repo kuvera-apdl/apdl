@@ -45,12 +45,6 @@ export class ContextCollector {
       };
     }
 
-    if (typeof document !== 'undefined') {
-      if (document.referrer) {
-        context.referrer = document.referrer;
-      }
-    }
-
     try {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (timezone) {
@@ -62,10 +56,10 @@ export class ContextCollector {
 
     if (typeof window !== 'undefined' && typeof window.location !== 'undefined') {
       context.page = {
-        url: window.location.href,
-        title: typeof document !== 'undefined' ? document.title : '',
+        url: `${window.location.origin}${window.location.pathname}`,
+        title: '',
         path: window.location.pathname,
-        search: window.location.search,
+        search: '',
       };
     }
 

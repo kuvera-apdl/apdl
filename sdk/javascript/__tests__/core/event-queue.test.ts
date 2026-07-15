@@ -326,6 +326,102 @@ describe('EventQueue', () => {
       });
     });
 
+    it.each([
+      [
+        'page',
+        {
+          url: 'https://example.test/search?q=private#fragment',
+          title: 'Private search title',
+          path: '/search?q=private#fragment',
+          search: '?q=private',
+          referrer: 'https://referrer.test/private',
+          extra: 'private',
+        },
+        { url: 'https://example.test/search', path: '/search' },
+      ],
+      [
+        '$form_submit',
+        {
+          formId: 'private-id',
+          formName: 'private-name',
+          formAction: 'https://example.test/reset?token=private',
+          formMethod: 'POST',
+        },
+        { formMethod: 'post' },
+      ],
+      [
+        '$input_change',
+        {
+          tag: 'input',
+          inputType: 'email',
+          inputName: 'private-name',
+          inputId: 'private-id',
+          hasValue: true,
+        },
+        { tag: 'input', inputType: 'email', hasValue: true },
+      ],
+      [
+        '$scroll_depth',
+        { threshold: 50, percent: 67, url: 'https://example.test/?secret=1' },
+        { threshold: 50, percent: 67 },
+      ],
+    ])('should enforce the property allowlist for %s auto-capture', (
+      eventName,
+      properties,
+      expected
+    ) => {
+      queue.enqueue(createEvent({
+        event: eventName,
+        type: eventName === 'page' ? 'page' : 'track',
+        properties,
+      }));
+
+      expect(queue.getQueue()[0].properties).toEqual(expected);
+      expect(JSON.stringify(queue.getQueue()[0].properties)).not.toContain('private');
+      expect(JSON.stringify(queue.getQueue()[0].properties)).not.toContain('secret');
+    });
+
+    it('should strip sensitive context before and after custom scrubbers for every event', () => {
+      scrubber.addScrubber((event) => ({
+        ...event,
+        context: {
+          ...event.context,
+          referrer: 'https://referrer.test/reset?token=reintroduced',
+          page: {
+            url: 'https://example.test/account?token=reintroduced#fragment',
+            title: 'Reintroduced private title',
+            path: '/account?token=reintroduced#fragment',
+            search: '?token=reintroduced',
+          },
+        },
+      }));
+
+      queue.enqueue(createEvent({
+        event: 'custom_event',
+        context: {
+          referrer: 'https://referrer.test/?token=initial',
+          page: {
+            url: 'https://example.test/account?token=initial#fragment',
+            title: 'Initial private title',
+            path: '/account?token=initial#fragment',
+            search: '?token=initial',
+          },
+        },
+      }));
+
+      expect(queue.getQueue()[0].context).toEqual({
+        page: {
+          url: 'https://example.test/account',
+          title: '',
+          path: '/account',
+          search: '',
+        },
+      });
+      expect(JSON.stringify(queue.getQueue()[0].context)).not.toContain('token');
+      expect(JSON.stringify(queue.getQueue()[0].context)).not.toContain('private');
+      expect(queue.getQueue()[0].context).not.toHaveProperty('referrer');
+    });
+
     it('should keep only canonical structural properties on reserved events', () => {
       queue.enqueue(createEvent({
         event: '$click',
