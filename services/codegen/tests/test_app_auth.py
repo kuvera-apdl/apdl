@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.github.app_auth import (
+    CODEGEN_PR_WRITE_PERMISSIONS,
     CODEGEN_READ_PERMISSIONS,
     CODEGEN_WRITE_PERMISSIONS,
     AuthorizedRepositoryTarget,
@@ -91,8 +92,12 @@ def test_authorized_repository_target_requires_strict_positive_ids(
 
 @pytest.mark.parametrize(
     "permission_profile",
-    [CODEGEN_READ_PERMISSIONS, CODEGEN_WRITE_PERMISSIONS],
-    ids=["read", "write"],
+    [
+        CODEGEN_READ_PERMISSIONS,
+        CODEGEN_WRITE_PERMISSIONS,
+        CODEGEN_PR_WRITE_PERMISSIONS,
+    ],
+    ids=["read", "contents-write", "pr-write"],
 )
 @pytest.mark.asyncio
 async def test_mint_token_for_repository_requests_exact_numeric_scope(

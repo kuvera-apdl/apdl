@@ -167,6 +167,42 @@ async def test_repair_push_requires_the_exact_existing_remote_head(
 
 
 @pytest.mark.asyncio
+async def test_recovery_accepts_only_an_existing_branch_with_the_gated_tree(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate(tmp_path)
+    _git(
+        Path(candidate["source"]),
+        "push",
+        candidate["remote"],
+        f"{candidate['head_sha']}:refs/heads/apdl/change-cs_123",
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: candidate["remote"],
+    )
+
+    recovered = await GitBranchPublisher().recover_published(
+        repository="owner/repo",
+        branch="apdl/change-cs_123",
+        candidate_tree_sha=candidate["tree_sha"],
+        read_token="read-token",
+    )
+
+    assert recovered is not None
+    assert recovered.head_sha == candidate["head_sha"]
+
+    with pytest.raises(BranchPublicationError, match="differs"):
+        await GitBranchPublisher().recover_published(
+            repository="owner/repo",
+            branch="apdl/change-cs_123",
+            candidate_tree_sha="d" * 40,
+            read_token="read-token",
+        )
+
+
+@pytest.mark.asyncio
 async def test_prepare_rejects_a_stale_base_before_applying_the_patch(
     monkeypatch, tmp_path
 ):

@@ -38,6 +38,15 @@ class _Txn:
 class FakeConn:
     def __init__(self, store: dict[str, Any]) -> None:
         self.store = store
+        self._connection_id = object()
+        self.terminated = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+        locks = self.store.setdefault("advisory_locks", {})
+        for lock_key, owner in list(locks.items()):
+            if owner is self._connection_id:
+                del locks[lock_key]
 
     def transaction(self) -> _Txn:
         return _Txn()
@@ -75,6 +84,32 @@ class FakeConn:
             "payload": args[9],
         }
         return observation_id
+
+    def _insert_pr_publication_event(self, args: tuple[Any, ...]) -> str | None:
+        rows = self._rows("pull_request_publication_events")
+        event_id = args[0]
+        if event_id in rows:
+            return None
+        payload = _json(args[8])
+        if payload.get("event_type") == "intent_recorded" and any(
+            _json(row["payload"]).get("event_type") == "intent_recorded"
+            and row["changeset_id"] == args[1]
+            for row in rows.values()
+        ):
+            return None
+        rows[event_id] = {
+            "event_id": event_id,
+            "event_sequence": len(rows) + 1,
+            "changeset_id": args[1],
+            "event_type": args[2],
+            "intent_event_id": args[3],
+            "cleanup_request_event_id": args[4],
+            "pr_number": args[5],
+            "github_url": args[6],
+            "recorded_at": args[7],
+            "payload": args[8],
+        }
+        return event_id
 
     def _insert_ci_observation(self, args: tuple[Any, ...]) -> str | None:
         rows = self._rows("ci_verification_observations")
@@ -220,10 +255,48 @@ class FakeConn:
             row["runtime_acceptance_plan"] = args[1]
         elif "SET publication_authorization" in query:
             row["publication_authorization"] = args[1]
+        elif "SET branch = $2, head_sha = $3" in query:
+            if row["status"] == "pushing":
+                row["branch"] = args[1]
+                row["head_sha"] = args[2]
+        elif "SET branch = $2, updated_at" in query:
+            row["branch"] = args[1]
+        elif "SET pr_number = COALESCE" in query:
+            if row["status"] == "pushing":
+                row["pr_number"] = args[1] or row.get("pr_number")
+                row["pr_url"] = args[2] or row.get("pr_url")
+        elif "SET status = 'error', error = $2" in query:
+            row["status"] = "error"
+            row["error"] = args[1]
+        elif "SET status = 'error', error = COALESCE" in query:
+            if row["status"] == "pushing":
+                row["status"] = "error"
+                row["error"] = row.get("error") or args[1]
         row["updated_at"] = _T0
         return None
 
     async def fetchval(self, query: str, *args: Any) -> Any:
+        if "pg_try_advisory_lock" in query:
+            lock_key = args[0]
+            locks = self.store.setdefault("advisory_locks", {})
+            owner = locks.get(lock_key)
+            if owner is None:
+                locks[lock_key] = self._connection_id
+                return True
+            return owner is self._connection_id
+        if "pg_advisory_unlock(" in query:
+            started = self.store.get("advisory_unlock_started")
+            if started is not None:
+                started.set()
+            release = self.store.get("advisory_unlock_release")
+            if release is not None:
+                await release.wait()
+            lock_key = args[0]
+            locks = self.store.setdefault("advisory_locks", {})
+            if locks.get(lock_key) is not self._connection_id:
+                return False
+            del locks[lock_key]
+            return True
         if "SELECT 1" in query and "FROM" not in query:
             return 1
         if "SELECT status FROM codegen_changesets" in query:
@@ -251,6 +324,8 @@ class FakeConn:
             return datetime.now(timezone.utc) > observed_at + timedelta(seconds=seconds)
         if "INSERT INTO codegen_pull_request_observations" in query:
             return self._insert_pr_observation(args)
+        if "INSERT INTO codegen_pull_request_publication_events" in query:
+            return self._insert_pr_publication_event(args)
         if "SELECT observation_id FROM codegen_pull_request_observations" in query:
             values = [
                 row
@@ -609,6 +684,24 @@ class FakeConn:
         if "SELECT * FROM codegen_changesets" in query:
             return self._rows("changesets").get(args[0])
 
+        if "FROM codegen_pull_request_publication_events" in query:
+            rows = [
+                row
+                for row in self._rows("pull_request_publication_events").values()
+                if row["changeset_id"] == args[0]
+            ]
+            if "event_type = 'intent_recorded'" in query:
+                rows = [row for row in rows if row["event_type"] == "intent_recorded"]
+            elif "event_type = 'branch_published'" in query:
+                rows = [row for row in rows if row["event_type"] == "branch_published"]
+            if not rows:
+                return None
+            rows.sort(
+                key=lambda row: row["event_sequence"],
+                reverse=True,
+            )
+            return {"payload": rows[0]["payload"]}
+
         if "UPDATE codegen_changesets" in query:
             row = self._rows("changesets").get(args[0])
             if row is None:
@@ -727,6 +820,34 @@ class FakeConn:
                 reverse=True,
             )
             return [{"payload": row["payload"]} for row in rows[:limit]]
+        if (
+            "FROM codegen_pull_request_publication_events" in query
+            and "SELECT payload" in query
+        ):
+            rows = [
+                row
+                for row in self._rows("pull_request_publication_events").values()
+                if row["changeset_id"] == args[0]
+            ]
+            rows.sort(key=lambda row: row["event_sequence"])
+            return [{"payload": row["payload"]} for row in rows]
+        if (
+            "FROM codegen_changesets AS changeset" in query
+            and "event_type = 'intent_recorded'" in query
+        ):
+            intent_changesets = {
+                row["changeset_id"]
+                for row in self._rows("pull_request_publication_events").values()
+                if row["event_type"] == "intent_recorded"
+            }
+            rows = [
+                {"changeset_id": row["changeset_id"]}
+                for row in self._rows("changesets").values()
+                if row["status"] == "pushing"
+                and row["changeset_id"] in intent_changesets
+            ]
+            rows.sort(key=lambda row: row["changeset_id"])
+            return rows
         if "FROM codegen_ci_verification_observations" in query:
             changeset_id, head_sha, limit = args
             rows = [
@@ -777,9 +898,17 @@ class FakeConn:
             return [{"payload": row["payload"]} for row in rows[:limit]]
         if "UPDATE codegen_changesets" in query and "status = ANY" in query:
             transient = set(args[1])
+            intent_changesets = {
+                row["changeset_id"]
+                for row in self._rows("pull_request_publication_events").values()
+                if row["event_type"] == "intent_recorded"
+            }
             swept = []
             for row in self._rows("changesets").values():
-                if row["status"] in transient:
+                if row["status"] in transient and not (
+                    row["status"] == "pushing"
+                    and row["changeset_id"] in intent_changesets
+                ):
                     row["status"] = "error"
                     row["error"] = row.get("error") or args[0]
                     row["updated_at"] = _T0
@@ -831,6 +960,7 @@ class FakePool:
             "connections",
             "changesets",
             "pull_request_observations",
+            "pull_request_publication_events",
             "ci_verification_observations",
             "runtime_evidence_observations",
             "runtime_collection_claims",
@@ -839,9 +969,13 @@ class FakePool:
         ):
             self.store.setdefault(name, {})
         self.store.setdefault("grant_notifications", [])
+        self.store.setdefault("advisory_locks", {})
+        self.acquire_count = 0
         self.conn = FakeConn(self.store)
 
     def acquire(self) -> _Acquire:
+        self.acquire_count += 1
+        self.conn = FakeConn(self.store)
         return _Acquire(self.conn)
 
     def add_connection(

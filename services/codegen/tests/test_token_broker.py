@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.github.app_auth import (
+    CODEGEN_PR_WRITE_PERMISSIONS,
     CODEGEN_READ_PERMISSIONS,
     CODEGEN_WRITE_PERMISSIONS,
     AuthorizedRepositoryTarget,
@@ -30,6 +31,7 @@ def _issued_token(value: str = "ghs_scoped") -> InstallationToken:
     [
         ("read_changeset", CODEGEN_READ_PERMISSIONS),
         ("write_changeset", CODEGEN_WRITE_PERMISSIONS),
+        ("pr_write_changeset", CODEGEN_PR_WRITE_PERMISSIONS),
     ],
 )
 @pytest.mark.asyncio

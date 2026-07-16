@@ -52,9 +52,15 @@ from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
 from app.github.checks import get_ci_evidence
 from app.github.publisher import GitBranchPublisher
-from app.github.pulls import get_pull_request, open_pull_request
+from app.github.pulls import (
+    close_pull_request,
+    find_pull_request_by_branch,
+    get_pull_request,
+    open_pull_request,
+)
 from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
+from app.jobs.pr_publication import resume_pull_request_publication
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
@@ -63,6 +69,7 @@ from app.routers import changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
+from app.store import pr_publication as publication_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
 _ORPHAN_ERROR = (
@@ -222,7 +229,15 @@ async def lifespan(application: FastAPI):
     # Attest the exact evaluated worker/proxy topology before opening database
     # or GitHub-token lifecycle resources.
     editor = _make_editor(publication_gate.stage)
-    pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
+    # A recovering publication owns one session-level advisory lock connection.
+    # Keep independent capacity for token minting, the broker listener, and API
+    # traffic even when every configured worker is inside publication recovery.
+    pool_max_size = max(10, codegen_max_concurrent_jobs() + 4)
+    pool = await asyncpg.create_pool(
+        postgres_url(),
+        min_size=2,
+        max_size=pool_max_size,
+    )
     application.state.pg_pool = pool
     application.state.authenticator = PostgresAuthenticator(pool)
     token_broker = GitHubTokenBroker(pool)
@@ -232,6 +247,15 @@ async def lifespan(application: FastAPI):
         await assert_schema_ready(conn)
     await token_broker.start()
     branch_publisher = GitBranchPublisher()
+    publication_recovery_deps = {
+        "mint_read_token": token_broker.read_changeset,
+        "mint_write_token": token_broker.write_changeset,
+        "mint_pr_write_token": token_broker.pr_write_changeset,
+        "branch_publisher": branch_publisher,
+        "open_pr": open_pull_request,
+        "find_pr": find_pull_request_by_branch,
+        "close_pr": close_pull_request,
+    }
 
     # Recover orphans: in-process background jobs can't survive a restart, so any
     # changeset left in an active (post-claim, pre-PR) state from before this
@@ -239,9 +263,22 @@ async def lifespan(application: FastAPI):
     # status forever. The deadline (2× the full per-job pipeline budget) keeps a
     # concurrent replica's in-flight work safe on the shared database; rows
     # younger than that are caught by the periodic sweeper once they age out.
+    orphan_deadline = 2 * codegen_job_budget()
+    recoverable_publications = await publication_store.list_recoverable_ids(
+        pool,
+        # Every intent predates this fresh process. Recovery is idempotent and
+        # branch-scoped, so resume immediately instead of waiting a job budget.
+        older_than_seconds=0,
+    )
+    for changeset_id in recoverable_publications:
+        await resume_pull_request_publication(
+            pool,
+            changeset_id,
+            **publication_recovery_deps,
+        )
     swept = await changeset_store.fail_stale_changesets(
         pool,
-        older_than_seconds=2 * codegen_job_budget(),
+        older_than_seconds=orphan_deadline,
         error=_ORPHAN_ERROR,
     )
     if swept:
@@ -285,8 +322,11 @@ async def lifespan(application: FastAPI):
         "editor": editor,
         "mint_read_token": token_broker.read_changeset,
         "mint_write_token": token_broker.write_changeset,
+        "mint_pr_write_token": token_broker.pr_write_changeset,
         "branch_publisher": branch_publisher,
         "open_pr": open_pull_request,
+        "find_pr": find_pull_request_by_branch,
+        "close_pr": close_pull_request,
         "publication_gate": publication_gate,
         "platform_safety_policy": platform_safety_policy,
     }
@@ -344,8 +384,9 @@ async def lifespan(application: FastAPI):
             run_stale_sweeper(
                 pool,
                 interval_seconds=sweep_interval,
-                older_than_seconds=2 * codegen_job_budget(),
+                older_than_seconds=orphan_deadline,
                 error=_ORPHAN_ERROR,
+                **publication_recovery_deps,
             )
         )
     else:

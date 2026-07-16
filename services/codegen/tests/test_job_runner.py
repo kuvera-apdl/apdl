@@ -13,7 +13,7 @@ from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
 from app.evaluations.models import RiskLevel, RolloutStage
 from app.github.app_auth import AuthorizedRepositoryTarget, InstallationToken
-from app.github.pulls import PullRequest
+from app.github.pulls import PullRequest, PullRequestIdentityError
 from app.github.token_broker import GitHubTokenBroker
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.jobs.runner import run_changeset_job as _run_changeset_job
@@ -24,6 +24,11 @@ from app.models.changeset import (
 )
 from app.models.connection import RepositoryTarget
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
+from app.models.pr_publication import (
+    PublicationCleanupConfirmed,
+    PublicationCreateAccepted,
+    PullRequestAcceptedReceipt,
+)
 from app.publication import (
     DEVELOPMENT_CODEGEN_REVISION,
     ConfiguredPublicationGate,
@@ -56,6 +61,7 @@ from app.safety.policy import (
 )
 from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
+from app.store import pr_publication as publication_store
 from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
 from tests.publisher_fakes import FakeBranchPublisher
@@ -74,11 +80,78 @@ _TASK = {
 
 async def run_changeset_job(*args, publication_gate=None, **kwargs):
     """Exercise the production runner with an explicit trusted test gate."""
+    pool = args[0]
     legacy_minter = kwargs.pop("mint_token", None)
     if legacy_minter is not None:
         kwargs.setdefault("mint_read_token", legacy_minter)
         kwargs.setdefault("mint_write_token", legacy_minter)
+        kwargs.setdefault("mint_pr_write_token", legacy_minter)
+    else:
+        kwargs.setdefault("mint_pr_write_token", kwargs["mint_write_token"])
     kwargs.setdefault("branch_publisher", FakeBranchPublisher())
+    user_open_pr = kwargs["open_pr"]
+
+    async def open_pr_adapter(**call):
+        result = await user_open_pr(**call)
+        repository_id = next(
+            grant["repository_id"]
+            for grant in pool.store["repository_grants"].values()
+            if grant["repository_full_name"] == call["repo"]
+        )
+        normalized = PullRequest(
+            repository=call["repo"],
+            repository_id=repository_id,
+            url=result.url,
+            number=result.number,
+            head_ref=call["head"],
+            base_ref=call["base"],
+            head_sha=result.head_sha,
+            status=result.status,
+            github_updated_at=result.github_updated_at,
+        )
+        receipt = PullRequestAcceptedReceipt(
+            source="create",
+            repository=call["repo"],
+            requested_head=call["head"],
+            requested_base=call["base"],
+            accepted_at=result.github_updated_at,
+            status_code=201,
+            pr_number=result.number,
+            github_url=result.url,
+            raw_response={
+                "number": result.number,
+                "html_url": result.url,
+                "state": "open",
+                "draft": result.status is GitHubPRStatus.draft,
+                "head": {
+                    "ref": call["head"],
+                    "sha": result.head_sha,
+                    "repo": {"id": repository_id},
+                },
+                "base": {
+                    "ref": call["base"],
+                    "repo": {"id": repository_id},
+                },
+                "updated_at": result.github_updated_at.isoformat(),
+            },
+        )
+        await call["on_accepted"](receipt)
+        if result.head_sha != call["expected_head_sha"]:
+            raise PullRequestIdentityError(
+                "GitHub pull-request response has an exact-head mismatch",
+                receipt,
+            )
+        return normalized
+
+    async def find_pr(**_call):
+        return None
+
+    async def close_pr(**_call):
+        return None
+
+    kwargs["open_pr"] = open_pr_adapter
+    kwargs.setdefault("find_pr", find_pr)
+    kwargs.setdefault("close_pr", close_pr)
     return await _run_changeset_job(
         *args,
         publication_gate=publication_gate or allowing_publication_gate(),
@@ -137,12 +210,16 @@ async def _seed(
 def _pr(
     number: int,
     *,
-    head_sha: str = "fake-head-sha",
+    head_sha: str = "c" * 40,
     status: GitHubPRStatus = GitHubPRStatus.open,
 ) -> PullRequest:
     return PullRequest(
+        repository="acme/widgets",
+        repository_id=10,
         url=f"https://github.com/acme/widgets/pull/{number}",
         number=number,
+        head_ref="apdl/test",
+        base_ref="main",
         head_sha=head_sha,
         status=status,
         github_updated_at=datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
@@ -253,7 +330,7 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert final.status == ChangesetStatus.pr_open
     assert final.pr_url.endswith("/pull/9")
     assert final.pr_number == 9
-    assert final.head_sha == "fake-head-sha"
+    assert final.head_sha == "c" * 40
     assert final.github_pr_status is GitHubPRStatus.open
     assert final.external_ci_status is ExternalCIStatus.pending
     assert final.branch.startswith("apdl/add-dark-mode-")
@@ -543,7 +620,7 @@ async def test_token_cleanup_failure_does_not_orphan_an_opened_pr():
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_pr_token_cleanup_keeps_accepted_pr_projected():
+async def test_cancellation_during_pr_token_cleanup_keeps_identity_recoverable():
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_cancelpr")
@@ -600,9 +677,11 @@ async def test_cancellation_during_pr_token_cleanup_keeps_accepted_pr_projected(
         await job
 
     final = await store.get_changeset(pool, "cs_cancelpr")
-    assert final.status == ChangesetStatus.pr_open
+    assert final.status == ChangesetStatus.pushing
     assert final.pr_number == 44
     assert final.pr_url.endswith("/pull/44")
+    events = await publication_store.list_events(pool, "cs_cancelpr")
+    assert any(isinstance(event, PublicationCreateAccepted) for event in events)
 
 
 @pytest.mark.asyncio
@@ -1160,7 +1239,7 @@ class _BlockingEditor:
             success=True,
             branch=request.branch,
             diff_stat={"files": 1, "additions": 1, "deletions": 0},
-            head_sha="fake-head-sha",
+            head_sha="c" * 40,
             base_sha="a" * 40,
             candidate_tree_sha="b" * 40,
             patch_base64=base64.b64encode(b"candidate patch").decode("ascii"),
@@ -1451,7 +1530,7 @@ async def test_job_opens_draft_and_records_unverified_when_repo_has_no_ci():
 
 
 @pytest.mark.asyncio
-async def test_job_rejects_pr_whose_head_differs_from_pushed_branch():
+async def test_job_retains_and_closes_pr_whose_head_differs_from_pushed_branch():
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_head0001")
@@ -1469,5 +1548,72 @@ async def test_job_rejects_pr_whose_head_differs_from_pushed_branch():
 
     stored = await store.get_changeset(pool, "cs_head0001")
     assert stored.status is ChangesetStatus.error
-    assert "exact branch head" in (stored.error or "")
-    assert stored.pr_number is None
+    assert "was closed" in (stored.error or "")
+    assert stored.pr_number == 15
+    assert stored.pr_url.endswith("/pull/15")
+    events = await publication_store.list_events(pool, "cs_head0001")
+    assert any(isinstance(event, PublicationCleanupConfirmed) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_job_rejects_editor_selected_branch_identity():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_branch_identity")
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            branch="apdl/editor-selected",
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+        )
+    )
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("non-canonical branch must never be published")
+
+    await run_changeset_job(
+        pool,
+        "cs_branch_identity",
+        editor=editor,
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_branch_identity")
+    assert stored.status is ChangesetStatus.error
+    assert "controller-owned canonical branch" in (stored.error or "")
+    assert await publication_store.get_intent(pool, "cs_branch_identity") is None
+
+
+@pytest.mark.asyncio
+async def test_job_keeps_pushing_when_failure_escapes_after_intent(monkeypatch):
+    import app.jobs.runner as runner_module
+
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_post_intent_failure")
+
+    async def fail_recovery(*_args, **_kwargs):
+        raise RuntimeError("journal write unavailable after GitHub acceptance")
+
+    monkeypatch.setattr(
+        runner_module,
+        "resume_pull_request_publication",
+        fail_recovery,
+    )
+
+    async def open_pr(**_kwargs) -> PullRequest:
+        raise AssertionError("patched recovery owns the publication boundary")
+
+    await run_changeset_job(
+        pool,
+        "cs_post_intent_failure",
+        editor=FakeEditor(),
+        mint_token=_mint,
+        open_pr=open_pr,
+    )
+
+    stored = await store.get_changeset(pool, "cs_post_intent_failure")
+    intent = await publication_store.get_intent(pool, "cs_post_intent_failure")
+    assert stored.status is ChangesetStatus.pushing
+    assert intent is not None

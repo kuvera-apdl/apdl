@@ -19,6 +19,7 @@ from typing import Protocol
 import asyncpg
 
 from app.github.app_auth import (
+    CODEGEN_PR_WRITE_PERMISSIONS,
     CODEGEN_READ_PERMISSIONS,
     CODEGEN_WRITE_PERMISSIONS,
     AuthorizedRepositoryTarget,
@@ -275,11 +276,23 @@ class GitHubTokenBroker:
 
     @asynccontextmanager
     async def write_changeset(self, changeset_id: str) -> AsyncIterator[str]:
-        """Lease a write token for one changeset's immutable target."""
+        """Lease a contents-write token for one changeset's branch mutation."""
         connection = await self._changeset_connection(changeset_id)
         async with self._lease(
             connection,
             CODEGEN_WRITE_PERMISSIONS,
+            lambda: self._changeset_connection(changeset_id),
+            minimum_ttl=_WRITE_TOKEN_MINIMUM_TTL,
+        ) as token:
+            yield token
+
+    @asynccontextmanager
+    async def pr_write_changeset(self, changeset_id: str) -> AsyncIterator[str]:
+        """Lease PR-write authority without repository contents mutation."""
+        connection = await self._changeset_connection(changeset_id)
+        async with self._lease(
+            connection,
+            CODEGEN_PR_WRITE_PERMISSIONS,
             lambda: self._changeset_connection(changeset_id),
             minimum_ttl=_WRITE_TOKEN_MINIMUM_TTL,
         ) as token:

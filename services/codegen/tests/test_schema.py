@@ -46,10 +46,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_egress_publication_migration():
-    with pytest.raises(RuntimeError, match="026_codegen_egress_publication.sql"):
+async def test_rejects_database_without_pr_publication_recovery_migration():
+    with pytest.raises(RuntimeError, match="027_codegen_pr_publication_recovery.sql"):
         await assert_schema_ready(
-            FakeConn(migration_name="025_codegen_private_task_controls.sql")
+            FakeConn(migration_name="026_codegen_egress_publication.sql")
         )
 
 
@@ -131,6 +131,32 @@ def test_egress_publication_migration_retires_unattested_authority():
         in migration
     )
     assert "= 'development_publication_authorization@1'" in migration
+
+
+def test_pr_publication_recovery_migration_is_strict_and_append_only():
+    migration = (
+        Path(__file__).parents[3]
+        / "pipeline/postgres/migrations/027_codegen_pr_publication_recovery.sql"
+    ).read_text()
+
+    assert (
+        "CREATE TABLE IF NOT EXISTS codegen_pull_request_publication_events"
+        in migration
+    )
+    assert "pull_request_publication_intent@1" in migration
+    assert "pull_request_create_accepted@1" in migration
+    assert "pull_request_identity_validated@1" in migration
+    assert "event_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE" in migration
+    assert "cleanup_request_event_id TEXT" in migration
+    assert "uq_codegen_pr_publication_intent" in migration
+    assert "codegen_pr_publication_payload_identity_check" in migration
+    assert "IS NOT DISTINCT FROM event_id" in migration
+    assert "IS NOT DISTINCT FROM cleanup_request_event_id" in migration
+    assert "request.pr_number IS NOT DISTINCT FROM NEW.pr_number" in migration
+    assert "request.github_url IS NOT DISTINCT FROM NEW.github_url" in migration
+    assert "NEW.payload->>'next_action'" in migration
+    assert "codegen_pr_publication_events_require_intent" in migration
+    assert "BEFORE UPDATE OR DELETE" in migration
 
 
 def test_shutdown_awaits_requeued_jobs_before_closing_database():

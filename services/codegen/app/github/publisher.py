@@ -83,6 +83,15 @@ class BranchPublisher(Protocol):
         write_token: str,
     ) -> PublishedBranch: ...
 
+    async def recover_published(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        candidate_tree_sha: str,
+        read_token: str,
+    ) -> PublishedBranch | None: ...
+
 
 def _validate_repository(value: str) -> str:
     if not _REPOSITORY_RE.fullmatch(value):
@@ -394,3 +403,64 @@ class GitBranchPublisher:
                 "published branch SHA does not match the controller commit"
             )
         return PublishedBranch(branch=prepared.branch, head_sha=head_sha)
+
+    async def recover_published(
+        self,
+        *,
+        repository: str,
+        branch: str,
+        candidate_tree_sha: str,
+        read_token: str,
+    ) -> PublishedBranch | None:
+        """Observe an existing APDL branch only when its exact tree is gated."""
+        repository = _validate_repository(repository)
+        branch = _validate_branch(branch)
+        candidate_tree_sha = _validate_sha(candidate_tree_sha, "candidate tree SHA")
+        ref = f"refs/heads/{branch}"
+        remote = await _run_git(
+            None,
+            ["ls-remote", _repository_url(repository), ref],
+            token=read_token,
+        )
+        line = remote.decode("utf-8", "strict").strip()
+        if not line:
+            return None
+        values = line.split("\t")
+        if len(values) != 2 or values[1] != ref:
+            raise BranchPublicationError(
+                "existing APDL branch could not be resolved exactly"
+            )
+        head_sha = _validate_sha(values[0], "existing APDL branch SHA")
+        workspace = Path(tempfile.mkdtemp(prefix="apdl-recover-publish-"))
+        try:
+            await _run_git(None, ["init", "--quiet", workspace.as_posix()])
+            await _run_git(
+                workspace,
+                ["remote", "add", "origin", _repository_url(repository)],
+            )
+            await _run_git(
+                workspace,
+                ["fetch", "--depth", "1", "origin", ref],
+                token=read_token,
+            )
+            observed_head = (
+                (await _run_git(workspace, ["rev-parse", "FETCH_HEAD"]))
+                .decode("ascii", "strict")
+                .strip()
+            )
+            if observed_head != head_sha:
+                raise BranchPublicationError(
+                    "existing APDL branch changed during recovery"
+                )
+            observed_tree = (
+                (await _run_git(workspace, ["rev-parse", "FETCH_HEAD^{tree}"]))
+                .decode("ascii", "strict")
+                .strip()
+            )
+            if observed_tree != candidate_tree_sha:
+                raise BranchPublicationError(
+                    "existing APDL branch tree differs from the gated candidate"
+                )
+            return PublishedBranch(branch=branch, head_sha=head_sha)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)

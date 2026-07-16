@@ -35,6 +35,8 @@ from app.safety.policy import TenantCodegenConnectionPolicy
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
 
+_POSTGRES_INTEGER_MAX = 2_147_483_647
+
 
 class ChangesetStatus(str, Enum):
     """The single source of truth for where a changeset is in its lifecycle."""
@@ -194,7 +196,7 @@ class Changeset(BaseModel):
     base_branch: str | None = None
     branch: str | None = None
     pr_url: str | None = None
-    pr_number: int | None = None
+    pr_number: int | None = Field(default=None, ge=1, le=_POSTGRES_INTEGER_MAX)
     head_sha: str | None = None
     github_pr_status: GitHubPRStatus | None = None
     external_ci_status: ExternalCIStatus | None = None

@@ -51,6 +51,12 @@ CODEGEN_WRITE_PERMISSIONS: Mapping[str, str] = MappingProxyType(
         "pull_requests": "write",
     }
 )
+CODEGEN_PR_WRITE_PERMISSIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "metadata": "read",
+        "pull_requests": "write",
+    }
+)
 _DISCOVERY_PERMISSIONS: Mapping[str, str] = MappingProxyType({"metadata": "read"})
 
 
@@ -167,6 +173,7 @@ def _permission_payload(permissions: Mapping[str, str]) -> dict[str, str]:
     if requested not in (
         dict(CODEGEN_READ_PERMISSIONS),
         dict(CODEGEN_WRITE_PERMISSIONS),
+        dict(CODEGEN_PR_WRITE_PERMISSIONS),
     ):
         raise ValueError("permissions must be an exact codegen permission profile")
     return requested

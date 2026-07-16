@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 26
-MIGRATION_NAME = "026_codegen_egress_publication.sql"
+MIGRATION_VERSION = 27
+MIGRATION_NAME = "027_codegen_pr_publication_recovery.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -70,6 +70,17 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "retry_of_changeset_id"),
         ("codegen_changesets", "control_metadata"),
         ("codegen_pull_request_observations", "github_updated_at"),
+        ("codegen_pull_request_publication_events", "event_id"),
+        ("codegen_pull_request_publication_events", "event_sequence"),
+        ("codegen_pull_request_publication_events", "changeset_id"),
+        ("codegen_pull_request_publication_events", "event_type"),
+        ("codegen_pull_request_publication_events", "intent_event_id"),
+        ("codegen_pull_request_publication_events", "cleanup_request_event_id"),
+        ("codegen_pull_request_publication_events", "pr_number"),
+        ("codegen_pull_request_publication_events", "github_url"),
+        ("codegen_pull_request_publication_events", "recorded_at"),
+        ("codegen_pull_request_publication_events", "inserted_at"),
+        ("codegen_pull_request_publication_events", "payload"),
         ("codegen_ci_verification_observations", "evidence_hash"),
         ("codegen_runtime_evidence_observations", "ci_observation_id"),
         ("codegen_runtime_collection_claims", "ci_observation_id"),

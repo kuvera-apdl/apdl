@@ -12,6 +12,8 @@ class FakeBranchPublisher:
     def __init__(self) -> None:
         self.prepare_calls: list[dict] = []
         self.push_calls: list[tuple[PreparedBranch, str]] = []
+        self.recover_calls: list[dict] = []
+        self.published: dict[str, PublishedBranch] = {}
 
     @asynccontextmanager
     async def prepare(self, **kwargs):
@@ -35,7 +37,13 @@ class FakeBranchPublisher:
         write_token: str,
     ) -> PublishedBranch:
         self.push_calls.append((prepared, write_token))
-        return PublishedBranch(
+        published = PublishedBranch(
             branch=prepared.branch,
             head_sha=prepared.candidate_head_sha,
         )
+        self.published[prepared.branch] = published
+        return published
+
+    async def recover_published(self, **kwargs) -> PublishedBranch | None:
+        self.recover_calls.append(dict(kwargs))
+        return self.published.get(kwargs["branch"])

@@ -194,7 +194,7 @@ CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /
-`CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
+`CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + publication) is
 bounded by `codegen_job_budget()`, which also caps the sandbox container and the orphan-sweep
 deadline. The derived budget is hard-capped at 3000 seconds so the
 credential-bearing container ends with at least a five-minute token-expiry
@@ -208,9 +208,12 @@ test-generation guidance. APDL does not execute it authoritatively; GitHub CI do
 The pre-push gates run inside the editor on the full diff (a violating branch
 never reaches GitHub), and the job runner re-checks the same resolved policy as
 a backstop before opening the PR. Orphan recovery: queued changesets are re-enqueued at
-startup (the queued → cloning transition is the dedup claim); active-state
-orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
-(default 300s) once older than twice the job budget.
+startup (the queued → cloning transition is the dedup claim). A `pushing`
+changeset with an append-only publication intent is resumed by its deterministic
+APDL branch before any PR create retry; raw accepted PR identities remain
+journaled for validation and cleanup. Other active-state orphans are swept to
+`error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL` (default 300s) once
+older than twice the job budget.
 
 Tenant connection preferences use one strict, versioned contract. Unknown
 fields are rejected. Tenant limits can only lower the operator limits, and
@@ -479,7 +482,11 @@ The editor sits behind the `Editor` interface; *how/where* it runs is config:
   before any repository-derived prompt input is built. The read token is also
   supplied over stdin and never enters either container's environment. Aider is
   pinned, receives service-owned empty config/env files, and cannot auto-run
-  repository lint, test, shell-suggestion, hook, URL, or browser commands.
+  repository lint, test, shell-suggestion, hook, URL, or browser commands. The
+  editor returns a patch and exact Git object identities; the controller
+  reconstructs and pushes it with a short-lived contents-write token, then
+  uses a separate PR-write token with no contents mutation permission for
+  pull-request discovery, creation, and cleanup.
 
   The separate inspection container is the only process allowed to establish
   trust in an untrusted checkout. Later profiling in the editor is consumption
@@ -559,8 +566,10 @@ The autonomous loop runs once these external pieces are set up:
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
 service) → `POST /v1/changesets` → the job recomputes and persists the rollout
 decision → only an allowed decision permits minting a repo token → the Aider
-editor in a sandboxed clone, runs deterministic pre-push gates,
-pushes a branch, and opens a PR (draft when policy or evidence requires it) →
+editor in a sandboxed clone returns a gated patch and exact tree identity → the
+controller reconstructs and publishes that tree with a just-in-time write
+credential, then recovers or opens one branch-bound PR (draft when policy or
+evidence requires it) →
 the repo's CI runs → the webhook or poller records GitHub's exact-head external
 CI status and feeds bounded logs/artifacts into same-branch repair → GitHub
 reviews/rulesets decide readiness and merge.

@@ -23,6 +23,7 @@ from app.models.observations import ExternalCIStatus
 _REQUIREMENT_ID_PATTERN = r"^REQ-[0-9]{3}$"
 _HEAD_SHA_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"
 _ARTIFACT_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,128}$"
+_POSTGRES_INTEGER_MAX = 2_147_483_647
 RUNTIME_ACCEPTANCE_WORKFLOW_PATH = ".github/workflows/apdl-runtime-acceptance.yml"
 
 
@@ -538,7 +539,7 @@ class RuntimeEvidenceObservation(StrictModel):
     observation_id: str = Field(pattern=r"^runtime_obs_[0-9a-f]{32}$")
     changeset_id: str = Field(min_length=1, max_length=200)
     repository: str = Field(pattern=r"^[^/\s]+/[^/\s]+$")
-    pr_number: int = Field(ge=1)
+    pr_number: int = Field(ge=1, le=_POSTGRES_INTEGER_MAX)
     head_sha: str = Field(pattern=_HEAD_SHA_PATTERN)
     ci_observation_id: str = Field(min_length=1, max_length=200)
     ci_evidence_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

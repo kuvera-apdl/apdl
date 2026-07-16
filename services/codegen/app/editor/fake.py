@@ -42,7 +42,7 @@ class FakeEditor:
             return replace(
                 result,
                 branch=result.branch or request.branch,
-                head_sha=result.head_sha or "fake-head-sha",
+                head_sha=result.head_sha or "c" * 40,
                 base_sha=result.base_sha or "a" * 40,
                 candidate_tree_sha=result.candidate_tree_sha or "b" * 40,
                 patch_base64=(

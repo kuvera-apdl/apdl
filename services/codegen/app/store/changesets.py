@@ -46,8 +46,9 @@ from app.verification.models import VerificationCoverage, VerificationPlan
 #: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
 #: a queued row hasn't started, so a restart re-enqueues it rather than failing
 #: it — see :func:`list_queued_changeset_ids`). The job runner uses in-process
-#: background tasks, so a process restart orphans any changeset sitting here —
-#: :func:`fail_stale_changesets` sweeps the stale ones.
+#: background tasks, so a process restart orphans any changeset sitting here.
+#: Rows without durable publication intent are swept; intent-bearing ``pushing``
+#: rows are resumed by the publication recovery worker.
 _ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
     ChangesetStatus.cloning,
     ChangesetStatus.editing,
@@ -229,9 +230,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         head_sha=_optional_column(row, "head_sha"),
         github_pr_status=_optional_column(row, "github_pr_status"),
         external_ci_status=_optional_column(row, "external_ci_status"),
-        external_ci_awaiting_since=_optional_column(
-            row, "external_ci_awaiting_since"
-        ),
+        external_ci_awaiting_since=_optional_column(row, "external_ci_awaiting_since"),
         ci_retry_count=_optional_column(row, "ci_retry_count") or 0,
         ci_remediation_status=(
             _optional_column(row, "ci_remediation_status") or CIRemediationStatus.idle
@@ -270,9 +269,7 @@ def _assert_idempotency_request(row: asyncpg.Record, request_sha256: str) -> Non
         )
 
 
-def _assert_revert_control(
-    row: asyncpg.Record, source_changeset_id: str
-) -> None:
+def _assert_revert_control(row: asyncpg.Record, source_changeset_id: str) -> None:
     revert = _controls_from_row(row).revert
     if revert is None or revert.source_changeset_id != source_changeset_id:
         raise ChangesetIdempotencyConflict(
@@ -544,8 +541,7 @@ async def create_revert_changeset(
                 )
                 if row is None:
                     raise RuntimeError(
-                        "Revert idempotency conflict did not resolve to an "
-                        "existing row"
+                        "Revert idempotency conflict did not resolve to an existing row"
                     )
                 _assert_revert_control(row, source_changeset_id)
                 _assert_idempotency_request(row, idempotency_request_sha256)
@@ -651,9 +647,7 @@ async def create_retry_changeset(
                     raise ChangesetIdempotencyConflict(
                         "Retry lineage is already bound to a different idempotency key"
                     )
-                _assert_idempotency_request(
-                    lineage_row, idempotency_request_sha256
-                )
+                _assert_idempotency_request(lineage_row, idempotency_request_sha256)
                 return _row_to_changeset(lineage_row), False
             if key_row is not None:
                 if str(key_row["retry_of_changeset_id"] or "") != retry_of_changeset_id:
@@ -1154,7 +1148,9 @@ async def fail_stale_changesets(
     swept: they are re-enqueued at startup instead. The ``older_than_seconds``
     deadline guards against killing work a *concurrent* codegen replica may
     still be running on the shared database: set it longer than any single job
-    can take (e.g. ``2 ×`` the job pipeline budget).
+    can take (e.g. ``2 ×`` the job pipeline budget). A ``pushing`` row with an
+    append-only publication intent is excluded: the publication recovery path
+    resumes it by deterministic branch identity instead of discarding it.
     """
     statuses = [s.value for s in _ACTIVE_STATUSES]
     async with pool.acquire() as conn:
@@ -1164,6 +1160,15 @@ async def fail_stale_changesets(
             SET status = 'error', error = COALESCE(error, $1), updated_at = now()
             WHERE status = ANY($2::text[])
               AND updated_at < now() - $3 * interval '1 second'
+              AND (
+                  status <> 'pushing'
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM codegen_pull_request_publication_events AS event
+                      WHERE event.changeset_id = codegen_changesets.changeset_id
+                        AND event.event_type = 'intent_recorded'
+                  )
+              )
             RETURNING changeset_id
             """,
             error,
