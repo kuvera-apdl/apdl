@@ -50,9 +50,13 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 23
-    assert MIGRATION_NAME == "023_llm_governance.sql"
+    assert MIGRATION_VERSION == 28
+    assert MIGRATION_NAME == "028_admin_execution_authority.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
+    assert (
+        "admin_project_execution_authorizations",
+        "authorization_source",
+    ) in REQUIRED_COLUMNS
     assert ("feature_proposals", "project_id") in REQUIRED_COLUMNS
     assert ("custom_agent_test_runs", "lease_expires_at") in REQUIRED_COLUMNS
     assert (
@@ -82,6 +86,18 @@ async def test_rejects_incomplete_schema_at_startup():
 async def test_rejects_missing_project_provenance_column_at_startup():
     columns = REQUIRED_COLUMNS - {("admin_projects", "created_by")}
     with pytest.raises(RuntimeError, match="admin_projects.created_by"):
+        await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_execution_authorization_contract_at_startup():
+    columns = REQUIRED_COLUMNS - {
+        ("admin_project_execution_authorizations", "reason")
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="admin_project_execution_authorizations.reason",
+    ):
         await assert_schema_ready(FakeConn(columns=columns))
 
 

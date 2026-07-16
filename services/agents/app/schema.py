@@ -8,11 +8,16 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 23
-MIGRATION_NAME = "023_llm_governance.sql"
+MIGRATION_VERSION = 28
+MIGRATION_NAME = "028_admin_execution_authority.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
+        ("admin_project_execution_authorizations", "project_id"),
+        ("admin_project_execution_authorizations", "authorization_source"),
+        ("admin_project_execution_authorizations", "actor"),
+        ("admin_project_execution_authorizations", "reason"),
+        ("admin_project_execution_authorizations", "authorized_at"),
         ("auth_credentials", "actor_user_id"),
         ("agent_memory", "project_id"),
         ("agent_memory", "embedding"),

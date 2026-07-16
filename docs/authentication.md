@@ -92,12 +92,15 @@ for the upstream call and the row is deleted after the response or SSE stream
 closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
 
-Agents execution is available only to operator-provisioned projects whose
-canonical `admin_projects.created_by` is null. Self-created projects retain
-`agents:read`, but the Admin proxy will not mint an execution credential for
-them and the Agents service independently rejects execution roles even if a
-long-lived credential was manually overprivileged. PostgreSQL also rejects new
-`agent_runs` rows for self-created or unknown projects.
+Agents and Codegen execution requires a canonical
+`admin_project_execution_authorizations` row. Migration 028 backfills and
+automatically records `operator_provisioned` authority only for projects whose
+immutable `admin_projects.created_by` is null. Self-created projects retain
+`agents:read` by default. An operator may authorize one deliberately with the
+`self_registered_override` source, a non-empty actor, reason, and timestamp.
+Agents and Codegen independently load that record, while PostgreSQL rejects
+execution roles and inserts into registered execution-bearing tables when it
+is absent.
 
 Experiment analysis uses synchronous credential delegation: after Query has
 authenticated a confidential `X-API-Key` and enforced `query:read` for its
@@ -109,7 +112,22 @@ Query-to-Config request and outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
-sessions.
+sessions. An execution role on a previously unauthorized self-created project
+requires all three explicit options:
+
+```bash
+make create-admin-user ARGS="\
+  --email operator@example.com \
+  --project-id acme \
+  --roles agents:manage \
+  --allow-self-registered-execution \
+  --override-actor operator@example.com \
+  --override-reason 'Approved production automation boundary'"
+```
+
+The authorization and role grant commit together. The authorization record is
+immutable audit evidence; operational access is stopped by removing execution
+roles and revoking credentials.
 
 ## Roles
 
@@ -125,9 +143,10 @@ sessions.
 | `agents:manage` | Create, test, update, and archive custom agents |
 | `agents:approve` | Approve or reject gated agent actions |
 
-The three Agents execution roles are valid only for operator-provisioned
-projects. Self-created projects are restricted to `agents:read` at membership,
-credential, service-authorization, and run-storage boundaries.
+The three Agents execution roles are valid only for operator-provisioned or
+explicitly authorized self-created projects. Unauthorized self-created
+projects are restricted to `agents:read` at membership, credential,
+service-authorization, and execution-storage boundaries.
 
 ## Provision credentials
 

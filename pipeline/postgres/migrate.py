@@ -294,6 +294,16 @@ SELECT
 \\else
 {migration.path.read_text()}
 
+DO $assert_execution_table_registry$
+BEGIN
+    IF to_regprocedure(
+        'public.apdl_assert_execution_table_registry()'
+    ) IS NOT NULL THEN
+        PERFORM public.apdl_assert_execution_table_registry();
+    END IF;
+END
+$assert_execution_table_registry$;
+
 INSERT INTO public.{LEDGER_TABLE} (version, name, checksum)
 VALUES (:migration_version, :'migration_name', :'migration_checksum');
 \\endif

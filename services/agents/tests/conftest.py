@@ -26,6 +26,7 @@ def authenticated_request_context(monkeypatch):
                 }
             ),
             self_registered_project=False,
+            execution_authorized=True,
         )
         request.state.principal = principal
         return principal

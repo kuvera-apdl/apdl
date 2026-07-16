@@ -175,6 +175,7 @@ async def test_approval_requires_agents_approve_role() -> None:
             project_id="demo",
             roles=frozenset({"agents:run"}),
             self_registered_project=False,
+            execution_authorized=True,
         )
         request.state.principal = principal
         return principal

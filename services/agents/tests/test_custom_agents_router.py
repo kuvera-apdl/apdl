@@ -61,6 +61,7 @@ async def _authenticate_self_registered(request: Request) -> Principal:
             {"agents:read", "agents:run", "agents:manage", "agents:approve"}
         ),
         self_registered_project=True,
+        execution_authorized=False,
     )
     request.state.principal = principal
     return principal
@@ -172,7 +173,7 @@ async def test_self_registered_overprivileged_project_cannot_manage_custom_agent
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Agents execution is unavailable for self-registered projects"
+        "Agents execution requires operator project authorization"
     )
     assert stubbed_store["created"] is None
 
@@ -201,7 +202,7 @@ async def test_self_registered_custom_agent_test_invokes_no_tools_or_llm(monkeyp
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Agents execution is unavailable for self-registered projects"
+        "Agents execution requires operator project authorization"
     )
     assert calls == []
 

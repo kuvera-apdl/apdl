@@ -21,12 +21,12 @@ The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
 hidden from definitions, and custom agents cannot select UI-config tools.
 
-Execution is enabled only for operator-provisioned projects in the OSS
-developer preview. Projects created through the public workspace flow retain
-read-only definitions, run history, results, and audit access, but cannot
-trigger runs, manage/test custom agents, or approve work. This is enforced from
-canonical project provenance even when a credential incorrectly contains an
-execution role.
+Execution is enabled only for operator-provisioned projects or self-created
+projects with an explicit, audited operator override in the OSS developer
+preview. Projects created through the public workspace flow retain read-only
+definitions, run history, results, and audit access by default. This is
+enforced from canonical project execution authority even when a credential
+incorrectly contains an execution role.
 
 A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
 PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
@@ -39,7 +39,7 @@ requeued at the persisted phase rather than terminalized as a failed run.
 All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
 management, and approval operations use distinct project-scoped roles. The
 `agents:run`, `agents:manage`, and `agents:approve` roles are honored only for
-operator-provisioned projects (`admin_projects.created_by IS NULL`).
+projects with a canonical `admin_project_execution_authorizations` row.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -113,8 +113,9 @@ policy explicitly permits it and the failure is classified as retryable.
 
 ## Approval and safety boundary
 
-These levels apply only to operator-provisioned projects. Self-created projects
-cannot start or resume an Agents execution at any autonomy level.
+These levels apply only to projects with canonical execution authority.
+Self-created projects cannot start or resume an Agents execution at any
+autonomy level unless an operator has recorded the explicit override.
 
 `gate_action` (`app/framework/gating.py`) is a generic policy primitive, not a
 claim that the enabled product flow is autonomous. Experiment design invokes it

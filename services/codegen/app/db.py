@@ -6,10 +6,15 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 27
-MIGRATION_NAME = "027_codegen_pr_publication_recovery.sql"
+MIGRATION_VERSION = 28
+MIGRATION_NAME = "028_admin_execution_authority.sql"
 REQUIRED_COLUMNS = frozenset(
     {
+        ("admin_project_execution_authorizations", "project_id"),
+        ("admin_project_execution_authorizations", "authorization_source"),
+        ("admin_project_execution_authorizations", "actor"),
+        ("admin_project_execution_authorizations", "reason"),
+        ("admin_project_execution_authorizations", "authorized_at"),
         ("codegen_connections", "project_id"),
         ("codegen_connections", "grant_id"),
         ("codegen_connections", "default_base_branch"),

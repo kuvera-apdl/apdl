@@ -456,12 +456,13 @@ Filtered cohort comparison:
 
 ## Agents operator preview
 
-Agents execution is an operator-provisioned capability in the OSS developer
+Agents execution is an operator-authorized capability in the OSS developer
 preview. Projects created through public registration keep `agents:read` for
-definitions, history, results, and audit records, but cannot trigger runs,
-manage/test custom agents, or approve queued actions. Agents derives this
-boundary from immutable project provenance as well as credential roles, so an
-overprivileged key cannot enable execution for a self-registered project.
+definitions, history, results, and audit records by default. Execution requires
+either operator-provisioned project provenance or an explicit immutable
+self-registration override with operator actor and reason evidence. Agents,
+Codegen, role storage, and execution-bearing database tables all enforce that
+canonical authorization.
 
 The agents service runs operator-triggered analysis and proposal workflows
 powered by policy-governed LLM reasoning. The safe default permits only the
