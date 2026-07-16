@@ -80,9 +80,22 @@ async def claim_next(pool) -> dict | None:
                           SELECT 1
                           FROM config_outbox AS earlier
                           WHERE earlier.project_id = pending.project_id
-                            AND earlier.kind = pending.kind
                             AND earlier.processed_at IS NULL
                             AND earlier.id < pending.id
+                            AND (
+                                (
+                                    pending.kind IN (
+                                        'flag_change', 'experiment_change'
+                                    )
+                                    AND earlier.kind IN (
+                                        'flag_change', 'experiment_change'
+                                    )
+                                )
+                                OR (
+                                    pending.kind = 'exposure'
+                                    AND earlier.kind = 'exposure'
+                                )
+                            )
                       )
                     ORDER BY pending.available_at, pending.id
                     FOR UPDATE SKIP LOCKED
@@ -139,11 +152,13 @@ async def deliver(row: dict, redis, broadcaster) -> None:
     project_id = row["project_id"]
     payload = row["payload"]
     if kind == "flag_change":
-        await redis_cache.invalidate_flags(redis, project_id)
+        project_version = _project_version(payload)
+        await redis_cache.invalidate_flags(redis, project_id, project_version)
         await broadcaster.broadcast(
             project_id,
             payload["event_type"],
             json.dumps(payload["data"], separators=(",", ":")),
+            project_version=project_version,
         )
         return
     if kind == "experiment_change":
@@ -152,6 +167,7 @@ async def deliver(row: dict, redis, broadcaster) -> None:
             project_id,
             payload["event_type"],
             json.dumps(payload["data"], separators=(",", ":")),
+            project_version=_project_version(payload),
         )
         return
     if kind == "exposure":
@@ -215,6 +231,17 @@ async def deliver(row: dict, redis, broadcaster) -> None:
             )
         return
     raise ValueError(f"Unsupported Config outbox kind: {kind}")
+
+
+def _project_version(payload: dict) -> int:
+    project_version = payload.get("project_version")
+    if (
+        isinstance(project_version, bool)
+        or not isinstance(project_version, int)
+        or project_version < 1
+    ):
+        raise ValueError("Config outbox payload has an invalid project_version")
+    return project_version
 
 
 def _should_log_alert(event: str, stream_key: str) -> bool:

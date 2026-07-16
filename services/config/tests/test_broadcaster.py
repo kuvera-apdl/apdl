@@ -1,240 +1,247 @@
-"""Port of all 16 test cases from C++ test_broadcaster.cpp.
-
-Tests the SSE broadcaster: connection management, broadcast delivery,
-dead-connection cleanup, lifecycle, message format, and unique IDs.
-"""
-
-import asyncio
+"""Bounded SSE broadcaster admission, fan-out, and closure tests."""
 
 import pytest
 import pytest_asyncio
 
-from app.sse import broadcaster as broadcaster_module
-from app.sse.broadcaster import SSEBroadcaster
+from app.sse.broadcaster import (
+    ConnectionQuotaExceeded,
+    SSEBroadcaster,
+    SSESettings,
+)
 
 
 @pytest_asyncio.fixture
 async def broadcaster():
-    b = SSEBroadcaster()
-    yield b
-    await b.stop()
+    instance = SSEBroadcaster()
+    yield instance
+    await instance.stop()
 
 
-# ---- Connection management ----
+async def add(
+    broadcaster: SSEBroadcaster,
+    project: str = "proj_1",
+    credential: str = "credential_1",
+    ip: str = "192.0.2.1",
+):
+    return await broadcaster.add_connection(project, credential, ip)
 
 
 @pytest.mark.asyncio
 async def test_add_and_remove_connection(broadcaster):
-    queue = asyncio.Queue()
-    conn_id = await broadcaster.add_connection("proj_1", queue)
+    subscription = await add(broadcaster)
 
     assert await broadcaster.connection_count("proj_1") == 1
-    assert conn_id  # not empty
+    assert subscription.connection_id
 
-    await broadcaster.remove_connection("proj_1", conn_id)
+    await broadcaster.remove_connection(subscription)
     assert await broadcaster.connection_count("proj_1") == 0
 
 
 @pytest.mark.asyncio
-async def test_multiple_connections_same_project(broadcaster):
-    _id1 = await broadcaster.add_connection("proj_1", asyncio.Queue())
-    id2 = await broadcaster.add_connection("proj_1", asyncio.Queue())
-    _id3 = await broadcaster.add_connection("proj_1", asyncio.Queue())
-
-    assert await broadcaster.connection_count("proj_1") == 3
-    assert await broadcaster.total_connection_count() == 3
-
-    await broadcaster.remove_connection("proj_1", id2)
-    assert await broadcaster.connection_count("proj_1") == 2
-
-
-@pytest.mark.asyncio
-async def test_connections_across_projects(broadcaster):
-    await broadcaster.add_connection("proj_1", asyncio.Queue())
-    await broadcaster.add_connection("proj_2", asyncio.Queue())
-    await broadcaster.add_connection("proj_3", asyncio.Queue())
+async def test_connections_are_counted_across_projects(broadcaster):
+    first = await add(broadcaster)
+    second = await add(
+        broadcaster,
+        project="proj_2",
+        credential="credential_2",
+        ip="192.0.2.2",
+    )
 
     assert await broadcaster.connection_count("proj_1") == 1
     assert await broadcaster.connection_count("proj_2") == 1
-    assert await broadcaster.connection_count("proj_3") == 1
-    assert await broadcaster.total_connection_count() == 3
+    assert await broadcaster.total_connection_count() == 2
+
+    await broadcaster.remove_connection(first)
+    await broadcaster.remove_connection(second)
 
 
 @pytest.mark.asyncio
-async def test_nonexistent_project_has_zero_connections(broadcaster):
-    assert await broadcaster.connection_count("nonexistent") == 0
-
-
-# ---- Broadcasting ----
-
-
-@pytest.mark.asyncio
-async def test_broadcast_to_connections(broadcaster):
-    queue = asyncio.Queue()
-    await broadcaster.add_connection("proj_1", queue)
-
-    await broadcaster.broadcast(
-        "proj_1", "flag_update", '{"key":"test","enabled":true}'
+async def test_broadcast_is_project_scoped_and_versioned(broadcaster):
+    target = await add(broadcaster)
+    other = await add(
+        broadcaster,
+        project="proj_2",
+        credential="credential_2",
+        ip="192.0.2.2",
     )
 
-    assert not queue.empty()
-    msg = queue.get_nowait()
-    assert "event: flag_update" in msg
-    assert "data: " in msg
-    assert "id: " in msg
+    await broadcaster.broadcast(
+        "proj_1",
+        "flag_update",
+        '{"key":"checkout"}',
+        project_version=9,
+    )
+
+    queued = target.queue.get_nowait()
+    assert queued.project_version == 9
+    encoded = queued.event.encode().decode()
+    assert "id: 9" in encoded
+    assert "event: flag_update" in encoded
+    assert 'data: {"key":"checkout"}' in encoded
+    assert other.queue.empty()
 
 
 @pytest.mark.asyncio
-async def test_broadcast_only_to_target_project(broadcaster):
-    queue1 = asyncio.Queue()
-    queue2 = asyncio.Queue()
+async def test_broadcast_fans_out_to_every_project_connection(broadcaster):
+    subscriptions = [
+        await add(
+            broadcaster,
+            credential=f"credential_{index}",
+            ip=f"192.0.2.{index}",
+        )
+        for index in range(1, 4)
+    ]
 
-    await broadcaster.add_connection("proj_1", queue1)
-    await broadcaster.add_connection("proj_2", queue2)
+    await broadcaster.broadcast("proj_1", "update", "payload", project_version=2)
 
-    await broadcaster.broadcast("proj_1", "test_event", "data")
-
-    assert not queue1.empty()
-    assert queue2.empty()
-
-
-@pytest.mark.asyncio
-async def test_broadcast_fanout_to_multiple_connections(broadcaster):
-    queues = [asyncio.Queue() for _ in range(3)]
-    for q in queues:
-        await broadcaster.add_connection("proj_1", q)
-
-    await broadcaster.broadcast("proj_1", "update", "payload")
-
-    for q in queues:
-        assert not q.empty()
+    assert all(not subscription.queue.empty() for subscription in subscriptions)
 
 
 @pytest.mark.asyncio
-async def test_broadcast_to_nonexistent_project_is_noop(broadcaster):
-    # Should not crash
-    await broadcaster.broadcast("nonexistent", "event", "data")
-    assert await broadcaster.total_connection_count() == 0
+async def test_queue_overflow_signals_close_and_retains_quota_until_exit():
+    broadcaster = SSEBroadcaster(SSESettings(queue_capacity=1))
+    subscription = await add(broadcaster)
 
+    await broadcaster.broadcast("proj_1", "update", "first", project_version=1)
+    await broadcaster.broadcast("proj_1", "update", "second", project_version=2)
 
-@pytest.mark.asyncio
-async def test_dead_connections_removed_on_broadcast(broadcaster):
-    """Dead connections (full queues) are cleaned up during broadcast."""
-    # Create a queue with maxsize=0 that is always "full"
-    # We simulate a dead connection by using a queue that will raise on put_nowait
-    dead_queue = asyncio.Queue(maxsize=1)
-    # Fill it so put_nowait raises QueueFull
-    dead_queue.put_nowait("filler")
-
-    good_queue = asyncio.Queue()
-
-    await broadcaster.add_connection("proj_1", dead_queue)
-    await broadcaster.add_connection("proj_1", good_queue)
-
-    assert await broadcaster.connection_count("proj_1") == 2
-
-    await broadcaster.broadcast("proj_1", "test", "data")
-
-    # Dead connection should be removed
-    assert await broadcaster.connection_count("proj_1") == 1
-    assert not good_queue.empty()
-
-
-# ---- Remove edge cases ----
-
-
-@pytest.mark.asyncio
-async def test_remove_nonexistent_connection_is_noop(broadcaster):
-    await broadcaster.add_connection("proj_1", asyncio.Queue())
-    assert await broadcaster.connection_count("proj_1") == 1
-
-    # Removing nonexistent connection should not affect existing ones
-    await broadcaster.remove_connection("proj_1", "does_not_exist")
-    assert await broadcaster.connection_count("proj_1") == 1
-
-
-@pytest.mark.asyncio
-async def test_remove_from_nonexistent_project_is_noop(broadcaster):
-    await broadcaster.remove_connection("nonexistent", "some_id")
-    assert await broadcaster.total_connection_count() == 0
-
-
-# ---- Lifecycle ----
-
-
-@pytest.mark.asyncio
-async def test_start_stop_lifecycle(broadcaster):
-    await broadcaster.start()
-    assert await broadcaster.total_connection_count() == 0
-
-    await broadcaster.add_connection("proj_1", asyncio.Queue())
+    assert subscription.close_event.is_set()
+    assert subscription.close_reason == "slow_consumer"
     assert await broadcaster.total_connection_count() == 1
+    metrics = await broadcaster.metrics_snapshot()
+    assert metrics["queue_overflow_total"] == 1
+
+    await broadcaster.remove_connection(subscription)
+    assert await broadcaster.total_connection_count() == 0
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "slow_consumer": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_stop_is_idempotent_and_closes_every_connection(broadcaster):
+    await broadcaster.start()
+    subscription = await add(broadcaster)
 
     await broadcaster.stop()
+    await broadcaster.stop()
+
+    assert subscription.close_event.is_set()
+    assert subscription.close_reason == "server_shutdown"
     assert await broadcaster.total_connection_count() == 0
 
 
+@pytest.mark.parametrize(
+    "settings,expected_scope",
+    [
+        (
+            SSESettings(
+                max_connections=1,
+                max_connections_per_project=1,
+                max_connections_per_credential=1,
+                max_connections_per_ip=1,
+            ),
+            "global",
+        ),
+        (
+            SSESettings(
+                max_connections=3,
+                max_connections_per_project=1,
+                max_connections_per_credential=3,
+                max_connections_per_ip=3,
+            ),
+            "project",
+        ),
+        (
+            SSESettings(
+                max_connections=3,
+                max_connections_per_project=3,
+                max_connections_per_credential=1,
+                max_connections_per_ip=3,
+            ),
+            "credential",
+        ),
+        (
+            SSESettings(
+                max_connections=3,
+                max_connections_per_project=3,
+                max_connections_per_credential=3,
+                max_connections_per_ip=1,
+            ),
+            "ip",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_double_start_is_idempotent(broadcaster):
-    await broadcaster.start()
-    await broadcaster.start()  # Should not crash or create duplicate tasks
-    await broadcaster.stop()
+async def test_each_admission_quota_fails_atomically(settings, expected_scope):
+    broadcaster = SSEBroadcaster(settings)
+    first = await add(broadcaster)
+    attempted = {
+        "global": ("proj_2", "credential_2", "192.0.2.2"),
+        "project": ("proj_1", "credential_2", "192.0.2.2"),
+        "credential": ("proj_2", "credential_1", "192.0.2.2"),
+        "ip": ("proj_2", "credential_2", "192.0.2.1"),
+    }[expected_scope]
+
+    with pytest.raises(ConnectionQuotaExceeded) as caught:
+        await add(broadcaster, *attempted)
+
+    assert caught.value.scope == expected_scope
+    assert await broadcaster.total_connection_count() == 1
+    metrics = await broadcaster.metrics_snapshot()
+    assert metrics["rejected_total"][expected_scope] == 1
+
+    await broadcaster.remove_connection(first)
+    admitted = await add(broadcaster, *attempted)
+    assert await broadcaster.total_connection_count() == 1
+    await broadcaster.remove_connection(admitted)
 
 
 @pytest.mark.asyncio
-async def test_double_stop_is_idempotent(broadcaster):
-    await broadcaster.start()
-    await broadcaster.stop()
-    await broadcaster.stop()  # Should not crash
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_is_typed_sse_event(monkeypatch):
-    monkeypatch.setattr(broadcaster_module, "HEARTBEAT_INTERVAL_SECONDS", 0.01)
-    b = SSEBroadcaster()
-    queue = asyncio.Queue()
-    await b.add_connection("proj_1", queue)
-
-    try:
-        await b.start()
-        msg = await asyncio.wait_for(queue.get(), timeout=0.2)
-    finally:
-        await b.stop()
-
-    assert msg == "event: heartbeat\ndata: {}\n\n"
-
-
-# ---- SSE message format ----
-
-
-@pytest.mark.asyncio
-async def test_sse_message_format(broadcaster):
-    queue = asyncio.Queue()
-    await broadcaster.add_connection("proj_1", queue)
-
-    await broadcaster.broadcast(
-        "proj_1", "config_change", '{"hello":"world"}'
+async def test_max_lifetime_signals_observable_close():
+    now = [10.0]
+    broadcaster = SSEBroadcaster(
+        SSESettings(max_lifetime_seconds=5.0),
+        clock=lambda: now[0],
     )
+    subscription = await add(broadcaster)
 
-    msg = queue.get_nowait()
+    now[0] = 14.9
+    await broadcaster.expire_connections()
+    assert not subscription.close_event.is_set()
 
-    # Verify SSE format: id, event, data lines, followed by empty line
-    assert "id: " in msg
-    assert "event: config_change\n" in msg
-    assert 'data: {"hello":"world"}\n' in msg
-    # Should end with \n\n
-    assert msg.endswith("\n\n")
+    now[0] = 15.0
+    await broadcaster.expire_connections()
+    assert subscription.close_event.is_set()
+    assert subscription.close_reason == "max_lifetime"
+    await broadcaster.remove_connection(subscription)
 
 
-# ---- Unique IDs ----
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"queue_capacity": 0}, "queue_capacity"),
+        ({"max_connections": 0}, "max_connections"),
+        ({"ping_interval_seconds": 0}, "ping_interval_seconds"),
+        ({"ping_interval_seconds": float("nan")}, "ping_interval_seconds"),
+        ({"send_timeout_seconds": float("inf")}, "send_timeout_seconds"),
+        (
+            {"max_connections": 2, "max_connections_per_project": 3},
+            "max_connections_per_project",
+        ),
+    ],
+)
+def test_settings_reject_unbounded_or_inconsistent_values(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        SSESettings(**kwargs)
 
 
 @pytest.mark.asyncio
-async def test_unique_connection_ids(broadcaster):
-    id1 = await broadcaster.add_connection("proj_1", asyncio.Queue())
-    id2 = await broadcaster.add_connection("proj_1", asyncio.Queue())
-    id3 = await broadcaster.add_connection("proj_2", asyncio.Queue())
-
-    assert id1 != id2
-    assert id2 != id3
-    assert id1 != id3
+async def test_connection_ids_are_unique(broadcaster):
+    first = await add(broadcaster)
+    second = await add(
+        broadcaster,
+        credential="credential_2",
+        ip="192.0.2.2",
+    )
+    assert first.connection_id != second.connection_id

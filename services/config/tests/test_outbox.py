@@ -169,7 +169,7 @@ async def test_stream_pressure_emits_structured_alert(caplog):
 
 
 @pytest.mark.asyncio
-async def test_failed_head_blocks_newer_rows_only_in_its_project_kind_domain():
+async def test_failed_head_preserves_global_config_order_per_project():
     pool = RecordingClaimPool()
 
     assert await outbox.claim_next(pool) is None
@@ -177,11 +177,15 @@ async def test_failed_head_blocks_newer_rows_only_in_its_project_kind_domain():
     sql = pool.conn.sql
     assert "NOT EXISTS" in sql
     assert "earlier.project_id = pending.project_id" in sql
-    assert "earlier.kind = pending.kind" in sql
+    assert "pending.kind IN" in sql
+    assert "'flag_change', 'experiment_change'" in sql
+    assert "earlier.kind IN" in sql
+    assert "pending.kind = 'exposure'" in sql
+    assert "earlier.kind = 'exposure'" in sql
     assert "earlier.processed_at IS NULL" in sql
     assert "earlier.id < pending.id" in sql
-    # Failed head N remains unprocessed while its backoff delays availability,
-    # so the anti-join excludes N+1. Other projects/kinds remain independent.
+    # A failed config head blocks later flag and experiment rows for only that
+    # project. Exposure durability remains independent from config delivery.
     assert "earlier.available_at" not in sql
 
 
@@ -195,6 +199,7 @@ async def test_flag_change_invalidates_then_broadcasts_versioned_payload(monkeyp
         "kind": "flag_change",
         "payload": {
             "event_type": "flag_update",
+            "project_version": 19,
             "data": {
                 "action": "flag_updated",
                 "key": "checkout",
@@ -202,14 +207,33 @@ async def test_flag_change_invalidates_then_broadcasts_versioned_payload(monkeyp
             },
         },
     }
+    redis = object()
 
-    await outbox.deliver(row, object(), broadcaster)
+    await outbox.deliver(row, redis, broadcaster)
 
-    invalidate.assert_awaited_once()
+    invalidate.assert_awaited_once_with(redis, "apdl", 19)
     project_id, event_type, raw = broadcaster.broadcast.await_args.args
     assert project_id == "apdl"
     assert event_type == "flag_update"
     assert json.loads(raw)["version"] == 7
+    assert broadcaster.broadcast.await_args.kwargs == {"project_version": 19}
+
+
+@pytest.mark.asyncio
+async def test_config_change_with_invalid_project_version_fails_closed(monkeypatch):
+    monkeypatch.setattr(outbox.redis_cache, "invalidate_flags", AsyncMock())
+    row = {
+        "project_id": "apdl",
+        "kind": "flag_change",
+        "payload": {
+            "event_type": "flag_update",
+            "project_version": "19",
+            "data": {},
+        },
+    }
+
+    with pytest.raises(ValueError, match="project_version"):
+        await outbox.deliver(row, object(), AsyncMock())
 
 
 @pytest.mark.asyncio

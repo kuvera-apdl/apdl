@@ -34,7 +34,7 @@ async def get_flags(request: Request):
     if cached is not None:
         logger.debug("Cache hit for flags of project %s", project_id)
         return Response(
-            content=cached,
+            content=cached.config_json,
             media_type="application/json",
             headers={"X-Cache": "HIT"},
         )
@@ -42,12 +42,36 @@ async def get_flags(request: Request):
     # Cache miss -- query PostgreSQL
     logger.debug("Cache miss for flags of project %s, querying Postgres", project_id)
     pool = request.app.state.pg_pool
-    flags = await pg_store.get_flags(pool, project_id, client_visible_only=True)
-
+    flags, project_version = await pg_store.get_flag_snapshot(
+        pool,
+        project_id,
+        client_visible_only=True,
+    )
     flags_json = _flags_to_json(project_id, flags)
 
-    # Populate cache
-    await redis_cache.set_flags(redis, project_id, flags_json, ttl=60)
+    cached_snapshot = await redis_cache.set_flags(
+        redis,
+        project_id,
+        project_version,
+        flags_json,
+        ttl=60,
+    )
+    if not cached_snapshot:
+        # An invalidation raced this miss after its database snapshot. Refetch
+        # once; never loop indefinitely under sustained mutation traffic.
+        flags, project_version = await pg_store.get_flag_snapshot(
+            pool,
+            project_id,
+            client_visible_only=True,
+        )
+        flags_json = _flags_to_json(project_id, flags)
+        await redis_cache.set_flags(
+            redis,
+            project_id,
+            project_version,
+            flags_json,
+            ttl=60,
+        )
 
     return Response(
         content=flags_json,

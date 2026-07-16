@@ -1,211 +1,343 @@
-"""SSE broadcaster for pushing real-time config updates to connected clients.
+"""Bounded SSE admission and project-versioned fan-out."""
 
-Matches the C++ SSEBroadcaster behavior: per-project connection management,
-heartbeat loop, dead-connection cleanup, and SSE message formatting.
-"""
+from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Literal
+
+from sse_starlette import ServerSentEvent
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_INTERVAL_SECONDS = 30
+QuotaScope = Literal["global", "project", "credential", "ip"]
+CloseReason = Literal[
+    "client_disconnect",
+    "slow_consumer",
+    "max_lifetime",
+    "server_shutdown",
+]
+
+
+@dataclass(frozen=True)
+class SSESettings:
+    queue_capacity: int = 256
+    max_connections: int = 1000
+    max_connections_per_project: int = 100
+    max_connections_per_credential: int = 10
+    max_connections_per_ip: int = 20
+    ping_interval_seconds: float = 15.0
+    send_timeout_seconds: float = 10.0
+    max_lifetime_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        integer_values = {
+            "queue_capacity": self.queue_capacity,
+            "max_connections": self.max_connections,
+            "max_connections_per_project": self.max_connections_per_project,
+            "max_connections_per_credential": self.max_connections_per_credential,
+            "max_connections_per_ip": self.max_connections_per_ip,
+        }
+        for name, value in integer_values.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name, value in {
+            "ping_interval_seconds": self.ping_interval_seconds,
+            "send_timeout_seconds": self.send_timeout_seconds,
+            "max_lifetime_seconds": self.max_lifetime_seconds,
+        }.items():
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive duration")
+        for name in (
+            "max_connections_per_project",
+            "max_connections_per_credential",
+            "max_connections_per_ip",
+        ):
+            if getattr(self, name) > self.max_connections:
+                raise ValueError(f"{name} must not exceed max_connections")
+
+
+class ConnectionQuotaExceeded(RuntimeError):
+    """A bounded SSE admission scope has no remaining capacity."""
+
+    def __init__(self, scope: QuotaScope, limit: int) -> None:
+        self.scope = scope
+        self.limit = limit
+        super().__init__(f"SSE {scope} connection limit reached")
+
+
+@dataclass(frozen=True)
+class ProjectEvent:
+    event: ServerSentEvent
+    project_version: int
+
+
+@dataclass
+class SSESubscription:
+    connection_id: str
+    project_id: str
+    credential_id: str
+    client_ip: str
+    queue: asyncio.Queue[ProjectEvent]
+    created_at: float
+    close_event: asyncio.Event = field(default_factory=asyncio.Event)
+    close_reason: CloseReason | None = None
 
 
 class SSEBroadcaster:
-    """Manages SSE connections per project and broadcasts events."""
+    """Manage one process's bounded SSE connections and update queues."""
 
-    def __init__(self) -> None:
-        # project_id -> list of (connection_id, asyncio.Queue)
-        self._connections: dict[str, list[tuple[str, asyncio.Queue]]] = {}
+    def __init__(
+        self,
+        settings: SSESettings | None = None,
+        *,
+        clock=time.monotonic,
+    ) -> None:
+        self.settings = settings or SSESettings()
+        self._clock = clock
+        self._connections: dict[str, SSESubscription] = {}
+        self._project_counts: Counter[str] = Counter()
+        self._credential_counts: Counter[str] = Counter()
+        self._ip_counts: Counter[str] = Counter()
+        self._rejected_counts: Counter[str] = Counter()
+        self._closed_counts: Counter[str] = Counter()
+        self._accepted_total = 0
+        self._queue_overflow_total = 0
         self._lock = asyncio.Lock()
         self._running = False
-        self._heartbeat_task: asyncio.Task | None = None
-        self._event_counter = 0
+        self._maintenance_task: asyncio.Task | None = None
         self._conn_counter = 0
 
     async def start(self) -> None:
-        """Start the heartbeat loop. Idempotent -- a second call is a no-op."""
         if self._running:
             return
         self._running = True
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        logger.info("SSE broadcaster heartbeat task started")
+        self._maintenance_task = asyncio.create_task(self._maintenance_loop())
+        logger.info("SSE broadcaster maintenance task started")
 
     async def stop(self) -> None:
-        """Stop the heartbeat loop and clear all connections. Idempotent."""
-        if not self._running:
-            return
-        self._running = False
-
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            self._heartbeat_task = None
+        if self._running:
+            self._running = False
+            if self._maintenance_task is not None:
+                self._maintenance_task.cancel()
+                try:
+                    await self._maintenance_task
+                except asyncio.CancelledError:
+                    pass
+                self._maintenance_task = None
 
         async with self._lock:
-            self._connections.clear()
-
-        logger.info("SSE broadcaster stopped, all connections cleared")
-
-    def _generate_connection_id(self) -> str:
-        conn_id = f"sse_{self._conn_counter}"
-        self._conn_counter += 1
-        return conn_id
+            subscriptions = tuple(self._connections.values())
+            for subscription in subscriptions:
+                self._request_close_locked(subscription, "server_shutdown")
+                self._remove_locked(subscription)
+        logger.info("SSE broadcaster stopped, all connections closed")
 
     async def add_connection(
-        self, project_id: str, queue: asyncio.Queue
-    ) -> str:
-        """Register a new SSE connection for a project.
-
-        Returns a unique connection_id.
-        """
-        conn_id = self._generate_connection_id()
+        self,
+        project_id: str,
+        credential_id: str,
+        client_ip: str,
+    ) -> SSESubscription:
+        """Atomically admit and register one connection within every quota."""
         async with self._lock:
-            if project_id not in self._connections:
-                self._connections[project_id] = []
-            self._connections[project_id].append((conn_id, queue))
-
+            self._assert_capacity_locked(
+                project_id=project_id,
+                credential_id=credential_id,
+                client_ip=client_ip,
+            )
+            connection_id = f"sse_{self._conn_counter}"
+            self._conn_counter += 1
+            subscription = SSESubscription(
+                connection_id=connection_id,
+                project_id=project_id,
+                credential_id=credential_id,
+                client_ip=client_ip,
+                queue=asyncio.Queue(maxsize=self.settings.queue_capacity),
+                created_at=self._clock(),
+            )
+            self._connections[connection_id] = subscription
+            self._project_counts[project_id] += 1
+            self._credential_counts[credential_id] += 1
+            self._ip_counts[client_ip] += 1
+            self._accepted_total += 1
         logger.debug(
-            "SSE connection %s added for project %s", conn_id, project_id
-        )
-        return conn_id
-
-    async def remove_connection(
-        self, project_id: str, connection_id: str
-    ) -> None:
-        """Remove a specific connection. No-op if not found."""
-        async with self._lock:
-            conns = self._connections.get(project_id)
-            if conns is None:
-                return
-
-            self._connections[project_id] = [
-                (cid, q) for cid, q in conns if cid != connection_id
-            ]
-
-            if not self._connections[project_id]:
-                del self._connections[project_id]
-
-        logger.debug(
-            "SSE connection %s removed for project %s",
+            "SSE connection %s admitted for project %s",
             connection_id,
             project_id,
         )
+        return subscription
+
+    async def remove_connection(
+        self,
+        subscription: SSESubscription,
+        *,
+        reason: CloseReason = "client_disconnect",
+    ) -> None:
+        async with self._lock:
+            current = self._connections.get(subscription.connection_id)
+            if current is not subscription:
+                return
+            if subscription.close_reason is None:
+                subscription.close_reason = reason
+            self._remove_locked(subscription)
 
     async def broadcast(
-        self, project_id: str, event_type: str, data: str
+        self,
+        project_id: str,
+        event_type: str,
+        data: str,
+        *,
+        project_version: int,
     ) -> None:
-        """Send an SSE-formatted message to all connections for a project.
-
-        Dead connections (full queues) are cleaned up automatically.
-        """
-        event_id = self._event_counter
-        self._event_counter += 1
-
-        # Format SSE message matching C++ output:
-        #   id: <id>\n
-        #   event: <type>\n
-        #   data: <line>\n  (for each line in data)
-        #   \n
-        lines = [f"id: {event_id}\n", f"event: {event_type}\n"]
-        for line in data.split("\n"):
-            lines.append(f"data: {line}\n")
-        lines.append("\n")
-        message = "".join(lines)
-
+        """Queue one ordered project event or close a saturated consumer."""
+        if (
+            isinstance(project_version, bool)
+            or not isinstance(project_version, int)
+            or project_version < 1
+        ):
+            raise ValueError("project_version must be a positive integer")
+        event = ProjectEvent(
+            event=ServerSentEvent(
+                data=data,
+                event=event_type,
+                id=str(project_version),
+            ),
+            project_version=project_version,
+        )
         async with self._lock:
-            conns = self._connections.get(project_id)
-            if conns is None:
-                logger.debug(
-                    "No SSE connections for project %s, broadcast dropped",
-                    project_id,
-                )
-                return
-
-            dead: list[str] = []
-
-            for conn_id, queue in conns:
+            for subscription in tuple(self._connections.values()):
+                if (
+                    subscription.project_id != project_id
+                    or subscription.close_reason is not None
+                ):
+                    continue
                 try:
-                    queue.put_nowait(message)
-                except (asyncio.QueueFull, Exception):
+                    subscription.queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    self._queue_overflow_total += 1
+                    self._request_close_locked(subscription, "slow_consumer")
                     logger.warning(
-                        "SSE write failed for connection %s", conn_id
+                        "SSE slow consumer scheduled for disconnect",
+                        extra={
+                            "event": "sse_slow_consumer",
+                            "project_id": project_id,
+                            "connection_id": subscription.connection_id,
+                        },
                     )
-                    dead.append(conn_id)
-
-            # Remove dead connections
-            if dead:
-                dead_set = set(dead)
-                self._connections[project_id] = [
-                    (cid, q)
-                    for cid, q in conns
-                    if cid not in dead_set
-                ]
-                if not self._connections[project_id]:
-                    del self._connections[project_id]
-                logger.debug(
-                    "Removed %d dead SSE connections for project %s",
-                    len(dead),
-                    project_id,
-                )
 
     async def connection_count(self, project_id: str) -> int:
-        """Return the number of active connections for a project."""
         async with self._lock:
-            conns = self._connections.get(project_id)
-            return len(conns) if conns else 0
+            return self._project_counts[project_id]
 
     async def total_connection_count(self) -> int:
-        """Return the total number of active connections across all projects."""
         async with self._lock:
-            return sum(len(c) for c in self._connections.values())
+            return len(self._connections)
 
-    async def _heartbeat_loop(self) -> None:
-        """Send periodic heartbeat comments to all connections.
+    async def metrics_snapshot(self) -> dict:
+        """Return low-cardinality operational metrics without identity labels."""
+        async with self._lock:
+            return {
+                "active_connections": len(self._connections),
+                "accepted_total": self._accepted_total,
+                "rejected_total": {
+                    scope: self._rejected_counts[scope]
+                    for scope in ("global", "project", "credential", "ip")
+                },
+                "closed_total": dict(sorted(self._closed_counts.items())),
+                "queue_overflow_total": self._queue_overflow_total,
+            }
 
-        Typed heartbeat events keep the connection alive and are observable by
-        browser EventSource clients for client-side liveness monitoring.
-        """
-        heartbeat = "event: heartbeat\ndata: {}\n\n"
+    async def expire_connections(self) -> None:
+        """Signal connections whose hard lifetime has elapsed."""
+        now = self._clock()
+        async with self._lock:
+            for subscription in tuple(self._connections.values()):
+                if (
+                    subscription.close_reason is None
+                    and now - subscription.created_at
+                    >= self.settings.max_lifetime_seconds
+                ):
+                    self._request_close_locked(subscription, "max_lifetime")
 
+    def _assert_capacity_locked(
+        self,
+        *,
+        project_id: str,
+        credential_id: str,
+        client_ip: str,
+    ) -> None:
+        checks: tuple[tuple[QuotaScope, int, int], ...] = (
+            ("global", len(self._connections), self.settings.max_connections),
+            (
+                "project",
+                self._project_counts[project_id],
+                self.settings.max_connections_per_project,
+            ),
+            (
+                "credential",
+                self._credential_counts[credential_id],
+                self.settings.max_connections_per_credential,
+            ),
+            ("ip", self._ip_counts[client_ip], self.settings.max_connections_per_ip),
+        )
+        for scope, current, limit in checks:
+            if current >= limit:
+                self._rejected_counts[scope] += 1
+                raise ConnectionQuotaExceeded(scope, limit)
+
+    def _request_close_locked(
+        self,
+        subscription: SSESubscription,
+        reason: CloseReason,
+    ) -> None:
+        if subscription.close_reason is not None:
+            return
+        subscription.close_reason = reason
+        subscription.close_event.set()
+
+    def _remove_locked(self, subscription: SSESubscription) -> None:
+        self._connections.pop(subscription.connection_id, None)
+        self._decrement(self._project_counts, subscription.project_id)
+        self._decrement(self._credential_counts, subscription.credential_id)
+        self._decrement(self._ip_counts, subscription.client_ip)
+        reason = subscription.close_reason or "client_disconnect"
+        self._closed_counts[reason] += 1
+
+    @staticmethod
+    def _decrement(counts: Counter[str], key: str) -> None:
+        counts[key] -= 1
+        if counts[key] <= 0:
+            del counts[key]
+
+    async def _maintenance_loop(self) -> None:
         while self._running:
             try:
-                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                await asyncio.sleep(1.0)
+                await self.expire_connections()
             except asyncio.CancelledError:
-                return
+                raise
+            except Exception:
+                logger.exception("SSE connection maintenance failed")
 
-            if not self._running:
-                return
 
-            async with self._lock:
-                projects_to_remove: list[str] = []
-
-                for project_id, conns in list(self._connections.items()):
-                    dead: list[str] = []
-
-                    for conn_id, queue in conns:
-                        try:
-                            queue.put_nowait(heartbeat)
-                        except (asyncio.QueueFull, Exception):
-                            logger.debug(
-                                "Heartbeat failed for connection %s", conn_id
-                            )
-                            dead.append(conn_id)
-
-                    if dead:
-                        dead_set = set(dead)
-                        self._connections[project_id] = [
-                            (cid, q)
-                            for cid, q in conns
-                            if cid not in dead_set
-                        ]
-
-                    if not self._connections.get(project_id):
-                        projects_to_remove.append(project_id)
-
-                for pid in projects_to_remove:
-                    self._connections.pop(pid, None)
+def stream_close_event(reason: CloseReason) -> ServerSentEvent:
+    """Return the terminal signal clients observe before reconnecting."""
+    return ServerSentEvent(
+        data=json.dumps(
+            {"reason": reason, "snapshot_required": True},
+            separators=(",", ":"),
+        ),
+        event="stream_error",
+        retry=1000,
+    )

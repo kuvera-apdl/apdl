@@ -80,6 +80,32 @@ describe('SSEConnection', () => {
     });
   });
 
+  it('reconnects after a terminal slow-consumer event and receives a new snapshot', async () => {
+    const callback = vi.fn();
+    connection.onMessage(callback);
+    connection.connect();
+    await flushAsync();
+    const first = MockEventSource.instances[0];
+
+    first.emit('config', '{"flags":[]}', '7');
+    first.emit('stream_error', '{"reason":"slow_consumer","snapshot_required":true}');
+    first.close();
+    await flushAsync();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushAsync();
+    const reconnected = MockEventSource.instances[1];
+    reconnected.emit('config', '{"flags":[{"key":"latest"}]}', '9');
+    await flushAsync();
+
+    expect(reconnected.init.headers).toMatchObject({ 'Last-Event-ID': '7' });
+    expect(callback).toHaveBeenLastCalledWith({
+      type: 'config',
+      data: '{"flags":[{"key":"latest"}]}',
+      id: '9',
+    });
+  });
+
   it('clamps a server retry of zero to prevent a reconnect spin', async () => {
     connection.connect();
     await flushAsync();

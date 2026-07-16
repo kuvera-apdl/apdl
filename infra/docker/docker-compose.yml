@@ -104,6 +104,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      # Docker's default bridge address pool. Production deployments should
+      # narrow this to the exact public-edge proxy network.
+      CONFIG_TRUSTED_PROXY_CIDRS: ${CONFIG_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
       LOG_LEVEL: info
     healthcheck:
       test:
