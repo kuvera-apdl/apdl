@@ -24,6 +24,8 @@ jobs:
     name: Build Release Artifacts
     needs: ci
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     permissions:
       contents: read
     env:
@@ -48,12 +50,17 @@ jobs:
           uv pip install -e services/ingestion
           --python services/ingestion/.venv/bin/python
       - name: Validate release tag and manifest
-        run: >-
-          python scripts/verify_release.py
-          --tag "$GITHUB_REF_NAME"
-          --check-registries
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
+          version=$(python -c 'import json; print(json.load(open("release-manifest.json"))["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build and verify release artifacts once
         shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           root="$PWD"
@@ -62,18 +69,18 @@ jobs:
           ./scripts/test-packed-python-sdk.sh "$root/release-artifacts/python"
           python scripts/verify_python_artifacts.py release-artifacts/python
 
-          npm_artifact="release-artifacts/npm/apdl-oss-sdk-0.3.0.tgz"
-          python_wheel="release-artifacts/python/apdl_sdk-0.3.0-py3-none-any.whl"
-          python_sdist="release-artifacts/python/apdl_sdk-0.3.0.tar.gz"
+          npm_artifact="release-artifacts/npm/apdl-oss-sdk-${VERSION}.tgz"
+          python_wheel="release-artifacts/python/apdl_sdk-${VERSION}-py3-none-any.whl"
+          python_sdist="release-artifacts/python/apdl_sdk-${VERSION}.tar.gz"
           test -f "$npm_artifact"
           test -f "$python_wheel"
           test -f "$python_sdist"
 
           {
-            (cd release-artifacts/npm && sha256sum apdl-oss-sdk-0.3.0.tgz)
+            (cd release-artifacts/npm && sha256sum "apdl-oss-sdk-${VERSION}.tgz")
             (cd release-artifacts/python && sha256sum \
-              apdl_sdk-0.3.0-py3-none-any.whl \
-              apdl_sdk-0.3.0.tar.gz)
+              "apdl_sdk-${VERSION}-py3-none-any.whl" \
+              "apdl_sdk-${VERSION}.tar.gz")
           } > release-artifacts/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -81,9 +88,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: |
-            release-artifacts/npm/apdl-oss-sdk-0.3.0.tgz
-            release-artifacts/python/apdl_sdk-0.3.0-py3-none-any.whl
-            release-artifacts/python/apdl_sdk-0.3.0.tar.gz
+            release-artifacts/npm/apdl-oss-sdk-${{ steps.release.outputs.version }}.tgz
+            release-artifacts/python/apdl_sdk-${{ steps.release.outputs.version }}-py3-none-any.whl
+            release-artifacts/python/apdl_sdk-${{ steps.release.outputs.version }}.tar.gz
             release-artifacts/SHA256SUMS
 
   publish-npm:
@@ -94,22 +101,47 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
           path: release-artifacts
+      - name: Check immutable npm publication state
+        id: registry
+        shell: bash
+        env:
+          VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: |
+          set -euo pipefail
+          state=$(python scripts/verify_published_artifacts.py npm \
+            --version "$VERSION" \
+            --artifact "release-artifacts/npm/apdl-oss-sdk-${VERSION}.tgz")
+          echo "state=$state" >> "$GITHUB_OUTPUT"
       - name: Publish exact npm tarball
-        run: >-
-          npm publish
-          "$GITHUB_WORKSPACE/release-artifacts/npm/apdl-oss-sdk-0.3.0.tgz"
-          --provenance
-          --access public
+        if: steps.registry.outputs.state == 'absent'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: >-
+          npm publish
+          "$GITHUB_WORKSPACE/release-artifacts/npm/apdl-oss-sdk-${VERSION}.tgz"
+          --provenance
+          --access public
+      - name: Verify exact npm artifact is published
+        env:
+          VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: >-
+          python scripts/verify_published_artifacts.py
+          --wait-seconds 180 npm
+          --version "$VERSION"
+          --artifact "release-artifacts/npm/apdl-oss-sdk-${VERSION}.tgz"
 
   publish-pypi:
     name: Publish Python Package
@@ -120,18 +152,42 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
           path: release-artifacts
+      - name: Check immutable PyPI publication state
+        id: registry
+        shell: bash
+        env:
+          VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: |
+          set -euo pipefail
+          state=$(python scripts/verify_published_artifacts.py pypi \
+            --version "$VERSION" \
+            --artifacts-dir release-artifacts/python)
+          echo "state=$state" >> "$GITHUB_OUTPUT"
       - name: Publish exact wheel and source distribution
+        if: steps.registry.outputs.state == 'absent'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: release-artifacts/python
+      - name: Verify exact PyPI artifacts are published
+        env:
+          VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: >-
+          python scripts/verify_published_artifacts.py
+          --wait-seconds 180 pypi
+          --version "$VERSION"
+          --artifacts-dir release-artifacts/python
 
   github-release:
     name: Create GitHub Release
-    needs: [publish-npm, publish-pypi]
+    needs: [build-artifacts, publish-npm, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,7 +200,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-artifacts/npm/apdl-oss-sdk-0.3.0.tgz
-            release-artifacts/python/apdl_sdk-0.3.0-py3-none-any.whl
-            release-artifacts/python/apdl_sdk-0.3.0.tar.gz
+            release-artifacts/npm/apdl-oss-sdk-${{ needs.build-artifacts.outputs.version }}.tgz
+            release-artifacts/python/apdl_sdk-${{ needs.build-artifacts.outputs.version }}-py3-none-any.whl
+            release-artifacts/python/apdl_sdk-${{ needs.build-artifacts.outputs.version }}.tar.gz
             release-artifacts/SHA256SUMS
