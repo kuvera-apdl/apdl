@@ -13,6 +13,7 @@
     "setup": "npm ci",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --testTimeout=10000",
