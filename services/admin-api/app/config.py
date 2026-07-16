@@ -136,7 +136,10 @@ class Settings:
             service_api_keys=_service_keys(),
             internal_token=os.getenv("APDL_INTERNAL_TOKEN", ""),
             allowed_origins=_json_origins(
-                os.getenv("APDL_ADMIN_ALLOWED_ORIGINS", '["http://localhost:5173"]')
+                os.getenv(
+                    "APDL_ADMIN_ALLOWED_ORIGINS",
+                    '["http://localhost:5173","http://localhost:5174"]',
+                )
             ),
             cookie_secure=_bool("APDL_ADMIN_COOKIE_SECURE", "true"),
             session_ttl_seconds=_positive_int(
