@@ -21,15 +21,19 @@ make lint               # Run all linters
 make check              # Lint + test every package in parallel (local CI mirror)
 make fmt                # Auto-format all packages (ruff format + autofix)
 make dev                # Start Docker deps only (Redis, ClickHouse, PostgreSQL)
-make dev-all            # Start full stack via Docker Compose
+make dev-core           # Start the supported core stack (default application path)
+make dev-all            # Start full stack via Docker Compose (core + Agents + Codegen)
 make dev-down           # Stop all containers
 make status             # Container status + service health endpoints
 make smoke              # End-to-end smoke test against the running stack
+make smoke-fresh        # Hermetic fresh-install core proof (clean volumes)
 make migrate-clickhouse # Apply ClickHouse SQL migrations
+make migrate-postgres   # Apply PostgreSQL SQL migrations
 ```
 
 `scripts/dev.sh` is the master entry point wrapping all of the above
-(`setup`, `up`, `up-full`, `status`, `smoke`, `check`, `down`, `reset`).
+(`setup`, `up`, `up-core`, `up-full`, `smoke-fresh`, `status`, `smoke`,
+`test`, `lint`, `check`, `logs`, `down`, `reset`).
 
 ### Running individual services (with hot-reload)
 
@@ -39,6 +43,7 @@ make run-config     # Config Service    → localhost:8081
 make run-query      # Query Service     → localhost:8082
 make run-agents     # Agents Service    → localhost:8083
 make run-codegen    # Codegen Service   → localhost:8084
+make run-admin-api  # Admin API (console gateway) → localhost:8085
 make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 make run-admin      # Admin Console (Vite dev server) → localhost:5173
 ```
@@ -54,7 +59,10 @@ make run-admin      # Admin Console (Vite dev server) → localhost:5173
 | Query | `make test-query` | `make lint-query` |
 | Agents | `make test-agents` | `make lint-agents` |
 | Codegen | `make test-codegen` | `make lint-codegen` |
+| Admin API | `make test-admin-api` | `make lint-admin-api` |
 | Admin Console | `make test-admin` | `make lint-admin` |
+| ClickHouse Writer | `make test-writer` | `make lint-writer` |
+| ETL Framework (experimental) | `make test-etl` | `make lint-etl` |
 
 ### Running a single test
 
@@ -71,11 +79,12 @@ cd services/config && .venv/bin/python -m pytest tests/test_evaluator.py -v
 cd services/query && .venv/bin/python -m pytest tests/test_funnels.py -v
 cd services/agents && .venv/bin/python -m pytest tests/test_supervisor.py::test_specific -v
 cd services/codegen && .venv/bin/python -m pytest tests/test_job_runner.py -v
+cd services/admin-api && .venv/bin/python -m pytest tests/test_proxy.py -v
 ```
 
 ## Architecture Overview
 
-The system is a monorepo with five Python services, a data pipeline, and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
+The system is a monorepo with six Python services, a data pipeline (plus an experimental ETL framework), and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
 
 ```
 SDK (TypeScript) ──POST /v1/events──→ Ingestion (Python/FastAPI :8080) ──→ Redis Streams
@@ -90,6 +99,9 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                                       ↓
                                               Codegen Service (Python/FastAPI :8084)
                                               → GitHub App → customer repos (autonomous PRs)
+
+Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAPI :8085)
+                                              → project-scoped credentials → core services
 ```
 
 ### Data Flow
@@ -101,6 +113,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
 6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
 7. **Autonomous code:** Codegen Service turns approved feature proposals into tested-green pull requests on connected customer repos via a sandboxed, model-agnostic OSS coding agent (Aider); merge is gated on green CI + autonomy level, audited like every other action
+8. **Admin operations:** the browser console talks only to the Admin API gateway (same-origin `/api`), which authenticates hashed sessions with CSRF/origin enforcement and proxies each call to the core services using server-selected, project-scoped credentials, writing proxy audit records
 
 ### Tech Stack by Service
 
@@ -111,7 +124,9 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
 - **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), Aider (model-agnostic editor via LiteLLM) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
+- **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Security gateway for the Admin Console: hashed sessions, CSRF/origin enforcement, login lockouts, memberships, and audited proxying to the core services
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
+- **ETL Framework** (`pipeline/etl/`): Python 3.12, experimental transform framework — uv, pytest, ruff. Outside the supported release surface
 
 ### Key Ports
 
@@ -123,6 +138,8 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 | Query | 8082 |
 | Agents | 8083 |
 | Codegen | 8084 |
+| Admin API (console gateway) | 8085 |
+| Admin Console | 5173 |
 | Redis | 6379 |
 | ClickHouse HTTP / Native | 8123 / 9000 |
 | PostgreSQL | 5432 |
@@ -135,6 +152,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
 - **CI runs on push/PR to main:** lint, tests, builds, package contracts, dependency audits, and isolated core/experiment smokes for the declared developer-preview surface
+- **Dependency updates:** manual, per `docs/dependency-policy.md` — Dependabot version updates are not enabled on this repository
 - **Releases:** the tag must match `release-manifest.json`; `v0.3.0` publishes the JavaScript SDK to npm, the Python SDK to PyPI, and source/checksum assets to GitHub Releases. No GHCR images are published for this release line
 
 ## Environment Variables
