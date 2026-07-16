@@ -8,7 +8,6 @@ and the overall risk level is assessed.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -36,19 +35,6 @@ class SafetyResult(BaseModel):
     checks: list[dict[str, Any]]
     risk_level: str  # "low", "medium", "high"
 
-
-# ---------------------------------------------------------------------------
-# Rate-limit state (in-memory, per-process)
-# ---------------------------------------------------------------------------
-
-_action_timestamps: dict[str, list[datetime]] = {}
-_MAX_ACTIONS_PER_HOUR: dict[ActionType, int] = {
-    ActionType.create_experiment: 5,
-    ActionType.update_flag: 20,
-    ActionType.update_ui_config: 30,
-    ActionType.feature_proposal: 3,
-    ActionType.open_pull_request: 10,
-}
 
 _REJECTED_FLAG_FIELDS = {
     "default_value",
@@ -287,17 +273,6 @@ class SafetyValidator:
             self._run_check("guardrails", self._check_guardrails, action),
         ]
 
-        # Rate-limit last, and only count actions that pass the other checks —
-        # a burst of rejected drafts must not exhaust the quota for the
-        # eventual legitimate action.
-        record = all(c["passed"] for c in checks)
-        checks.insert(
-            0,
-            self._run_check(
-                "rate_limit", self._check_rate_limits, action, record=record
-            ),
-        )
-
         passed = all(c["passed"] for c in checks)
         risk_level = self._assess_risk(action, checks)
 
@@ -320,47 +295,6 @@ class SafetyValidator:
     # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
-
-    def _check_rate_limits(self, action: AgentAction, record: bool = True) -> dict[str, Any]:
-        """Ensure the agent is not exceeding action rate limits.
-
-        ``record=False`` checks the budget without consuming it — used for
-        actions already failing other checks, so rejected drafts don't starve
-        the eventual legitimate action.
-        """
-        key = f"{action.project_id}:{action.type.value}"
-        now = datetime.now(timezone.utc)
-
-        # Clean up timestamps older than 1 hour
-        if key in _action_timestamps:
-            _action_timestamps[key] = [
-                ts for ts in _action_timestamps[key]
-                if (now - ts).total_seconds() < 3600
-            ]
-        else:
-            _action_timestamps[key] = []
-
-        limit = _MAX_ACTIONS_PER_HOUR.get(action.type, 10)
-        current_count = len(_action_timestamps[key])
-
-        if current_count >= limit:
-            return {
-                "name": "rate_limit",
-                "passed": False,
-                "message": (
-                    f"Rate limit exceeded: {current_count}/{limit} "
-                    f"{action.type.value} actions in the last hour."
-                ),
-            }
-
-        if record:
-            _action_timestamps[key].append(now)
-
-        return {
-            "name": "rate_limit",
-            "passed": True,
-            "message": f"Within rate limits ({current_count + 1}/{limit}).",
-        }
 
     def _check_conflicts(self, action: AgentAction) -> dict[str, Any]:
         """Check for conflicts with existing configurations.

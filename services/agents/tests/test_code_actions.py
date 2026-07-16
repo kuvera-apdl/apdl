@@ -1,14 +1,6 @@
 """Safety validation for the PR-creation action."""
 
-import pytest
-
-from app.safety import validator
 from app.safety.validator import ActionType, AgentAction, SafetyValidator
-
-
-@pytest.fixture(autouse=True)
-def clear_rate_limit_state():
-    validator._action_timestamps.clear()
 
 
 def _validate(action_type: ActionType, config: dict) -> dict:

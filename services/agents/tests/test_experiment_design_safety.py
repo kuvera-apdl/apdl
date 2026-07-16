@@ -9,12 +9,6 @@ import pytest
 from app.framework import AgentContext
 from app.graphs import experiment_design
 from app.graphs.experiment_design import ExperimentDesignAgent
-from app.safety import validator
-
-
-@pytest.fixture(autouse=True)
-def clear_rate_limits() -> None:
-    validator._action_timestamps.clear()
 
 
 def _ctx(level: int = 4) -> AgentContext:
