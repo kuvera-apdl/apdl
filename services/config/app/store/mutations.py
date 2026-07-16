@@ -282,6 +282,7 @@ async def _reject_experiment_owned(conn, project_id: str, flag_key: str) -> None
 
 
 async def _insert_flag(conn, flag: dict) -> dict:
+    validate_flag_variant_config(flag)
     row = await conn.fetchrow(
         f"""
         INSERT INTO flags (
@@ -317,6 +318,7 @@ async def _insert_flag(conn, flag: dict) -> dict:
 
 
 async def _update_flag(conn, flag: dict, expected_version: int) -> dict:
+    validate_flag_variant_config(flag)
     row = await conn.fetchrow(
         f"""
         UPDATE flags SET

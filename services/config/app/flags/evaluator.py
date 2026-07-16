@@ -3,6 +3,8 @@
 import logging
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.flags.targeting_contract import (
     MAX_CONDITIONS_PER_RULE,
     MAX_RULES,
@@ -17,6 +19,7 @@ from app.flags.targeting_contract import (
     parse_numeric,
     scalar_equal,
 )
+from app.models.schemas import FallthroughConfig, RolloutConfig
 
 logger = logging.getLogger(__name__)
 
@@ -168,18 +171,46 @@ def _rules_within_limits(rules: Any) -> bool:
 
 
 def _base_result(flag: dict) -> dict:
+    key = flag.get("key")
+    version = flag.get("version")
     return {
-        "key": flag.get("key", ""),
-        "variant": flag.get("default_variant", "control"),
+        "key": key if isinstance(key, str) else "",
+        "variant": None,
         "reason": "",
         "rule_id": None,
         "rollout_bucket": None,
         "variant_bucket": None,
         "rollout_percentage": None,
         "bucket_by": None,
-        "config_version": int(flag.get("version", 0)),
+        "config_version": (
+            version
+            if isinstance(version, int) and not isinstance(version, bool) and version >= 1
+            else None
+        ),
         "source": None,
     }
+
+
+def _canonical_evaluation_flag(flag: dict) -> dict:
+    """Parse every durable rollout without coercing malformed values."""
+    canonical = dict(flag)
+    rules = flag.get("rules")
+    if isinstance(rules, list):
+        canonical["rules"] = [
+            {
+                **rule,
+                "rollout": RolloutConfig.model_validate(
+                    rule.get("rollout")
+                ).model_dump(mode="python"),
+            }
+            if isinstance(rule, dict)
+            else rule
+            for rule in rules
+        ]
+    canonical["fallthrough"] = FallthroughConfig.model_validate(
+        flag.get("fallthrough")
+    ).model_dump(mode="python")
+    return canonical
 
 
 def _apply_rollout(
@@ -187,8 +218,8 @@ def _apply_rollout(
     rollout: dict,
     ctx: dict,
 ) -> tuple[bool, float | None, float, str]:
-    percentage = float(rollout.get("percentage", 0.0))
-    bucket_by = rollout.get("bucket_by", "user_id")
+    percentage = rollout["percentage"]
+    bucket_by = rollout["bucket_by"]
     unit_id = _unit_id(ctx, bucket_by)
     if not unit_id:
         return False, None, percentage, bucket_by
@@ -240,6 +271,12 @@ def _assign_variant(flag: dict, ctx: dict, bucket_by: str) -> tuple[str, float |
 def evaluate(flag: dict, ctx: dict) -> dict:
     """Evaluate one canonical flag config against a context."""
     result = _base_result(flag)
+    try:
+        flag = _canonical_evaluation_flag(flag)
+    except (ValidationError, TypeError, ValueError):
+        result["reason"] = "invalid_config"
+        return result
+    result["variant"] = flag.get("default_variant", "control")
 
     # The SDK evaluators gate only on ``enabled`` and never look at ``state``.
     # That is safe — not a parity gap — because the flags table enforces

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.flags.evaluator import (
     evaluate,
     evaluate_all,
@@ -47,6 +49,52 @@ def make_context(user_id: str = "user_123") -> dict:
         "anonymous_id": "",
         "attributes": {"plan": "pro", "country": "US", "age": "30"},
     }
+
+
+@pytest.mark.parametrize(
+    "percentage",
+    ["50", True, None, float("nan"), float("inf"), -1.0, 101.0],
+)
+def test_corrupt_fallthrough_rollout_fails_closed(percentage):
+    flag = make_flag(
+        {
+            "fallthrough": {
+                "rollout": {
+                    "percentage": percentage,
+                    "bucket_by": "user_id",
+                }
+            }
+        }
+    )
+
+    result = evaluate(flag, make_context())
+
+    assert result["key"] == "checkout"
+    assert result["variant"] is None
+    assert result["reason"] == "invalid_config"
+    assert result["config_version"] == 4
+
+
+def test_corrupt_rule_rollout_fails_closed_before_rule_matching():
+    flag = make_flag(
+        {
+            "rules": [
+                {
+                    "id": "corrupt",
+                    "conditions": [],
+                    "rollout": {
+                        "percentage": "100",
+                        "bucket_by": "user_id",
+                    },
+                }
+            ]
+        }
+    )
+
+    result = evaluate(flag, make_context())
+
+    assert result["variant"] is None
+    assert result["reason"] == "invalid_config"
 
 
 def test_disabled_flag_returns_default_variant():

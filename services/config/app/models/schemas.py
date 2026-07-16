@@ -61,6 +61,10 @@ MAX_EXPERIMENT_DURATION_DAYS = 90
 MAX_EXPERIMENT_DURATION = timedelta(days=MAX_EXPERIMENT_DURATION_DAYS)
 MAX_ANALYTICS_WINDOW_MINUTES = 90 * 24 * 60
 RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+MAX_EVAL_CONTEXT_DEPTH = 4
+MAX_EVAL_CONTEXT_KEYS = 100
+MAX_EVAL_CONTEXT_NODES = 1000
+MAX_EVAL_PAGE_LENGTH = 2048
 GateEvaluationReason = Literal[
     "not_found",
     "invalid_config",
@@ -94,7 +98,13 @@ class GateCondition(StrictModel):
 
 
 class RolloutConfig(StrictModel):
-    percentage: float = Field(..., ge=0.0, le=100.0)
+    percentage: float = Field(
+        ...,
+        ge=0.0,
+        le=100.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
     bucket_by: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
 
 
@@ -170,7 +180,7 @@ def validate_variant_weights(variants: list[VariantConfig]) -> None:
 
 
 def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
-    """Validate the canonical variant fields for a complete flag config."""
+    """Validate canonical variants and rollout fields before persistence."""
     default_variant = flag.get("default_variant")
     if not isinstance(default_variant, str) or not default_variant:
         raise ValueError("default_variant must be a non-empty string")
@@ -180,10 +190,45 @@ def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
         raise ValueError("variants must contain at least one variant")
 
     parsed_variants = [
-        variant if isinstance(variant, VariantConfig) else VariantConfig.model_validate(variant)
+        VariantConfig.model_validate(
+            variant.model_dump(
+                mode="python",
+                exclude_unset=True,
+                warnings="none",
+            )
+            if isinstance(variant, VariantConfig)
+            else variant
+        )
         for variant in variants
     ]
     validate_variants(parsed_variants, default_variant)
+
+    rules = flag.get("rules")
+    if not isinstance(rules, list):
+        raise ValueError("rules must be a list")
+    if len(rules) > MAX_RULES:
+        raise ValueError(f"rules must contain at most {MAX_RULES} entries")
+    for rule in rules:
+        GateRule.model_validate(
+            rule.model_dump(
+                mode="python",
+                exclude_unset=True,
+                warnings="none",
+            )
+            if isinstance(rule, GateRule)
+            else rule
+        )
+
+    fallthrough = flag.get("fallthrough")
+    FallthroughConfig.model_validate(
+        fallthrough.model_dump(
+            mode="python",
+            exclude_unset=True,
+            warnings="none",
+        )
+        if isinstance(fallthrough, FallthroughConfig)
+        else fallthrough
+    )
 
 
 class VariantFlagMixin(StrictModel):
@@ -196,7 +241,11 @@ class VariantFlagMixin(StrictModel):
 
     @model_validator(mode="after")
     def validate_variant_config(self):
-        validate_flag_variant_config(self.model_dump(mode="python"))
+        # Nested rules and fallthrough have already been parsed by Pydantic at
+        # this point. Re-serializing and parsing them again would materialize
+        # optional fields that were deliberately omitted (for example, the
+        # absent ``value`` on presence operators).
+        validate_variants(self.variants, self.default_variant)
         return self
 
 
@@ -245,7 +294,13 @@ class ExperimentConfig(BaseModel):
     variants_json: str = "[]"
     targeting_rules_json: str = "[]"
     primary_metric_json: str = "{}"
-    traffic_percentage: float = 100.0
+    traffic_percentage: float = Field(
+        default=100.0,
+        ge=0.0,
+        le=100.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
     start_date: AwareDatetime | None = None
     end_date: AwareDatetime | None = None
     version: int = Field(default=1, ge=1)
@@ -253,22 +308,44 @@ class ExperimentConfig(BaseModel):
     updated_at: str = ""
 
 
-def _validate_context_value(value: Any, *, depth: int = 0) -> bool:
+def _validate_context_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    budget: dict[str, int] | None = None,
+) -> bool:
     """Bound JSON context values without coercing their types."""
+    if budget is None:
+        budget = {"keys": 0, "nodes": 0}
+    budget["nodes"] += 1
+    if budget["nodes"] > MAX_EVAL_CONTEXT_NODES:
+        return False
     if value is None or isinstance(value, bool) or is_json_number(value):
         return True
     if isinstance(value, str):
         return is_bounded_string(value)
-    if depth >= 4:
+    if depth >= MAX_EVAL_CONTEXT_DEPTH:
         return False
     if isinstance(value, list):
         return len(value) <= MAX_MEMBERSHIP_VALUES and all(
-            _validate_context_value(item, depth=depth + 1) for item in value
+            _validate_context_value(
+                item,
+                depth=depth + 1,
+                budget=budget,
+            )
+            for item in value
         )
     if isinstance(value, dict):
+        budget["keys"] += len(value)
+        if budget["keys"] > MAX_EVAL_CONTEXT_KEYS:
+            return False
         return len(value) <= MAX_MEMBERSHIP_VALUES and all(
             is_identifier(key)
-            and _validate_context_value(item, depth=depth + 1)
+            and _validate_context_value(
+                item,
+                depth=depth + 1,
+                budget=budget,
+            )
             for key, item in value.items()
         )
     return False
@@ -284,10 +361,12 @@ class EvalContext(StrictModel):
 
     @model_validator(mode="after")
     def validate_attributes(self):
+        budget = {"keys": len(self.attributes), "nodes": 1}
         if not all(
-            is_identifier(key) and _validate_context_value(value)
+            is_identifier(key)
+            and _validate_context_value(value, budget=budget)
             for key, value in self.attributes.items()
-        ):
+        ) or budget["keys"] > MAX_EVAL_CONTEXT_KEYS:
             raise ValueError("attributes must contain bounded JSON values")
         return self
 
@@ -306,14 +385,18 @@ class EvalResult(StrictModel):
 
 
 class GateEvaluateRequest(StrictModel):
-    project_id: str = Field(..., min_length=1)
-    key: str = Field(..., min_length=1)
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_LENGTH,
+    )
+    key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     context: EvalContext = Field(default_factory=EvalContext)
     log_exposure: bool = True
-    session_id: str = ""
-    message_id: str = ""
-    page: str = ""
-    component: str = ""
+    session_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
+    message_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
+    page: str = Field(default="", max_length=MAX_EVAL_PAGE_LENGTH)
+    component: str = Field(default="", max_length=MAX_STRING_LENGTH)
 
 
 class GateEvaluateResponse(StrictModel):
@@ -481,7 +564,13 @@ class ExperimentCreate(StrictModel):
     flag_key: str | None = Field(default=None, pattern=RESOURCE_KEY_PATTERN)
     status: ExperimentCreateStatus = "draft"
     description: str = ""
-    traffic_percentage: float = Field(default=100.0, ge=0.0, le=100.0)
+    traffic_percentage: float = Field(
+        default=100.0,
+        ge=0.0,
+        le=100.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
     start_date: AwareDatetime | None = None
     end_date: AwareDatetime | None = None
     variants: list[ExperimentVariant] = Field(
@@ -518,7 +607,13 @@ class ExperimentUpdate(StrictModel):
     version: int = Field(..., ge=1)
     status: ExperimentStatus | None = None
     description: str | None = None
-    traffic_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    traffic_percentage: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
     start_date: AwareDatetime | None = None
     end_date: AwareDatetime | None = None
     variants: list[ExperimentVariant] | None = Field(

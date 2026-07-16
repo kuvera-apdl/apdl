@@ -91,6 +91,22 @@ def test_rule_identifier_name_and_condition_limits_are_enforced():
         )
 
 
+@pytest.mark.parametrize(
+    "percentage",
+    ["50", True, None, float("nan"), float("inf"), -0.1, 100.1],
+)
+def test_rollout_percentage_requires_a_finite_bounded_number(percentage):
+    with pytest.raises(ValidationError):
+        GateRule.model_validate(
+            _rule(
+                rollout={
+                    "percentage": percentage,
+                    "bucket_by": "user_id",
+                }
+            )
+        )
+
+
 def test_flag_rule_list_limit_is_enforced():
     with pytest.raises(ValidationError):
         FlagCreate.model_validate(

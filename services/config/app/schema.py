@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 16
-MIGRATION_NAME = "016_config_project_versions.sql"
+MIGRATION_VERSION = 17
+MIGRATION_NAME = "017_config_rollout_contract.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),

@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
+from app.models.schemas import GateRule
 from app.store import mutations
 
 
@@ -118,6 +120,49 @@ def make_experiment(overrides: dict | None = None) -> dict:
     if overrides:
         experiment.update(overrides)
     return experiment
+
+
+class NeverPersistConn:
+    async def fetchrow(self, sql: str, *args):
+        raise AssertionError("invalid flag reached PostgreSQL")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["insert", "update"])
+async def test_persistence_boundary_rejects_noncanonical_rollout(operation):
+    flag = make_flag(
+        {
+            "fallthrough": {
+                "rollout": {
+                    "percentage": "100",
+                    "bucket_by": "user_id",
+                }
+            }
+        }
+    )
+    conn = NeverPersistConn()
+
+    with pytest.raises(ValidationError):
+        if operation == "insert":
+            await mutations._insert_flag(conn, flag)
+        else:
+            await mutations._update_flag(conn, flag, flag["version"])
+
+
+@pytest.mark.asyncio
+async def test_persistence_boundary_revalidates_mutated_model_instances():
+    rule = GateRule.model_validate(
+        {
+            "id": "rule",
+            "conditions": [],
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        }
+    )
+    rule.rollout.percentage = "100"
+    flag = make_flag({"rules": [rule]})
+
+    with pytest.raises(ValidationError):
+        await mutations._insert_flag(NeverPersistConn(), flag)
 
 
 @pytest.mark.asyncio
