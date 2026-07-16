@@ -473,8 +473,20 @@ async def test_event_timeseries(client):
 @pytest.mark.asyncio
 async def test_event_breakdown(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"property_value": "US", "event_count": 50, "unique_users": 20},
-        {"property_value": "UK", "event_count": 30, "unique_users": 15},
+        {
+            "selector": "click[page.path eq /pricing]",
+            "property_type": "string",
+            "property_value": "US",
+            "event_count": 50,
+            "unique_users": 20,
+        },
+        {
+            "selector": "click[page.path eq /pricing]",
+            "property_type": "string",
+            "property_value": "UK",
+            "event_count": 30,
+            "unique_users": 15,
+        },
     ])
 
     resp = await client.post("/v1/query/events/breakdown", json={
@@ -493,6 +505,13 @@ async def test_event_breakdown(client):
     assert body["selector"] == "click[page.path eq /pricing]"
     assert body["property"] == "country"
     assert len(body["results"]) == 2
+    assert body["results"][0] == {
+        "selector": "click[page.path eq /pricing]",
+        "property_type": "string",
+        "property_value": "US",
+        "event_count": 50,
+        "unique_users": 20,
+    }
 
 
 @pytest.mark.asyncio

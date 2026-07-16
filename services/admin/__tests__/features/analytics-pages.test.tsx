@@ -26,6 +26,29 @@ const server = setupServer(
       total_users: 48,
     })
   }),
+  http.post('*/api/projects/demo/query/v1/query/events/breakdown', async ({ request }) => {
+    requests.push({ path: 'breakdown', body: await request.json() })
+    return HttpResponse.json({
+      selector: '$click',
+      property: 'score',
+      results: [
+        {
+          selector: '$click',
+          property_type: 'integer',
+          property_value: '1',
+          event_count: 9,
+          unique_users: 7,
+        },
+        {
+          selector: '$click',
+          property_type: 'float',
+          property_value: '1',
+          event_count: 4,
+          unique_users: 3,
+        },
+      ],
+    })
+  }),
   http.post('*/api/projects/demo/query/v1/query/funnel', async ({ request }) => {
     requests.push({ path: 'funnel', body: await request.json() })
     return HttpResponse.json({
@@ -111,6 +134,20 @@ describe('EventsExplorerPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Clear Selector 1 event name' }))
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))
     expect(requests).toHaveLength(0)
+  })
+
+  test('renders scalar types that distinguish equal canonical values', async () => {
+    renderPage(<EventsExplorerPage />)
+    await userEvent.click(screen.getByRole('tab', { name: 'Breakdown' }))
+    await userEvent.type(screen.getByPlaceholderText('href'), 'score')
+    await userEvent.click(screen.getByRole('button', { name: 'Run' }))
+
+    expect(await screen.findByText('integer')).toBeInTheDocument()
+    expect(screen.getByText('float')).toBeInTheDocument()
+    expect(requests[0]?.body).toMatchObject({
+      project_id: 'demo',
+      property: 'score',
+    })
   })
 })
 

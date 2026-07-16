@@ -14,6 +14,7 @@ import type {
 } from '@/api/types/query'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -382,8 +383,9 @@ export function EventsExplorerPage() {
                     raw={bdQuery.data}
                     csv={{
                       filename: 'event-breakdown',
-                      headers: ['property_value', 'event_count', 'unique_users'],
+                      headers: ['property_type', 'property_value', 'event_count', 'unique_users'],
                       rows: bdQuery.data.results.map((row) => [
+                        row.property_type,
                         row.property_value,
                         row.event_count,
                         row.unique_users,
@@ -399,12 +401,20 @@ export function EventsExplorerPage() {
                       const max = Math.max(...bdQuery.data.results.map((row) => row.event_count), 1)
                       return (
                         <div className="space-y-2">
-                          {bdQuery.data.results.map((row, index) => (
-                            <div key={index} className="space-y-1">
+                          {bdQuery.data.results.map((row) => (
+                            <div
+                              key={`${row.property_type}:${row.property_value}`}
+                              className="space-y-1"
+                            >
                               <div className="flex items-baseline justify-between gap-2 text-sm">
-                                <code className="truncate font-mono text-xs">
-                                  {row.property_value || '(empty)'}
-                                </code>
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <code className="truncate font-mono text-xs">
+                                    {row.property_value || '(empty)'}
+                                  </code>
+                                  <Badge variant="outline" className="shrink-0 font-mono font-normal">
+                                    {row.property_type}
+                                  </Badge>
+                                </div>
                                 <span className="shrink-0 tabular-nums text-muted-foreground">
                                   {row.event_count.toLocaleString()} ·{' '}
                                   {formatPercent((row.event_count / max) * 100)} of top

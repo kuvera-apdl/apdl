@@ -328,10 +328,22 @@ class BreakdownRequest(DateRangeRequest):
     limit: int = Field(default=20, ge=1, le=100)
 
 
-class BreakdownResponse(BaseModel):
+class BreakdownResult(StrictModel):
+    """One canonical typed scalar bucket returned by a breakdown query."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    selector: str
+    property_type: Literal["string", "integer", "float", "boolean"]
+    property_value: str
+    event_count: int = Field(..., ge=0)
+    unique_users: int = Field(..., ge=0)
+
+
+class BreakdownResponse(StrictModel):
     selector: str
     property: str
-    results: list[dict[str, Any]]
+    results: list[BreakdownResult]
 
 
 # ---------------------------------------------------------------------------

@@ -134,7 +134,13 @@ ORDER BY bucket
 
 
 def build_event_breakdown_query(selector: EventSelector, params: dict[str, Any]) -> str:
-    """Build a property breakdown query for one selector."""
+    """Build a typed scalar property breakdown query for one selector.
+
+    ClickHouse's JSON functions return default values when the requested value
+    has the wrong type.  Classify each value first so strings, integers,
+    floating-point numbers, and booleans cannot collapse into the same bucket.
+    Missing values, nulls, arrays, and objects are deliberately excluded.
+    """
     params["selector_label"] = selector_label(selector)
     condition = build_selector_condition(
         selector,
@@ -146,16 +152,51 @@ def build_event_breakdown_query(selector: EventSelector, params: dict[str, Any])
     identity_join = identity_alias_join_sql("e", "actor_identity")
     return f"""
 SELECT
-    %(selector_label)s AS selector,
-    JSONExtractString(e.properties, %(property)s) AS property_value,
+    selector,
+    property_type,
+    property_value,
     count() AS event_count,
-    uniqExactIf({actor}, {actor} != '') AS unique_users
-FROM events AS e FINAL
-{identity_join}
-WHERE e.project_id = %(project_id)s
-  AND e.event_date BETWEEN %(start_date)s AND %(end_date)s
-  AND {condition}
-GROUP BY property_value
+    uniqExactIf(actor_id, actor_id != '') AS unique_users
+FROM (
+    SELECT
+        selector,
+        actor_id,
+        multiIf(
+            property_json_type = 'String', 'string',
+            property_json_type IN ('Int64', 'UInt64'), 'integer',
+            property_json_type = 'Double', 'float',
+            property_json_type = 'Bool', 'boolean',
+            ''
+        ) AS property_type,
+        multiIf(
+            property_json_type = 'String',
+                JSONExtractString(properties, %(property)s),
+            property_json_type = 'Int64',
+                toString(JSONExtractInt(properties, %(property)s)),
+            property_json_type = 'UInt64',
+                toString(JSONExtractUInt(properties, %(property)s)),
+            property_json_type = 'Double',
+                toString(JSONExtractFloat(properties, %(property)s)),
+            property_json_type = 'Bool',
+                if(JSONExtractBool(properties, %(property)s), 'true', 'false'),
+            ''
+        ) AS property_value
+    FROM (
+        SELECT
+            %(selector_label)s AS selector,
+            e.properties AS properties,
+            JSONType(e.properties, %(property)s) AS property_json_type,
+            {actor} AS actor_id
+        FROM events AS e FINAL
+        {identity_join}
+        WHERE e.project_id = %(project_id)s
+          AND e.event_date BETWEEN %(start_date)s AND %(end_date)s
+          AND {condition}
+    )
+    WHERE property_json_type
+        IN ('String', 'Int64', 'UInt64', 'Double', 'Bool')
+)
+GROUP BY selector, property_type, property_value
 ORDER BY event_count DESC
 LIMIT %(limit)s
 """

@@ -296,7 +296,7 @@ per-flag audit history — see the [config service README](services/config/READM
 |---|---|---|
 | `POST` | `/v1/query/events/count` | Count one or more event selectors |
 | `POST` | `/v1/query/events/timeseries` | Time-bucketed counts for one selector |
-| `POST` | `/v1/query/events/breakdown` | Property breakdown for one selector |
+| `POST` | `/v1/query/events/breakdown` | Typed scalar property breakdown for one selector |
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
 | `POST` | `/v1/query/cohort` | Cohort analysis |
 | `POST` | `/v1/query/retention` | Window-relative retention (`first_match_in_window`) |
@@ -366,6 +366,11 @@ Breakdown of filtered clicks:
   "limit": 20
 }
 ```
+
+Breakdown rows include `property_type` (`string`, `integer`, `float`, or
+`boolean`) plus a canonical string `property_value`. Type is part of the bucket,
+so values such as the integer `1` and string `"1"` remain distinct. Missing,
+null, array, and object properties are excluded.
 
 Page/click-path funnel:
 

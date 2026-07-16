@@ -128,15 +128,38 @@ describe('response schemas (exact SQL alias mirrors)', () => {
       breakdownResponseSchema.safeParse({
         selector: '$click',
         property: 'href',
-        results: [{ selector: '$click', property_value: '/pricing', event_count: 7, unique_users: 6 }],
+        results: [
+          {
+            selector: '$click',
+            property_type: 'string',
+            property_value: '/pricing',
+            event_count: 7,
+            unique_users: 6,
+          },
+        ],
       }).success,
     ).toBe(true)
-    // Aliased/wrong row keys must fail (Strict Schema Rule).
+    // Missing type and aliased/wrong row keys must fail (Strict Schema Rule).
     expect(
       breakdownResponseSchema.safeParse({
         selector: '$click',
         property: 'href',
         results: [{ selector: '$click', value: '/pricing', event_count: 7, unique_users: 6 }],
+      }).success,
+    ).toBe(false)
+    expect(
+      breakdownResponseSchema.safeParse({
+        selector: '$click',
+        property: 'href',
+        results: [
+          {
+            selector: '$click',
+            property_type: 'number',
+            property_value: '1',
+            event_count: 7,
+            unique_users: 6,
+          },
+        ],
       }).success,
     ).toBe(false)
   })

@@ -19,6 +19,7 @@ from app.clickhouse.selectors import selector_label
 from app.models.schemas import (
     BreakdownRequest,
     BreakdownResponse,
+    BreakdownResult,
     EventCatalogRequest,
     EventCatalogResponse,
     EventCountRequest,
@@ -120,7 +121,7 @@ async def event_breakdown(
     return BreakdownResponse(
         selector=selector_label(body.selector),
         property=body.property,
-        results=rows,
+        results=[BreakdownResult.model_validate(row) for row in rows],
     )
 
 

@@ -198,10 +198,11 @@ export const timeseriesResponseSchema = z
 
 const breakdownRowSchema = z
   .object({
-    selector: z.string(),
+    selector: z.string().min(1),
+    property_type: z.enum(['string', 'integer', 'float', 'boolean']),
     property_value: z.string(),
-    event_count: z.number(),
-    unique_users: z.number(),
+    event_count: z.number().int().nonnegative(),
+    unique_users: z.number().int().nonnegative(),
   })
   .strict()
 

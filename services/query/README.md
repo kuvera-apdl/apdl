@@ -26,7 +26,7 @@ credential; health and readiness probes remain public.
 |--------|------|-------------|
 | `POST` | `/v1/query/events/count` | Event + unique-user counts for 1–20 selectors |
 | `POST` | `/v1/query/events/timeseries` | Time-bucketed counts (`1 HOUR`/`1 DAY`/`1 WEEK`/`1 MONTH`) |
-| `POST` | `/v1/query/events/breakdown` | Top property values for a selector |
+| `POST` | `/v1/query/events/breakdown` | Top typed scalar property values for a selector |
 | `POST` | `/v1/query/funnel` | N-step funnel (2–20 steps, 1–90 day window) |
 | `POST` | `/v1/query/cohort` | Compare a metric across values of a user property |
 | `POST` | `/v1/query/retention` | Window-relative day/week retention (`first_match_in_window`) |
@@ -51,6 +51,17 @@ plus up to 25 property filters, AND-combined. Supported operators: `eq`, `neq`,
 
 See the [main README](../../README.md) for more selector examples across
 endpoints.
+
+## Typed property breakdowns
+
+Property breakdowns preserve JSON scalar types instead of coercing every value
+through a string extractor. Each result includes a required `property_type` of
+`string`, `integer`, `float`, or `boolean`, and a canonical string
+`property_value`. Strings retain their contents, signed and unsigned integers
+use their decimal representation, floats use ClickHouse's canonical decimal
+representation, and booleans are `true` or `false`. Rows are grouped by both
+fields, so an integer `1`, a floating-point `1`, and a string `"1"` remain
+distinct. Missing properties, JSON nulls, arrays, and objects are omitted.
 
 ## Actor identity and totals
 
