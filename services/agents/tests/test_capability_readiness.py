@@ -25,7 +25,18 @@ async def test_capability_report_separates_configuration_and_reachability(
         probed_urls.append(url)
         return "config.test" not in url
 
+    async def fake_codegen_probe(client, *, configured, url):
+        del client
+        assert configured is True
+        probed_urls.append(url)
+        return {
+            "configured": True,
+            "reachable": True,
+            "changeset_creation": "available",
+        }
+
     monkeypatch.setattr(readiness, "_probe_endpoint", fake_probe)
+    monkeypatch.setattr(readiness, "_probe_codegen_readiness", fake_codegen_probe)
 
     report = await readiness.capability_report()
 
@@ -41,7 +52,11 @@ async def test_capability_report_separates_configuration_and_reachability(
     }
     assert capabilities["query"] == {"configured": True, "reachable": True}
     assert capabilities["config"] == {"configured": True, "reachable": False}
-    assert capabilities["codegen"] == {"configured": True, "reachable": True}
+    assert capabilities["codegen"] == {
+        "configured": True,
+        "reachable": True,
+        "changeset_creation": "available",
+    }
     assert len(probed_urls) == 4
     assert "openai-secret" not in str(report)
 
@@ -56,3 +71,50 @@ async def test_endpoint_probe_requires_success_status(status_code, expected) -> 
         reachable = await readiness._probe_endpoint(client, "http://service.test/ready")
 
     assert reachable is expected
+
+
+@pytest.mark.asyncio
+async def test_codegen_probe_distinguishes_disabled_from_unavailable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "status": "ready",
+                "service": "apdl-codegen",
+                "capabilities": {"changeset_creation": "disabled"},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        disabled = await readiness._probe_codegen_readiness(
+            client,
+            configured=True,
+            url="http://codegen.test/ready",
+        )
+
+    assert disabled == {
+        "configured": True,
+        "reachable": True,
+        "changeset_creation": "disabled",
+    }
+
+    malformed_transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            request=request,
+            json={"status": "ready"},
+        )
+    )
+    async with httpx.AsyncClient(transport=malformed_transport) as client:
+        unavailable = await readiness._probe_codegen_readiness(
+            client,
+            configured=True,
+            url="http://codegen.test/ready",
+        )
+
+    assert unavailable == {
+        "configured": True,
+        "reachable": False,
+        "changeset_creation": "unavailable",
+    }

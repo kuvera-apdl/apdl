@@ -27,12 +27,18 @@ from app.graphs.experiment_design import (
     stage_experiment_draft,
     treatment_changeset_task,
 )
+from app.readiness import CodegenChangesetCapability
 from app.store.experiments import record_designed_experiment
 from app.store.mutation_quotas import (
     MutationQuotaExceededError,
     reserve_mutation,
 )
-from app.store.proposals import enqueue_proposals, get_proposal, mark_failed, mark_implemented
+from app.store.proposals import (
+    enqueue_proposals,
+    get_proposal,
+    mark_failed,
+    mark_implemented,
+)
 from app.tools.code import open_changeset
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,7 @@ _GATE_RESULT_KEY: dict[str, str] = {
     "feature_proposal": "feature_proposals",
     "code_implementation": "changesets",
 }
+_CODEGEN_EFFECT_TYPES = frozenset({"open_treatment_changeset", "open_code_changeset"})
 
 
 class ApprovalCommandError(RuntimeError):
@@ -71,6 +78,17 @@ class ApprovalGateConflictError(ApprovalCommandError):
 
 class ApprovalDecisionError(ApprovalCommandError):
     """Decisions do not exactly cover the persisted canonical gate items."""
+
+
+class ApprovalCapabilityError(ApprovalCommandError):
+    """An approved item requires a capability the deployment cannot provide."""
+
+    def __init__(self, capability: CodegenChangesetCapability) -> None:
+        self.capability = capability
+        super().__init__(
+            "Codegen changeset creation is "
+            f"{capability}; reject code-backed items or enable a publication stage."
+        )
 
 
 class RetryableApprovalEffectError(RuntimeError):
@@ -303,7 +321,10 @@ def _plan_effects(
                         effect_type="record_experiment_rejection",
                         effect_order=order,
                         depends_on_effect_id=None,
-                        payload={**item, "rejection_reason": "approved item was not actionable"},
+                        payload={
+                            **item,
+                            "rejection_reason": "approved item was not actionable",
+                        },
                         quota_action_type=None,
                     )
                 )
@@ -449,11 +470,14 @@ async def enqueue_approval_command(
     run_id: str,
     project_id: str,
     actor_credential_id: str,
+    codegen_changeset_capability: CodegenChangesetCapability,
     decisions: tuple[ApprovalDecision, ...],
     comment: str | None,
     actor_user_id: str | None = None,
 ) -> ApprovalCommandView:
     """Validate and atomically enqueue the exact currently persisted gate."""
+    if codegen_changeset_capability not in {"available", "disabled", "unavailable"}:
+        raise ValueError("Invalid Codegen changeset capability")
     request_sha256 = _approval_request_sha256(run_id, decisions, comment)
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -501,11 +525,15 @@ async def enqueue_approval_command(
 
             phase = str(run["phase"] or "")
             if not phase.endswith("_approval"):
-                raise ApprovalGateConflictError(f"Run {run_id} has no canonical gate phase")
+                raise ApprovalGateConflictError(
+                    f"Run {run_id} has no canonical gate phase"
+                )
             gate_agent = phase.removesuffix("_approval")
             produces = _GATE_RESULT_KEY.get(gate_agent)
             if produces is None:
-                raise ApprovalGateConflictError(f"Unsupported approval gate {gate_agent!r}")
+                raise ApprovalGateConflictError(
+                    f"Unsupported approval gate {gate_agent!r}"
+                )
 
             result = await conn.fetchrow(
                 """
@@ -539,7 +567,9 @@ async def enqueue_approval_command(
             items_by_id: dict[str, dict[str, Any]] = {}
             for raw_item in raw_items:
                 if not isinstance(raw_item, dict):
-                    raise ApprovalGateConflictError("Persisted gate items must be objects")
+                    raise ApprovalGateConflictError(
+                        "Persisted gate items must be objects"
+                    )
                 item = dict(raw_item)
                 item_id = _canonical_item_id(gate_agent, item)
                 _validate_gate_item_contract(gate_agent, item)
@@ -570,6 +600,10 @@ async def enqueue_approval_command(
             rejected_count = len(decisions) - approved_count
             resume_status = "approved" if approved_count else "rejected"
             effects = _plan_effects(gate_agent, items_by_id, decisions)
+            if codegen_changeset_capability != "available" and any(
+                effect.effect_type in _CODEGEN_EFFECT_TYPES for effect in effects
+            ):
+                raise ApprovalCapabilityError(codegen_changeset_capability)
 
             command = await conn.fetchrow(
                 """

@@ -15,6 +15,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import asyncpg
 from fastapi import Depends, FastAPI
@@ -77,6 +78,8 @@ _ORPHAN_ERROR = (
 )
 
 logger = logging.getLogger(__name__)
+
+ChangesetCreationCapability = Literal["available", "disabled"]
 
 
 def _make_editor(stage: RolloutStage | None = None) -> Editor:
@@ -449,18 +452,39 @@ async def health_check():
 
 @app.get("/ready")
 async def readiness_check():
-    """Readiness probe — verifies PostgreSQL connectivity.
+    """Readiness probe with the canonical changeset-creation capability.
 
     Returns 503 (not 200-with-a-sad-body) on failure: orchestrators and load
-    balancers key on the status code, not the payload.
+    balancers key on the status code, not the payload.  Process readiness and
+    publication authority are deliberately separate: offline/shadow Codegen is
+    healthy, but callers must not offer or enqueue changeset mutations.
     """
+    stage = getattr(app.state, "codegen_rollout_stage", None)
+    if not isinstance(stage, RolloutStage):
+        stage = codegen_rollout_stage()
+    changeset_creation: ChangesetCreationCapability = (
+        "disabled"
+        if stage in {RolloutStage.offline, RolloutStage.shadow}
+        else "available"
+    )
+    capabilities = {"changeset_creation": changeset_creation}
     try:
         pool: asyncpg.Pool = app.state.pg_pool
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        return {"status": "ready"}
+        return {
+            "status": "ready",
+            "service": "apdl-codegen",
+            "capabilities": capabilities,
+        }
     except Exception as exc:
         logger.error("Readiness check failed: %s", exc)
         return JSONResponse(
-            status_code=503, content={"status": "not_ready", "error": str(exc)}
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "service": "apdl-codegen",
+                "capabilities": capabilities,
+                "error": str(exc),
+            },
         )
