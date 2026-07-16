@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request, Response
 
 from app.auth import require_role
 from app.client_ip import client_ip
-from app.middleware.rate_limit import check_rate_limit, request_cost
+from app.middleware.rate_limit import admit_bytes, admit_events, admit_request
 from app.privacy import sanitize_auto_capture_events
 from app.streaming.redis_producer import (
     EVENT_STREAM_RETRY_AFTER_SECONDS,
@@ -31,10 +31,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class _RequestBodyTooLarge(Exception):
+    """Raised as soon as an incrementally read body crosses the hard bound."""
+
+
+async def _read_bounded_body(request: Request) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_REQUEST_BYTES:
+            raise _RequestBodyTooLarge
+        body.extend(chunk)
+    return bytes(body)
+
+
 @router.post("/v1/events", status_code=202)
 async def ingest_events(request: Request):
     principal = require_role(request, "events:write")
     project_id = principal.project_id
+    redis = request.app.state.redis
+
+    # Charge authenticated traffic before Content-Length checks, body reads,
+    # privacy processing, or schema work. Invalid requests consume this budget.
+    rate_result = await admit_request(redis, principal, request)
+    if rate_result is not None:
+        return rate_result
 
     content_length = request.headers.get("content-length")
     if content_length is not None:
@@ -49,15 +69,22 @@ async def ingest_events(request: Request):
             return _error_response(400, "bad_request", "Invalid Content-Length")
 
     try:
-        raw_body = await request.body()
-    except Exception:
-        return _error_response(400, "bad_request", "Could not read request body")
-    if len(raw_body) > MAX_REQUEST_BYTES:
+        raw_body = await _read_bounded_body(request)
+    except _RequestBodyTooLarge:
         return _error_response(
             413,
             "payload_too_large",
             f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
         )
+    except Exception:
+        return _error_response(400, "bad_request", "Could not read request body")
+
+    # Preserve byte-proportional abuse protection after the hard body bound,
+    # but before JSON parsing, privacy processing, or schema validation.
+    rate_result = await admit_bytes(redis, principal, request, len(raw_body))
+    if rate_result is not None:
+        return rate_result
+
     try:
         body = parse_canonical_json(raw_body)
     except CanonicalJSONError as exc:
@@ -95,13 +122,7 @@ async def ingest_events(request: Request):
         )
 
     events = body["events"]
-    redis = request.app.state.redis
-    rate_result = await check_rate_limit(
-        redis,
-        project_id,
-        request,
-        cost=request_cost(len(events), len(raw_body)),
-    )
+    rate_result = await admit_events(redis, principal, request, events)
     if rate_result is not None:
         return rate_result
 

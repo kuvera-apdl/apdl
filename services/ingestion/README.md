@@ -7,7 +7,7 @@ authenticates and validates them, and enqueues them onto Redis Streams for the
 
 ## What it does
 
-Each `POST /v1/events` request goes through four stages:
+Each `POST /v1/events` request goes through six stages:
 
 1. **Auth** — verifies the `x-api-key` header against the hashed PostgreSQL
    credential registry, then derives project authority and roles from that
@@ -17,12 +17,20 @@ Each `POST /v1/events` request goes through four stages:
    kind/prefix are checked for consistency but never trusted as authority.
    Invalid, expired, or revoked keys return 401; keys without `events:write`
    return 403. See [authentication](../../docs/authentication.md).
-2. **Rate limit** — a Redis-backed token bucket shared by every process
-   (capacity 1000, refill 100 units/s). Each request costs one unit per event
-   plus one unit per KiB received. Exhausted buckets →
-   `429 {"error": "rate_limited"}` with `Retry-After`, `X-RateLimit-Limit`, and
-   `X-RateLimit-Remaining` headers; an unavailable quota authority fails closed.
-3. **Validation** — the batch must be exactly `{"events": [...]}` with 1–100
+2. **Early request admission** — immediately after authentication and role
+   checks, one Redis Lua operation checks and debits the global, project,
+   credential, and canonical client-IP request buckets together. This happens
+   before `Content-Length` inspection, body reads, privacy processing, and
+   schema work, so malformed authenticated traffic consumes quota. No bucket
+   is changed unless every bucket can pay the request cost. Redis keys contain
+   hashes of credential IDs and IP addresses, never their raw values.
+3. **Bounded body and byte admission** — `Content-Length` and the body itself
+   are capped at 512 KiB. After a body passes that hard bound, but before JSON
+   parsing, privacy processing, or schema work, another atomic Lua operation
+   charges `max(1, ceil(bytes / 1024))` units across global, project,
+   credential, and client-IP byte buckets. A fresh browser bucket accepts one
+   maximum-sized request while remaining subordinate to the project bucket.
+4. **Validation** — the batch must be exactly `{"events": [...]}` with 1–100
    events. Every event requires `event`, `type`, a canonical RFC3339 UTC
    `timestamp` (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`),
    nested `context`, a stable `message_id`, and at least one of `user_id` or
@@ -39,7 +47,17 @@ Each `POST /v1/events` request goes through four stages:
    `400 {"error": "validation_failed",
    "errors": [{"field", "message"}, ...]}` with every error collected, not
    just the first.
-4. **Bounded durable admission** — each event is enriched with `server_timestamp`, client `ip`
+5. **Hierarchical event admission** — after strict validation, one atomic Lua
+   operation checks and debits global, project, credential, client-IP, and
+   identity buckets. Identity costs are aggregated within the batch by
+   `anonymous_id` (falling back to `user_id`); the identity hash includes the
+   authenticated project, so tenants never share identity quota. Only hashes
+   reach Redis. Rejection of any child leaves parent and sibling balances
+   unchanged. Exhausted buckets →
+   `429 {"error": "rate_limited"}` with `Retry-After`, `X-RateLimit-Limit`, and
+   `X-RateLimit-Remaining` headers; an unavailable quota authority fails closed
+   with `503 {"error": "service_unavailable"}` before any stream publication.
+6. **Bounded durable admission** — each event is enriched with `server_timestamp`, client `ip`
    (the socket peer, or one canonical `X-Forwarded-For` address from a
    configured trusted proxy), and `project_id`, then published as compact JSON
    to the Redis Stream `events:raw:{project_id}`. One Lua operation checks the
@@ -51,6 +69,19 @@ Each `POST /v1/events` request goes through four stages:
    `202 {"accepted": N}` only after the complete atomic operation. Any known or
    ambiguous operation failure returns `503`; clients retry the same stable
    `message_id` values and ClickHouse deduplicates them.
+
+The three quota stages use these exact capacity/refill-per-second pairs:
+
+| Stage (cost unit) | Global | Project | Confidential credential | Browser credential | IP | Identity |
+|---|---:|---:|---:|---:|---:|---:|
+| Request (1/request) | 100,000 / 10,000 | 1,000 / 100 | 1,000 / 100 | 200 / 20 | 500 / 50 | — |
+| Byte (started KiB) | 100,000 / 10,000 | 1,000 / 100 | 1,000 / 100 | 512 / 20 | 1,000 / 50 | — |
+| Event (1/event) | 100,000 / 10,000 | 1,000 / 100 | 1,000 / 100 | 200 / 20 | 500 / 50 | 200 / 20 |
+
+Each stage is one check-all/debit-all Redis operation: a rejection at any level
+does not debit its parent or siblings. Every quota rejection uses the same
+retryable `429` headers above; every Redis quota-authority error fails closed as
+`503`.
 
 ## API
 

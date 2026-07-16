@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.auth import PostgresAuthenticator, authenticate_request
+from app.auth import (
+    CredentialKind,
+    PostgresAuthenticator,
+    Principal,
+    authenticate_request,
+)
 
 
 API_KEY = "proj_verifiedproject_0123456789abcdef0123456789abcdef"
@@ -76,6 +81,7 @@ async def test_authentication_derives_authority_from_stored_record():
     assert principal.project_id == "verifiedproject"
     assert principal.credential_id == "credential-1"
     assert principal.roles == frozenset({"query:read", "events:write"})
+    assert principal.credential_kind is CredentialKind.CONFIDENTIAL
     query, args = pool.connection.calls[0]
     assert "WHERE key_hash = $1" in query
     assert "project_id =" not in query
@@ -97,6 +103,17 @@ async def test_browser_credential_is_accepted_at_its_exact_role_ceiling():
     assert principal is not None
     assert principal.project_id == "verifiedproject"
     assert principal.roles == frozenset({"events:write", "config:read"})
+    assert principal.credential_kind is CredentialKind.BROWSER
+
+
+def test_principal_without_verified_kind_gets_browser_quota():
+    principal = Principal(
+        credential_id="legacy-test-principal",
+        project_id="verifiedproject",
+        roles=frozenset({"events:write"}),
+    )
+
+    assert principal.credential_kind is CredentialKind.BROWSER
 
 
 @pytest.mark.asyncio
