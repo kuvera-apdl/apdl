@@ -26,6 +26,7 @@ from app.models.schemas import (
     ExperimentAnalysisResponse,
     ExperimentArmResult,
     ExperimentComparison,
+    ProjectId,
 )
 
 router = APIRouter(prefix="/v1/query", tags=["experiments"])
@@ -300,7 +301,7 @@ async def experiment_results(
     experiment_key: str = Path(..., pattern=_RESOURCE_KEY_PATTERN),
     *,
     request: Request,
-    project_id: str | None = Query(None, min_length=1, max_length=64),
+    project_id: ProjectId | None = Query(None),
 ) -> ExperimentAnalysisResponse:
     """Analyze one Config-owned experiment using first-exposure attribution."""
     _reject_unknown_query_parameters(request)

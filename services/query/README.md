@@ -20,7 +20,8 @@ against ClickHouse over FastAPI (port **8082**).
 
 Every analytics route requires a registered `X-API-Key` credential with
 `query:read`. The requested `project_id` must match the project on the verified
-credential; health and readiness probes remain public.
+credential and must be a 1–64 character ASCII alphanumeric string; values are
+never coerced. Health and readiness probes remain public.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -82,7 +83,7 @@ curl -s http://localhost:8082/v1/query/events/count \
   -H 'X-API-Key: proj_myproject_<secret>' \
   -H 'Content-Type: application/json' \
   -d '{
-    "project_id": "my-project",
+    "project_id": "myproject",
     "start_date": "2026-05-01",
     "end_date": "2026-05-31",
     "selectors": [

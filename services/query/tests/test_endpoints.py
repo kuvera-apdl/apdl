@@ -389,7 +389,7 @@ async def test_event_count_rejects_removed_event_names_field(client):
 
 
 @pytest.mark.asyncio
-async def test_event_count_denies_numeric_project_outside_authenticated_tenant(client):
+async def test_event_count_rejects_numeric_project_without_coercion(client):
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
     resp = await client.post("/v1/query/events/count", json={
@@ -399,7 +399,7 @@ async def test_event_count_denies_numeric_project_outside_authenticated_tenant(c
         "selectors": [{"event_name": "click", "filters": []}],
     })
 
-    assert resp.status_code == 403
+    assert resp.status_code == 422
     app.state.ch_client.execute.assert_not_awaited()
 
 
@@ -1432,8 +1432,31 @@ async def test_experiment_project_assertion_is_tenant_scoped(client, monkeypatch
 
     resp = await client.get(
         "/v1/query/experiment/exp_123",
-        params={"project_id": "another-project"},
+        params={"project_id": "anotherproject"},
     )
 
     assert resp.status_code == 403
     fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "project_id",
+    ["another-project", " anotherproject", "another_project", "a" * 65],
+)
+async def test_experiment_rejects_noncanonical_project_assertion(
+    client,
+    monkeypatch,
+    project_id,
+):
+    fetch = AsyncMock(return_value=_experiment_metadata())
+    monkeypatch.setattr(experiments, "fetch_experiment_analysis", fetch)
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": project_id},
+    )
+
+    assert resp.status_code == 422
+    fetch.assert_not_awaited()
+    app.state.ch_client.execute.assert_not_awaited()

@@ -20,6 +20,11 @@ export const eventFilterOperatorSchema = z.enum([
 ])
 
 export const PROPERTY_NAME_PATTERN = /^[A-Za-z0-9_$][A-Za-z0-9_.$:-]{0,127}$/
+export const PROJECT_ID_PATTERN = /^[A-Za-z0-9]{1,64}$/
+
+export const projectIdSchema = z
+  .string()
+  .regex(PROJECT_ID_PATTERN, '1-64 ASCII alphanumeric characters')
 
 const propertyNameSchema = z
   .string()
@@ -95,7 +100,7 @@ export const timeIntervalSchema = z.enum(['1 HOUR', '1 DAY', '1 WEEK', '1 MONTH'
 
 export const eventCountRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     selectors: z.array(eventSelectorSchema).min(1).max(20),
@@ -105,7 +110,7 @@ export const eventCountRequestSchema = z
 
 export const timeseriesRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     selector: eventSelectorSchema,
@@ -116,7 +121,7 @@ export const timeseriesRequestSchema = z
 
 export const breakdownRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     selector: eventSelectorSchema,
@@ -128,7 +133,7 @@ export const breakdownRequestSchema = z
 
 export const funnelRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     steps: z.array(eventSelectorSchema).min(2).max(20),
@@ -139,7 +144,7 @@ export const funnelRequestSchema = z
 
 export const retentionRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     cohort_selector: eventSelectorSchema,
@@ -152,7 +157,7 @@ export const retentionRequestSchema = z
 
 export const cohortRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     cohort_property: propertyNameSchema,
@@ -279,7 +284,7 @@ export const cohortResponseSchema = z
 
 export const eventCatalogRequestSchema = z
   .object({
-    project_id: z.string().min(1),
+    project_id: projectIdSchema,
     start_date: dateSchema,
     end_date: dateSchema,
     limit: z.number().int().min(1).max(1000),

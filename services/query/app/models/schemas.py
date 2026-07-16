@@ -18,21 +18,26 @@ from pydantic import (
 )
 
 
-def _coerce_project_id(value: Any) -> str:
-    if value is None:
-        raise ValueError("project_id is required")
-    return str(value)
-
-
-ProjectId = Annotated[str, BeforeValidator(_coerce_project_id)]
+PROJECT_ID_PATTERN = r"^[A-Za-z0-9]{1,64}$"
+ProjectId = Annotated[
+    str,
+    Field(
+        strict=True,
+        min_length=1,
+        max_length=64,
+        pattern=PROJECT_ID_PATTERN,
+    ),
+]
 
 
 class StrictModel(BaseModel):
     """Base model for strict public request contracts."""
 
     model_config = ConfigDict(extra="forbid")
-    
+
+
 _PROPERTY_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$:-]{0,127}$")
+
 
 def _validate_property_name(value: Any) -> str:
     if not isinstance(value, str):
@@ -52,6 +57,7 @@ PropertyName = Annotated[str, BeforeValidator(_validate_property_name)]
 # Shared enums
 # ---------------------------------------------------------------------------
 
+
 class TimeInterval(str, Enum):
     """Supported time-bucket intervals for timeseries queries."""
     hour = "1 HOUR"
@@ -70,6 +76,8 @@ class GuardrailThreshold(str, Enum):
     """Supported feature-flag guardrail thresholds."""
     two_x_baseline = "2x_baseline"
     at_least_one = "at_least_one"
+
+
 class EventFilterOperator(str, Enum):
     """Supported property filter operators for event selectors."""
     eq = "eq"
@@ -88,6 +96,7 @@ class EventFilterOperator(str, Enum):
 # ---------------------------------------------------------------------------
 # Shared base with date-range validation
 # ---------------------------------------------------------------------------
+
 
 class DateRangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")

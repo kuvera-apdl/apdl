@@ -71,6 +71,14 @@ describe('request schemas', () => {
       eventCountRequestSchema.safeParse({ ...base, start_date: '2026-06-11' }).success,
     ).toBe(false)
     expect(eventCountRequestSchema.safeParse({ ...base, selectors: [] }).success).toBe(false)
+    expect(eventCountRequestSchema.safeParse({ ...base, project_id: 'A'.repeat(64) }).success).toBe(
+      true,
+    )
+    for (const projectId of [1, '', 'demo-project', 'demo_project', ' demo', 'A'.repeat(65)]) {
+      expect(eventCountRequestSchema.safeParse({ ...base, project_id: projectId }).success).toBe(
+        false,
+      )
+    }
   })
 
   test('funnel requires 2–20 steps and window 1–90', () => {
