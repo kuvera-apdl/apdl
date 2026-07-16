@@ -105,9 +105,7 @@ test('creates a project from a zero-project workspace and associates it with the
           'config:evaluate',
           'query:read',
           'agents:read',
-          'agents:run',
-          'agents:manage',
-          'agents:approve',
+          'credentials:manage',
         ],
       },
     ],
@@ -120,6 +118,7 @@ test('creates a project from a zero-project workspace and associates it with the
       csrfHeader = request.headers.get('x-csrf-token')
       return HttpResponse.json(withProject, { status: 201 })
     }),
+    http.get('*/api/projects/firstproject/credentials', () => HttpResponse.json([])),
   )
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -140,7 +139,7 @@ test('creates a project from a zero-project workspace and associates it with the
   await userEvent.type(screen.getByLabelText('Project ID'), 'firstproject')
   await userEvent.click(screen.getByRole('button', { name: 'Create project' }))
 
-  expect(await screen.findByText('firstproject')).toBeInTheDocument()
+  expect((await screen.findAllByText('firstproject')).length).toBeGreaterThanOrEqual(1)
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })
   expect(csrfHeader).toBe('project-csrf')
