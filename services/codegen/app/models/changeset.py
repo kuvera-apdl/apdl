@@ -118,6 +118,11 @@ class ChangesetCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1)
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$",
+    )
     task: TaskSpec
     run_id: str | None = None
     base_branch: str | None = None

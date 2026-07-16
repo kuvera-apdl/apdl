@@ -7,6 +7,7 @@ a row-locked transaction so concurrent updates cannot corrupt the status.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -50,6 +51,34 @@ _ACTIVE_STATUSES: tuple[ChangesetStatus, ...] = (
     ChangesetStatus.editing,
     ChangesetStatus.pushing,
 )
+
+
+class ChangesetIdempotencyConflict(ValueError):
+    """Raised when one key is reused for a different immutable request."""
+
+
+def changeset_request_sha256(
+    *,
+    project_id: str,
+    run_id: str | None,
+    base_branch: str | None,
+    task: dict[str, Any],
+) -> str:
+    """Hash the exact canonical client intent with JSON types preserved."""
+    canonical = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "base_branch": base_branch,
+        "task": TaskSpec.model_validate(task).model_dump(mode="json"),
+    }
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _prompts_from_row(row: asyncpg.Record) -> list[dict[str, Any]]:
@@ -221,52 +250,142 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     )
 
 
+def _assert_idempotency_request(row: asyncpg.Record, request_sha256: str) -> None:
+    if str(row["idempotency_request_sha256"]) != request_sha256:
+        raise ChangesetIdempotencyConflict(
+            "Idempotency key is already bound to a different canonical request payload"
+        )
+
+
+async def get_idempotent_changeset(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
+) -> Changeset | None:
+    """Resolve an accepted request before mutable creation preconditions."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM codegen_changesets
+            WHERE project_id = $1 AND idempotency_key = $2
+            """,
+            project_id,
+            idempotency_key,
+        )
+    if row is None:
+        return None
+    _assert_idempotency_request(row, idempotency_request_sha256)
+    return _row_to_changeset(row)
+
+
+async def get_idempotent_retry_changeset(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str,
+    retry_of_changeset_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
+) -> Changeset | None:
+    """Resolve the canonical same-tenant retry child before mutable policy."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM codegen_changesets
+            WHERE project_id = $1 AND idempotency_key = $2
+            """,
+            project_id,
+            idempotency_key,
+        )
+    if row is None:
+        return None
+    if str(row["retry_of_changeset_id"] or "") != retry_of_changeset_id:
+        raise ChangesetIdempotencyConflict(
+            "Idempotency key is already bound to a different retry lineage"
+        )
+    _assert_idempotency_request(row, idempotency_request_sha256)
+    return _row_to_changeset(row)
+
+
 async def create_changeset(
     pool: asyncpg.Pool,
     *,
     changeset_id: str,
     project_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
     repository_target: RepositoryTarget,
     tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
     effective_safety_policy_sha256: str | None = None,
-) -> Changeset:
-    """Insert queued work with an immutable, grant-verified repository target."""
+) -> tuple[Changeset, bool]:
+    """Atomically create or return one immutable request for a tenant key.
+
+    The unique ``(project_id, idempotency_key)`` database boundary serializes
+    concurrent callers. Only the caller whose insert succeeds receives
+    ``created=True`` and may enqueue the downstream job.
+    """
     if repository_target.project_id != project_id:
         raise ValueError("Changeset project does not match its repository grant")
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO codegen_changesets
-                (changeset_id, project_id, run_id, status, base_branch, task,
-                 tenant_policy_snapshot, effective_safety_policy_sha256,
-                 repository_grant_id, repository_id,
-                 repository_installation_id, repository_full_name,
-                 repository_target_quarantined)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8,
-                    $9, $10, $11, $12, false)
-            RETURNING *
-            """,
-            changeset_id,
-            project_id,
-            run_id,
-            ChangesetStatus.queued.value,
-            base_branch,
-            json.dumps(task),
-            (
-                tenant_policy_snapshot.model_dump_json()
-                if tenant_policy_snapshot is not None
-                else None
-            ),
-            effective_safety_policy_sha256,
-            repository_target.grant_id,
-            repository_target.repository_id,
-            repository_target.installation_id,
-            repository_target.repository_full_name,
-        )
-    return _row_to_changeset(row)
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO codegen_changesets
+                    (changeset_id, project_id, idempotency_key,
+                     idempotency_request_sha256, run_id, status, base_branch,
+                     task, tenant_policy_snapshot,
+                     effective_safety_policy_sha256, repository_grant_id,
+                     repository_id, repository_installation_id,
+                     repository_full_name, repository_target_quarantined)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+                        $10, $11, $12, $13, $14, false)
+                ON CONFLICT (project_id, idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                changeset_id,
+                project_id,
+                idempotency_key,
+                idempotency_request_sha256,
+                run_id,
+                ChangesetStatus.queued.value,
+                base_branch,
+                json.dumps(task),
+                (
+                    tenant_policy_snapshot.model_dump_json()
+                    if tenant_policy_snapshot is not None
+                    else None
+                ),
+                effective_safety_policy_sha256,
+                repository_target.grant_id,
+                repository_target.repository_id,
+                repository_target.installation_id,
+                repository_target.repository_full_name,
+            )
+            created = row is not None
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM codegen_changesets
+                    WHERE project_id = $1 AND idempotency_key = $2
+                    FOR UPDATE
+                    """,
+                    project_id,
+                    idempotency_key,
+                )
+                if row is None:
+                    raise RuntimeError(
+                        "Changeset idempotency conflict did not resolve to an "
+                        "existing row"
+                    )
+                _assert_idempotency_request(row, idempotency_request_sha256)
+    return _row_to_changeset(row), created
 
 
 async def create_retry_changeset(
@@ -275,6 +394,8 @@ async def create_retry_changeset(
     changeset_id: str,
     retry_of_changeset_id: str,
     project_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
@@ -291,55 +412,97 @@ async def create_retry_changeset(
     if repository_target.project_id != project_id:
         raise ValueError("Changeset project does not match its repository grant")
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO codegen_changesets
-                (changeset_id, project_id, run_id, status, base_branch, task,
-                 tenant_policy_snapshot, effective_safety_policy_sha256,
-                 repository_grant_id, repository_id,
-                 repository_installation_id, repository_full_name,
-                 repository_target_quarantined, retry_of_changeset_id)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8,
-                    $9, $10, $11, $12, false, $13)
-            ON CONFLICT (retry_of_changeset_id)
-                WHERE retry_of_changeset_id IS NOT NULL
-                DO NOTHING
-            RETURNING *
-            """,
-            changeset_id,
-            project_id,
-            run_id,
-            ChangesetStatus.queued.value,
-            base_branch,
-            json.dumps(task),
-            (
-                tenant_policy_snapshot.model_dump_json()
-                if tenant_policy_snapshot is not None
-                else None
-            ),
-            effective_safety_policy_sha256,
-            repository_target.grant_id,
-            repository_target.repository_id,
-            repository_target.installation_id,
-            repository_target.repository_full_name,
-            retry_of_changeset_id,
-        )
-        if row is not None:
-            return _row_to_changeset(row), True
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO codegen_changesets
+                    (changeset_id, project_id, idempotency_key,
+                     idempotency_request_sha256, run_id, status, base_branch,
+                     task, tenant_policy_snapshot, effective_safety_policy_sha256,
+                     repository_grant_id, repository_id,
+                     repository_installation_id, repository_full_name,
+                     repository_target_quarantined, retry_of_changeset_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+                        $10, $11, $12, $13, $14, false, $15)
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """,
+                changeset_id,
+                project_id,
+                idempotency_key,
+                idempotency_request_sha256,
+                run_id,
+                ChangesetStatus.queued.value,
+                base_branch,
+                json.dumps(task),
+                (
+                    tenant_policy_snapshot.model_dump_json()
+                    if tenant_policy_snapshot is not None
+                    else None
+                ),
+                effective_safety_policy_sha256,
+                repository_target.grant_id,
+                repository_target.repository_id,
+                repository_target.installation_id,
+                repository_target.repository_full_name,
+                retry_of_changeset_id,
+            )
+            if row is not None:
+                return _row_to_changeset(row), True
 
-        row = await conn.fetchrow(
-            """
-            SELECT *
-            FROM codegen_changesets
-            WHERE retry_of_changeset_id = $1
-            """,
-            retry_of_changeset_id,
-        )
-    if row is None:
-        raise RuntimeError(
-            "Retry idempotency conflict did not resolve to an existing child"
-        )
-    return _row_to_changeset(row), False
+            lineage_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND retry_of_changeset_id = $2
+                FOR UPDATE
+                """,
+                project_id,
+                retry_of_changeset_id,
+            )
+            key_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                project_id,
+                idempotency_key,
+            )
+            if lineage_row is not None:
+                if str(lineage_row["idempotency_key"]) != idempotency_key:
+                    raise ChangesetIdempotencyConflict(
+                        "Retry lineage is already bound to a different idempotency key"
+                    )
+                _assert_idempotency_request(
+                    lineage_row, idempotency_request_sha256
+                )
+                return _row_to_changeset(lineage_row), False
+            if key_row is not None:
+                if str(key_row["retry_of_changeset_id"] or "") != retry_of_changeset_id:
+                    raise ChangesetIdempotencyConflict(
+                        "Idempotency key is already bound to a different retry lineage"
+                    )
+                _assert_idempotency_request(key_row, idempotency_request_sha256)
+                return _row_to_changeset(key_row), False
+
+            foreign_project = await conn.fetchval(
+                """
+                SELECT project_id
+                FROM codegen_changesets
+                WHERE retry_of_changeset_id = $1
+                LIMIT 1
+                """,
+                retry_of_changeset_id,
+            )
+            if foreign_project is not None:
+                raise ChangesetIdempotencyConflict(
+                    "Retry lineage is bound to a changeset in another project"
+                )
+            raise RuntimeError(
+                "Retry idempotency conflict did not resolve to an existing child"
+            )
 
 
 async def set_safety_policy_provenance(
