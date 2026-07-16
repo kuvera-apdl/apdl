@@ -38,6 +38,19 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 )
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
+_SERVICE_CREDENTIAL_ROLES = frozenset(
+    {
+        "events:write",
+        "config:read",
+        "config:write",
+        "config:evaluate",
+        "query:read",
+        "agents:read",
+        "agents:run",
+        "agents:manage",
+        "agents:approve",
+    }
+)
 StreamAuthorityState = Literal[
     "authorized",
     "session_expired",
@@ -57,6 +70,13 @@ async def _service_credential(
     configured = settings.service_api_keys.get(project_id)
     if configured is not None and not force_ephemeral:
         return configured, None
+
+    service_roles = sorted(roles & _SERVICE_CREDENTIAL_ROLES)
+    if not service_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No service roles available",
+        )
 
     raw_key = f"proj_{project_id}_{secrets.token_hex(24)}"
     credential_id = f"adminproxy-{uuid.uuid4().hex}"
@@ -84,7 +104,7 @@ async def _service_credential(
                 project_id,
                 f"proj_{project_id}_",
                 digest,
-                sorted(roles),
+                service_roles,
                 uuid.UUID(actor_user_id) if actor_user_id is not None else None,
                 _EPHEMERAL_CREDENTIAL_TTL_SECONDS,
             )

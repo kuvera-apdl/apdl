@@ -89,6 +89,7 @@ def admin_session() -> AdminSession:
                     "agents:run",
                     "agents:manage",
                     "agents:approve",
+                    "credentials:manage",
                 }
             )
         },

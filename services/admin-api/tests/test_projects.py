@@ -97,6 +97,7 @@ def test_self_registered_project_roles_are_core_only() -> None:
         "config:evaluate",
         "query:read",
         "agents:read",
+        "credentials:manage",
     )
     assert not {
         "agents:run",

@@ -228,3 +228,25 @@ async def test_override_flags_are_strict_and_validated_before_connect(
 
     with pytest.raises(SystemExit, match=message):
         await create_admin_user.provision(args)
+
+
+@pytest.mark.asyncio
+async def test_cli_can_grant_human_only_credential_management_role(monkeypatch):
+    connection = FakeConnection(
+        created_by=UUID("10000000-0000-4000-8000-000000000001"),
+        execution_authorized=False,
+    )
+    _patch_runtime(monkeypatch, connection)
+
+    await create_admin_user.provision(_args(roles=["credentials:manage"]))
+
+    membership_call = next(
+        call
+        for call in connection.calls
+        if "INSERT INTO admin_user_projects" in call[0]
+    )
+    assert membership_call[1][2] == ["credentials:manage"]
+    assert not any(
+        "INSERT INTO admin_project_execution_authorizations" in query
+        for query, _, _ in connection.calls
+    )

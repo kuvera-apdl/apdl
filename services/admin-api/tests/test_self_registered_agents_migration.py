@@ -9,6 +9,7 @@ MIGRATIONS = ROOT / "pipeline" / "postgres" / "migrations"
 MIGRATION_014 = MIGRATIONS / "014_disable_self_registered_agents.sql"
 MIGRATION_015 = MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
 MIGRATION_028 = MIGRATIONS / "028_admin_execution_authority.sql"
+MIGRATION_029 = MIGRATIONS / "029_admin_managed_credentials.sql"
 MIGRATION_RUNNER = ROOT / "pipeline" / "postgres" / "migrate.py"
 SQL_014 = MIGRATION_014.read_text(encoding="utf-8")
 SQL_015 = MIGRATION_015.read_text(encoding="utf-8")
@@ -32,6 +33,7 @@ def test_postgres_migration_sequence_includes_the_complete_execution_fence() -> 
     assert names[13] == MIGRATION_014.name
     assert names[14] == MIGRATION_015.name
     assert names[27] == MIGRATION_028.name
+    assert names[28] == MIGRATION_029.name
     assert [name[:3] for name in names] == [
         f"{version:03d}" for version in range(1, len(names) + 1)
     ]

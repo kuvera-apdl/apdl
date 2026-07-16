@@ -27,6 +27,7 @@ ROLES = frozenset(
         "agents:run",
         "agents:manage",
         "agents:approve",
+        "credentials:manage",
     }
 )
 EXECUTION_ROLES = frozenset({"agents:run", "agents:manage", "agents:approve"})

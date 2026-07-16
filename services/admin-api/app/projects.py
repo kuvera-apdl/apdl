@@ -19,6 +19,7 @@ PROJECT_CREATOR_ROLES = (
     "config:evaluate",
     "query:read",
     "agents:read",
+    "credentials:manage",
 )
 
 

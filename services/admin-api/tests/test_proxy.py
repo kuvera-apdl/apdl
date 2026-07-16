@@ -127,7 +127,10 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
     assert insert[1][1] == "demo"
     assert insert[1][2] == "proj_demo_"
     assert insert[1][3] == hashlib.sha256(seen_key.encode()).hexdigest()
-    assert insert[1][4] == sorted(admin_session.projects["demo"])
+    assert insert[1][4] == sorted(
+        admin_session.projects["demo"] - {"credentials:manage"}
+    )
+    assert "credentials:manage" not in insert[1][4]
     assert insert[1][5] is None
     assert insert[1][6] == 300
     assert "'confidential'" in insert[0]
