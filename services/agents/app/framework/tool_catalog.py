@@ -386,7 +386,9 @@ def llm_tool_schemas(tool_names: Sequence[str]) -> list[dict[str, Any]]:
 
 def _date_window(ctx: AgentContext) -> tuple[str, str]:
     end = date.today()
-    start = end - timedelta(days=ctx.time_range_days)
+    # Query's date contract is inclusive at both ends. A one-day window is
+    # therefore today only, while a seven-day window starts six days ago.
+    start = end - timedelta(days=ctx.time_range_days - 1)
     return start.isoformat(), end.isoformat()
 
 
