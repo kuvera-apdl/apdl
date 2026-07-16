@@ -39,6 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -50,10 +52,33 @@ jobs:
         working-directory: services/admin
       - run: npm run lint
         working-directory: services/admin
-      - run: npm test
+      - name: Test with coverage thresholds
+        run: npm run test:coverage
+        working-directory: services/admin
+      - name: Enforce changed-file coverage
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          COVERAGE_BASE: origin/${{ github.base_ref }}
+        run: npm run test:coverage:changed
         working-directory: services/admin
       - run: npm run build
         working-directory: services/admin
+      - name: Upload full Admin coverage
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-coverage-full
+          path: services/admin/coverage/full
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload changed-file Admin coverage
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-coverage-changed
+          path: services/admin/coverage/changed
+          if-no-files-found: error
+          retention-days: 14
 
   admin-api:
     name: Admin API
