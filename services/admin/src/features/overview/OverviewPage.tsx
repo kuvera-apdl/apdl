@@ -195,7 +195,7 @@ function LiveStreamCard() {
           </div>
         </dl>
         <p className="mt-3 text-xs text-muted-foreground">
-          Server heartbeats every 35s; the console reconnects with backoff if the stream goes
+          Server heartbeats every 15s; the console reconnects with backoff if the stream goes
           quiet for 90s.
         </p>
       </CardContent>

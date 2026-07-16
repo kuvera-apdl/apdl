@@ -276,7 +276,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
     update('sse', {
       status: 'fail',
       detail: `Stream ${live.status}${live.hasServedFlags ? '' : ', no config snapshot yet'}`,
-      hint: 'The server heartbeats every 35s — check the config service and your project access.',
+      hint: 'The server heartbeats every 15s — check the config service and your project access.',
     })
     return false
   }

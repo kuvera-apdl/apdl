@@ -9,10 +9,13 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
 - Stores canonical flag and experiment state in PostgreSQL. Each public write
   commits the record, optimistic version, audit entry, and delivery intent in
   one transaction
-- Serves the SDK bootstrap payload (`GET /v1/flags`) from Redis (60s TTL,
-  invalidated on every admin write; responses carry an `X-Cache: HIT|MISS` header)
+- Serves the SDK bootstrap payload (`GET /v1/flags`) from a project-versioned
+  Redis cache (60s TTL; stale fills cannot cross a newer invalidation; responses
+  carry an `X-Cache: HIT|MISS` header)
 - Delivers cache invalidation and `flag_update` / `experiment_update` SSE events
-  at least once from a durable PostgreSQL outbox (plus a `heartbeat` every 35s)
+  in monotonic project order from a durable PostgreSQL outbox. Streams send a
+  `heartbeat` every 15s, use bounded admission/queues, and reconnect to a full
+  snapshot after overflow, send timeout, or their hard lifetime
 - Evaluates `server`/`both`-mode gates on behalf of trusted backends
   (`POST /v1/evaluate`), durably enqueueing `$feature_flag_exposure` events
   through the same bounded, non-trimming Redis admission policy as Ingestion;
@@ -39,11 +42,12 @@ never from query parameters. See
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v1/flags` | Bootstrap flag config (only `client`/`both` evaluation modes), Redis-cached |
-| `GET /v1/stream` | SSE: initial `config` event, then `flag_update`/`experiment_update`/`heartbeat` |
+| `GET /v1/stream` | SSE: versioned `config` synchronization barrier, then ordered `flag_update`/`experiment_update`/`heartbeat` events; quota exhaustion returns 429 |
 | `GET /v1/auth/me` | Return the verified credential ID, project, and sorted roles |
 | `POST /v1/evaluate` | Trusted server-side gate evaluation with optional exposure logging |
 | `GET /v1/experiments/{key}/analysis` | Tenant-scoped authoritative experiment metadata delegated by Query (`query:read`) |
-| `GET /health` | Liveness probe (PG, Redis, SSE connection count) |
+| `GET /health` | Process liveness probe; does not touch dependencies |
+| `GET /ready` | Dependency readiness probe; returns 503 unless PostgreSQL and Redis are ready, and includes low-cardinality SSE metrics |
 
 ### Admin (`/v1/admin`)
 
@@ -129,6 +133,16 @@ same `fixtures/gates/targeting.json` cases. Supported operators are `equals`,
 `exists`/`not_exists` omit `value`; explicit null is invalid. Regex is not part
 of the cross-runtime contract. Identifiers, strings, rule counts, condition
 counts, and membership lists are bounded and malformed rules fail closed.
+Rollout percentages are finite JSON numbers from 0 through 100; strings,
+booleans, nulls, non-finite numbers, and out-of-range values are rejected before
+persistence. Migration 017 disables and audits any corrupt durable rollout,
+repairs its source experiment, and emits a versioned convergence update.
+
+Server evaluation bodies are capped at 65,536 UTF-8 bytes before JSON parsing.
+Context values have maximum depth 4, 100 aggregate object keys, 1,000 aggregate
+nodes, 128-character keys/identities, and 256-character string values. The
+`page` field is capped at 2,048 characters. A corrupt stored rollout returns the
+fail-closed `invalid_config` result without logging an exposure.
 
 ## Developer-preview deployment boundary
 
@@ -145,8 +159,17 @@ database upgrades are unsupported.
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Authoritative flag/experiment/outbox store (must be migrated before startup) |
 | `PG_POOL_SIZE` | `4` | Max asyncpg pool size |
 | `REDIS_URL` | `redis://localhost:6379` | Flag cache + exposure event stream |
+| `CONFIG_TRUSTED_PROXY_CIDRS` | empty | Exact proxy networks allowed to supply one `X-Forwarded-For` client IP; untrusted peers cannot override their socket IP |
+| `SSE_QUEUE_CAPACITY` | `256` | Maximum queued updates per connection before a `slow_consumer` close |
+| `SSE_MAX_CONNECTIONS` | `1000` | Process-wide SSE connection ceiling |
+| `SSE_MAX_CONNECTIONS_PER_PROJECT` | `100` | Per-project SSE connection ceiling |
+| `SSE_MAX_CONNECTIONS_PER_CREDENTIAL` | `10` | Per-credential SSE connection ceiling |
+| `SSE_MAX_CONNECTIONS_PER_IP` | `20` | Per-client-IP SSE connection ceiling |
+| `SSE_PING_INTERVAL_SECONDS` | `15` | Typed heartbeat interval; must be finite and positive |
+| `SSE_SEND_TIMEOUT_SECONDS` | `10` | Maximum blocked ASGI send duration before transport closure |
+| `SSE_MAX_LIFETIME_SECONDS` | `300` | Hard connection lifetime before a snapshot-required reconnect |
 | `EXPERIMENT_LIFECYCLE_ENABLED` | `true` | Run scheduled-start/completion sweeps |
-| `EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS` | `300` | Lifecycle sweep interval |
+| `EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS` | `300` | Lifecycle sweep interval, bounded to 1-86,400 seconds |
 
 ## Running locally
 
