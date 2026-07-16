@@ -20,6 +20,7 @@ import { formatPercent } from '@/lib/format'
 import { DateRangePicker } from './DateRangePicker'
 import { ResultActions } from './ResultActions'
 import { SavedViews } from './SavedViews'
+import { funnelViewSchema, type FunnelView } from './savedViewSchemas'
 import { SelectorBuilder } from './SelectorBuilder'
 import {
   emptySelector,
@@ -30,12 +31,6 @@ import {
   type SelectorFormValues,
 } from './selectorModel'
 import { useAnalyticsQuery } from './useAnalyticsQuery'
-
-interface FunnelView {
-  range: DateRange
-  steps: SelectorFormValues[]
-  windowDays: number
-}
 
 function FunnelChart({ result }: { result: FunnelResponse }) {
   const steps = result.steps
@@ -142,6 +137,7 @@ export function FunnelsPage() {
           <SavedViews
             screen="funnels"
             current={view}
+            viewSchema={funnelViewSchema}
             onLoad={(loaded) => {
               setRange(loaded.range)
               setSteps(loaded.steps)

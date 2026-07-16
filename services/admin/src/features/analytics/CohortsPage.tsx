@@ -21,6 +21,7 @@ import { SimpleLineChart } from './charts'
 import { DateRangePicker } from './DateRangePicker'
 import { ResultActions } from './ResultActions'
 import { SavedViews } from './SavedViews'
+import { cohortsViewSchema, type CohortsView } from './savedViewSchemas'
 import { SelectorBuilder } from './SelectorBuilder'
 import {
   emptySelector,
@@ -33,12 +34,6 @@ import {
 import { useAnalyticsQuery } from './useAnalyticsQuery'
 
 const HIGH_CARDINALITY = 12
-
-interface CohortsView {
-  range: DateRange
-  cohortProperty: string
-  metricSelector: SelectorFormValues
-}
 
 export function CohortsPage() {
   const { active, projectId } = useWorkspace()
@@ -79,6 +74,7 @@ export function CohortsPage() {
           <SavedViews
             screen="cohorts"
             current={view}
+            viewSchema={cohortsViewSchema}
             onLoad={(loaded) => {
               setRange(loaded.range)
               setCohortProperty(loaded.cohortProperty)

@@ -3,6 +3,7 @@
 import { Bookmark, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
+import { z, type ZodType } from 'zod'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -29,15 +30,35 @@ interface SavedView<T> {
   view: T
 }
 
+const savedViewEnvelopeSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    view: z.unknown(),
+  })
+  .strict()
+
 function storageKey(workspaceId: string, screen: string): string {
   return `apdl-admin:views:${workspaceId}:${screen}`
 }
 
-function loadViews<T>(workspaceId: string, screen: string): SavedView<T>[] {
+function loadViews<T>(
+  workspaceId: string,
+  screen: string,
+  viewSchema: ZodType<T>,
+): SavedView<T>[] {
   try {
     const raw = localStorage.getItem(storageKey(workspaceId, screen))
     const parsed: unknown = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? (parsed as SavedView<T>[]) : []
+    const envelopes = z.array(savedViewEnvelopeSchema).safeParse(parsed)
+    if (!envelopes.success) return []
+
+    const views: SavedView<T>[] = []
+    for (const envelope of envelopes.data) {
+      const view = viewSchema.safeParse(envelope.view)
+      if (!view.success) return []
+      views.push({ name: envelope.name, view: view.data })
+    }
+    return views
   } catch {
     return []
   }
@@ -46,13 +67,24 @@ function loadViews<T>(workspaceId: string, screen: string): SavedView<T>[] {
 interface SavedViewsProps<T> {
   screen: string
   current: T
+  viewSchema: ZodType<T>
   onLoad: (view: T) => void
 }
 
-export function SavedViews<T>({ screen, current, onLoad }: SavedViewsProps<T>) {
-  const { active } = useWorkspace()
-  const workspaceId = active?.id ?? 'none'
-  const [views, setViews] = useState<SavedView<T>[]>(() => loadViews<T>(workspaceId, screen))
+interface ScopedSavedViewsProps<T> extends SavedViewsProps<T> {
+  workspaceId: string
+}
+
+function ScopedSavedViews<T>({
+  workspaceId,
+  screen,
+  current,
+  viewSchema,
+  onLoad,
+}: ScopedSavedViewsProps<T>) {
+  const [views, setViews] = useState<SavedView<T>[]>(() =>
+    loadViews(workspaceId, screen, viewSchema),
+  )
   const [saveOpen, setSaveOpen] = useState(false)
   const [name, setName] = useState('')
 
@@ -134,4 +166,12 @@ export function SavedViews<T>({ screen, current, onLoad }: SavedViewsProps<T>) {
       </Dialog>
     </>
   )
+}
+
+export function SavedViews<T>(props: SavedViewsProps<T>) {
+  const { active } = useWorkspace()
+  const workspaceId = active?.id ?? 'none'
+  const scopeKey = storageKey(workspaceId, props.screen)
+
+  return <ScopedSavedViews key={scopeKey} workspaceId={workspaceId} {...props} />
 }
