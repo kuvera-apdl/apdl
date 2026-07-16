@@ -114,7 +114,8 @@ def test_register_requires_name():
         (4, False, "low", GateDecision.halt),    # ...but never a failed safety check
     ],
 )
-def test_gate_action(autonomy, passed, risk, expected):
+def test_gate_action(monkeypatch, autonomy, passed, risk, expected):
+    monkeypatch.setenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", "true")
     safety = {"passed": passed, "risk_level": risk}
     assert gate_action(autonomy, safety) == expected
 
@@ -122,6 +123,17 @@ def test_gate_action(autonomy, passed, risk, expected):
 def test_gate_action_always_require_approval():
     safety = {"passed": True, "risk_level": "low"}
     assert gate_action(4, safety, always_require_approval=True) == GateDecision.approve
+
+
+@pytest.mark.parametrize("value", [None, "false", "TRUE", "1", "yes", " true "])
+def test_gate_action_disables_autonomous_mutations_by_default(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", raising=False)
+    else:
+        monkeypatch.setenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", value)
+
+    safety = {"passed": True, "risk_level": "low"}
+    assert gate_action(4, safety) == GateDecision.approve
 
 
 # ---------------------------------------------------------------------------

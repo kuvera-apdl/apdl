@@ -55,20 +55,17 @@ def _patch(monkeypatch, proposals, *, open_result=None):
 
 
 @pytest.mark.asyncio
-async def test_l3_opens_changeset_and_marks_implemented(monkeypatch):
+async def test_l3_routes_changeset_to_approval_without_opening(monkeypatch):
     calls = _patch(monkeypatch, [_PROPOSAL])
 
     result = await CodeImplementationAgent().run(_make_ctx(3), {})
 
     assert len(result.output) == 1
-    assert result.output[0]["decision"] == "deploy"
-    assert result.output[0]["changeset_id"] == "cs_1"
-    assert calls["opened"][0]["project_id"] == "apdl"
-    assert calls["opened"][0]["title"] == "Add dark mode"
-    assert calls["opened"][0]["run_id"] == "run-1"
-    assert calls["opened"][0]["context"] == {"proposal_id": "p1"}
-    assert calls["implemented"] == [("apdl", "p1", "cs_1", "run-1")]
-    assert result.metadata["opened"] == 1
+    assert result.output[0]["decision"] == "approve"
+    assert result.metadata["needs_approval"] is True
+    assert calls["opened"] == []
+    assert calls["implemented"] == []
+    assert result.metadata["opened"] == 0
 
 
 @pytest.mark.asyncio
@@ -108,7 +105,7 @@ async def test_bad_spec_fails_safety_and_marks_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codegen_failure_marks_proposal_failed(monkeypatch):
+async def test_l4_does_not_call_codegen_before_human_approval(monkeypatch):
     calls = _patch(monkeypatch, [_PROPOSAL])
 
     async def boom(**kwargs):
@@ -118,8 +115,9 @@ async def test_codegen_failure_marks_proposal_failed(monkeypatch):
 
     result = await CodeImplementationAgent().run(_make_ctx(4), {})
 
-    assert "error" in result.output[0]
-    assert calls["failed"][0] == ("apdl", "p1", "codegen down", "run-1")
+    assert result.output[0]["decision"] == "approve"
+    assert "error" not in result.output[0]
+    assert calls["failed"] == []
 
 
 @pytest.mark.asyncio

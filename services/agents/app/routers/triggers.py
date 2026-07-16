@@ -44,8 +44,9 @@ class TriggerRequest(BaseModel):
         ge=1,
         le=4,
         description=(
-            "L1=suggest only; L2=approval; L3 auto-applies low risk; L4 applies "
-            "every safety-passing action except explicitly always-gated actions"
+            "L1=suggest only; L2=approval; L3/L4 may auto-apply eligible actions "
+            "only when the operator explicitly enables autonomous mutations; "
+            "inherently gated actions always require approval"
         ),
     )
 

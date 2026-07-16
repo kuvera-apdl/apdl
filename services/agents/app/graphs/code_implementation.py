@@ -101,7 +101,14 @@ class CodeImplementationAgent(BaseAgent):
                 project_id=ctx.project_id,
             )
         ).model_dump()
-        decision = gate_action(ctx.autonomy_level, safety)
+        decision = gate_action(
+            ctx.autonomy_level,
+            safety,
+            # A draft pull request is still an external repository mutation.
+            # The durable approval worker is the only path allowed to enqueue
+            # it; agent reasoning never calls Codegen directly.
+            always_require_approval=True,
+        )
         result: dict[str, Any] = {
             "proposal_id": proposal_id,
             # Carry the spec on the gate item so the approval handler can open
