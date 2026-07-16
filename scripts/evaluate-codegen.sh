@@ -17,7 +17,7 @@ if [[ "$revision" == "$git_head" ]] \
   exit 2
 fi
 model="${CODEGEN_MODEL:-claude-opus-4-8}"
-policy_path="${CODEGEN_ROLLOUT_POLICY:-$ROOT_DIR/services/codegen/app/evaluations/rollout_policy_v3.json}"
+policy_path="${CODEGEN_ROLLOUT_POLICY:-$ROOT_DIR/services/codegen/app/evaluations/rollout_policy_v4.json}"
 artifact_dir="${CODEGEN_EVALUATION_ARTIFACT_DIR:-$ROOT_DIR/local-files/codegen-rollouts/$revision}"
 controller_image="${CODEGEN_EVALUATION_CONTROLLER_IMAGE:-apdl-codegen-evaluation-controller:$revision}"
 candidate_image="${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:$revision}"

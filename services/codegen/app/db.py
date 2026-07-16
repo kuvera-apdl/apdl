@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 22
-MIGRATION_NAME = "022_agents_durable_effects.sql"
+MIGRATION_VERSION = 24
+MIGRATION_NAME = "024_codegen_segmented_publication.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -54,6 +54,10 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "review_verdict"),
         ("codegen_changesets", "publication_authorization"),
         ("codegen_changesets", "publication_authorization_legacy"),
+        (
+            "codegen_changesets",
+            "publication_authorization_segmentless_legacy",
+        ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),

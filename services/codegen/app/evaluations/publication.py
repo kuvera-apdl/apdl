@@ -22,6 +22,10 @@ from app.evaluations.models import (
     canonical_sha256,
 )
 from app.evaluations.rollout import decide_rollout
+from app.evaluations.segments import (
+    SegmentedEvaluationReport,
+    validate_segmented_report,
+)
 
 
 MAX_PUBLICATION_BUNDLE_BYTES = 8 * 1024 * 1024
@@ -31,13 +35,15 @@ MAX_ROLLOUT_POLICY_BYTES = 64 * 1024
 class PublicationEvidenceBundle(StrictModel):
     """Content-addressed report and policy selected by an operator."""
 
-    schema_version: Literal["publication_evidence_bundle@2"] = (
-        "publication_evidence_bundle@2"
+    schema_version: Literal["publication_evidence_bundle@3"] = (
+        "publication_evidence_bundle@3"
     )
     report: EvaluationReport
+    segmented_report: SegmentedEvaluationReport
     policy: RolloutPolicy
     candidate_identity_sha256: Sha256
     report_sha256: Sha256
+    segmented_report_sha256: Sha256
     policy_sha256: Sha256
     bundle_sha256: Sha256
 
@@ -45,13 +51,23 @@ class PublicationEvidenceBundle(StrictModel):
     def validate_content_addresses(self) -> PublicationEvidenceBundle:
         candidate_identity = self.report.run.candidate_identity
         if candidate_identity is None:
-            raise ValueError("publication evidence requires a trusted candidate identity")
+            raise ValueError(
+                "publication evidence requires a trusted candidate identity"
+            )
         if self.candidate_identity_sha256 != candidate_identity.identity_sha256:
             raise ValueError(
                 "bundle candidate identity does not match its evaluation run"
             )
         if self.report_sha256 != self.report.report_sha256:
             raise ValueError("bundle report_sha256 does not match its report")
+        if (
+            self.segmented_report_sha256
+            != self.segmented_report.segmented_report_sha256
+        ):
+            raise ValueError(
+                "bundle segmented_report_sha256 does not match its segmented report"
+            )
+        validate_segmented_report(self.report, self.segmented_report)
         if self.policy_sha256 != canonical_sha256(self.policy):
             raise ValueError("bundle policy_sha256 does not match its policy")
         expected = canonical_sha256(
@@ -91,14 +107,15 @@ class PublicationRequest(StrictModel):
 class PublicationAuthorization(StrictModel):
     """Persistable proof that trusted evidence was evaluated for one request."""
 
-    schema_version: Literal["publication_authorization@2"] = (
-        "publication_authorization@2"
+    schema_version: Literal["publication_authorization@3"] = (
+        "publication_authorization@3"
     )
     request: PublicationRequest
     expected_model: str = Field(min_length=1)
     expected_codegen_revision: str = Field(min_length=1)
     expected_candidate_identity_sha256: Sha256
     report_sha256: Sha256
+    segmented_report_sha256: Sha256
     bundle_sha256: Sha256
     policy_sha256: Sha256
     decision: RolloutDecision
@@ -125,6 +142,10 @@ class PublicationAuthorization(StrictModel):
             raise ValueError("publication decision risk does not match its request")
         if self.decision.policy_sha256 != self.policy_sha256:
             raise ValueError("publication decision does not use the bundled policy")
+        if self.decision.segmented_report_sha256 != self.segmented_report_sha256:
+            raise ValueError(
+                "publication decision does not use the bundled segmented report"
+            )
         expected = canonical_sha256(
             self.model_dump(mode="json", exclude={"authorization_sha256"})
         )
@@ -152,12 +173,14 @@ def _revalidate_bundle(bundle: PublicationEvidenceBundle) -> PublicationEvidence
     recomputed = aggregate_metrics(validated.report.run)
     if recomputed != validated.report.summary:
         raise ValueError("evaluation report summary does not match its run outcomes")
+    validate_segmented_report(validated.report, validated.segmented_report)
     validate_run_provenance(validated.report.run)
     return validated
 
 
 def build_publication_bundle(
     report: EvaluationReport,
+    segmented_report: SegmentedEvaluationReport,
     policy: RolloutPolicy,
 ) -> PublicationEvidenceBundle:
     """Build an operator artifact after independently checking report arithmetic."""
@@ -173,17 +196,23 @@ def build_publication_bundle(
     if aggregate_metrics(validated_report.run) != validated_report.summary:
         raise ValueError("evaluation report summary does not match its run outcomes")
     validate_run_provenance(validated_report.run)
+    validated_segmented_report = validate_segmented_report(
+        validated_report,
+        segmented_report,
+    )
     candidate_identity = validated_report.run.candidate_identity
     if candidate_identity is None:
         raise ValueError(
             "publication evidence requires the default trusted Docker candidate identity"
         )
     payload = {
-        "schema_version": "publication_evidence_bundle@2",
+        "schema_version": "publication_evidence_bundle@3",
         "report": validated_report.model_dump(mode="json"),
+        "segmented_report": validated_segmented_report.model_dump(mode="json"),
         "policy": validated_policy.model_dump(mode="json"),
         "candidate_identity_sha256": candidate_identity.identity_sha256,
         "report_sha256": validated_report.report_sha256,
+        "segmented_report_sha256": (validated_segmented_report.segmented_report_sha256),
         "policy_sha256": canonical_sha256(validated_policy),
     }
     return PublicationEvidenceBundle.model_validate_json(
@@ -254,19 +283,14 @@ class TrustedPublicationAuthorizer:
             raise ValueError(
                 "evaluation codegen revision does not match expected_codegen_revision"
             )
-        if (
-            validated.candidate_identity_sha256
-            != expected_candidate_identity_sha256
-        ):
+        if validated.candidate_identity_sha256 != expected_candidate_identity_sha256:
             raise ValueError(
                 "evaluation candidate identity does not match expected identity"
             )
         self._bundle_json = validated.model_dump_json()
         self._expected_model = expected_model
         self._expected_codegen_revision = expected_codegen_revision
-        self._expected_candidate_identity_sha256 = (
-            expected_candidate_identity_sha256
-        )
+        self._expected_candidate_identity_sha256 = expected_candidate_identity_sha256
 
     @property
     def bundle_sha256(self) -> str:
@@ -301,13 +325,24 @@ class TrustedPublicationAuthorizer:
             requested_stage=request.requested_stage,
             risk=request.risk,
             summary=bundle.report.summary,
+            segmented_report=bundle.segmented_report,
             policy=bundle.policy,
             canary_identity=request.canary_identity,
         )
-        if decision.evaluation_summary_sha256 != bundle.report.summary.evidence_sha256():
+        if (
+            decision.evaluation_summary_sha256
+            != bundle.report.summary.evidence_sha256()
+        ):
             raise ValueError("publication decision does not bind the bundled summary")
+        if (
+            decision.segmented_report_sha256
+            != bundle.segmented_report.segmented_report_sha256
+        ):
+            raise ValueError(
+                "publication decision does not bind the bundled segmented report"
+            )
         payload = {
-            "schema_version": "publication_authorization@2",
+            "schema_version": "publication_authorization@3",
             "request": request.model_dump(mode="json"),
             "expected_model": self._expected_model,
             "expected_codegen_revision": self._expected_codegen_revision,
@@ -315,6 +350,7 @@ class TrustedPublicationAuthorizer:
                 self._expected_candidate_identity_sha256
             ),
             "report_sha256": bundle.report_sha256,
+            "segmented_report_sha256": bundle.segmented_report_sha256,
             "bundle_sha256": bundle.bundle_sha256,
             "policy_sha256": bundle.policy_sha256,
             "decision": decision.model_dump(mode="json"),

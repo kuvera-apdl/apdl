@@ -23,6 +23,9 @@ CODEGEN_PUBLICATION_IDENTITY_SQL = (
 CODEGEN_DEVELOPMENT_PUBLICATION_SQL = (
     POSTGRES_MIGRATIONS / "011_codegen_development_publication.sql"
 ).read_text()
+CODEGEN_SEGMENTED_PUBLICATION_SQL = (
+    POSTGRES_MIGRATIONS / "024_codegen_segmented_publication.sql"
+).read_text()
 CUSTOM_AGENT_CONTRACT_SQL = (
     POSTGRES_MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
 ).read_text()
@@ -197,6 +200,18 @@ def test_codegen_development_publication_is_a_separate_draft_only_contract():
     assert "local-development" in sql
     assert "draft_only" in sql
     assert ") IS TRUE" in sql
+
+
+def test_codegen_segmented_publication_retires_aggregate_only_authority():
+    sql = CODEGEN_SEGMENTED_PUBLICATION_SQL
+    assert "publication_authorization_segmentless_legacy" in sql
+    assert "publication_authorization = NULL" in sql
+    assert "= 'publication_authorization@2'" in sql
+    assert "= 'publication_authorization@3'" in sql
+    assert "development_publication_authorization@1" in sql
+    assert "segmented evidence" in sql
+    assert ") IS TRUE" in sql
+    assert "jsonb_set" not in sql.lower()
 
 
 def test_custom_agent_contract_migration_is_explicit_and_strict():

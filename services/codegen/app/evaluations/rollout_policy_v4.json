@@ -1,7 +1,10 @@
 {
-  "schema_version": "rollout_policy@3",
+  "schema_version": "rollout_policy@4",
   "minimum_sample_size": 8,
   "minimum_metric_denominator": 8,
+  "minimum_risk_segment_sample_size": 2,
+  "minimum_ecosystem_segment_sample_size": 2,
+  "minimum_task_type_segment_sample_size": 2,
   "maximum_escaped_defect_rate": 0.0,
   "minimum_requirement_coverage": 1.0,
   "minimum_behavioral_acceptance_rate": 1.0,

@@ -46,13 +46,9 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_durable_effects_migration():
-    with pytest.raises(
-        RuntimeError, match="022_agents_durable_effects.sql"
-    ):
-        await assert_schema_ready(
-            FakeConn(migration_name="021_agents_mutation_quotas.sql")
-        )
+async def test_rejects_database_without_segmented_publication_migration():
+    with pytest.raises(RuntimeError, match="024_codegen_segmented_publication.sql"):
+        await assert_schema_ready(FakeConn(migration_name="023_llm_governance.sql"))
 
 
 @pytest.mark.asyncio

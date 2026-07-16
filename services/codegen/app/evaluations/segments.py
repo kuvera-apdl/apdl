@@ -12,6 +12,7 @@ from app.evaluations.metrics import aggregate_metrics, build_evaluation_report
 from app.evaluations.models import (
     CaseId,
     EvaluationCorpus,
+    EvaluationReport,
     EvaluationRun,
     EvaluationSummary,
     MetricName,
@@ -106,11 +107,101 @@ def _validate_alignment(run: EvaluationRun, corpus: EvaluationCorpus) -> None:
     corpus_case_ids = {case.case_id for case in corpus.cases}
     if run_case_ids != corpus_case_ids:
         raise ValueError("evaluation run outcomes must cover corpus cases exactly")
-    expected_fixtures = {
-        case.case_id: case.fixture_sha256 for case in corpus.cases
-    }
+    expected_fixtures = {case.case_id: case.fixture_sha256 for case in corpus.cases}
     if run.fixture_sha256_by_case != expected_fixtures:
         raise ValueError("evaluation run fixture provenance does not match the corpus")
+
+
+def _build_segment_run(
+    run: EvaluationRun,
+    *,
+    dimension: SegmentDimension,
+    value: str,
+    case_ids: list[CaseId],
+) -> EvaluationRun:
+    outcomes = {outcome.case_id: outcome for outcome in run.outcomes}
+    ordered_ids = sorted(case_ids)
+    if ordered_ids != case_ids or len(ordered_ids) != len(set(ordered_ids)):
+        raise ValueError("segment case_ids must be unique and sorted")
+    if not set(ordered_ids) <= set(outcomes):
+        raise ValueError("segment contains a case outside the evaluation run")
+    return EvaluationRun.model_validate(
+        {
+            **run.model_dump(
+                mode="python",
+                exclude={"run_id", "outcomes", "fixture_sha256_by_case"},
+            ),
+            "run_id": f"{run.run_id}::segment::{dimension.value}::{value}",
+            "outcomes": [
+                outcomes[case_id].model_dump(mode="python") for case_id in ordered_ids
+            ],
+            "fixture_sha256_by_case": {
+                case_id: run.fixture_sha256_by_case[case_id] for case_id in ordered_ids
+            },
+        }
+    )
+
+
+def validate_segmented_report(
+    report: EvaluationReport,
+    segmented: SegmentedEvaluationReport,
+) -> SegmentedEvaluationReport:
+    """Recompute slice arithmetic and prove every dimension partitions the run."""
+    report = EvaluationReport.model_validate(report.model_dump(mode="python"))
+    segmented = SegmentedEvaluationReport.model_validate(
+        segmented.model_dump(mode="python")
+    )
+    run = report.run
+    if segmented.run_id != run.run_id:
+        raise ValueError("segmented report run id does not match the evaluation report")
+    if segmented.run_sha256 != run.evidence_sha256():
+        raise ValueError("segmented report does not bind the evaluation run")
+    if segmented.corpus_id != run.corpus_id:
+        raise ValueError("segmented report corpus id does not match the evaluation run")
+    if segmented.corpus_sha256 != run.corpus_sha256:
+        raise ValueError(
+            "segmented report corpus digest does not match the evaluation run"
+        )
+    if segmented.overall_report_sha256 != report.report_sha256:
+        raise ValueError("segmented report does not bind the overall report")
+
+    run_case_ids = {outcome.case_id for outcome in run.outcomes}
+    for dimension in SegmentDimension:
+        dimension_segments = [
+            segment for segment in segmented.segments if segment.dimension is dimension
+        ]
+        flattened = [
+            case_id for segment in dimension_segments for case_id in segment.case_ids
+        ]
+        if len(flattened) != len(set(flattened)):
+            raise ValueError(
+                f"{dimension.value} segments overlap instead of partitioning the run"
+            )
+        if set(flattened) != run_case_ids:
+            raise ValueError(
+                f"{dimension.value} segments do not cover the evaluation run exactly"
+            )
+
+    model_segments = [
+        segment
+        for segment in segmented.segments
+        if segment.dimension is SegmentDimension.model
+    ]
+    if model_segments[0].value != run.model:
+        raise ValueError("model segment does not identify the evaluated model")
+
+    for segment in segmented.segments:
+        slice_run = _build_segment_run(
+            run,
+            dimension=segment.dimension,
+            value=segment.value,
+            case_ids=segment.case_ids,
+        )
+        if segment.slice_run_sha256 != slice_run.evidence_sha256():
+            raise ValueError("segment slice digest does not match the evaluation run")
+        if segment.summary != aggregate_metrics(slice_run):
+            raise ValueError("segment summary does not match its evaluation slice")
+    return segmented
 
 
 def build_segmented_report(
@@ -138,19 +229,15 @@ def build_segmented_report(
 
     segments: list[EvaluationSegment] = []
     for (dimension, value), case_ids in sorted(
-        groups.items(), key=lambda item: (list(SegmentDimension).index(item[0][0]), item[0][1])
+        groups.items(),
+        key=lambda item: (list(SegmentDimension).index(item[0][0]), item[0][1]),
     ):
         ordered_ids = sorted(case_ids)
-        slice_run = EvaluationRun.model_validate(
-            {
-                **run.model_dump(mode="python", exclude={"run_id", "outcomes", "fixture_sha256_by_case"}),
-                "run_id": f"{run.run_id}::segment::{dimension.value}::{value}",
-                "outcomes": [outcomes[case_id].model_dump(mode="python") for case_id in ordered_ids],
-                "fixture_sha256_by_case": {
-                    case_id: run.fixture_sha256_by_case[case_id]
-                    for case_id in ordered_ids
-                },
-            }
+        slice_run = _build_segment_run(
+            run,
+            dimension=dimension,
+            value=value,
+            case_ids=ordered_ids,
         )
         summary = aggregate_metrics(slice_run)
         segments.append(

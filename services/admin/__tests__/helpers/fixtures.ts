@@ -15,14 +15,14 @@ import type { Workspace } from '../../src/core/workspace'
 
 type EvaluatedPublicationAuthorization = Extract<
   PublicationAuthorization,
-  { schema_version: 'publication_authorization@2' }
+  { schema_version: 'publication_authorization@3' }
 >
 
 export function makePublicationAuthorization(
   overrides: Partial<EvaluatedPublicationAuthorization> = {},
 ): EvaluatedPublicationAuthorization {
   return {
-    schema_version: 'publication_authorization@2',
+    schema_version: 'publication_authorization@3',
     request: {
       schema_version: 'publication_request@2',
       requested_stage: 'reviewed_pr',
@@ -36,10 +36,11 @@ export function makePublicationAuthorization(
     expected_codegen_revision: 'codegen-improvements@9838401',
     expected_candidate_identity_sha256: '7'.repeat(64),
     report_sha256: '1'.repeat(64),
+    segmented_report_sha256: 'a'.repeat(64),
     bundle_sha256: '2'.repeat(64),
     policy_sha256: '3'.repeat(64),
     decision: {
-      schema_version: 'rollout_decision@2',
+      schema_version: 'rollout_decision@3',
       requested_stage: 'reviewed_pr',
       risk: 'medium',
       allowed: false,
@@ -48,6 +49,7 @@ export function makePublicationAuthorization(
       ready_for_review: false,
       reasons: ['test pass rate 0.800 is below required 0.950'],
       evaluation_summary_sha256: '4'.repeat(64),
+      segmented_report_sha256: 'a'.repeat(64),
       policy_sha256: '3'.repeat(64),
       canary_identity_sha256: null,
       canary_bucket: null,

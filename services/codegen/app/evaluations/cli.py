@@ -30,7 +30,7 @@ from app.evaluations.rollout import decide_rollout
 
 
 MAX_EVALUATION_RUN_BYTES = 16 * 1024 * 1024
-DEFAULT_ROLLOUT_POLICY_PATH = Path(__file__).with_name("rollout_policy_v3.json")
+DEFAULT_ROLLOUT_POLICY_PATH = Path(__file__).with_name("rollout_policy_v4.json")
 
 
 def _write_artifact(path: Path | None, artifact) -> None:
@@ -107,9 +107,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--controller-image-id",
-        help=(
-            "immutable sha256 ID of the sealed controller running this evaluation"
-        ),
+        help=("immutable sha256 ID of the sealed controller running this evaluation"),
     )
     parser.add_argument(
         "--docker-bin",
@@ -212,6 +210,7 @@ def main() -> None:
             requested_stage=RolloutStage.reviewed_pr,
             risk=RiskLevel.high,
             summary=report.summary,
+            segmented_report=segmented,
             policy=policy,
         )
         payload["reviewed_pr_decision"] = decision.model_dump(mode="json")
@@ -225,7 +224,7 @@ def main() -> None:
                 ),
             )
         if args.bundle_output is not None:
-            bundle = build_publication_bundle(report, policy)
+            bundle = build_publication_bundle(report, segmented, policy)
             payload["publication_bundle"] = bundle.model_dump(mode="json")
             _write_artifact(args.bundle_output, bundle)
 

@@ -13,6 +13,10 @@ from app.evaluations.models import (
     RolloutStage,
     canonical_sha256,
 )
+from app.evaluations.segments import (
+    SegmentDimension,
+    SegmentedEvaluationReport,
+)
 
 
 def canary_bucket(identity: str) -> int:
@@ -48,11 +52,59 @@ def _metric_at_least(
 
 
 def _build_decision(**values) -> RolloutDecision:
-    payload = {"schema_version": "rollout_decision@2", **values}
+    payload = {"schema_version": "rollout_decision@3", **values}
     return RolloutDecision(
         **payload,
         decision_sha256=canonical_sha256(payload),
     )
+
+
+def _segmented_evidence_reasons(
+    segmented: SegmentedEvaluationReport | None,
+    *,
+    summary: EvaluationSummary | None,
+    policy: RolloutPolicy,
+) -> list[str]:
+    if segmented is None:
+        return ["no segmented evaluation report was supplied"]
+    if summary is None:
+        return []
+    if segmented.run_sha256 != summary.run_sha256:
+        return ["segmented evaluation report does not match the overall summary"]
+
+    thresholds = {
+        SegmentDimension.risk: policy.minimum_risk_segment_sample_size,
+        SegmentDimension.ecosystem: policy.minimum_ecosystem_segment_sample_size,
+        SegmentDimension.task_type: policy.minimum_task_type_segment_sample_size,
+    }
+    reasons: list[str] = []
+    for segment in segmented.segments:
+        minimum = thresholds.get(segment.dimension)
+        if minimum is None:
+            continue
+        label = f"{segment.dimension.value} segment {segment.value!r}"
+        if segment.summary.sample_size < minimum:
+            reasons.append(
+                f"{label} sample size {segment.summary.sample_size} is below "
+                f"required {minimum}"
+            )
+        escaped = segment.summary.escaped_defect_rate
+        if escaped.denominator < minimum:
+            reasons.append(
+                f"{label} escaped-defect denominator {escaped.denominator} is "
+                f"below required {minimum}"
+            )
+        if escaped.value is None:
+            reasons.append(
+                f"{label} escaped defect rate is unavailable: "
+                f"{escaped.unavailable_reason}"
+            )
+        elif escaped.numerator != 0:
+            reasons.append(
+                f"{label} contains {escaped.numerator:g} escaped defects; zero "
+                "are allowed"
+            )
+    return reasons
 
 
 def decide_rollout(
@@ -60,6 +112,7 @@ def decide_rollout(
     requested_stage: RolloutStage,
     risk: RiskLevel,
     summary: EvaluationSummary | None,
+    segmented_report: SegmentedEvaluationReport | None = None,
     policy: RolloutPolicy | None = None,
     canary_identity: str | None = None,
 ) -> RolloutDecision:
@@ -79,6 +132,13 @@ def decide_rollout(
         else None
     )
     summary = validated_summary
+    segmented = (
+        SegmentedEvaluationReport.model_validate(
+            segmented_report.model_dump(mode="python")
+        )
+        if segmented_report is not None
+        else None
+    )
     policy_sha256 = canonical_sha256(resolved)
     bucket = canary_bucket(canary_identity) if canary_identity else None
     identity_sha = (
@@ -98,6 +158,9 @@ def decide_rollout(
             evaluation_summary_sha256=(
                 summary.evidence_sha256() if summary is not None else None
             ),
+            segmented_report_sha256=(
+                segmented.segmented_report_sha256 if segmented is not None else None
+            ),
             policy_sha256=policy_sha256,
             canary_identity_sha256=identity_sha,
             canary_bucket=bucket,
@@ -115,8 +178,7 @@ def decide_rollout(
         escaped = summary.escaped_defect_rate
         if escaped.value is None:
             reasons.append(
-                "escaped defect rate is unavailable: "
-                f"{escaped.unavailable_reason}"
+                f"escaped defect rate is unavailable: {escaped.unavailable_reason}"
             )
         else:
             if escaped.denominator < resolved.minimum_metric_denominator:
@@ -149,11 +211,18 @@ def decide_rollout(
                 resolved.minimum_metric_denominator,
                 reasons,
             )
+    reasons.extend(
+        _segmented_evidence_reasons(
+            segmented,
+            summary=summary,
+            policy=resolved,
+        )
+    )
 
     if requested_stage is RolloutStage.low_risk_canary:
         reasons.append(
             "low-risk canary requires observed reviewed-PR CI evidence; "
-            "rollout_policy@3 authorizes draft reviewed_pr publication only"
+            "rollout_policy@4 authorizes draft reviewed_pr publication only"
         )
         if risk is not RiskLevel.low:
             reasons.append("only low-risk changes may enter the canary stage")
@@ -173,6 +242,9 @@ def decide_rollout(
         reasons=reasons,
         evaluation_summary_sha256=(
             summary.evidence_sha256() if summary is not None else None
+        ),
+        segmented_report_sha256=(
+            segmented.segmented_report_sha256 if segmented is not None else None
         ),
         policy_sha256=policy_sha256,
         canary_identity_sha256=identity_sha,

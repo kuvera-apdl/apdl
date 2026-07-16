@@ -283,7 +283,7 @@ Rollout stages are strict capabilities:
 2. `shadow` runs generation without branch or PR capability.
 3. `reviewed_pr` requires a valid operator bundle and always opens a draft PR.
 4. `low_risk_canary` is reserved for promotion evidence from reviewed PRs.
-   `rollout_policy@3` deliberately denies it until real GitHub CI/review
+   `rollout_policy@4` deliberately denies it until real GitHub CI/review
    observations are represented by a later policy contract.
 
 `development_pr` is not a step in this evaluated progression. It remains an
@@ -322,7 +322,7 @@ This command:
    temporary bind, so sibling candidate mounts resolve through the host daemon;
 5. forwards only an explicit model-provider and behavior-setting allowlist; and
 6. evaluates and builds the publication bundle in one trusted invocation using
-   the checked-in strict `rollout_policy_v3.json`.
+   the checked-in strict `rollout_policy_v4.json`.
 
 The run and bundle content-address the exact controller image ID, candidate
 image ID, revision, and normalized non-secret behavior configuration. Provider
@@ -358,11 +358,16 @@ Use a new revision whenever source or behavior changes so artifacts remain
 separate and auditable. Even if an old revision is reused accidentally, the
 identity digest prevents its bundle from authorizing different behavior.
 
-The checked-in `rollout_policy@3` gates reviewed draft-PR publication only on
-metrics the sealed offline harness can honestly measure. GitHub CI, human
-review, merge, revert, and post-merge outcomes remain unavailable during this
-run and are never fabricated. Those external observations are required for
-later canary/expansion decisions, not for opening a mandatory-review draft.
+The checked-in `rollout_policy@4` gates reviewed draft-PR publication on the
+overall metrics and on every risk, ecosystem, and task-type segment produced by
+the sealed offline harness. Each segment must meet its minimum sample and
+eligible escaped-defect denominator, with zero escaped defects. The current
+eight-case corpus intentionally cannot satisfy the default two-sample segment
+floor for every slice, so operators must expand the sealed corpus before
+reviewed publication can be authorized. GitHub CI, human review, merge, revert,
+and post-merge outcomes remain unavailable during this run and are never
+fabricated. Those external observations are required for later
+canary/expansion decisions.
 
 ### Deploy the evaluated candidate
 
