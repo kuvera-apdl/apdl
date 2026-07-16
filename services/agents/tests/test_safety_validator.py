@@ -18,9 +18,6 @@ def make_experiment(flag_config: dict | None = None) -> dict:
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
-        "guardrail_metrics": [
-            {"event": "frontend_error_rate", "threshold": "2x_baseline", "direction": "increase"},
-        ],
         "flag_config": flag_config
         or {
             "key": "exp_checkout",
@@ -56,6 +53,11 @@ def test_create_experiment_accepts_canonical_variant_flag_config():
     checks = {check["name"]: check for check in result["checks"]}
     assert checks["variant_config"]["passed"] is True
     assert checks["blast_radius"]["passed"] is True
+    assert checks["guardrails"] == {
+        "name": "guardrails",
+        "passed": True,
+        "message": "Required experiment design fields are present.",
+    }
 
 
 def test_create_experiment_treats_variant_weights_as_relative():

@@ -161,7 +161,7 @@ def _run_row(
 def _patch(monkeypatch):
     enq: list = []
     kicked: list = []
-    deployed: list = []
+    drafted: list = []
 
     async def fake_enqueue(pool, run_id, project_id, proposals):
         enq.append((run_id, project_id, proposals))
@@ -170,8 +170,8 @@ def _patch(monkeypatch):
     async def fake_supervisor(**kwargs):
         kicked.append(kwargs)
 
-    async def fake_deploy(project_id, experiment):
-        deployed.append((project_id, experiment))
+    async def fake_draft(project_id, experiment):
+        drafted.append((project_id, experiment))
         return True
 
     async def fake_treatment(pool, project_id, run_id, design):
@@ -179,9 +179,9 @@ def _patch(monkeypatch):
 
     monkeypatch.setattr(approvals, "enqueue_proposals", fake_enqueue)
     monkeypatch.setattr(approvals, "run_supervisor", fake_supervisor)
-    monkeypatch.setattr(approvals, "deploy_experiment", fake_deploy)
+    monkeypatch.setattr(approvals, "stage_experiment_draft", fake_draft)
     monkeypatch.setattr(approvals, "open_treatment_changeset", fake_treatment)
-    return enq, kicked, deployed
+    return enq, kicked, drafted
 
 
 class _FakeVectorStore:
@@ -401,8 +401,8 @@ async def test_empty_or_ambiguous_request_is_422(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_experiment_design_deploys_approved_and_resumes(monkeypatch):
-    enq, kicked, deployed = _patch(monkeypatch)
+async def test_experiment_design_drafts_approved_and_resumes(monkeypatch):
+    enq, kicked, drafted = _patch(monkeypatch)
     design = {"experiment_id": "exp_demo", "flag_config": {"key": "exp_demo"}, "variants": []}
     store = {
         "run": _run_row(
@@ -416,7 +416,7 @@ async def test_experiment_design_deploys_approved_and_resumes(monkeypatch):
         resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
 
     assert resp.status_code == 200
-    assert deployed and deployed[0][0] == "demo" and deployed[0][1]["experiment_id"] == "exp_demo"
+    assert drafted and drafted[0][0] == "demo" and drafted[0][1]["experiment_id"] == "exp_demo"
     # The SAME run resumes to continue the pipeline (feature_proposal); no code-impl fork here.
     resumes = _resumes(kicked)
     assert resumes and resumes[0]["run_id"] == "run-1"
@@ -425,13 +425,13 @@ async def test_experiment_design_deploys_approved_and_resumes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_experiment_deploy_failure_is_returned_and_persisted_for_resume(monkeypatch):
+async def test_experiment_draft_failure_is_returned_and_persisted_for_resume(monkeypatch):
     _, kicked, _ = _patch(monkeypatch)
 
-    async def failed_deploy(project_id, experiment):
+    async def failed_draft(project_id, experiment):
         return False
 
-    monkeypatch.setattr(approvals, "deploy_experiment", failed_deploy)
+    monkeypatch.setattr(approvals, "stage_experiment_draft", failed_draft)
     design = {
         "experiment_id": "exp_failed",
         "flag_config": {"key": "exp_failed"},
@@ -449,20 +449,20 @@ async def test_experiment_deploy_failure_is_returned_and_persisted_for_resume(mo
         resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
 
     assert resp.status_code == 200
-    assert resp.json()["errors"] == ["experiment deploy failed: exp_failed"]
+    assert resp.json()["errors"] == ["experiment draft creation failed: exp_failed"]
     result_query, result_args = next(
         (query, args)
         for query, args in app.state.pg_pool.conn.executed
         if "INSERT INTO agent_run_results" in query and "approval_errors" in query
     )
     assert "lease_owner_id = $3" in result_query
-    assert json.loads(result_args[1]) == ["experiment deploy failed: exp_failed"]
+    assert json.loads(result_args[1]) == ["experiment draft creation failed: exp_failed"]
     assert _resumes(kicked)
 
 
 @pytest.mark.asyncio
-async def test_experiment_design_reject_skips_deploy_but_resumes(monkeypatch):
-    _, kicked, deployed = _patch(monkeypatch)
+async def test_experiment_design_reject_skips_draft_but_resumes(monkeypatch):
+    _, kicked, drafted = _patch(monkeypatch)
     design = {"experiment_id": "exp_demo", "flag_config": {"key": "exp_demo"}, "variants": []}
     store = {
         "run": _run_row(
@@ -479,7 +479,7 @@ async def test_experiment_design_reject_skips_deploy_but_resumes(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert deployed == []  # rejected design not deployed
+    assert drafted == []  # rejected design is not drafted
     assert _resumes(kicked)  # pipeline still continues to feature_proposal
 
 
@@ -668,11 +668,11 @@ async def test_approval_does_not_overwrite_a_lingering_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_experiment_gate_blanket_approve_skips_non_deployable_designs(monkeypatch):
-    """A multi-design gate can hold a safety-halted or already-deployed sibling
+async def test_experiment_gate_blanket_approve_skips_non_stageable_designs(monkeypatch):
+    """A multi-design gate can hold a safety-halted or non-approval sibling
     next to the design genuinely awaiting a human; a blanket approve must
-    deploy only the approvable one and audit the skips."""
-    _, kicked, deployed = _patch(monkeypatch)
+    stage only the approvable one and audit the skips."""
+    _, kicked, drafted = _patch(monkeypatch)
     designs = [
         {"experiment_id": "exp_ok", "decision": "approve",
          "safety_result": {"passed": True}},
@@ -691,7 +691,7 @@ async def test_experiment_gate_blanket_approve_skips_non_deployable_designs(monk
         resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
 
     assert resp.status_code == 200
-    assert [e[1]["experiment_id"] for e in deployed] == ["exp_ok"]
+    assert [e[1]["experiment_id"] for e in drafted] == ["exp_ok"]
     skipped = [
         a for q, a in app.state.pg_pool.conn.fetchvals
         if "agent_audit_log" in q and a[1] == "approval_skipped"
@@ -703,14 +703,21 @@ async def test_experiment_gate_blanket_approve_skips_non_deployable_designs(monk
 @pytest.mark.asyncio
 async def test_approved_experiment_opens_treatment_changeset(monkeypatch):
     """Phase 2: a human-approved experiment gets its treatment built — the
-    approval deploys the experiment AND opens the codegen changeset."""
-    _, kicked, deployed = _patch(monkeypatch)
+    approval drafts the experiment before opening the codegen changeset."""
+    _, kicked, _ = _patch(monkeypatch)
     treatments: list = []
+    effects: list[str] = []
+
+    async def fake_draft(project_id, design):
+        effects.append("draft")
+        return True
 
     async def fake_treatment(pool, project_id, run_id, design):
+        effects.append("treatment")
         treatments.append(design.get("experiment_id"))
         return "cs-treat-1"
 
+    monkeypatch.setattr(approvals, "stage_experiment_draft", fake_draft)
     monkeypatch.setattr(approvals, "open_treatment_changeset", fake_treatment)
     design = {
         "experiment_id": "exp_demo",
@@ -728,7 +735,8 @@ async def test_approved_experiment_opens_treatment_changeset(monkeypatch):
         resp = await client.post("/v1/agents/run-1/approve", json={"approved": True})
 
     assert resp.status_code == 200
-    assert deployed and treatments == ["exp_demo"]
+    assert effects == ["draft", "treatment"]
+    assert treatments == ["exp_demo"]
     assert resp.json()["opened_changesets"] == ["cs-treat-1"]
     assert _resumes(kicked)
 
@@ -747,13 +755,13 @@ async def test_slow_approval_keeps_owner_heartbeat_against_competing_reaper(
         heartbeat_started.set()
         await real_maintain(*args, **kwargs)
 
-    async def slow_deploy(project_id: str, design: dict[str, Any]) -> bool:
+    async def slow_draft(project_id: str, design: dict[str, Any]) -> bool:
         effect_started.set()
         await finish_effect.wait()
         return True
 
     monkeypatch.setattr(approvals, "maintain_run_lease", tracked_maintain)
-    monkeypatch.setattr(approvals, "deploy_experiment", slow_deploy)
+    monkeypatch.setattr(approvals, "stage_experiment_draft", slow_draft)
     design = {"experiment_id": "exp_slow", "flag_config": {"key": "exp_slow"}}
     store = {
         "run": _run_row(
@@ -826,7 +834,7 @@ async def test_approval_lease_loss_cancels_config_before_codegen_continues(
         return "cs-should-not-open"
 
     monkeypatch.setattr(approvals, "maintain_run_lease", lose_during_config)
-    monkeypatch.setattr(approvals, "deploy_experiment", blocked_config)
+    monkeypatch.setattr(approvals, "stage_experiment_draft", blocked_config)
     monkeypatch.setattr(approvals, "open_treatment_changeset", forbidden_codegen)
     design = {"experiment_id": "exp_loss", "flag_config": {"key": "exp_loss"}}
     store = {

@@ -6,7 +6,7 @@ statistical design, and causal inference.
 Your responsibilities:
 1. Design rigorous experiments based on product insights and hypotheses — one experiment per
 insight that genuinely warrants one, never more than one per insight.
-2. Specify clear primary and secondary metrics, guardrail metrics, and success criteria.
+2. Specify one clear primary conversion metric and success criteria.
 3. Calculate appropriate sample sizes and expected experiment duration.
 4. Consider interaction effects with other running experiments.
 5. Define the feature flag configuration needed to implement the experiment.
@@ -33,8 +33,6 @@ code change (e.g. pure traffic/config change)>",
     {"key": "treatment", "weight": 50, "description": "..."}
   ],
   "primary_metric": {"event": "...", "type": "conversion", "direction": "increase|decrease"},
-  "secondary_metrics": [...],
-  "guardrail_metrics": [{"event": "...", "threshold": "...", "direction": "..."}],
   "targeting": {"conditions": [...]},
   "estimated_duration_days": 14,
   "statistical_plan": {
@@ -70,9 +68,7 @@ code change (e.g. pure traffic/config change)>",
 The flag_config is validated strictly — keep it canonical or the experiment is rejected:
 - flag_config.variants must contain ONLY "key" and an integer "weight". Do NOT add "description" or any \
 other field there; put per-variant descriptions in the top-level "variants".
-- flag_config.rules must be [] unless every rule is canonical: each rule has a "rollout" object \
-{"percentage": 0-100, "bucket_by": "<attribute>"} and never sets "variants" or "default_variant". Put \
-experiment targeting in the top-level "targeting", not in flag rules.
+- flag_config.rules must be []. Put experiment targeting in the top-level "targeting" only.
 - flag_config.fallthrough must contain only {"rollout": {"percentage": ..., "bucket_by": ...}}.
 - flag_config.auto_disable must be false; automatic guardrail mutation is unavailable in this release.
 - statistical_plan is immutable once the experiment leaves draft. Size it prospectively for a
@@ -80,8 +76,11 @@ two-proportion comparison using the primary metric direction and Bonferroni-adju
 (significance_level / number of treatment arms). Never lower required_sample_size_per_arm to fit
 the proposed duration; increase duration or traffic instead.
 
-Be conservative with experiment scope. Prefer smaller, focused experiments over large multi-factorial designs. \
-Always include guardrail metrics for error rate and latency."""
+Every accepted design is held for human approval. Approval creates an inert Config draft with a disabled \
+backing flag before the treatment changeset is opened. Do not assume the experiment is scheduled, running, \
+or automatically activated.
+
+Be conservative with experiment scope. Prefer smaller, focused experiments over large multi-factorial designs."""
 
 
 EXPERIMENT_DESIGN_PROMPT = """Design experiments for the following insights (at most one per insight):
@@ -123,7 +122,7 @@ Active experiments:
 
 Consider:
 1. Does this experiment overlap with any active experiments in a way that could cause interaction effects?
-2. Are the guardrail metrics sufficient to detect negative impact?
+2. Does the treatment introduce operational, privacy, or product risks that need explicit mitigation?
 3. Is the traffic allocation safe (not exposing too many users to a risky change)?
 4. Is the minimum detectable effect reasonable for the expected effect size?
 5. Are there any ethical concerns with this experiment?

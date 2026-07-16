@@ -3,7 +3,7 @@
 A gate (experiment_design or feature_proposal) can hold several items. The
 human decides each one in a single batched submit; approved items fork their
 own downstream track (a feature proposal → its own code_implementation run /
-PR; an experiment design → an individual deploy) while rejected items are
+PR; an experiment design → an inert Config draft and treatment changeset) while rejected items are
 recorded and skipped. Whatever the mix, the run always resumes afterwards so it
 either runs later pipeline agents or finalizes — it never wedges at ``resuming``.
 """
@@ -21,7 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import require_role
-from app.graphs.experiment_design import deploy_experiment, open_treatment_changeset
+from app.graphs.experiment_design import open_treatment_changeset, stage_experiment_draft
 from app.graphs.supervisor import run_supervisor
 from app.safety.audit import AuditLogger
 from app.store.experiments import record_designed_experiment
@@ -140,14 +140,14 @@ async def _update_design_ledger(
         )
 
 
-def _experiment_deployable(design: dict[str, Any]) -> bool:
-    """True if an experiment_design gate item is safe to deploy on approval.
+def _experiment_stageable(design: dict[str, Any]) -> bool:
+    """True if an experiment-design item can become an inert draft on approval.
 
     Multi-design gates can mix outcomes: a safety-halted sibling or one the
-    agent already deployed (L3/L4) lands in the same persisted list as the
-    items genuinely awaiting a human. A blanket approve must not deploy those.
+    item not awaiting approval can land beside a valid sibling. A blanket
+    approval must not stage those items.
     Legacy single-design items carry no ``decision`` key — the run only gated
-    when that design was awaiting approval, so they stay deployable.
+    when that design was awaiting approval, so they remain stageable.
     """
     decision = design.get("decision")
     if decision is not None and str(decision) != "approve":
@@ -357,7 +357,7 @@ async def _apply_approval_effects(
     forked_supervisor_tasks: list[dict[str, Any]] = []
     if gated_agent == "experiment_design":
         for design in approved_items:
-            if not _experiment_deployable(design):
+            if not _experiment_stageable(design):
                 await audit.log(
                     run_id,
                     "approval_skipped",
@@ -370,18 +370,18 @@ async def _apply_approval_effects(
                     approval_status="skipped",
                 )
                 logger.warning(
-                    "[%s] Skipped deploying design %s — decision=%r, not deployable",
+                    "[%s] Skipped staging design %s — decision=%r, not stageable",
                     run_id,
                     _item_id(gated_agent, design),
                     design.get("decision"),
                 )
                 continue
             try:
-                deployed = await deploy_experiment(project_id, design)
+                drafted = await stage_experiment_draft(project_id, design)
             except Exception:
-                deployed = False
+                drafted = False
                 logger.exception(
-                    "[%s] Failed to deploy experiment %s",
+                    "[%s] Failed to create experiment draft %s",
                     run_id,
                     _item_id(gated_agent, design),
                 )
@@ -390,13 +390,19 @@ async def _apply_approval_effects(
                 run_id,
                 project_id,
                 design,
-                "deployed" if deployed else "deploy_failed",
+                "drafted" if drafted else "draft_failed",
             )
-            if deployed:
+            if drafted:
                 logger.info(
-                    "[%s] Deployed approved experiment %s",
+                    "[%s] Created approved experiment draft %s",
                     run_id,
                     _item_id(gated_agent, design),
+                )
+                await audit.log(
+                    run_id,
+                    "experiment_draft_created",
+                    {"experiment_id": _item_id(gated_agent, design)},
+                    approval_status="approved",
                 )
                 try:
                     changeset_id = await open_treatment_changeset(
@@ -425,15 +431,15 @@ async def _apply_approval_effects(
                     )
             else:
                 experiment_id = _item_id(gated_agent, design) or "(no id)"
-                errors.append(f"experiment deploy failed: {experiment_id}")
+                errors.append(f"experiment draft creation failed: {experiment_id}")
                 await audit.log(
                     run_id,
-                    "deploy_failed",
+                    "experiment_draft_failed",
                     {"item_id": experiment_id, "kind": gated_agent},
                     approval_status="approved",
                 )
                 logger.error(
-                    "[%s] Deploy failed for approved experiment %s",
+                    "[%s] Draft creation failed for approved experiment %s",
                     run_id,
                     experiment_id,
                 )
@@ -526,7 +532,8 @@ async def approve_action(
     """Record per-item human decisions on a gate, fork approved items, resume.
 
     Approved feature proposals each fork their own code_implementation run (one
-    PR per proposal); approved experiment designs each deploy individually.
+    PR per proposal); approved experiment designs each create an inert Config
+    draft before opening their treatment changeset.
     Rejected items are audited and skipped. The run always resumes so it
     continues the pipeline or finalizes — closing the old ``resuming`` wedge.
     """

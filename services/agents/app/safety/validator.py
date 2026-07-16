@@ -270,7 +270,7 @@ class SafetyValidator:
     1. Rate limits — prevent runaway agents from making too many changes.
     2. Conflict detection — flag overlapping experiments or conflicting flags.
     3. Blast radius — ensure traffic allocation is within safe bounds.
-    4. Guardrail checks — verify required safety fields are present.
+    4. Required-field checks — verify action-specific safety fields are present.
     """
 
     def validate(self, action: AgentAction) -> SafetyResult:
@@ -392,12 +392,13 @@ class SafetyValidator:
                     "message": "Flag key is missing from experiment design.",
                 }
 
-            # In a production system, we would query the config service here
-            # to check for existing experiments with the same flag key.
             return {
                 "name": "conflict_check",
                 "passed": True,
-                "message": "No conflicts detected.",
+                "message": (
+                    "Experiment identity fields are present; authoritative Config "
+                    "conflict evidence is evaluated by the experiment-design graph."
+                ),
             }
 
         if action.type == ActionType.update_flag:
@@ -623,24 +624,13 @@ class SafetyValidator:
     def _check_guardrails(self, action: AgentAction) -> dict[str, Any]:
         """Verify that required safety fields are present in the configuration.
 
-        For experiments: must have guardrail metrics defined.
+        For experiments: must have a primary metric and clear hypothesis.
         For flags: must have a description.
         For feature proposals: must have risks documented.
         """
         config = action.config
 
         if action.type == ActionType.create_experiment:
-            guardrails = config.get("guardrail_metrics", [])
-            if not guardrails:
-                return {
-                    "name": "guardrails",
-                    "passed": False,
-                    "message": (
-                        "No guardrail metrics defined. Experiments must include "
-                        "guardrails for error rate and latency at minimum."
-                    ),
-                }
-
             primary_metric = config.get("primary_metric")
             if not (isinstance(primary_metric, dict) and primary_metric.get("event")):
                 return {
@@ -666,7 +656,7 @@ class SafetyValidator:
             return {
                 "name": "guardrails",
                 "passed": True,
-                "message": "All required guardrails are present.",
+                "message": "Required experiment design fields are present.",
             }
 
         if action.type == ActionType.feature_proposal:

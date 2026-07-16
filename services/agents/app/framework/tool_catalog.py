@@ -3,7 +3,7 @@
 This module is the read-only security boundary for user-defined agents:
 only the read-only query/list tools below are reachable from a custom
 agent's ``tools`` selection. Nothing that creates or mutates state
-(``create_flag``, ``create_experiment_config``, ``create_ui_config``,
+(``create_flag``, ``create_experiment_draft``, ``create_ui_config``,
 anything in ``tools/code.py``) is in the catalog, so a custom agent cannot
 acquire side effects no matter what its definition says.
 

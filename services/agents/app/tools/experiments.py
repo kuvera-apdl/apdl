@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -43,7 +42,20 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
         resp = await client.get("/v1/admin/experiments", params={"project_id": project_id})
         resp.raise_for_status()
         data = resp.json()
-        return data.get("experiments", []) if isinstance(data, dict) else data
+        if not isinstance(data, dict) or set(data) != {"experiments", "count"}:
+            raise ValueError(
+                "Config experiments response must contain exactly experiments and count"
+            )
+        experiments = data["experiments"]
+        count = data["count"]
+        if (
+            not isinstance(experiments, list)
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count != len(experiments)
+        ):
+            raise ValueError("Config experiments response count does not match its list")
+        return experiments
 
 
 _CONDITION_OPERATORS = {
@@ -164,7 +176,7 @@ def _strict_statistical_plan(plan: Any) -> dict[str, Any]:
     return dict(plan)
 
 
-async def create_experiment_config(
+async def create_experiment_draft(
     project_id: str,
     experiment_id: str,
     hypothesis: str,
@@ -172,18 +184,16 @@ async def create_experiment_config(
     default_variant: str,
     primary_metric: dict[str, str],
     statistical_plan: dict[str, Any],
-    secondary_metrics: list[dict[str, str]] | None = None,
-    guardrail_metrics: list[dict[str, Any]] | None = None,
     targeting: dict[str, Any] | None = None,
-    estimated_duration_days: int = 14,
     flag_key: str | None = None,
     traffic_percentage: float = 100.0,
 ) -> dict[str, Any]:
-    """Create a running experiment via the Config service.
+    """Create an inert experiment draft via the Config service.
 
     The Config service owns experiment→flag initialization, so this single call
-    also creates the canonical backing flag (keyed by ``flag_key``) that controls
-    variant assignment — the agent no longer creates the flag separately.
+    also creates the canonical backing flag (keyed by ``flag_key``). Draft
+    experiments create disabled draft flags and carry no lifecycle dates, so
+    assignment cannot begin before the treatment changeset exists.
 
     Args:
         project_id: Project scope.
@@ -194,27 +204,16 @@ async def create_experiment_config(
         primary_metric: Dict with "event", "type", and "direction".
         statistical_plan: Immutable fixed-horizon decision contract. Config
             validates its prospective sample target before accepting traffic.
-        secondary_metrics: Optional additional metrics to track.
-        guardrail_metrics: Metrics that should not degrade.
         targeting: User targeting conditions.
-        estimated_duration_days: Expected experiment runtime.
         flag_key: Backing flag key to use (defaults to experiment_id).
-        traffic_percentage: Share of traffic the backing flag exposes to the
-            experiment. Must be the same number the safety validator judged
-            (the design's fallthrough rollout) — deploying at a hardcoded 100%
-            would void the blast-radius check.
+        traffic_percentage: Proposed traffic share retained on the disabled
+            backing flag. It must match the number the safety validator judged.
 
     Returns:
         The created experiment configuration.
     """
-    if (
-        isinstance(estimated_duration_days, bool)
-        or not isinstance(estimated_duration_days, int)
-        or not 1 <= estimated_duration_days <= 90
-    ):
-        raise ValueError("estimated_duration_days must be an integer from 1 to 90")
     if not isinstance(primary_metric, dict) or not primary_metric.get("event"):
-        raise ValueError("primary_metric.event is required for a running experiment")
+        raise ValueError("primary_metric.event is required for an experiment draft")
     if primary_metric.get("type", "conversion") != "conversion":
         raise ValueError("primary_metric.type must be conversion")
     if primary_metric.get("direction", "increase") not in {"increase", "decrease"}:
@@ -233,18 +232,14 @@ async def create_experiment_config(
     if not isinstance(default_variant, str) or default_variant not in variant_keys:
         raise ValueError("default_variant must match a variant key")
 
-    start_date = datetime.now(UTC)
-    end_date = start_date + timedelta(days=estimated_duration_days)
     payload: dict[str, Any] = {
         "key": experiment_id,
         "flag_key": flag_key or experiment_id,
-        "status": "running",
+        "status": "draft",
         "description": hypothesis,
         "variants": variants,
         "default_variant": default_variant,
         "traffic_percentage": traffic_percentage,
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
         "primary_metric": {
             "event": primary_metric["event"],
             "type": primary_metric.get("type", "conversion"),
