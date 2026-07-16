@@ -49,10 +49,11 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
-def test_startup_requires_self_registered_agent_gate_migration():
-    assert MIGRATION_VERSION == 14
-    assert MIGRATION_NAME == "014_disable_self_registered_agents.sql"
+def test_startup_requires_custom_agent_contract_migration():
+    assert MIGRATION_VERSION == 15
+    assert MIGRATION_NAME == "015_custom_agent_contracts_and_retry_lineage.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
+    assert ("custom_agent_test_runs", "lease_expires_at") in REQUIRED_COLUMNS
 
 
 @pytest.mark.asyncio

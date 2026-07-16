@@ -7,13 +7,14 @@ text answer or exhausts the step budget.
 
 Safety properties, in order of importance:
 
-* Only :data:`app.framework.tool_catalog.TOOL_CATALOG` tools are reachable —
-  the same read-only, ctx-scoped boundary custom agents already live behind.
-  ``run_tool`` validates params per call and injects ``project_id`` and the
-  date window from the context, so the model can never widen its scope.
+* Only tools in the current agent's declared schema allow-list are dispatched,
+  and every allowed name must also resolve through
+  :data:`app.framework.tool_catalog.TOOL_CATALOG`. ``run_tool`` validates
+  params per call and injects ``project_id`` plus the context's date window,
+  so the model can never widen its scope.
 * ``max_steps`` bounds the number of tool ROUNDS (one model turn may request
-  several calls). On exhaustion the model is forced to answer with tools
-  withheld — the loop cannot run away.
+  several calls). On exhaustion the model is forced to answer with further
+  tool calls disabled — the loop cannot run away.
 * Every tool call is audit-logged (``{agent}_tool_call``) so the console can
   show the investigation trace, and optionally collected into ``trace`` for
   the wizard's dry-run preview.
@@ -26,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,7 +70,11 @@ def _truncate(blob: str, cap: int = RESULT_CHAR_CAP) -> str:
 
 
 async def _execute_call(
-    ctx: AgentContext, name: str, arguments: dict[str, Any]
+    ctx: AgentContext,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    allowed_tools: frozenset[str],
 ) -> ToolTraceEntry:
     """Run one catalog tool; failures become result content, never raises.
 
@@ -76,11 +82,21 @@ async def _execute_call(
     service down) as tool output so it can correct course — an exception here
     would kill the whole agent over one bad call.
     """
+    started = time.monotonic()
+    if name not in allowed_tools:
+        error = f"PermissionError: Tool {name!r} is not enabled for this agent"
+        logger.warning("Rejected out-of-scope tool %s", name)
+        return ToolTraceEntry(
+            tool=name,
+            params=arguments,
+            error=error,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
     # Late import so tests monkeypatching app.framework.tool_catalog.run_tool
     # are honored (same convention as CustomAgent.gather used).
     from app.framework import tool_catalog
 
-    started = time.monotonic()
     try:
         output = await tool_catalog.run_tool(ctx, name, arguments)
         result = _truncate(json.dumps(output, default=str))
@@ -118,8 +134,14 @@ async def run_preset_tools(
     marks an entry as preset in the trace the console renders).
     """
     trace: list[ToolTraceEntry] = []
+    allowed_tools = frozenset(entry["tool"] for entry in preset_tools)
     for entry in preset_tools:
-        executed = await _execute_call(ctx, entry["tool"], entry.get("params") or {})
+        executed = await _execute_call(
+            ctx,
+            entry["tool"],
+            entry.get("params") or {},
+            allowed_tools=allowed_tools,
+        )
         trace.append(executed)
         if log_tool_calls:
             await ctx.audit.log(
@@ -148,6 +170,7 @@ async def run_tool_loop(
     model_tier: str = "reasoning",
     max_steps: int = 8,
     log_tool_calls: bool = True,
+    terminal_result_for_tool: Callable[[ToolTraceEntry], str | None] | None = None,
 ) -> ToolLoopResult:
     """Run the model with tools until it answers in text or the budget ends.
 
@@ -160,6 +183,8 @@ async def run_tool_loop(
         max_steps: Max tool ROUNDS before the final answer is forced.
         log_tool_calls: Write audit entries per call (off for dry-run testing,
             which must stay side-effect free).
+        terminal_result_for_tool: Optional deterministic stop hook. Returning
+            text after a tool result ends the loop without another LLM call.
 
     Returns:
         The final assistant text plus the executed tool-call trace.
@@ -169,6 +194,7 @@ async def run_tool_loop(
         {"role": "user", "content": user_prompt},
     ]
     trace: list[ToolTraceEntry] = []
+    allowed_tools = frozenset(schema["name"] for schema in tool_schemas)
 
     for round_index in range(max_steps):
         completion = await chat_completion_with_tools(
@@ -190,7 +216,12 @@ async def run_tool_loop(
                 "role": "assistant",
                 "content": completion.text,
                 "tool_calls": [
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                    {
+                        "id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                        "thought_signature": tc.thought_signature,
+                    }
                     for tc in requested
                 ],
             }
@@ -200,7 +231,12 @@ async def run_tool_loop(
         # 1–3 calls) and the query service is a shared dependency — the old
         # plan-executor's burst concurrency is what this loop replaces.
         for tc in requested:
-            entry = await _execute_call(ctx, tc.name, tc.arguments)
+            entry = await _execute_call(
+                ctx,
+                tc.name,
+                tc.arguments,
+                allowed_tools=allowed_tools,
+            )
             trace.append(entry)
             if log_tool_calls:
                 await ctx.audit.log(
@@ -225,10 +261,23 @@ async def run_tool_loop(
                     else json.dumps({"error": entry.error}),
                 }
             )
+            if terminal_result_for_tool is not None:
+                terminal_text = terminal_result_for_tool(entry)
+                if terminal_text is not None:
+                    logger.info(
+                        "[%s] Tool %s produced a deterministic terminal result",
+                        agent_name,
+                        entry.tool,
+                    )
+                    return ToolLoopResult(
+                        text=terminal_text,
+                        trace=trace,
+                        rounds=round_index + 1,
+                    )
 
-    # Budget exhausted: force a final answer. Tools are withheld (tools=None)
-    # so the model cannot request more work, but the full investigation
-    # transcript stays in context.
+    # Budget exhausted: force a final answer. Tool declarations stay present
+    # because providers validate historical tool calls against them; the
+    # explicit force_text control prevents any new calls.
     messages.append(
         {
             "role": "user",
@@ -239,7 +288,10 @@ async def run_tool_loop(
         }
     )
     completion = await chat_completion_with_tools(
-        model_tier=model_tier, messages=messages, tools=None
+        model_tier=model_tier,
+        messages=messages,
+        tools=tool_schemas,
+        force_text=True,
     )
     logger.info(
         "[%s] Tool loop hit max_steps=%d (%d calls executed)",

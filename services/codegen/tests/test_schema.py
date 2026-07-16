@@ -46,10 +46,12 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_development_publication_migration():
-    with pytest.raises(RuntimeError, match="011_codegen_development_publication.sql"):
+async def test_rejects_database_without_retry_lineage_migration():
+    with pytest.raises(
+        RuntimeError, match="015_custom_agent_contracts_and_retry_lineage.sql"
+    ):
         await assert_schema_ready(
-            FakeConn(migration_name="010_codegen_publication_identity.sql")
+            FakeConn(migration_name="014_disable_self_registered_agents.sql")
         )
 
 

@@ -1,5 +1,6 @@
 """Endpoint tests for the changeset lifecycle."""
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,7 @@ from app.models.observations import CIVerificationObservation, ExternalCIStatus
 from app.runtime.collector import RuntimeEvidenceCollection
 from app.runtime.evidence import build_runtime_evidence_observation
 from app.runtime.models import RuntimeAcceptancePlan
+from app.routers import changesets as changesets_router
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 
@@ -282,6 +284,42 @@ async def test_retry_pre_pr_error_enqueues_same_task():
     assert body["task"]["spec"] == "spec spec spec"
     assert body["base_branch"] == "develop"
     assert body["task"]["context"]["retry_of"] == "cs_bad"
+    assert pool.store["changesets"][body["changeset_id"]]["retry_of_changeset_id"] == "cs_bad"
+
+
+@pytest.mark.asyncio
+async def test_retry_is_idempotent_for_duplicate_and_concurrent_requests(monkeypatch):
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_bad", "demo", status="error")
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        changesets_router,
+        "_maybe_enqueue",
+        lambda app, background_tasks, changeset_id: enqueued.append(changeset_id),
+    )
+
+    async with _client(pool) as client:
+        first, second = await asyncio.gather(
+            client.post("/v1/changesets/cs_bad/retry"),
+            client.post("/v1/changesets/cs_bad/retry"),
+        )
+        third = await client.post("/v1/changesets/cs_bad/retry")
+
+    assert [first.status_code, second.status_code, third.status_code] == [202, 202, 202]
+    child_ids = {
+        first.json()["changeset_id"],
+        second.json()["changeset_id"],
+        third.json()["changeset_id"],
+    }
+    assert len(child_ids) == 1
+    children = [
+        row
+        for row in pool.store["changesets"].values()
+        if row.get("retry_of_changeset_id") == "cs_bad"
+    ]
+    assert len(children) == 1
+    assert enqueued == [next(iter(child_ids))]
 
 
 @pytest.mark.parametrize(

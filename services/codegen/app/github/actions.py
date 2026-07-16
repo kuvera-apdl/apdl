@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import github_api_url
 from app.github.artifacts import StaleActionsHeadError, redact_text
-from app.github.client import gh_client, gh_headers
+from app.github.client import gh_client, gh_headers, github_json_pages
 
 _PER_PAGE = 100
 _MAX_PAGES = 5
@@ -55,21 +55,6 @@ class ActionsJobLog(StrictModel):
     redacted: bool = False
 
 
-def _next_api_page(response: httpx.Response) -> str | None:
-    next_url = (response.links.get("next") or {}).get("url")
-    if next_url is None:
-        return None
-    target = httpx.URL(next_url)
-    configured = httpx.URL(github_api_url())
-    if (target.scheme, target.host, target.port) != (
-        configured.scheme,
-        configured.host,
-        configured.port,
-    ):
-        raise ValueError("GitHub pagination attempted to leave the configured API host")
-    return next_url
-
-
 def _validate_head_sha(head_sha: str) -> None:
     if not _HEAD_PATTERN.fullmatch(head_sha):
         raise ValueError("head_sha contains invalid characters")
@@ -112,19 +97,14 @@ async def list_workflow_runs(
         raise ValueError("head_sha and a positive max_pages are required")
     base = github_api_url()
     runs: list[ActionsWorkflowRun] = []
-    next_url: str | None = (
+    url = (
         f"{base}/repos/{repo}/actions/runs?head_sha={head_sha}&per_page={_PER_PAGE}"
     )
     async with gh_client(client) as c:
-        for _ in range(max_pages):
-            if next_url is None:
-                break
-            response = await c.get(next_url, headers=gh_headers(token))
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("workflow_runs", []), list
-            ):
+        async for payload in github_json_pages(
+            c, url, token, max_pages=max_pages
+        ):
+            if not isinstance(payload.get("workflow_runs", []), list):
                 raise ValueError("GitHub workflow-runs response must contain a list")
             for item in payload.get("workflow_runs") or []:
                 if not isinstance(item, dict):
@@ -142,7 +122,6 @@ async def list_workflow_runs(
                         html_url=item.get("html_url"),
                     )
                 )
-            next_url = _next_api_page(response)
     return sorted(runs, key=lambda item: (item.run_id, item.run_attempt))
 
 
@@ -163,19 +142,14 @@ async def list_run_jobs(
     jobs: list[ActionsJob] = []
     async with gh_client(client) as c:
         await _exact_run(c, repo, run_id, head_sha, token)
-        next_url: str | None = (
+        url = (
             f"{base}/repos/{repo}/actions/runs/{run_id}/jobs"
             f"?filter=latest&per_page={_PER_PAGE}"
         )
-        for _ in range(max_pages):
-            if next_url is None:
-                break
-            response = await c.get(next_url, headers=gh_headers(token))
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("jobs", []), list
-            ):
+        async for payload in github_json_pages(
+            c, url, token, max_pages=max_pages
+        ):
+            if not isinstance(payload.get("jobs", []), list):
                 raise ValueError("GitHub workflow-jobs response must contain a list")
             for item in payload.get("jobs") or []:
                 if not isinstance(item, dict):
@@ -194,7 +168,6 @@ async def list_run_jobs(
                         html_url=item.get("html_url"),
                     )
                 )
-            next_url = _next_api_page(response)
     return sorted(jobs, key=lambda item: item.job_id)
 
 

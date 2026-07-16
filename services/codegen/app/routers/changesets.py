@@ -316,9 +316,10 @@ async def retry_changeset(
     tenant_policy, effective_policy_sha256 = _policy_provenance(
         request.app, connection
     )
-    new_changeset = await store.create_changeset(
+    new_changeset, created = await store.create_retry_changeset(
         pool,
         changeset_id=new_id,
+        retry_of_changeset_id=changeset_id,
         project_id=original.project_id,
         run_id=original.run_id,
         base_branch=original.base_branch,
@@ -327,5 +328,6 @@ async def retry_changeset(
         tenant_policy_snapshot=tenant_policy,
         effective_safety_policy_sha256=effective_policy_sha256,
     )
-    _maybe_enqueue(request.app, background_tasks, new_id)
+    if created:
+        _maybe_enqueue(request.app, background_tasks, new_changeset.changeset_id)
     return new_changeset

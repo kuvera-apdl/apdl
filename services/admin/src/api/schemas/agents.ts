@@ -105,6 +105,7 @@ export const approvalResponseSchema = z
     rejected_count: z.number().int().optional(),
     forked_runs: z.array(z.string()).optional(),
     opened_changesets: z.array(z.string()).optional(),
+    errors: z.array(z.string()).optional(),
     message: z.string(),
   })
   .strict()
@@ -150,8 +151,8 @@ export const presetToolCallSchema = z
 // Create/update body (CustomAgentSpec). Server-side validate_definition owns
 // the domain rules; these mirror the shape so bad payloads fail client-side.
 // Custom agents are agentic: `tools` is the ALLOWED-tools selection (catalog
-// names the model may call in its tool loop); an empty list allows the whole
-// catalog. `max_tool_steps` bounds the loop's tool rounds. `preset_tools`
+// names the model may call in its tool loop); an empty list allows no agentic
+// tools. `max_tool_steps` bounds the loop's tool rounds. `preset_tools`
 // are the deterministic calls run verbatim before the loop.
 export const customAgentSpecSchema = z
   .object({
@@ -160,8 +161,16 @@ export const customAgentSpecSchema = z
       .regex(/^[a-z][a-z0-9_]{2,63}$/, 'lowercase letters, digits, underscores; 3-64 chars'),
     display_name: z.string().min(1).max(120),
     description: z.string().max(500),
-    system_prompt: z.string().min(1).max(20_000),
-    user_prompt_template: z.string().min(1).max(20_000),
+    system_prompt: z
+      .string()
+      .min(1)
+      .max(20_000)
+      .refine((value) => value.trim().length > 0, 'Prompt must contain non-whitespace characters.'),
+    user_prompt_template: z
+      .string()
+      .min(1)
+      .max(20_000)
+      .refine((value) => value.trim().length > 0, 'Prompt must contain non-whitespace characters.'),
     model_tier: modelTierSchema,
     tools: z.array(z.string().min(1)),
     preset_tools: z.array(presetToolCallSchema).max(10),

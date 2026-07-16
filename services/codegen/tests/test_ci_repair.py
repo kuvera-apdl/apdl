@@ -11,6 +11,10 @@ import pytest
 import app.jobs.repair as repair_module
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
+from app.editor.prompts import (
+    PROMPT_TRANSCRIPT_MAX_BYTES,
+    serialized_prompt_bytes,
+)
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
 from app.models.observations import (
@@ -321,6 +325,47 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
         by_sequence[2].prompt_evidence[0].evidence_id
     ]
     assert by_sequence[1].attempt_id == by_sequence[2].attempt_id
+
+
+@pytest.mark.asyncio
+async def test_repair_append_keeps_prompt_transcript_bounded(monkeypatch):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    initial = [
+        {
+            "stage": "edit",
+            "label": f"initial-{index}",
+            "user": str(index) * 100_000,
+        }
+        for index in range(6)
+    ]
+    await changeset_store.set_prompts(pool, "cs-repair", initial)
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+            changed_paths=["src/fix.py"],
+            diff_text="+fixed",
+            head_sha="head-repaired",
+            prompts=[
+                {
+                    "stage": "edit",
+                    "label": f"repair-{index}",
+                    "user": "R" * 100_000,
+                }
+                for index in range(6)
+            ],
+        )
+    )
+
+    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    assert serialized_prompt_bytes(final.prompts) <= PROMPT_TRANSCRIPT_MAX_BYTES
+    assert final.prompts[0]["label"] == "initial-0"
+    assert final.prompts[-1]["label"] == "repair-5"
+    assert any(item["stage"] == "transcript" for item in final.prompts)
 
 
 @pytest.mark.asyncio

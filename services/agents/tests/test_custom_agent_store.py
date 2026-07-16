@@ -181,6 +181,23 @@ async def test_fetch_active_by_slugs_short_circuits_on_empty():
 
 
 @pytest.mark.asyncio
+async def test_project_contract_projection_does_not_fetch_prompt_rows():
+    pool = _FakePool()
+    pool.conn.fetch_result = [
+        {"agent_id": "agent-1", "produces": "churn_signals"}
+    ]
+
+    outputs = await store.list_active_custom_agent_outputs(pool, "demo")
+
+    assert outputs == [{"agent_id": "agent-1", "produces": "churn_signals"}]
+    query, args = pool.conn.executed[0]
+    assert "SELECT agent_id, produces" in query
+    assert "system_prompt" not in query
+    assert "user_prompt_template" not in query
+    assert args == ("demo",)
+
+
+@pytest.mark.asyncio
 async def test_fetch_active_by_slugs_maps_by_slug():
     pool = _FakePool()
     pool.conn.fetch_result = [_row()]

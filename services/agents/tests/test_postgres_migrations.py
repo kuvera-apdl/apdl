@@ -1,7 +1,10 @@
 """Contracts for the canonical PostgreSQL migration authority."""
 
+import json
 import re
 from pathlib import Path
+
+from app.framework.tool_catalog import TOOL_CATALOG
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -19,6 +22,9 @@ CODEGEN_PUBLICATION_IDENTITY_SQL = (
 ).read_text()
 CODEGEN_DEVELOPMENT_PUBLICATION_SQL = (
     POSTGRES_MIGRATIONS / "011_codegen_development_publication.sql"
+).read_text()
+CUSTOM_AGENT_CONTRACT_SQL = (
+    POSTGRES_MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
 ).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
@@ -164,6 +170,41 @@ def test_codegen_development_publication_is_a_separate_draft_only_contract():
     assert "local-development" in sql
     assert "draft_only" in sql
     assert ") IS TRUE" in sql
+
+
+def test_custom_agent_contract_migration_is_explicit_and_strict():
+    sql = CUSTOM_AGENT_CONTRACT_SQL
+    for tool_name in (
+        "discover_events",
+        "query_events",
+        "query_timeseries",
+        "query_funnel",
+        "query_retention",
+        "query_cohort",
+        "query_breakdown",
+        "list_flags",
+        "get_active_experiments",
+    ):
+        assert f'"{tool_name}"' in sql
+    migrated_tools = re.search(r"SET tools = '(\[[^']+\])'::jsonb", sql)
+    assert migrated_tools is not None
+    assert json.loads(migrated_tools.group(1)) == list(TOOL_CATALOG)
+    assert "WHERE tools = '[]'::jsonb" in sql
+    assert "DROP COLUMN IF EXISTS parse_as" in sql
+    assert "CREATE TABLE custom_agent_test_runs" in sql
+    assert "llm_calls INTEGER NOT NULL DEFAULT 0" in sql
+    assert "custom_agent_test_runs_one_running_per_project_idx" in sql
+    assert "WHERE status = 'running'" in sql
+
+
+def test_retry_lineage_migration_backfills_one_child_and_enforces_uniqueness():
+    sql = CUSTOM_AGENT_CONTRACT_SQL
+    assert "ADD COLUMN IF NOT EXISTS retry_of_changeset_id TEXT" in sql
+    assert "row_number() OVER" in sql
+    assert "legacy.retry_rank = 1" in sql
+    assert "codegen_changesets_retry_of_changeset_id_fkey" in sql
+    assert "codegen_changesets_one_retry_child_idx" in sql
+    assert "WHERE retry_of_changeset_id IS NOT NULL" in sql
 
 
 def test_database_runners_enforce_the_single_engine_authority():

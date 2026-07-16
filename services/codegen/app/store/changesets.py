@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from app.contracts.models import ContractBundle
+from app.editor.prompts import bound_prompt_transcript
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
@@ -266,6 +267,79 @@ async def create_changeset(
             repository_target.repository_full_name,
         )
     return _row_to_changeset(row)
+
+
+async def create_retry_changeset(
+    pool: asyncpg.Pool,
+    *,
+    changeset_id: str,
+    retry_of_changeset_id: str,
+    project_id: str,
+    run_id: str | None,
+    base_branch: str | None,
+    task: dict[str, Any],
+    repository_target: RepositoryTarget,
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
+    effective_safety_policy_sha256: str | None = None,
+) -> tuple[Changeset, bool]:
+    """Create or return the one canonical child for a retryable changeset.
+
+    ``codegen_changesets_one_retry_child_idx`` is the cross-replica
+    idempotency boundary. Only the request that inserts the row may enqueue
+    it; duplicate or concurrent requests receive the already-created child.
+    """
+    if repository_target.project_id != project_id:
+        raise ValueError("Changeset project does not match its repository grant")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO codegen_changesets
+                (changeset_id, project_id, run_id, status, base_branch, task,
+                 tenant_policy_snapshot, effective_safety_policy_sha256,
+                 repository_grant_id, repository_id,
+                 repository_installation_id, repository_full_name,
+                 repository_target_quarantined, retry_of_changeset_id)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8,
+                    $9, $10, $11, $12, false, $13)
+            ON CONFLICT (retry_of_changeset_id)
+                WHERE retry_of_changeset_id IS NOT NULL
+                DO NOTHING
+            RETURNING *
+            """,
+            changeset_id,
+            project_id,
+            run_id,
+            ChangesetStatus.queued.value,
+            base_branch,
+            json.dumps(task),
+            (
+                tenant_policy_snapshot.model_dump_json()
+                if tenant_policy_snapshot is not None
+                else None
+            ),
+            effective_safety_policy_sha256,
+            repository_target.grant_id,
+            repository_target.repository_id,
+            repository_target.installation_id,
+            repository_target.repository_full_name,
+            retry_of_changeset_id,
+        )
+        if row is not None:
+            return _row_to_changeset(row), True
+
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM codegen_changesets
+            WHERE retry_of_changeset_id = $1
+            """,
+            retry_of_changeset_id,
+        )
+    if row is None:
+        raise RuntimeError(
+            "Retry idempotency conflict did not resolve to an existing child"
+        )
+    return _row_to_changeset(row), False
 
 
 async def set_safety_policy_provenance(
@@ -527,6 +601,7 @@ async def set_prompts(
     the state machine: the transcript is diagnostic metadata, valid to record
     in any state.
     """
+    bounded = bound_prompt_transcript(prompts)
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -535,7 +610,7 @@ async def set_prompts(
             WHERE changeset_id = $1
             """,
             changeset_id,
-            json.dumps(prompts),
+            json.dumps(bounded),
         )
 
 

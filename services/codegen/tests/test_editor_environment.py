@@ -75,9 +75,9 @@ def test_default_configuration_matches_effective_app_config(monkeypatch) -> None
         "sdk_reference_enabled": False,
         "contracts_enabled": True,
         "contract_install_timeout_seconds": 600,
-        "agent_timeout_seconds": 1800,
-        "git_timeout_seconds": 300,
-        "llm_timeout_seconds": 240.0,
+        "agent_timeout_seconds": 1075,
+        "git_timeout_seconds": 179,
+        "llm_timeout_seconds": 143.41463414634146,
         "job_budget_seconds": 3000,
         "require_verify": False,
         "provider_routing": {
@@ -114,9 +114,9 @@ def test_normalization_matches_effective_app_config(monkeypatch) -> None:
     assert configuration["helper_model"] == "openai/gpt-5"
     assert configuration["edit_retries"] == 0
     assert configuration["contract_install_timeout_seconds"] == 1
-    assert configuration["agent_timeout_seconds"] == 90
-    assert configuration["git_timeout_seconds"] == 30
-    assert configuration["llm_timeout_seconds"] == 12.5
+    assert configuration["agent_timeout_seconds"] == 11
+    assert configuration["git_timeout_seconds"] == 3
+    assert configuration["llm_timeout_seconds"] == pytest.approx(1.5384615385)
     assert configuration["job_budget_seconds"] == 80
     assert configuration["sdk_reference_enabled"] is False
     assert configuration["require_verify"] is False

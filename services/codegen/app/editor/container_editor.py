@@ -42,6 +42,7 @@ from app.config import codegen_job_budget
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
+from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
@@ -54,7 +55,7 @@ from app.verification.models import VerificationCoverage, VerificationPlan
 logger = logging.getLogger(__name__)
 
 _DEFAULT_IMAGE = "apdl-codegen-sandbox:latest"
-_ERR_TAIL = 800
+_ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 
 # Provider keys forwarded into the sandbox by NAME only (docker reads them from
 # our process env), so their VALUES never appear on the docker argv / process
@@ -341,7 +342,7 @@ class ContainerAiderEditor:
                     else None
                 ),
             )
-        tail = (stderr or stdout or "").strip()[-_ERR_TAIL:]
+        tail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
         return EditResult(
             success=False,
             branch=request.branch,

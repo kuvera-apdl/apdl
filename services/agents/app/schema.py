@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 14
-MIGRATION_NAME = "014_disable_self_registered_agents.sql"
+MIGRATION_VERSION = 15
+MIGRATION_NAME = "015_custom_agent_contracts_and_retry_lineage.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -33,6 +33,11 @@ REQUIRED_COLUMNS = frozenset(
         ("experiment_verdicts", "experiment_id"),
         ("custom_agents", "agent_id"),
         ("custom_agents", "max_tool_steps"),
+        ("custom_agent_test_runs", "test_run_id"),
+        ("custom_agent_test_runs", "project_id"),
+        ("custom_agent_test_runs", "status"),
+        ("custom_agent_test_runs", "llm_calls"),
+        ("custom_agent_test_runs", "lease_expires_at"),
         ("llm_calls", "project_id"),
         ("llm_calls", "run_id"),
     }

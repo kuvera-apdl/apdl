@@ -411,6 +411,79 @@ describe('CustomAgentWizardPage', () => {
     expect(screen.getByLabelText('Name')).toBeInTheDocument()
   })
 
+  test('materializes the full catalog when All tools is selected', async () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/custom" element={<div>list page</div>} />
+        <Route path="/agents/custom/new" element={<CustomAgentWizardPage />} />
+      </Routes>,
+      '/agents/custom/new',
+    )
+
+    await userEvent.type(await screen.findByLabelText('Name'), 'Churn watch')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /next/i }))
+    await userEvent.type(await screen.findByLabelText('System prompt'), 'Analyse churn.')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    expect(await screen.findByRole('radio', { name: /all tools/i })).toBeChecked()
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.type(await screen.findByLabelText('Output key (produces)'), 'churn_signals')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /create agent/i }))
+
+    const createCall = requests.find((entry) => entry.path === 'create')
+    expect(createCall?.body).toMatchObject({
+      tools: ['discover_events', 'query_funnel'],
+    })
+  })
+
+  test('sends an exact empty allow-list when no agentic tools are selected', async () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/custom" element={<div>list page</div>} />
+        <Route path="/agents/custom/new" element={<CustomAgentWizardPage />} />
+      </Routes>,
+      '/agents/custom/new',
+    )
+
+    await userEvent.type(await screen.findByLabelText('Name'), 'Plain analyst')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /next/i }))
+    await userEvent.type(await screen.findByLabelText('System prompt'), 'Analyse the context.')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('radio', { name: /limit tools/i }))
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.type(await screen.findByLabelText('Output key (produces)'), 'plain_findings')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /create agent/i }))
+
+    const createCall = requests.find((entry) => entry.path === 'create')
+    expect(createCall?.body).toMatchObject({ tools: [] })
+  })
+
+  test('preserves a zero tool budget so validation can reject it', async () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/custom/new" element={<CustomAgentWizardPage />} />
+      </Routes>,
+      '/agents/custom/new',
+    )
+
+    await userEvent.type(await screen.findByLabelText('Name'), 'Churn watch')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    await userEvent.click(await screen.findByRole('button', { name: /next/i }))
+    await userEvent.type(await screen.findByLabelText('System prompt'), 'Analyse churn.')
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+
+    const budget = await screen.findByLabelText('Tool budget (rounds)')
+    await userEvent.clear(budget)
+    expect(budget).toHaveValue(0)
+    await userEvent.click(screen.getByRole('button', { name: /next/i }))
+    expect(
+      await screen.findByText('Tool budget must be between 1 and 16 rounds.'),
+    ).toBeInTheDocument()
+  })
+
   test('prefills the form when editing an existing agent', async () => {
     customAgents = [makeCustomAgent()]
     renderWithProviders(

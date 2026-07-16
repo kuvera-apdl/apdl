@@ -259,3 +259,53 @@ def test_update_flag_rejects_legacy_boolean_field():
     assert result["passed"] is False
     assert variant_check["passed"] is False
     assert "non-canonical" in variant_check["message"]
+
+
+def test_rate_limit_check_failure_fails_closed(monkeypatch):
+    validator_instance = SafetyValidator()
+
+    def broken_rate_limit(action, record=True):
+        raise RuntimeError("rate store unavailable")
+
+    monkeypatch.setattr(validator_instance, "_check_rate_limits", broken_rate_limit)
+
+    result = validator_instance.validate(
+        AgentAction(
+            type=ActionType.create_experiment,
+            config=make_experiment(),
+            project_id="apdl",
+        )
+    ).model_dump()
+
+    rate_limit = {check["name"]: check for check in result["checks"]}["rate_limit"]
+    assert result["passed"] is False
+    assert rate_limit["passed"] is False
+    assert "rate store unavailable" in rate_limit["message"]
+
+
+def test_rate_limit_wrapper_preserves_record_semantics(monkeypatch):
+    validator_instance = SafetyValidator()
+    recorded: list[bool] = []
+
+    def track_rate_limit(action, record=True):
+        recorded.append(record)
+        return {"name": "rate_limit", "passed": True, "message": "tracked"}
+
+    monkeypatch.setattr(validator_instance, "_check_rate_limits", track_rate_limit)
+
+    validator_instance.validate(
+        AgentAction(
+            type=ActionType.create_experiment,
+            config=make_experiment(),
+            project_id="apdl",
+        )
+    )
+    validator_instance.validate(
+        AgentAction(
+            type=ActionType.update_flag,
+            config={"key": "checkout", "default_value": False},
+            project_id="apdl",
+        )
+    )
+
+    assert recorded == [True, False]

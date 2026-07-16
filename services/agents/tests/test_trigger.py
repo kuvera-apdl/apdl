@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -18,6 +19,11 @@ class _FakeConn:
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple]] = []
         self.custom_rows: list[dict[str, Any]] = []
+        self.transaction_entries = 0
+        self.transaction_exits = 0
+
+    def transaction(self) -> "_Transaction":
+        return _Transaction(self)
 
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
@@ -31,6 +37,18 @@ class _FakeConn:
         if "FROM custom_agents" in query:
             return self.custom_rows
         return []
+
+
+class _Transaction:
+    def __init__(self, conn: _FakeConn) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> None:
+        self.conn.transaction_entries += 1
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        self.conn.transaction_exits += 1
+        return False
 
 
 class _Acquire:
@@ -165,6 +183,18 @@ async def test_trigger_starts_run_and_serializes_config(monkeypatch):
     query, args = next(
         (q, a) for q, a in pool.conn.executed if "INSERT INTO agent_runs" in q
     )
+    advisory_index = next(
+        index
+        for index, (statement, _) in enumerate(pool.conn.executed)
+        if "pg_advisory_xact_lock" in statement
+    )
+    insert_index = next(
+        index
+        for index, (statement, _) in enumerate(pool.conn.executed)
+        if "INSERT INTO agent_runs" in statement
+    )
+    assert advisory_index < insert_index
+    assert pool.conn.transaction_entries == pool.conn.transaction_exits == 1
     assert "lease_expires_at" in query
     assert "now() + ($5 * interval '1 second')" in query
     assert "$6::jsonb" in query
@@ -182,6 +212,99 @@ async def test_trigger_starts_run_and_serializes_config(monkeypatch):
         "experiment_design",
     ]
     assert kicked[0]["run_id"] == body["run_id"]
+
+
+class _ConcurrentRunState:
+    def __init__(self) -> None:
+        self.advisory_lock = asyncio.Lock()
+        self.active_run_id: str | None = None
+        self.insert_count = 0
+
+
+class _ConcurrentTransaction:
+    def __init__(self, conn: "_ConcurrentConn") -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        if self.conn.lock_held:
+            self.conn.state.advisory_lock.release()
+            self.conn.lock_held = False
+        return False
+
+
+class _ConcurrentConn(_FakeConn):
+    def __init__(self, state: _ConcurrentRunState) -> None:
+        super().__init__()
+        self.state = state
+        self.lock_held = False
+
+    def transaction(self) -> _ConcurrentTransaction:
+        return _ConcurrentTransaction(self)
+
+    async def execute(self, query: str, *args: Any):
+        self.executed.append((query, args))
+        if "pg_advisory_xact_lock" in query:
+            await self.state.advisory_lock.acquire()
+            self.lock_held = True
+        elif "INSERT INTO agent_runs" in query:
+            self.state.active_run_id = str(args[0])
+            self.state.insert_count += 1
+
+    async def fetchval(self, query: str, *args: Any):
+        if "SELECT run_id FROM agent_runs" in query:
+            return self.state.active_run_id
+        return await super().fetchval(query, *args)
+
+
+class _ConcurrentAcquire:
+    def __init__(self, pool: "_ConcurrentPool") -> None:
+        self.pool = pool
+        self.conn: _ConcurrentConn | None = None
+
+    async def __aenter__(self) -> _ConcurrentConn:
+        self.conn = _ConcurrentConn(self.pool.state)
+        self.pool.connections.append(self.conn)
+        return self.conn
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _ConcurrentPool:
+    def __init__(self) -> None:
+        self.state = _ConcurrentRunState()
+        self.connections: list[_ConcurrentConn] = []
+
+    def acquire(self) -> _ConcurrentAcquire:
+        return _ConcurrentAcquire(self)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_trigger_requests_create_only_one_active_run(monkeypatch):
+    async def fake_supervisor(**kwargs):
+        return None
+
+    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+    pool = _ConcurrentPool()
+
+    async with _client(pool) as client:
+        responses = await asyncio.gather(
+            client.post(
+                "/v1/agents/trigger",
+                json={"project_id": "demo", "trigger_type": "manual"},
+            ),
+            client.post(
+                "/v1/agents/trigger",
+                json={"project_id": "demo", "trigger_type": "manual"},
+            ),
+        )
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert pool.state.insert_count == 1
+    assert pool.state.active_run_id is not None
 
 
 @pytest.mark.asyncio

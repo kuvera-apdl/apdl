@@ -5,7 +5,7 @@
 // thing an operator needs to know why an autonomous PR never opened.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronRight, ExternalLink, GitBranch } from 'lucide-react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 import {
@@ -196,6 +196,7 @@ function verificationLabel(value: string): string {
 
 export function ChangesetDetailPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const { active } = useWorkspace()
   const queryClient = useQueryClient()
   const ws = active as Workspace
@@ -255,9 +256,10 @@ export function ChangesetDetailPage() {
   })
   const retry = useMutation({
     mutationFn: () => retryChangeset(serviceConnection(ws, 'codegen'), id),
-    onSuccess: () => {
+    onSuccess: (changeset) => {
       toast.success('Retry started')
       invalidate()
+      navigate(`/codegen/${changeset.changeset_id}`)
     },
     onError: onError('Retry failed'),
   })

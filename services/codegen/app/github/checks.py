@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
 import httpx
 
 from app.config import github_api_url
-from app.github.client import gh_client, gh_headers
+from app.github.client import gh_client, gh_headers, github_paginated_items
 
 logger = logging.getLogger(__name__)
 
@@ -46,20 +47,37 @@ async def get_ci_evidence(
     """Fetch bounded raw status/check evidence for one exact GitHub head."""
     base = github_api_url()
     async with gh_client(client) as c:
-        status_resp = await c.get(
-            f"{base}/repos/{repo}/commits/{head_sha}/status",
-            headers=gh_headers(token),
+        status_task = asyncio.create_task(
+            _get_combined_status(c, repo, head_sha, token)
         )
-        status_resp.raise_for_status()
-        combined = status_resp.json()
-        if not isinstance(combined, dict):
-            raise ValueError("GitHub combined status must be an object")
-        check_runs = await _paginated_list(
-            c,
-            f"{base}/repos/{repo}/commits/{head_sha}/check-runs",
-            token,
-            "check_runs",
+        checks_task = asyncio.create_task(
+            github_paginated_items(
+                c,
+                (
+                    f"{base}/repos/{repo}/commits/{head_sha}/check-runs"
+                    f"?per_page={_PER_PAGE}"
+                ),
+                token,
+                "check_runs",
+                max_pages=_MAX_PAGES,
+            )
         )
+        try:
+            combined, raw_check_runs = await asyncio.gather(
+                status_task, checks_task
+            )
+        except BaseException:
+            # asyncio.gather propagates the first exception but deliberately
+            # leaves siblings running. Cancel and join both requests before the
+            # shared client context can close underneath the surviving task.
+            for task in (status_task, checks_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(status_task, checks_task, return_exceptions=True)
+            raise
+        if not all(isinstance(run, dict) for run in raw_check_runs):
+            raise ValueError("GitHub check-run entries must be objects")
+        check_runs: list[dict] = raw_check_runs
         failed_runs = [
             run
             for run in check_runs
@@ -87,17 +105,18 @@ async def get_ci_evidence(
     return GitHubCIEvidence(combined_status=combined, check_runs=check_runs)
 
 
-async def _paginated_list(
-    c: httpx.AsyncClient, url: str, token: str, key: str
-) -> list[dict]:
-    """Collect ``key`` items across GitHub Link-header pages (bounded)."""
-    items: list[dict] = []
-    next_url: str | None = f"{url}?per_page={_PER_PAGE}"
-    for _ in range(_MAX_PAGES):
-        if next_url is None:
-            break
-        resp = await c.get(next_url, headers=gh_headers(token))
-        resp.raise_for_status()
-        items.extend(resp.json().get(key) or [])
-        next_url = (resp.links.get("next") or {}).get("url")
-    return items
+async def _get_combined_status(
+    client: httpx.AsyncClient,
+    repo: str,
+    head_sha: str,
+    token: str,
+) -> dict:
+    response = await client.get(
+        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/status",
+        headers=gh_headers(token),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub combined status must be an object")
+    return payload

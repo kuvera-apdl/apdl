@@ -71,6 +71,19 @@ def test_tail_strips_before_measuring():
     assert _tail("   hi   ", limit=800) == "hi"
 
 
+def test_tail_omits_an_overlong_final_line_instead_of_slicing_it():
+    out = _tail("earlier line\n" + ("x" * 1000), limit=80)
+
+    assert "final line exceeds the 80-char excerpt limit" in out
+    assert "x" * 10 not in out
+
+
+def test_tail_keeps_a_complete_line_that_exactly_fits_the_limit():
+    out = _tail("earlier line\n" + ("y" * 20), limit=20)
+
+    assert out.split("\n", 1)[1] == "y" * 20
+
+
 def test_parse_numstat_sums_files_and_lines():
     out = "10\t2\tapp/a.py\n5\t0\tapp/b.py\n"
     assert _parse_numstat(out) == {"files": 2, "additions": 15, "deletions": 2}
@@ -1219,9 +1232,21 @@ async def test_prompt_transcript_records_brief_edit_and_review(monkeypatch, tmp_
 async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
     """An unusable brief still leaves its prompt recorded, with the fallback noted."""
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    events: list[str] = []
+    real_append_prompt = aider_editor.append_prompt
+
+    def recording_append_prompt(transcript, prompt):
+        events.append(f"append:{prompt['stage']}")
+        real_append_prompt(transcript, prompt)
+
+    async def unusable_brief(_system, _user):
+        events.append("brief-call")
+        return "too short"
+
+    monkeypatch.setattr(aider_editor, "append_prompt", recording_append_prompt)
     editor = AiderEditor(
         model="claude-opus-4-8", workdir_base=str(tmp_path),
-        complete=_routing_complete(brief_reply="too short"),
+        complete=unusable_brief,
     )
     _Pipeline(editor, monkeypatch)
 
@@ -1231,8 +1256,30 @@ async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
     brief = result.prompts[0]
     assert brief["stage"] == "brief"
     assert "no usable brief" in brief["notes"]
+    assert events[:2] == ["append:brief", "brief-call"]
     # The edit ran on the raw spec.
     assert "Build a bot filter." in result.prompts[1]["user"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_transcript_survives_raised_brief_completion(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_REVIEW", "false")
+
+    async def broken_brief(_system, _user):
+        raise RuntimeError("provider unavailable")
+
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=broken_brief,
+    )
+    _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert [prompt["stage"] for prompt in result.prompts] == ["brief", "edit"]
+    assert "failed (RuntimeError)" in result.prompts[0]["notes"]
 
 
 @pytest.mark.asyncio

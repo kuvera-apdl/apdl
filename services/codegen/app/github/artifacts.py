@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import github_api_url
-from app.github.client import gh_client, gh_headers
+from app.github.client import gh_client, gh_headers, github_json_pages
 from app.runtime.models import (
     ArtifactFileEvidence,
     RuntimeArtifactExpectation,
@@ -83,23 +83,6 @@ class ArtifactSafetyError(ValueError):
 
 class StaleActionsHeadError(ValueError):
     """Raised when an Actions resource does not belong to the requested head."""
-
-
-def _next_api_page(response: httpx.Response) -> str | None:
-    next_url = (response.links.get("next") or {}).get("url")
-    if next_url is None:
-        return None
-    target = httpx.URL(next_url)
-    configured = httpx.URL(github_api_url())
-    if (target.scheme, target.host, target.port) != (
-        configured.scheme,
-        configured.host,
-        configured.port,
-    ):
-        raise ArtifactSafetyError(
-            "GitHub pagination attempted to leave the configured API host"
-        )
-    return next_url
 
 
 def _validate_head_sha(head_sha: str) -> None:
@@ -216,18 +199,17 @@ async def list_run_artifacts(
     artifacts: list[GitHubArtifact] = []
     async with gh_client(client) as c:
         await _assert_run_head(c, repo, run_id, head_sha, token)
-        next_url: str | None = (
+        url = (
             f"{base}/repos/{repo}/actions/runs/{run_id}/artifacts?per_page={_PER_PAGE}"
         )
-        for _ in range(max_pages):
-            if next_url is None:
-                break
-            response = await c.get(next_url, headers=gh_headers(token))
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or not isinstance(
-                payload.get("artifacts", []), list
-            ):
+        async for payload in github_json_pages(
+            c,
+            url,
+            token,
+            max_pages=max_pages,
+            error_type=ArtifactSafetyError,
+        ):
+            if not isinstance(payload.get("artifacts", []), list):
                 raise ArtifactSafetyError(
                     "GitHub artifacts response must contain a list"
                 )
@@ -251,7 +233,6 @@ async def list_run_artifacts(
                         expired=False,
                     )
                 )
-            next_url = _next_api_page(response)
     return sorted(artifacts, key=lambda item: (item.name, item.artifact_id))
 
 

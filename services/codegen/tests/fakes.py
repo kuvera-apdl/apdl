@@ -449,6 +449,13 @@ class FakeConn:
                 "updated_at": changeset["updated_at"],
             }
         if "INSERT INTO codegen_changesets" in query:
+            is_retry = "retry_of_changeset_id" in query
+            retry_of_changeset_id = args[12] if is_retry else None
+            if is_retry and any(
+                existing.get("retry_of_changeset_id") == retry_of_changeset_id
+                for existing in self._rows("changesets").values()
+            ):
+                return None
             row = {
                 "changeset_id": args[0],
                 "project_id": args[1],
@@ -487,12 +494,23 @@ class FakeConn:
                 "publication_authorization": None,
                 "tenant_policy_snapshot": args[6],
                 "effective_safety_policy_sha256": args[7],
+                "retry_of_changeset_id": retry_of_changeset_id,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
             }
             self._rows("changesets")[args[0]] = row
             return row
+
+        if "WHERE retry_of_changeset_id = $1" in query:
+            return next(
+                (
+                    row
+                    for row in self._rows("changesets").values()
+                    if row.get("retry_of_changeset_id") == args[0]
+                ),
+                None,
+            )
 
         if (
             "SELECT cs.*, cs.repository_full_name AS connected_repository" in query
@@ -875,6 +893,7 @@ class FakePool:
                 connection["tenant_policy"] if connection is not None else None
             ),
             "effective_safety_policy_sha256": None,
+            "retry_of_changeset_id": None,
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

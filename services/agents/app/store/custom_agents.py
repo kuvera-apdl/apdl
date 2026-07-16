@@ -192,6 +192,30 @@ async def list_custom_agents(
     return [_row_to_dict(r) for r in rows]
 
 
+async def list_active_custom_agent_outputs(
+    pool: asyncpg.Pool, project_id: str
+) -> list[dict[str, str]]:
+    """Return only the identifiers needed for project contract validation.
+
+    Prompts and tool configuration are intentionally excluded: validating one
+    draft's ``requires``/``produces`` contract must not fetch every sibling's
+    potentially large and sensitive prompt text.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT agent_id, produces
+            FROM custom_agents
+            WHERE project_id = $1 AND status = 'active'
+            """,
+            project_id,
+        )
+    return [
+        {"agent_id": str(row["agent_id"]), "produces": str(row["produces"])}
+        for row in rows
+    ]
+
+
 async def fetch_active_by_slugs(
     pool: asyncpg.Pool, project_id: str, slugs: list[str]
 ) -> dict[str, dict[str, Any]]:

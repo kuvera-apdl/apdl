@@ -11,10 +11,33 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
+from app.config import github_api_url
+
 _TIMEOUT = 30.0
+
+
+def _validate_github_api_url(
+    url: str,
+    *,
+    error_type: type[ValueError],
+) -> str:
+    target = httpx.URL(url)
+    configured = httpx.URL(github_api_url())
+    if target.userinfo or (
+        target.scheme,
+        target.host,
+        target.port,
+    ) != (
+        configured.scheme,
+        configured.host,
+        configured.port,
+    ):
+        raise error_type("GitHub request attempted to leave the configured API host")
+    return url
 
 
 def gh_headers(token: str) -> dict[str, str]:
@@ -42,3 +65,69 @@ async def gh_client(
     finally:
         if owns:
             await client.aclose()
+
+
+def github_next_page(
+    response: httpx.Response,
+    *,
+    error_type: type[ValueError] = ValueError,
+) -> str | None:
+    """Return a same-origin GitHub ``rel=next`` URL, if one exists.
+
+    Pagination links are controlled by the remote response.  Keeping the
+    origin check in the shared client layer prevents every caller from growing
+    a subtly different token-forwarding boundary.
+    """
+    next_url = (response.links.get("next") or {}).get("url")
+    if next_url is None:
+        return None
+    return _validate_github_api_url(next_url, error_type=error_type)
+
+
+async def github_json_pages(
+    client: httpx.AsyncClient,
+    url: str,
+    token: str,
+    *,
+    max_pages: int,
+    error_type: type[ValueError] = ValueError,
+) -> AsyncIterator[dict[str, Any]]:
+    """Yield bounded object-shaped GitHub JSON pages from one same-origin walk."""
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+    next_url: str | None = _validate_github_api_url(url, error_type=error_type)
+    for _ in range(max_pages):
+        if next_url is None:
+            break
+        response = await client.get(next_url, headers=gh_headers(token))
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise error_type("GitHub paginated response must be an object")
+        yield payload
+        next_url = github_next_page(response, error_type=error_type)
+
+
+async def github_paginated_items(
+    client: httpx.AsyncClient,
+    url: str,
+    token: str,
+    key: str,
+    *,
+    max_pages: int,
+    error_type: type[ValueError] = ValueError,
+) -> list[Any]:
+    """Collect one list-valued field across bounded GitHub JSON pages."""
+    items: list[Any] = []
+    async for payload in github_json_pages(
+        client,
+        url,
+        token,
+        max_pages=max_pages,
+        error_type=error_type,
+    ):
+        page_items = payload.get(key, [])
+        if not isinstance(page_items, list):
+            raise error_type(f"GitHub paginated response field {key!r} must be a list")
+        items.extend(page_items)
+    return items

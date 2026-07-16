@@ -20,8 +20,8 @@ import logging
 from typing import Any
 
 from app.framework import AgentContext, BaseAgent, MemoryEntry, register_agent
+from app.framework.tool_loop import ToolLoopResult, ToolTraceEntry
 from app.llm.prompts.analysis import BEHAVIOR_ANALYSIS_SYSTEM, INVESTIGATION_PROMPT
-from app.llm.utils import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +61,35 @@ class BehaviorAnalysisAgent(BaseAgent):
             context=working.get("context", ""),
         )
 
-    def parse(self, response: str) -> Any:
-        # Unparseable output means no insights — not a fabricated "Raw
-        # analysis" pseudo-insight, which would satisfy downstream
-        # requires=("insights",), get stored to vector memory, and could seed
-        # an experiment design off unparsed prose.
-        insights = parse_llm_json(response, None)
-        if insights is None:
-            logger.warning("Investigation output was unparseable; producing no insights")
+    def agentic_terminal_result(self, entry: ToolTraceEntry) -> str | None:
+        """End with no insights as soon as discovery proves there is no data."""
+        if entry.tool != "discover_events" or entry.error is not None:
+            return None
+        try:
+            payload = json.loads(entry.result or "")
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(payload, dict) and payload.get("events") == []:
+            logger.info("Event discovery returned no data; producing no insights")
+            return "[]"
+        return None
+
+    def parse_agentic(self, result: ToolLoopResult) -> Any:
+        """Fail closed unless the investigation is grounded in event discovery."""
+        discovery = next(
+            (
+                entry
+                for entry in result.trace
+                if entry.tool == "discover_events" and entry.error is None
+            ),
+            None,
+        )
+        if discovery is None:
+            logger.warning(
+                "Investigation did not complete event discovery; producing no insights"
+            )
             return []
-        if not isinstance(insights, list):
-            insights = [insights]
-        return [i for i in insights if isinstance(i, dict)]
+        return super().parse_agentic(result)
 
     def memory_entries(
         self,

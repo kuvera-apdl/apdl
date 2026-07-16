@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -112,6 +113,31 @@ describe('ChangesetDetailPage', () => {
     expect(screen.getByText(/Did you mean to import hashBucket\?/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Abandon' })).not.toBeInTheDocument()
+  })
+
+  test('navigates to the changeset returned by retry', async () => {
+    server.use(
+      http.post('*/api/projects/demo/codegen/v1/changesets/cs_abc123/retry', () =>
+        HttpResponse.json(
+          makeChangeset({ changeset_id: 'cs_retry456', status: 'queued', error: null }),
+          { status: 202 },
+        ),
+      ),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', ({ params }) =>
+        HttpResponse.json(
+          makeChangeset({
+            changeset_id: String(params.id),
+            status: params.id === 'cs_retry456' ? 'queued' : 'error',
+            error: params.id === 'cs_retry456' ? null : makeChangeset().error,
+          }),
+        ),
+      ),
+    )
+
+    renderDetail()
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+
+    expect(await screen.findByText('cs_retry456')).toBeInTheDocument()
   })
 
   test('splits the trailing JSON metadata out of the spec prose', async () => {
