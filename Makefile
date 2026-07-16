@@ -85,16 +85,14 @@ deps:
 	cd services/codegen && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements-dev.txt --python .venv/bin/python
-	@echo "==> Setting up ETL framework"
-	cd pipeline/etl && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Python SDK"
 	cd sdk/python && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
 build: build-sdk build-admin
 
-test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-etl test-admin-api test-admin
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-admin-api test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer lint-etl lint-admin-api lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer lint-admin-api lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -383,15 +381,6 @@ test-writer:
 
 lint-writer:
 	cd pipeline/redis && .venv/bin/ruff check clickhouse_writer.py tests/
-
-test-etl:
-	cd pipeline/etl && .venv/bin/python -m pytest -v
-
-lint-etl:
-	cd pipeline/etl && .venv/bin/ruff check etl/ scripts/ tests/
-
-new-transform:
-	cd pipeline/etl && .venv/bin/python scripts/new_transform.py $(ARGS)
 
 migrate-clickhouse:
 	@CLICKHOUSE_COMPOSE_FILE="$(CLICKHOUSE_COMPOSE_FILE)" scripts/init-clickhouse.sh

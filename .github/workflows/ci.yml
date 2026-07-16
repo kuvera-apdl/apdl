@@ -223,23 +223,6 @@ jobs:
       - run: .venv/bin/python -m pytest -q
         working-directory: pipeline/redis
 
-  etl-framework:
-    name: ETL Framework (experimental)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
-        working-directory: pipeline/etl
-      - run: .venv/bin/ruff check etl/ scripts/ tests/
-        working-directory: pipeline/etl
-      - run: .venv/bin/python -m pytest -q
-        working-directory: pipeline/etl
-
   python-dependency-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest

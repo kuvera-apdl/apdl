@@ -58,9 +58,9 @@ builds the core images from the checked-out source. Agents is an opt-in,
 operator-provisioned preview. Only the Codegen API/control plane is available
 as a source-only, non-publishing `offline` preview; its Aider editor/worker and
 `agent` dependency extra are unsupported and excluded from release audits.
-ETL v2, Kubernetes, Terraform, multi-replica operation, upgrades, backup, and
-restore are unsupported. Redis Streams is the only event bus included in the
-repository. See [Support](SUPPORT.md) for the complete boundary.
+Kubernetes, Terraform, multi-replica operation, upgrades, backup, and restore
+are unsupported. Redis Streams is the only event bus included in the repository.
+See [Support](SUPPORT.md) for the complete boundary.
 
 ## Quick Start
 
@@ -229,7 +229,6 @@ apdl/
 │
 ├── pipeline/
 │   ├── redis/               # Redis Streams → ClickHouse event writer
-│   ├── etl/                 # Unsupported experimental v2 ETL framework
 │   └── clickhouse/          # Schemas + migrations
 │
 ├── examples/                # Runnable browser + Python end-to-end samples
@@ -249,7 +248,7 @@ apdl/
 | Lint + test everything in parallel (CI mirror) | `make check` |
 | All tests / all linters | `make test` / `make lint` |
 | Auto-format all packages | `make fmt` |
-| One package | `make test-<pkg>` / `make lint-<pkg>` — `sdk`, `sdk-python`, `ingestion`, `config`, `query`, `agents`, `etl` |
+| One package | `make test-<pkg>` / `make lint-<pkg>` — `sdk`, `sdk-python`, `ingestion`, `config`, `query`, `agents` |
 | Build the JS SDK | `make build` |
 | ClickHouse migrations | `make migrate-clickhouse` |
 | Health overview / smoke test | `make status` / `make smoke` |

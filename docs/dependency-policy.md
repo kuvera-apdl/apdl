@@ -5,8 +5,7 @@ security boundary. This policy applies to the published JavaScript and Python
 SDKs, the supported core, the Agents operator preview, and the offline Codegen
 API dependency set installed by the 0.3.0 developer-preview stack. It excludes
 unsupported source-only dependency sets that the stack never installs,
-including Codegen's `.[agent]` Aider editor/worker extra and the experimental
-ETL surface.
+including Codegen's `.[agent]` Aider editor/worker extra.
 
 ## Sources and Updates
 

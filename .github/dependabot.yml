@@ -30,7 +30,6 @@ updates:
       - /services/agents
       - /services/admin-api
       - /services/codegen
-      - /pipeline/etl
       - /pipeline/redis
     schedule:
       interval: weekly

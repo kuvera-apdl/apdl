@@ -10,7 +10,7 @@ QUERY_SOURCES = "\n".join(
     for path in sorted((ROOT / "services" / "query" / "app").rglob("*.py"))
 )
 SUPPORTED_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
-EXPERIMENTAL_SQL = ROOT / "pipeline" / "etl" / "clickhouse"
+REMOVED_ETL_MANIFEST = ROOT / "pipeline" / "etl" / "pyproject.toml"
 CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 
 
@@ -21,7 +21,7 @@ def test_live_writer_and_query_use_the_events_table_only():
     assert "events_v2" not in QUERY_SOURCES
 
 
-def test_supported_migrations_do_not_create_prototype_v2_tables():
+def test_supported_migrations_do_not_create_removed_prototype_v2_tables():
     migration_sql = "\n".join(
         path.read_text() for path in sorted(SUPPORTED_MIGRATIONS.glob("*.sql"))
     )
@@ -30,15 +30,9 @@ def test_supported_migrations_do_not_create_prototype_v2_tables():
         assert table not in migration_sql
         assert table in CLICKHOUSE_INIT
 
-    assert {path.name for path in EXPERIMENTAL_SQL.glob("*.sql")} == {
-        "events_v2.sql",
-        "decisions_v2.sql",
-        "feeds_v2.sql",
-    }
-    boundary = " ".join((EXPERIMENTAL_SQL / "README.md").read_text().split())
-    assert "not applied by `make migrate-clickhouse`" in boundary
-    assert "no supported producer, loader" in boundary
-    assert "Unsupported ETL v2 schema in release migration" in CLICKHOUSE_INIT
+    assert not REMOVED_ETL_MANIFEST.exists()
+    assert not list((ROOT / "pipeline").rglob("*_v2.sql"))
+    assert "Unsupported prototype v2 schema in release migration" in CLICKHOUSE_INIT
 
 
 def test_runtime_services_do_not_publish_disconnected_envelope_models():

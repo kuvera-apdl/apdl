@@ -12,6 +12,9 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 - Removed the disconnected Kafka topic definitions and Flink job scaffolding.
   Redis Streams is now the only event bus represented in the repository.
+- Removed the disconnected generic ETL/v2 design package and its setup, CI, and
+  dependency-management hooks. The Redis-to-ClickHouse writer remains the only
+  event-loading path.
 
 ### Fixed
 

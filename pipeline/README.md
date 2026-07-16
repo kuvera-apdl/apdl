@@ -1,13 +1,11 @@
 # Pipeline
 
-The APDL data pipeline: moves events from Redis Streams into ClickHouse, owns
-the ClickHouse schema, and provides the ETL framework for custom event types.
+The APDL data pipeline moves events from Redis Streams into ClickHouse and owns
+the ClickHouse and PostgreSQL migration paths.
 
-For APDL 0.3.0, only the Redis-to-ClickHouse writer and the PostgreSQL and
-ClickHouse migrations used by the source-built single-node core are supported.
-ETL v2 is a disconnected experimental surface: it is not started by the
-supported stack, published as a release artifact, or covered by the runtime
-support contract. Redis Streams is the only event bus included in APDL.
+For APDL 0.3.0, the Redis-to-ClickHouse writer and the PostgreSQL and ClickHouse
+migrations used by the source-built single-node core are supported. Redis
+Streams is the only event bus included in APDL.
 
 ## Layout
 
@@ -16,7 +14,6 @@ support contract. Redis Streams is the only event bus included in APDL.
 | `redis/` | Supported core | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
 | `clickhouse/` | Supported core migrations | SQL migrations and reference schemas (tables + materialized views) |
 | `postgres/` | Supported core migrations | The authoritative, versioned PostgreSQL migration sequence |
-| `etl/` | Unsupported experiment | Standalone custom-events ETL framework (`apdl-etl` package), not wired to live events |
 
 ## ClickHouse writer
 
@@ -128,11 +125,11 @@ The release has one event contract and one analytical source of truth:
    where retry deduplication is required).
 
 There is no envelope alias, v2 dual-write, or fallback loader in the supported
-runtime. The unused service envelope models were removed, and the v2 SQL was
-moved to `etl/clickhouse/`, outside the migration runner. Existing local
-databases created from older scaffolding may still contain inert v2 tables;
-they are not read, reconciled, migrated, or supported. In-place upgrades are
-outside the 0.3.0 preview contract, so use a fresh stack for release checks.
+runtime. The unused service envelope models and prototype v2 SQL were removed.
+Existing local databases created from older scaffolding may still contain inert
+v2 tables; they are not read, reconciled, migrated, or supported. In-place
+upgrades are outside the 0.3.0 preview contract, so use a fresh stack for release
+checks.
 
 **Tables**
 
@@ -231,20 +228,6 @@ unprojectable `feature_flags` table as `feature_flags_legacy`, and migration 007
 preserves runtime-evidence rows without an exact CI binding in
 `codegen_runtime_evidence_observations_legacy_unbound`.
 
-## ETL framework (unsupported in 0.3.0)
-
-`etl/` is a standalone, dependency-light experimental package (Pydantic only)
-that explores how custom records could reach a future warehouse path: each
-prototype record is wrapped in an envelope keyed by a `_schema` discriminator,
-processed through
-a `decode → validate → enrich → build_row` Template Method lifecycle with
-per-record DLQ isolation, routed by a schema registry, and handed to a
-pluggable `Loader`. No supported producer, consumer, loader process, Compose
-service, or release artifact connects it to the 0.3.0 runtime. New event types
-can be scaffolded for research with `make new-transform`; this is not a
-supported extension contract. Full design details:
-[`etl/docs/etl-framework.md`](etl/docs/etl-framework.md).
-
 ## Running locally
 
 ```bash
@@ -263,6 +246,4 @@ outside the 0.3.0 support boundary.
 ```bash
 make test-writer # pytest for the Redis ClickHouse writer
 make lint-writer # ruff for the writer and its tests
-make test-etl   # pytest for the ETL framework (pipeline/etl/tests/)
-make lint-etl   # ruff for etl/, scripts/, tests/
 ```

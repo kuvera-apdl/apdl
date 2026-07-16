@@ -131,7 +131,6 @@ cmd_setup() {
     setup_python_package "Codegen Service"   "$ROOT_DIR/services/codegen"
     setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
-    setup_python_package "ETL Framework"     "$ROOT_DIR/pipeline/etl"
     setup_python_package "Python SDK"        "$ROOT_DIR/sdk/python"
 
     info "Setting up JavaScript SDK"

@@ -5,9 +5,9 @@
 > the Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console are the
 > supported core. Agents is an opt-in operator preview; only the Codegen API
 > control plane is a source-only offline preview. Its editor/worker and
-> publication paths are unsupported. ETL v2, Kubernetes, Terraform,
-> multi-replica operation, upgrades, backup, and restore are not supported.
-> Redis Streams is the only included event bus. See [Support](../SUPPORT.md).
+> publication paths are unsupported. Kubernetes, Terraform, multi-replica
+> operation, upgrades, backup, and restore are not supported. Redis Streams is
+> the only included event bus. See [Support](../SUPPORT.md).
 
 APDL is a product analytics and experimentation platform with an optional
 operator-run Agents preview. Events flow in from the SDKs and land in
@@ -31,7 +31,6 @@ feedback cycle remains a product direction rather than a current capability.
 | Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | Core, source-built | [README](../services/admin-api/README.md) |
 | Admin Console | React, Vite, nginx | 5173 | Core, source-built | [README](../services/admin/README.md) |
 | Redis-to-ClickHouse writer | Python, clickhouse-driver | — | Core, source-built | [README](../pipeline/README.md) |
-| ETL v2 | Python design prototype | — | Unsupported | [README](../pipeline/README.md) |
 
 ## The three flows
 
@@ -54,9 +53,6 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
   stream depth remains the admission backlog. Stable client message IDs
   and `ReplacingMergeTree` keys make supported `FINAL` reads idempotent after
   an insert-before-ACK replay.
-- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) is an
-  unsupported design prototype. Its v2 SQL lives outside the migration path;
-  supported setup does not create those tables.
 
 ### 2. Flags & experiments (config path)
 
@@ -132,15 +128,12 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
 |---|---|
 | Redis 7 | Event streams (`events:raw:*`), flag-config cache (60 s TTL), rate-limit counters |
 | PostgreSQL 16 + pgvector | Flags, experiments, audit log, agent runs & memory |
-| ClickHouse | Core `events`/session/exposure/health/identity tables and materialized views; supported setup does not create v2 envelope tables |
+| ClickHouse | Core `events`/session/exposure/health/identity tables and materialized views |
 
 ## Deployment boundary
 
-Redis Streams is the only 0.3.0 event bus. The ETL package is future design
-scaffolding and is not connected to the live runtime, release artifacts, or
-support contract. Prototype v2 SQL is quarantined under
-`pipeline/etl/clickhouse/` and is not applied by supported setup. The repository
-contains no supported Kubernetes or Terraform deployment.
+Redis Streams is the only 0.3.0 event bus. The repository contains no supported
+Kubernetes or Terraform deployment.
 
 Compose runs a single instance of each service and uses a local-development
 nginx Gateway. Cross-replica cache/SSE behavior, hardened public ingress,
