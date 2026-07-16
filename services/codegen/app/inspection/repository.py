@@ -7,8 +7,11 @@ import hashlib
 import json
 import os
 import re
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Iterator
 
 from app.inspection.models import EvidenceKind, EvidenceRef, InspectionSnapshot
 
@@ -29,6 +32,8 @@ _EXCLUDED_DIRS = frozenset(
         "__pycache__",
     }
 )
+_VCS_METADATA_DIRS = frozenset({".git", ".hg", ".svn"})
+_EXCLUDED_FILES = frozenset({".git"})
 
 _BINARY_SUFFIXES = frozenset(
     {
@@ -105,6 +110,21 @@ class InspectionPathError(ValueError):
     """Raised when a requested path is outside the safe inspection boundary."""
 
 
+class _InspectionContentExcluded(InspectionPathError):
+    """An in-repository file whose contents are deliberately not inspectable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        byte_count: int = 0,
+        truncated: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.byte_count = byte_count
+        self.truncated = truncated
+
+
 @dataclass(frozen=True)
 class InspectedText:
     path: str
@@ -122,10 +142,74 @@ class TextCollection:
     truncated: bool
 
 
+@dataclass(frozen=True)
+class RepositoryInventory:
+    paths: tuple[str, ...]
+    truncated: bool
+
+
+class RepositoryTextView:
+    """One path-inventory snapshot with lazy, no-follow text reads."""
+
+    def __init__(
+        self,
+        inspector: RepositoryInspector,
+        inventory: RepositoryInventory,
+    ) -> None:
+        self._inspector = inspector
+        self.paths = inventory.paths
+        self.truncated = inventory.truncated
+        self._path_set = frozenset(inventory.paths)
+        self._cache: dict[str, InspectedText | None] = {}
+        self._bytes_inspected = 0
+
+    @property
+    def root(self) -> Path:
+        return self._inspector.root
+
+    def contains(self, path: str) -> bool:
+        """Return whether the inventory contains this exact regular file."""
+        return _normalize_relative(path) in self._path_set
+
+    def inspect(self, path: str) -> InspectedText | None:
+        """Return safe text, or ``None`` for deliberately excluded content."""
+        rel = _normalize_relative(path)
+        if rel not in self._path_set:
+            return None
+        if rel not in self._cache:
+            remaining = self._inspector.max_total_bytes - self._bytes_inspected
+            if remaining <= 0:
+                raise InspectionPathError(
+                    "repository text inspection exceeds the aggregate byte budget"
+                )
+            try:
+                inspected = self._inspector._inspect_path(
+                    rel,
+                    max_bytes=remaining,
+                )
+            except _InspectionContentExcluded as exc:
+                self._bytes_inspected += exc.byte_count
+                self._cache[rel] = None
+            else:
+                self._bytes_inspected += inspected.byte_count
+                if remaining < self._inspector.max_file_bytes and inspected.truncated:
+                    raise InspectionPathError(
+                        "repository text inspection exceeds the aggregate byte budget"
+                    )
+                self._cache[rel] = inspected
+        return self._cache[rel]
+
+    def text(self, path: str) -> str | None:
+        inspected = self.inspect(path)
+        return inspected.text if inspected is not None else None
+
+
 def _normalize_relative(path: str) -> str:
+    if "\x00" in path:
+        raise InspectionPathError("inspection paths cannot contain NUL bytes")
     value = path.replace("\\", "/").removeprefix("./")
     pure = PurePosixPath(value)
-    if not value or pure.is_absolute() or ".." in pure.parts:
+    if not value or not pure.parts or pure.is_absolute() or ".." in pure.parts:
         raise InspectionPathError("inspection paths must stay inside the repository")
     return pure.as_posix()
 
@@ -223,69 +307,261 @@ class RepositoryInspector:
         max_file_bytes: int = 128_000,
         max_total_bytes: int = 4_000_000,
         max_search_results: int = 100,
+        max_inventory_entries: int = 20_000,
     ) -> None:
-        root = root.resolve()
-        if not root.is_dir():
+        root = Path(os.path.abspath(os.fspath(root)))
+        try:
+            root_stat = os.lstat(root)
+        except OSError as exc:
+            raise ValueError(f"repository root is not a directory: {root}") from exc
+        if stat.S_ISLNK(root_stat.st_mode):
+            raise ValueError(f"repository root cannot be a symbolic link: {root}")
+        if not stat.S_ISDIR(root_stat.st_mode):
             raise ValueError(f"repository root is not a directory: {root}")
-        if min(max_files, max_file_bytes, max_total_bytes, max_search_results) <= 0:
+        if (
+            min(
+                max_files,
+                max_file_bytes,
+                max_total_bytes,
+                max_search_results,
+                max_inventory_entries,
+            )
+            <= 0
+        ):
             raise ValueError("inspection budgets must be positive")
         self.root = root
+        self._root_identity = (root_stat.st_dev, root_stat.st_ino)
         self.max_files = max_files
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
         self.max_search_results = max_search_results
+        self.max_inventory_entries = max_inventory_entries
+
+    @staticmethod
+    def _directory_flags() -> int:
+        required = ("O_DIRECTORY", "O_NOFOLLOW")
+        if any(not hasattr(os, name) for name in required):
+            raise RuntimeError(
+                "safe repository inspection requires O_DIRECTORY and O_NOFOLLOW"
+            )
+        return (
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        )
+
+    @staticmethod
+    def _file_flags() -> int:
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise RuntimeError("safe repository inspection requires O_NOFOLLOW")
+        return (
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @contextmanager
+    def _open_root(self) -> Iterator[int]:
+        try:
+            descriptor = os.open(self.root, self._directory_flags())
+        except OSError as exc:
+            raise InspectionPathError(
+                "repository root changed or is no longer safely inspectable"
+            ) from exc
+        try:
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISDIR(opened_stat.st_mode):
+                raise InspectionPathError("repository root is no longer a directory")
+            if (opened_stat.st_dev, opened_stat.st_ino) != self._root_identity:
+                raise InspectionPathError("repository root changed during inspection")
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def _open_file(self, path: str) -> Iterator[int]:
+        """Open one repository file without following any path component."""
+        rel = _normalize_relative(path)
+        descriptors: list[int] = []
+        try:
+            with self._open_root() as root_descriptor:
+                parent_descriptor = root_descriptor
+                for component in PurePosixPath(rel).parts[:-1]:
+                    try:
+                        descriptor = os.open(
+                            component,
+                            self._directory_flags(),
+                            dir_fd=parent_descriptor,
+                        )
+                    except OSError as exc:
+                        raise InspectionPathError(
+                            f"inspection path has an unsafe directory component: {rel}"
+                        ) from exc
+                    descriptors.append(descriptor)
+                    parent_descriptor = descriptor
+
+                try:
+                    file_descriptor = os.open(
+                        PurePosixPath(rel).name,
+                        self._file_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise InspectionPathError(
+                        f"inspection path is not a safe regular file: {rel}"
+                    ) from exc
+                descriptors.append(file_descriptor)
+                if not stat.S_ISREG(os.fstat(file_descriptor).st_mode):
+                    raise InspectionPathError(
+                        f"inspection path is not a regular file: {rel}"
+                    )
+                yield file_descriptor
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
 
     def _candidate_paths(self) -> tuple[list[str], bool]:
         paths: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(self.root, followlinks=False):
-            dirnames[:] = sorted(
-                name
-                for name in dirnames
-                if name not in _EXCLUDED_DIRS
-                and not (Path(dirpath) / name).is_symlink()
-            )
-            for name in sorted(filenames):
-                candidate = Path(dirpath) / name
-                if candidate.is_symlink():
+        scanned_entries = 0
+        truncated = False
+
+        def walk(
+            directory_descriptor: int,
+            prefix: PurePosixPath,
+        ) -> bool:
+            nonlocal scanned_entries, truncated
+            try:
+                with os.scandir(directory_descriptor) as directory_entries:
+                    entries = sorted(directory_entries, key=lambda item: item.name)
+            except OSError as exc:
+                display = prefix.as_posix() if prefix.parts else "."
+                raise InspectionPathError(
+                    f"repository directory is not safely inspectable: {display}"
+                ) from exc
+
+            for entry in entries:
+                scanned_entries += 1
+                if scanned_entries > self.max_inventory_entries:
+                    truncated = True
+                    return True
+                if "\\" in entry.name:
+                    raise InspectionPathError(
+                        "repository entry names cannot contain backslashes"
+                    )
+                rel_path = prefix / entry.name
+                rel = rel_path.as_posix()
+                try:
+                    mode = os.stat(
+                        entry.name,
+                        dir_fd=directory_descriptor,
+                        follow_symlinks=False,
+                    ).st_mode
+                except OSError as exc:
+                    raise InspectionPathError(
+                        f"repository entry changed during inspection: {rel}"
+                    ) from exc
+                if stat.S_ISLNK(mode):
+                    raise InspectionPathError(
+                        f"repository contains a symbolic link: {rel}"
+                    )
+                if stat.S_ISDIR(mode):
+                    if entry.name in _VCS_METADATA_DIRS:
+                        continue
+                    if entry.name in _EXCLUDED_DIRS:
+                        continue
+                    try:
+                        child_descriptor = os.open(
+                            entry.name,
+                            self._directory_flags(),
+                            dir_fd=directory_descriptor,
+                        )
+                    except OSError as exc:
+                        raise InspectionPathError(
+                            f"repository directory changed during inspection: {rel}"
+                        ) from exc
+                    try:
+                        if walk(child_descriptor, rel_path):
+                            return True
+                    finally:
+                        os.close(child_descriptor)
                     continue
-                rel = candidate.relative_to(self.root).as_posix()
+                if not stat.S_ISREG(mode):
+                    raise InspectionPathError(
+                        f"repository contains a non-regular entry: {rel}"
+                    )
+                if entry.name in _EXCLUDED_FILES:
+                    continue
+                if len(paths) >= self.max_files:
+                    truncated = True
+                    return True
                 paths.append(rel)
-                if len(paths) > self.max_files:
-                    return paths[: self.max_files], True
-        return paths, False
+            return False
 
-    def _resolve(self, path: str) -> tuple[str, Path]:
+        with self._open_root() as root_descriptor:
+            walk(root_descriptor, PurePosixPath())
+        paths.sort()
+        return paths, truncated
+
+    def inventory(self) -> RepositoryInventory:
+        """Return a bounded path inventory, rejecting every visible symlink."""
+        paths, truncated = self._candidate_paths()
+        return RepositoryInventory(paths=tuple(paths), truncated=truncated)
+
+    def text_view(self) -> RepositoryTextView:
+        """Return one inventory-bound, lazily inspected repository text view."""
+        return RepositoryTextView(self, self.inventory())
+
+    def inspect_text(self, path: str) -> InspectedText:
+        """Read one complete bounded UTF-8 file through the no-follow boundary."""
+        return self._inspect_path(path)
+
+    def _inspect_path(
+        self,
+        path: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> InspectedText:
         rel = _normalize_relative(path)
-        candidate = self.root / rel
-        if candidate.is_symlink():
-            raise InspectionPathError(f"symbolic links are not inspectable: {rel}")
-        resolved = candidate.resolve()
-        try:
-            resolved.relative_to(self.root)
-        except ValueError as exc:
-            raise InspectionPathError(
-                f"inspection path leaves the repository: {rel}"
-            ) from exc
-        if not resolved.is_file():
-            raise InspectionPathError(f"inspection path is not a file: {rel}")
         if _secret_shaped_path(rel) or _binary_shaped_path(rel):
-            raise InspectionPathError(f"inspection path is excluded: {rel}")
-        return rel, resolved
-
-    def _inspect_path(self, path: str) -> InspectedText:
-        rel, resolved = self._resolve(path)
-        with resolved.open("rb") as handle:
-            data = handle.read(self.max_file_bytes + 1)
-        truncated = len(data) > self.max_file_bytes
-        data = data[: self.max_file_bytes]
+            raise _InspectionContentExcluded(f"inspection path is excluded: {rel}")
+        limit = self.max_file_bytes
+        if max_bytes is not None:
+            if max_bytes <= 0:
+                raise InspectionPathError(
+                    "repository text inspection exceeds the aggregate byte budget"
+                )
+            limit = min(limit, max_bytes)
+        with self._open_file(rel) as descriptor:
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining > 0:
+                chunk = os.read(descriptor, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        truncated = len(data) > limit
+        data = data[:limit]
         if b"\x00" in data:
-            raise InspectionPathError(f"binary content is excluded: {rel}")
+            raise _InspectionContentExcluded(
+                f"binary content is excluded: {rel}",
+                byte_count=len(data),
+                truncated=truncated,
+            )
         if _secret_content(data):
-            raise InspectionPathError(f"secret-shaped content is excluded: {rel}")
+            raise _InspectionContentExcluded(
+                f"secret-shaped content is excluded: {rel}",
+                byte_count=len(data),
+                truncated=truncated,
+            )
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise InspectionPathError(f"non-UTF-8 content is excluded: {rel}") from exc
+            raise _InspectionContentExcluded(
+                f"non-UTF-8 content is excluded: {rel}",
+                byte_count=len(data),
+                truncated=truncated,
+            ) from exc
         return InspectedText(
             path=rel,
             text=text,
@@ -301,15 +577,20 @@ class RepositoryInspector:
         skipped: list[str] = []
         total = 0
         for path in candidates:
-            if total >= self.max_total_bytes:
+            remaining = self.max_total_bytes - total
+            if remaining <= 0:
                 truncated = True
                 break
             try:
-                inspected = self._inspect_path(path)
-            except InspectionPathError:
+                inspected = self._inspect_path(path, max_bytes=remaining)
+            except _InspectionContentExcluded as exc:
                 skipped.append(path)
+                total += exc.byte_count
+                if remaining < self.max_file_bytes and exc.truncated:
+                    truncated = True
+                    break
                 continue
-            if total + inspected.byte_count > self.max_total_bytes:
+            if remaining < self.max_file_bytes and inspected.truncated:
                 truncated = True
                 break
             files[path] = inspected

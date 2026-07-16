@@ -84,12 +84,108 @@ def test_inspection_rejects_traversal_symlinks_and_secret_reads(tmp_path: Path):
     (tmp_path / "linked.txt").symlink_to(outside)
 
     inspector = RepositoryInspector(tmp_path)
+    with pytest.raises(
+        InspectionPathError, match="repository contains a symbolic link"
+    ):
+        inspector.snapshot()
     with pytest.raises(InspectionPathError):
         inspector.read("../outside-inspection.txt")
     with pytest.raises(InspectionPathError):
         inspector.read("linked.txt")
     with pytest.raises(InspectionPathError):
         inspector.read(".env.local")
+
+
+def test_inventory_bound_view_does_not_follow_a_file_replaced_by_symlink(
+    tmp_path: Path,
+):
+    outside = tmp_path.parent / "proc-like-environ"
+    outside.write_text(
+        "OPENAI_API_KEY=provider-secret-that-must-not-be-read\n",
+        encoding="utf-8",
+    )
+    _write(tmp_path, "README.md", "safe before inventory\n")
+    view = RepositoryInspector(tmp_path).text_view()
+
+    (tmp_path / "README.md").unlink()
+    (tmp_path / "README.md").symlink_to(outside)
+
+    with pytest.raises(InspectionPathError, match="not a safe regular file"):
+        view.inspect("README.md")
+
+
+def test_intermediate_directory_symlink_is_rejected_without_reading_target(
+    tmp_path: Path,
+):
+    outside = tmp_path.parent / "outside-repository"
+    outside.mkdir(exist_ok=True)
+    (outside / "environ").write_text(
+        "ANTHROPIC_API_KEY=outside-provider-secret\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "proc").symlink_to(outside, target_is_directory=True)
+
+    inspector = RepositoryInspector(tmp_path)
+    with pytest.raises(
+        InspectionPathError, match="repository contains a symbolic link"
+    ):
+        inspector.collect_texts()
+    with pytest.raises(InspectionPathError, match="unsafe directory component"):
+        inspector.read("proc/environ")
+
+
+def test_repository_root_itself_cannot_be_a_symlink(tmp_path: Path):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="root cannot be a symbolic link"):
+        RepositoryInspector(linked)
+
+
+def test_lazy_text_view_fails_closed_at_aggregate_byte_budget(tmp_path: Path):
+    _write(tmp_path, "a.txt", "a" * 8)
+    _write(tmp_path, "b.txt", "b" * 8)
+    view = RepositoryInspector(
+        tmp_path,
+        max_file_bytes=32,
+        max_total_bytes=10,
+    ).text_view()
+
+    assert view.text("a.txt") == "a" * 8
+    with pytest.raises(InspectionPathError, match="aggregate byte budget"):
+        view.text("b.txt")
+
+
+def test_inventory_entry_budget_stops_large_tree_without_collecting_it(
+    tmp_path: Path,
+):
+    for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+        _write(tmp_path, name, name)
+
+    inventory = RepositoryInspector(
+        tmp_path,
+        max_files=10,
+        max_inventory_entries=2,
+    ).inventory()
+
+    assert inventory.paths == ("a.txt", "b.txt")
+    assert inventory.truncated is True
+
+
+def test_excluded_generated_tree_symlinks_are_outside_inspection_namespace(
+    tmp_path: Path,
+):
+    outside = tmp_path.parent / "generated-tool"
+    outside.write_text("generated executable\n", encoding="utf-8")
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin" / "tool").symlink_to(outside)
+    _write(tmp_path, "src/app.py", "print('safe')\n")
+
+    snapshot = RepositoryInspector(tmp_path).snapshot()
+
+    assert [item.path for item in snapshot.evidence] == ["src/app.py"]
 
 
 def test_large_file_reads_are_truncated_without_crossing_budget(tmp_path: Path):

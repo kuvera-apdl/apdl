@@ -7,9 +7,10 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from app.inspection.repository import RepositoryTextView
 from app.profiling.models import (
     CodeSurface,
     CommandKind,
@@ -46,7 +47,12 @@ class EcosystemAdapter(Protocol):
 
     def detect(self, paths: list[str]) -> bool: ...
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment: ...
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment: ...
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -59,27 +65,34 @@ def _cwd(manifest: Path, root: Path) -> str:
     return value or "."
 
 
-def _json(path: Path) -> dict | None:
+def _json(path: Path, root: Path, contents: RepositoryTextView) -> dict | None:
+    text = contents.text(_rel(path, root))
+    if text is None:
+        return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
+        value = json.loads(text)
+    except ValueError:
         return None
     return value if isinstance(value, dict) else None
 
 
-def _toml(path: Path) -> dict | None:
+def _toml(path: Path, root: Path, contents: RepositoryTextView) -> dict | None:
+    text = contents.text(_rel(path, root))
+    if text is None:
+        return None
     try:
-        value = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, tomllib.TOMLDecodeError):
+        value = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
         return None
     return value if isinstance(value, dict) else None
 
 
-def _text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+def _text(path: Path, root: Path, contents: RepositoryTextView) -> str:
+    return contents.text(_rel(path, root)) or ""
+
+
+def _exists(path: Path, root: Path, contents: RepositoryTextView) -> bool:
+    return contents.contains(_rel(path, root))
 
 
 def _uncertainty(code: UncertaintyCode, message: str, *paths: str) -> Uncertainty:
@@ -92,12 +105,24 @@ def _command(
     return RepoCommand(kind=kind, command=command, cwd=cwd, source_path=source_path)
 
 
-def _workspace_members(root: Path, base: Path, patterns: list[str]) -> list[str]:
+def _workspace_members(
+    root: Path,
+    base: Path,
+    patterns: list[str],
+    paths: list[str],
+) -> list[str]:
     members: set[str] = set()
+    base_path = PurePosixPath(_cwd(base / "package.json", root))
     for pattern in patterns:
-        for manifest in base.glob(f"{pattern.rstrip('/')}/package.json"):
-            if manifest.is_file():
-                members.add(_cwd(manifest, root))
+        manifest_pattern = f"{pattern.rstrip('/')}/package.json"
+        for path in paths:
+            candidate = PurePosixPath(path)
+            try:
+                relative = candidate.relative_to(base_path)
+            except ValueError:
+                continue
+            if relative.match(manifest_pattern):
+                members.add(candidate.parent.as_posix() or ".")
     return sorted(members)
 
 
@@ -135,7 +160,12 @@ class NodeAdapter:
     def detect(self, paths: list[str]) -> bool:
         return any(path.endswith("package.json") for path in paths)
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(languages=["JavaScript"])
         if any(path.endswith((".ts", ".tsx", "tsconfig.json")) for path in paths):
             out.languages.append("TypeScript")
@@ -145,7 +175,7 @@ class NodeAdapter:
         for lock in (
             root / path for path in paths if Path(path).name == "package-lock.json"
         ):
-            data = _json(lock) or {}
+            data = _json(lock, root, contents) or {}
             for key, record in (data.get("packages") or {}).items():
                 if not key or not isinstance(record, dict) or not record.get("version"):
                     continue
@@ -155,7 +185,7 @@ class NodeAdapter:
         for manifest in manifests:
             rel = _rel(manifest, root)
             cwd = _cwd(manifest, root)
-            data = _json(manifest)
+            data = _json(manifest, root, contents)
             if data is None:
                 out.uncertainties.append(
                     _uncertainty(
@@ -251,7 +281,10 @@ class NodeAdapter:
                         root=cwd,
                         ecosystem="node",
                         members=_workspace_members(
-                            root, manifest.parent, string_patterns
+                            root,
+                            manifest.parent,
+                            string_patterns,
+                            paths,
                         ),
                         source_path=rel,
                     )
@@ -357,7 +390,12 @@ class PythonAdapter:
             names & {"pyproject.toml", "setup.py", "requirements.txt", "Pipfile"}
         )
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(languages=["Python"])
         manifests = [
             root / path for path in paths if Path(path).name == "pyproject.toml"
@@ -365,7 +403,7 @@ class PythonAdapter:
         resolved: dict[str, tuple[str, str]] = {}
         for lock_name in ("uv.lock", "poetry.lock", "pdm.lock"):
             for lock in (root / path for path in paths if Path(path).name == lock_name):
-                data = _toml(lock) or {}
+                data = _toml(lock, root, contents) or {}
                 for package in data.get("package", []):
                     if (
                         isinstance(package, dict)
@@ -380,13 +418,13 @@ class PythonAdapter:
         for req in (
             root / path for path in paths if Path(path).match("requirements*.txt")
         ):
-            for line in _text(req).splitlines():
+            for line in _text(req, root, contents).splitlines():
                 match = re.match(r"\s*([A-Za-z0-9_.-]+)==([^\s;]+)", line)
                 if match:
                     resolved[match.group(1).lower()] = (match.group(2), _rel(req, root))
         for manifest in manifests:
             rel, cwd = _rel(manifest, root), _cwd(manifest, root)
-            data = _toml(manifest)
+            data = _toml(manifest, root, contents)
             if data is None:
                 out.uncertainties.append(
                     _uncertainty(
@@ -552,11 +590,19 @@ class GoAdapter:
     def detect(self, paths: list[str]) -> bool:
         return any(Path(path).name in {"go.mod", "go.work"} for path in paths)
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(languages=["Go"])
-        for workspace in (root / path for path in paths if Path(path).name == "go.work"):
+        for workspace in (
+            root / path for path in paths if Path(path).name == "go.work"
+        ):
             members = re.findall(
-                r"(?m)^\s*(\./[^\s)]+)", _text(workspace)
+                r"(?m)^\s*(\./[^\s)]+)",
+                _text(workspace, root, contents),
             )
             out.workspaces.append(
                 WorkspaceBoundary(
@@ -567,7 +613,11 @@ class GoAdapter:
                 )
             )
         for manifest in (root / path for path in paths if Path(path).name == "go.mod"):
-            rel, cwd, text = _rel(manifest, root), _cwd(manifest, root), _text(manifest)
+            rel, cwd, text = (
+                _rel(manifest, root),
+                _cwd(manifest, root),
+                _text(manifest, root, contents),
+            )
             module = re.search(r"(?m)^module\s+(\S+)", text)
             out.packages.append(
                 PackageBoundary(
@@ -596,11 +646,11 @@ class GoAdapter:
                     name="go_modules",
                     manifest_path=rel,
                     lockfile_path=str(Path(cwd) / "go.sum")
-                    if (manifest.parent / "go.sum").is_file()
+                    if _exists(manifest.parent / "go.sum", root, contents)
                     else None,
                 )
             )
-            if (manifest.parent / "go.sum").is_file():
+            if _exists(manifest.parent / "go.sum", root, contents):
                 out.lockfiles.append(_rel(manifest.parent / "go.sum", root))
             out.commands.extend(
                 [
@@ -615,7 +665,8 @@ class GoAdapter:
             )
         for path in paths:
             if path.endswith(".go") and re.search(
-                r"(?m)^package\s+main\b", _text(root / path)
+                r"(?m)^package\s+main\b",
+                _text(root / path, root, contents),
             ):
                 out.entrypoints.append(
                     CodeSurface(
@@ -633,11 +684,16 @@ class RustAdapter:
     def detect(self, paths: list[str]) -> bool:
         return any(Path(path).name == "Cargo.toml" for path in paths)
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(languages=["Rust"])
         resolved: dict[str, tuple[str, str]] = {}
         for lock in (root / path for path in paths if Path(path).name == "Cargo.lock"):
-            data = _toml(lock) or {}
+            data = _toml(lock, root, contents) or {}
             for package in data.get("package", []):
                 if (
                     isinstance(package, dict)
@@ -652,7 +708,11 @@ class RustAdapter:
         for manifest in (
             root / path for path in paths if Path(path).name == "Cargo.toml"
         ):
-            rel, cwd, data = _rel(manifest, root), _cwd(manifest, root), _toml(manifest)
+            rel, cwd, data = (
+                _rel(manifest, root),
+                _cwd(manifest, root),
+                _toml(manifest, root, contents),
+            )
             if data is None:
                 out.uncertainties.append(
                     _uncertainty(
@@ -709,7 +769,9 @@ class RustAdapter:
                 PackageManager(
                     name="cargo",
                     manifest_path=rel,
-                    lockfile_path=_rel(lock, root) if lock.is_file() else None,
+                    lockfile_path=(
+                        _rel(lock, root) if _exists(lock, root, contents) else None
+                    ),
                 )
             )
             out.commands.extend(
@@ -755,7 +817,12 @@ class JVMAdapter:
             }
         )
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(languages=["JVM"])
         for settings in (
             root / path
@@ -764,7 +831,10 @@ class JVMAdapter:
         ):
             members = [
                 value.replace(":", "/").strip("/")
-                for value in re.findall(r"['\"](:[^'\"]+)['\"]", _text(settings))
+                for value in re.findall(
+                    r"['\"](:[^'\"]+)['\"]",
+                    _text(settings, root, contents),
+                )
             ]
             out.workspaces.append(
                 WorkspaceBoundary(
@@ -778,15 +848,17 @@ class JVMAdapter:
             name = Path(path).name
             cwd = Path(path).parent.as_posix() or "."
             if name in {"build.gradle", "build.gradle.kts"}:
-                text = _text(root / path)
+                text = _text(root / path, root, contents)
                 lock_path = root / cwd / "gradle.lockfile"
                 locked: dict[str, str] = {}
-                for line in _text(lock_path).splitlines():
+                for line in _text(lock_path, root, contents).splitlines():
                     match = re.match(r"([^:]+:[^:]+):([^=]+)=", line.strip())
                     if match:
                         locked[match.group(1)] = match.group(2)
                 manager = (
-                    "gradle_wrapper" if (root / cwd / "gradlew").is_file() else "gradle"
+                    "gradle_wrapper"
+                    if _exists(root / cwd / "gradlew", root, contents)
+                    else "gradle"
                 )
                 prefix = "./gradlew" if manager == "gradle_wrapper" else "gradle"
                 out.packages.append(
@@ -796,12 +868,14 @@ class JVMAdapter:
                     PackageManager(
                         name=manager,
                         manifest_path=path,
-                        lockfile_path=_rel(lock_path, root)
-                        if lock_path.is_file()
-                        else None,
+                        lockfile_path=(
+                            _rel(lock_path, root)
+                            if _exists(lock_path, root, contents)
+                            else None
+                        ),
                     )
                 )
-                if lock_path.is_file():
+                if _exists(lock_path, root, contents):
                     out.lockfiles.append(_rel(lock_path, root))
                 out.commands.extend(
                     [
@@ -842,7 +916,7 @@ class JVMAdapter:
                         _command(
                             CommandKind.build,
                             "./mvnw verify"
-                            if (root / cwd / "mvnw").is_file()
+                            if _exists(root / cwd / "mvnw", root, contents)
                             else "mvn verify",
                             cwd,
                             path,
@@ -850,7 +924,7 @@ class JVMAdapter:
                         _command(
                             CommandKind.test,
                             "./mvnw test"
-                            if (root / cwd / "mvnw").is_file()
+                            if _exists(root / cwd / "mvnw", root, contents)
                             else "mvn test",
                             cwd,
                             path,
@@ -863,7 +937,9 @@ class JVMAdapter:
                     )
                 )
                 try:
-                    tree = ET.parse(root / path)
+                    tree = ET.ElementTree(
+                        ET.fromstring(_text(root / path, root, contents))
+                    )
                     ns = {"m": "http://maven.apache.org/POM/4.0.0"}
                     for dep in tree.findall(".//m:dependency", ns):
                         group = dep.findtext("m:groupId", default="", namespaces=ns)
@@ -882,7 +958,7 @@ class JVMAdapter:
                                     source_path=path,
                                 )
                             )
-                except (ET.ParseError, OSError):
+                except ET.ParseError:
                     out.uncertainties.append(
                         _uncertainty(
                             UncertaintyCode.malformed_manifest,
@@ -914,7 +990,12 @@ class DotNetAdapter:
     def detect(self, paths: list[str]) -> bool:
         return any(path.endswith((".sln", ".csproj", ".fsproj")) for path in paths)
 
-    def profile(self, root: Path, paths: list[str]) -> ProfileFragment:
+    def profile(
+        self,
+        root: Path,
+        paths: list[str],
+        contents: RepositoryTextView,
+    ) -> ProfileFragment:
         out = ProfileFragment(
             languages=["C#"]
             if any(path.endswith(".csproj") for path in paths)
@@ -925,7 +1006,7 @@ class DotNetAdapter:
                 match.replace("\\", "/")
                 for match in re.findall(
                     r'Project\([^)]*\)\s*=\s*"[^"]+",\s*"([^"]+\.(?:csproj|fsproj))"',
-                    _text(solution),
+                    _text(solution, root, contents),
                 )
             ]
             out.workspaces.append(
@@ -950,7 +1031,9 @@ class DotNetAdapter:
             )
             lock = root / cwd / "packages.lock.json"
             locked: dict[str, str] = {}
-            lock_data = _json(lock) if lock.is_file() else None
+            lock_data = (
+                _json(lock, root, contents) if _exists(lock, root, contents) else None
+            )
             for target in (lock_data or {}).get("dependencies", {}).values():
                 if not isinstance(target, dict):
                     continue
@@ -961,13 +1044,15 @@ class DotNetAdapter:
                 PackageManager(
                     name="nuget",
                     manifest_path=path,
-                    lockfile_path=_rel(lock, root) if lock.is_file() else None,
+                    lockfile_path=(
+                        _rel(lock, root) if _exists(lock, root, contents) else None
+                    ),
                 )
             )
-            if lock.is_file():
+            if _exists(lock, root, contents):
                 out.lockfiles.append(_rel(lock, root))
             try:
-                tree = ET.parse(root / path)
+                tree = ET.ElementTree(ET.fromstring(_text(root / path, root, contents)))
                 for ref in tree.findall(".//PackageReference"):
                     name = ref.get("Include") or ref.get("Update")
                     version = ref.get("Version") or ref.findtext("Version")
@@ -984,7 +1069,7 @@ class DotNetAdapter:
                                 else path,
                             )
                         )
-            except (ET.ParseError, OSError):
+            except ET.ParseError:
                 out.uncertainties.append(
                     _uncertainty(
                         UncertaintyCode.malformed_manifest,

@@ -5,6 +5,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from app.inspection.repository import InspectionPathError
 from app.profiling import profile_repository
 from app.profiling.models import RepoProfile, UncertaintyCode
 
@@ -83,6 +84,46 @@ def test_conflicting_node_lockfiles_are_explicit(tmp_path):
     profile = profile_repository(tmp_path)
     assert UncertaintyCode.conflicting_package_managers in _codes(profile)
     assert {manager.name for manager in profile.package_managers} == {"npm", "pnpm"}
+
+
+def test_large_lockfile_remains_bounded_but_resolves_versions(tmp_path):
+    _write(tmp_path, "package.json", '{"dependencies":{"next":"^15"}}')
+    padding = "x" * 140_000
+    _write(
+        tmp_path,
+        "package-lock.json",
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "node_modules/filler": {
+                        "version": "1.0.0",
+                        "description": padding,
+                    },
+                    "node_modules/next": {"version": "15.0.4"},
+                },
+            }
+        ),
+    )
+
+    profile = profile_repository(tmp_path)
+
+    assert profile.dependencies[0].resolved_version == "15.0.4"
+
+
+def test_profile_fails_closed_when_safe_text_exceeds_aggregate_budget(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.profiling.profiler._MAX_PROFILE_TOTAL_BYTES",
+        64,
+    )
+    _write(tmp_path, "one/AGENTS.md", "a" * 40)
+    _write(tmp_path, "two/AGENTS.md", "b" * 40)
+
+    with pytest.raises(InspectionPathError, match="aggregate byte budget"):
+        profile_repository(tmp_path)
 
 
 def test_python_uv_profile(tmp_path):
@@ -225,3 +266,17 @@ def test_profile_schema_rejects_unknown_fields():
         RepoProfile.model_validate(
             {"schema_version": "repo_profile@1", "unexpected": True}
         )
+
+
+def test_profile_rejects_repository_instruction_symlink_to_outside(tmp_path):
+    outside = tmp_path.parent / "outside-agents.md"
+    outside.write_text(
+        "OPENAI_API_KEY=provider-secret-that-must-not-be-profiled\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").symlink_to(outside)
+
+    with pytest.raises(
+        InspectionPathError, match="repository contains a symbolic link"
+    ):
+        profile_repository(tmp_path)

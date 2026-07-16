@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
+from app.inspection.repository import RepositoryInspector, RepositoryTextView
 from app.profiling.adapters import ADAPTERS, ProfileFragment
 from app.profiling.models import (
     BranchProtection,
@@ -23,36 +23,10 @@ from app.profiling.models import (
     UncertaintyCode,
 )
 
-_EXCLUDED = frozenset(
-    {
-        ".git",
-        "node_modules",
-        ".venv",
-        "venv",
-        "dist",
-        "build",
-        ".next",
-        "target",
-        "vendor",
-        "coverage",
-        "__pycache__",
-    }
-)
 _MAX_PATHS = 5000
+_MAX_PROFILE_FILE_BYTES = 4_000_000
+_MAX_PROFILE_TOTAL_BYTES = 32_000_000
 _MAX_INSTRUCTION_CHARS = 20_000
-
-
-def _paths(root: Path) -> tuple[list[str], bool]:
-    result: list[str] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root)
-        if any(part in _EXCLUDED for part in rel.parts):
-            continue
-        result.append(rel.as_posix())
-    result.sort()
-    return result[:_MAX_PATHS], len(result) > _MAX_PATHS
 
 
 def _unique(values: list[Any]) -> list[Any]:
@@ -70,7 +44,9 @@ def _unique(values: list[Any]) -> list[Any]:
     return result
 
 
-def _generic(root: Path, paths: list[str]) -> tuple[list, list, list, list, list, list]:
+def _generic(
+    paths: list[str], contents: RepositoryTextView
+) -> tuple[list, list, list, list, list, list]:
     ci: list[CIWorkflow] = []
     instructions: list[RepositoryInstruction] = []
     deployments: list[DeploymentTarget] = []
@@ -88,18 +64,19 @@ def _generic(root: Path, paths: list[str]) -> tuple[list, list, list, list, list
             ci.append(CIWorkflow(provider="circleci", path=path))
         if name == "AGENTS.md":
             scope = Path(path).parent.as_posix() or "."
-            try:
-                raw = (root / path).read_bytes()
-            except OSError:
-                raw = b""
-            content = raw.decode("utf-8", "replace")
+            inspected = contents.inspect(path)
+            if inspected is None:
+                continue
+            content = inspected.text
             instructions.append(
                 RepositoryInstruction(
                     path=path,
                     scope=scope,
                     content=content[:_MAX_INSTRUCTION_CHARS],
-                    content_sha256=hashlib.sha256(raw).hexdigest(),
-                    truncated=len(content) > _MAX_INSTRUCTION_CHARS,
+                    content_sha256=inspected.content_sha256,
+                    truncated=(
+                        inspected.truncated or len(content) > _MAX_INSTRUCTION_CHARS
+                    ),
                 )
             )
         if name == "Dockerfile" or name.startswith("Dockerfile."):
@@ -141,14 +118,15 @@ def _generic(root: Path, paths: list[str]) -> tuple[list, list, list, list, list
     return ci, instructions, deployments, services, sorted(protected), frameworks
 
 
-def _generic_commands(root: Path, paths: list[str]) -> list[RepoCommand]:
+def _generic_commands(
+    paths: list[str], contents: RepositoryTextView
+) -> list[RepoCommand]:
     commands: list[RepoCommand] = []
     for path in paths:
         if Path(path).name not in {"Makefile", "makefile"}:
             continue
-        try:
-            text = (root / path).read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        text = contents.text(path)
+        if text is None:
             continue
         targets = {
             match.group(1)
@@ -184,15 +162,25 @@ def profile_repository(
     paths_truncated: bool | None = None,
 ) -> RepoProfile:
     """Profile a checkout/snapshot without inferred ecosystem fallbacks."""
-    paths, local_truncated = _paths(root)
+    contents = RepositoryInspector(
+        root,
+        max_files=_MAX_PATHS,
+        max_file_bytes=_MAX_PROFILE_FILE_BYTES,
+        max_total_bytes=_MAX_PROFILE_TOTAL_BYTES,
+    ).text_view()
+    root = contents.root
+    paths = list(contents.paths)
+    local_truncated = contents.truncated
     truncated = local_truncated if paths_truncated is None else paths_truncated
     fragments: list[ProfileFragment] = [
-        adapter.profile(root, paths) for adapter in ADAPTERS if adapter.detect(paths)
+        adapter.profile(root, paths, contents)
+        for adapter in ADAPTERS
+        if adapter.detect(paths)
     ]
     ci, instructions, deployments, services, protected, generic_frameworks = _generic(
-        root, paths
+        paths, contents
     )
-    generic_commands = _generic_commands(root, paths)
+    generic_commands = _generic_commands(paths, contents)
     uncertainties: list[Uncertainty] = [
         item for fragment in fragments for item in fragment.uncertainties
     ]

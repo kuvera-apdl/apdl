@@ -510,6 +510,7 @@ class _Pipeline:
         diff_text=None,
         changed_paths: list[str] | None = None,
         repo_files: dict[str, str] | None = None,
+        repo_symlinks: dict[str, Path] | None = None,
         edit_files: dict[str, str] | None = None,
     ):
         self.aider_messages: list[str] = []
@@ -533,6 +534,10 @@ class _Pipeline:
                     target = repo / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(content)
+                for relative, link_target in (repo_symlinks or {}).items():
+                    target = repo / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.symlink_to(link_target)
             if args[0] == "diff":
                 return 0, self._diff_text
             if args[:2] == ["rev-parse", "HEAD"]:
@@ -885,6 +890,70 @@ async def test_runtime_workflow_refuses_non_apdl_owned_path_collision(
     assert pipeline.aider_messages == []
     assert pipeline.pushed is False
     assert ["add", "--", RUNTIME_ACCEPTANCE_WORKFLOW_PATH] not in pipeline.git_calls
+
+
+@pytest.mark.asyncio
+async def test_runtime_workflow_refuses_symlink_to_outside_secret(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CODEGEN_BRIEF", "false")
+    profile = RepoProfile(
+        package_managers=[
+            PackageManager(
+                name="npm",
+                manifest_path="package.json",
+                lockfile_path="package-lock.json",
+            )
+        ],
+        commands=[
+            RepoCommand(
+                kind=CommandKind.test,
+                command="npm test",
+                cwd=".",
+                source_path="package.json",
+            )
+        ],
+        test_facilities=[
+            ProfileTestFacility(
+                name="vitest", package_path=".", source_path="package.json"
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        aider_editor,
+        "_probe_repo",
+        lambda *_a, **_k: _RepoProbe(
+            verify_cmd="npm test",
+            has_test_runner=True,
+            preamble="",
+            profile=profile,
+        ),
+    )
+    outside = tmp_path / "outside-runtime-workflow.yml"
+    outside.write_text(
+        "OPENAI_API_KEY=provider-secret-that-must-not-be-read\n",
+        encoding="utf-8",
+    )
+    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(
+        editor,
+        monkeypatch,
+        repo_files={
+            "package.json": '{"scripts":{"test":"vitest run"}}',
+            "package-lock.json": '{"lockfileVersion":3,"packages":{}}',
+        },
+        repo_symlinks={RUNTIME_ACCEPTANCE_WORKFLOW_PATH: outside},
+    )
+    request = _request(test_cmd="npm test")
+    _enable_runtime_workflow(request)
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert "repository contains a symbolic link" in (result.error or "")
+    assert "provider-secret-that-must-not-be-read" not in (result.error or "")
+    assert pipeline.aider_messages == []
+    assert pipeline.pushed is False
 
 
 @pytest.mark.asyncio

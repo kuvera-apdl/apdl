@@ -75,6 +75,7 @@ from app.editor.llm import CompleteFn, resolve_completer
 from app.editor.prompts import append_prompt, replace_latest_prompt
 from app.inspection import (
     DependencySlice,
+    InspectionPathError,
     InspectionSnapshot,
     RepositoryInspector,
     build_dependency_slice,
@@ -730,8 +731,23 @@ class AiderEditor:
                 profile,
                 policy=request.runtime_acceptance_policy,
             )
-            if workflow_path.exists():
-                current = workflow_path.read_text(encoding="utf-8")
+            try:
+                workflow_contents = RepositoryInspector(repo_dir).text_view()
+                workflow_present = workflow_contents.contains(workflow_relative)
+                inspected_workflow = workflow_contents.inspect(workflow_relative)
+            except InspectionPathError as exc:
+                return (
+                    False,
+                    "runtime workflow inspection refused: " + str(exc),
+                )
+            if workflow_present:
+                if inspected_workflow is None:
+                    return (
+                        False,
+                        "runtime workflow inspection refused: the reserved path "
+                        "does not contain inspectable UTF-8 text",
+                    )
+                current = inspected_workflow.text
                 if current == desired:
                     return False, None
                 if not workflow_content_is_apdl_owned(current):
@@ -1539,15 +1555,24 @@ class AiderEditor:
                 and runtime_acceptance_plan is not None
                 and runtime_acceptance_plan.checks
             ):
-                workflow_path = repo_dir / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                 expected_workflow = render_github_actions_workflow(
                     runtime_acceptance_plan,
                     repo_profile,
                     policy=request.runtime_acceptance_policy,
                 )
+                try:
+                    workflow_contents = RepositoryInspector(repo_dir).text_view()
+                    inspected_workflow = workflow_contents.inspect(
+                        RUNTIME_ACCEPTANCE_WORKFLOW_PATH
+                    )
+                except InspectionPathError as exc:
+                    return fail(
+                        "The policy-authorized runtime workflow could not be "
+                        f"inspected safely: {exc}"
+                    )
                 if (
-                    not workflow_path.is_file()
-                    or workflow_path.read_text(encoding="utf-8") != expected_workflow
+                    inspected_workflow is None
+                    or inspected_workflow.text != expected_workflow
                 ):
                     return fail(
                         "The policy-authorized runtime workflow does not match "

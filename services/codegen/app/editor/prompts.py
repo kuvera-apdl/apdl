@@ -3,14 +3,62 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.editor.environment import MODEL_PROVIDER_ENV, MODEL_PROVIDER_ROUTING_ENV
+
 
 PROMPT_ENTRY_MAX_BYTES = 32 * 1024
 PROMPT_TRANSCRIPT_MAX_BYTES = 128 * 1024
+_REDACTED = "[REDACTED]"
 _TEXT_FIELDS = ("user", "system", "notes", "label", "stage")
+_MODEL_PROVIDER_SECRET_ENV = tuple(
+    name for name in MODEL_PROVIDER_ENV if name not in MODEL_PROVIDER_ROUTING_ENV
+)
+_WHOLE_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(
+        r"-----BEGIN [^\r\n-]*PRIVATE KEY-----.*?"
+        r"(?:-----END [^\r\n-]*PRIVATE KEY-----|\Z)",
+        re.DOTALL,
+    ),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{36,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"),
+    re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\."
+        r"[A-Za-z0-9_-]{8,}\b"
+    ),
+    re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@[^\s]+"),
+)
+_AUTHORIZATION_RE = re.compile(
+    r"(?im)\b(?P<label>authorization|proxy-authorization)"
+    r"(?P<separator>\s*[:=]\s*)(?P<scheme>bearer|basic)\s+"
+    r"(?P<value>[^\s,;\"']+)"
+)
+_SECRET_LABEL_PATTERN = (
+    r"(?:[a-z0-9]+[_-])*(?:secret[_-]?access[_-]?key|access[_-]?key[_-]?id|"
+    r"access[_-]?token|access[_-]?key|api[_-]?key|private[_-]?key|"
+    r"client[_-]?secret|token|password|secret|session_token|database_url|"
+    r"redis_url|postgres_url)"
+)
+_NAMED_QUOTED_SECRET_RE = re.compile(
+    rf"(?i)(?P<label_quote>[\"']?)\b(?P<label>{_SECRET_LABEL_PATTERN})"
+    r"(?P=label_quote)(?P<separator>\s*[:=]\s*)"
+    r"(?P<value_quote>[\"'])(?P<value>[^\r\n]*?)(?P=value_quote)"
+)
+_NAMED_UNQUOTED_SECRET_RE = re.compile(
+    rf"(?i)\b(?P<label>{_SECRET_LABEL_PATTERN})"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;\"'&]+)"
+)
 _TRANSCRIPT_MARKER_RE = re.compile(
     r"^\[…transcript truncated: omitted (?P<entries>[0-9]+) middle prompt "
     r"entries \((?P<bytes>[0-9]+) serialized bytes\)…\]$"
@@ -23,16 +71,45 @@ def serialized_prompt_bytes(value: Any) -> int:
 
 
 def _optional_text(value: Any) -> str | None:
-    return None if value is None else str(value)
+    return None if value is None else _redact_text(str(value))
+
+
+def _redact_text(value: str) -> str:
+    """Remove configured provider credentials and common secret-shaped values."""
+    configured = {
+        secret for name in _MODEL_PROVIDER_SECRET_ENV if (secret := os.getenv(name))
+    }
+    for secret in sorted(configured, key=len, reverse=True):
+        value = value.replace(secret, _REDACTED)
+    for pattern in _WHOLE_SECRET_PATTERNS:
+        value = pattern.sub(_REDACTED, value)
+    value = _AUTHORIZATION_RE.sub(
+        lambda match: (
+            f"{match['label']}{match['separator']}{match['scheme']} {_REDACTED}"
+        ),
+        value,
+    )
+    value = _NAMED_QUOTED_SECRET_RE.sub(
+        lambda match: (
+            f"{match['label_quote']}{match['label']}{match['label_quote']}"
+            f"{match['separator']}{match['value_quote']}"
+            f"{_REDACTED}{match['value_quote']}"
+        ),
+        value,
+    )
+    return _NAMED_UNQUOTED_SECRET_RE.sub(
+        lambda match: f"{match['label']}{match['separator']}{_REDACTED}",
+        value,
+    )
 
 
 def _canonical_prompt(prompt: Mapping[str, Any]) -> dict[str, Any]:
     """Keep the one strict prompt-entry shape accepted by the operator UI."""
     return {
-        "stage": str(prompt.get("stage") or "unknown"),
-        "label": str(prompt.get("label") or "Prompt"),
+        "stage": _redact_text(str(prompt.get("stage") or "unknown")),
+        "label": _redact_text(str(prompt.get("label") or "Prompt")),
         "system": _optional_text(prompt.get("system")),
-        "user": str(prompt.get("user") or ""),
+        "user": _redact_text(str(prompt.get("user") or "")),
         "notes": _optional_text(prompt.get("notes")),
     }
 
@@ -160,14 +237,10 @@ def bound_prompt_transcript(
 
     def candidate(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
         omitted_end = len(bounded) - len(values)
-        omitted_count = (
-            inherited_omitted_entries + max(0, omitted_end - 1)
-        )
+        omitted_count = inherited_omitted_entries + max(0, omitted_end - 1)
         if omitted_count == 0:
             return [first, *values]
-        omitted_bytes = (
-            inherited_omitted_bytes + sum(entry_sizes[1:omitted_end])
-        )
+        omitted_bytes = inherited_omitted_bytes + sum(entry_sizes[1:omitted_end])
         return [
             first,
             _aggregate_marker(
@@ -196,9 +269,7 @@ def bound_prompt_transcript(
     return result
 
 
-def append_prompt(
-    transcript: list[dict[str, Any]], prompt: Mapping[str, Any]
-) -> None:
+def append_prompt(transcript: list[dict[str, Any]], prompt: Mapping[str, Any]) -> None:
     """Append while enforcing both entry and running aggregate bounds."""
     transcript[:] = bound_prompt_transcript([*transcript, prompt])
 
