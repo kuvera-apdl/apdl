@@ -93,16 +93,29 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
 - A supervisor routes enabled runs through behavior analysis and experiment
   design. Experiment evaluation, feature proposals, and personalization are
   disabled; Config has no UI-config storage or delivery API in 0.3.0.
-- The LLM router tries providers in order (OpenAI → Anthropic → Google →
-  local), skipping providers without keys; agent memory is embedded into a
-  pgvector table for retrieval across runs.
+- Agent runs and approval effects are PostgreSQL-backed queues. Replica-safe
+  leases recover an interrupted run from persisted agent results, while an
+  approval transaction records exact decisions, required audit intents, and
+  ordered per-item effects before the worker may call Config or Codegen.
+  Effect retries reuse one persisted downstream idempotency key and expose
+  partial/manual-intervention state to operators. Operator cancellation clears
+  the run lease, prevents queued approval effects from being claimed, and
+  fences later LLM egress against the cancelled execution.
+- The LLM router treats configured providers as candidates, not authority.
+  Every call is project/run scoped and classified; an exact provider/model row,
+  residency match, and available run/project budget are required before a
+  durable attempt record is marked for egress. The default policy permits only
+  local `gemma4` at `http://localhost:11434/v1`, zero paid spend, and no
+  cross-vendor retry. Agent memory is embedded into a pgvector table for
+  retrieval across runs.
 - Agents execution is available only to operator-provisioned projects;
   self-created projects retain read-only history and definitions. Experiment
   proposals receive static shape/blast-radius validation and are audit-logged,
   but every experiment design requires human approval regardless of its stored
   autonomy level. Approval creates a disabled draft; it does not deploy a
-  treatment, enable the flag, or enter `running`. Static guardrail metadata is
-  not live monitoring, and automatic evaluation and rollback are unavailable.
+  treatment, enable the flag, or enter `running`. No canonical live guardrail
+  or rollback contract exists, and automatic evaluation and rollback are
+  unavailable.
 - Codegen is reachable only through the private service network and remains in
   offline/non-publishing mode in 0.3.0. A project role
   cannot choose a GitHub repository: a trusted operator separately grants one

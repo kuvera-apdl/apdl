@@ -28,10 +28,11 @@ trigger runs, manage/test custom agents, or approve work. This is enforced from
 canonical project provenance even when a credential incorrectly contains an
 execution role.
 
-A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): it
-resolves the requested agents from a registry, runs them in pipeline order,
-skips agents whose `requires` inputs are missing, and threads a shared state
-dict between them.
+A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
+PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
+resolves agents in pipeline order, and each result is persisted before
+post-result bookkeeping or a later approval effect. Expired ownership is
+requeued at the persisted phase rather than terminalized as a failed run.
 
 ## API
 
@@ -42,9 +43,11 @@ operator-provisioned projects (`admin_projects.created_by IS NULL`).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/agents/trigger` | Start an agent run (runs in the background; returns `run_id`) |
+| `POST` | `/v1/agents/trigger` | Durably queue an agent run; returns `run_id` |
 | `GET` | `/v1/agents/{run_id}/status` | Run status, phase, insight/experiment counts |
-| `POST` | `/v1/agents/{run_id}/approve` | Approve or reject a run waiting at an approval gate |
+| `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
+| `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
+| `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
 | `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
@@ -66,6 +69,13 @@ curl -X POST localhost:8083/v1/agents/trigger \
 `trigger_type` is `scheduled`, `manual`, or `threshold_alert`. To approve a
 waiting run: `POST /v1/agents/{run_id}/approve` with
 `{"decisions": [{"item_id": "exp_checkout", "approved": true}], "comment": "..."}`.
+The request accepts no whole-gate alias or unknown fields. Decisions must name
+every persisted gate item exactly once. Its response is a queued-command
+envelope containing `command_id`, gate/count fields, timestamps, and an
+`effects` array. Command status is `queued`, `processing`, `succeeded`, or
+`manual_intervention`; each effect also exposes `retryable_failed` and its
+attempt/error/result fields. Config and Codegen calls run only in the durable
+effect worker with a persisted idempotency key and PostgreSQL quota reservation.
 
 ## Agent graphs
 
@@ -84,10 +94,22 @@ Scaffold a new agent with `scripts/new_agent.py`.
 ## LLM router
 
 `app/llm/router.py` routes by tier (`fast` for cheap tasks, `reasoning` for
-analysis/design). Each tier tries **OpenAI → Anthropic → Google → local** in
-order, skipping providers whose API key is unset, and falls back to the next
-provider on failure. Defaults are overridable per slot
-(`LLM_FAST_PRIMARY`, `LLM_REASONING_FALLBACK`, `LOCAL_LLM_MODEL`, …).
+analysis/design), but environment variables only define candidate models; they
+do not authorize tenant data egress. Every call carries an explicit project,
+run, purpose, execution kind, and data classification. Before network egress,
+the router loads the project's exact provider/model/residency policy, reserves
+the worst-case run and daily cost atomically, and persists the logical call and
+provider attempt. It then records provider/model, prompt hash, usage, cost,
+latency, outcome, and retry classification without storing prompt content.
+
+Migration 023 creates one safe default policy for every project: only the exact
+local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
+spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, or Google requires an operator to update
+`llm_project_policies` and insert the exact provider/model row in
+`llm_project_provider_policies`, including allowed data classifications,
+residency, current input/output prices, and positive project-daily and per-run
+ceilings. A provider failure crosses to another vendor only when the project
+policy explicitly permits it and the failure is classified as retryable.
 
 ## Approval and safety boundary
 
@@ -105,8 +127,10 @@ experiment in 0.3.0. Actions that fail static validation halt.
   and a control group). Experiments require one primary metric and a clear
   hypothesis. These are pre-draft checks, not live guardrail monitoring or
   evidence that a treatment is safe to activate.
-- **Audit log** (`app/safety/audit.py`) — records workflow steps, decisions,
-  validator results, and human approvals in PostgreSQL.
+- **Audit log** (`app/safety/audit.py`) — authoritative human decisions and
+  mutation intents are committed with their command/outbox transaction before
+  external work. Best-effort logging is reserved for non-authoritative
+  workflow telemetry.
 - **Rollback surface** (`app/safety/rollback.py`) — explicitly unavailable and
   fails closed. It neither decides nor executes an automatic rollback.
 
@@ -160,15 +184,16 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Model overrides |
+| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names; each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
 | `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 
-At least one provider API key or `LOCAL_LLM_URL` is required to execute an
-LLM-backed run. `/ready/capabilities` reports provider and service
-availability, but its degraded state does not make the core `/ready` endpoint
-fail.
+At least one policy-authorized provider must also be configured and reachable
+to execute an LLM-backed run. API keys alone grant no project permission.
+`/ready/capabilities` reports process-level provider and service availability,
+but its degraded state does not make the core `/ready` endpoint fail and does
+not assert that any particular project's policy permits egress.
 
 ## Running locally
 

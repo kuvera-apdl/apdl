@@ -447,7 +447,9 @@ Filtered cohort comparison:
 |---|---|---|
 | `POST` | `/v1/agents/trigger` | Start an agent run |
 | `GET` | `/v1/agents/:run_id/status` | Check run status |
-| `POST` | `/v1/agents/:run_id/approve` | Approve a run's pending actions |
+| `POST` | `/v1/agents/:run_id/cancel` | Durably cancel an active run and fence further work |
+| `POST` | `/v1/agents/:run_id/approve` | Queue strict per-item approval decisions (`202`) |
+| `GET` | `/v1/agents/:run_id/approvals/:command_id` | Approval command and effect status |
 | `GET` | `/health` | Process liveness |
 | `GET` | `/ready` | Core Agents runtime and PostgreSQL readiness |
 | `GET` | `/ready/capabilities` | Non-blocking LLM, Query, Config, and Codegen capability report |
@@ -462,7 +464,10 @@ boundary from immutable project provenance as well as credential roles, so an
 overprivileged key cannot enable execution for a self-registered project.
 
 The agents service runs operator-triggered analysis and proposal workflows
-powered by LLM reasoning (via OpenAI, Anthropic, Google, and local model SDKs):
+powered by policy-governed LLM reasoning. The safe default permits only the
+exact local `gemma4` model at `http://localhost:11434/v1`; external providers, data classifications,
+residency, prices, spend ceilings, and cross-vendor retry require explicit
+per-project policy:
 
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns
 - **Experiment Design** — proposes A/B tests for human approval; an approval
