@@ -18,6 +18,8 @@ from typing import Iterable, Iterator
 MIGRATION_NAME = re.compile(r"^(?P<version>[0-9]{3})_[a-z0-9_]+\.sql$")
 CHECKSUM = re.compile(r"^[0-9a-f]{64}$")
 LEDGER_TABLE = "apdl_schema_migrations"
+QUIESCENCE_CONFIRMATION_ENV = "APDL_CLICKHOUSE_WRITERS_QUIESCED"
+QUIESCENCE_REQUIRED_VERSIONS = frozenset({5, 6, 7})
 PROTOTYPE_OBJECTS = frozenset({
     "events_v2",
     "events_dlq_v2",
@@ -163,6 +165,25 @@ def plan_migrations(
     return migration_sequence[len(applied_sequence) :]
 
 
+def _assert_writer_quiescence(pending: Iterable[Migration]) -> None:
+    dangerous = tuple(
+        migration.name
+        for migration in pending
+        if migration.version in QUIESCENCE_REQUIRED_VERSIONS
+    )
+    if not dangerous:
+        return
+    if os.environ.get(QUIESCENCE_CONFIRMATION_ENV) == "1":
+        return
+    raise MigrationError(
+        "ClickHouse migrations rebuild live-write tables and require the "
+        "canonical writer to be stopped: "
+        f"{', '.join(dangerous)}. Run scripts/init-clickhouse.sh; direct "
+        f"runners must set {QUIESCENCE_CONFIRMATION_ENV}=1 only after proving "
+        "that every writer is quiesced."
+    )
+
+
 class ClickHouseClient:
     """Minimal clickhouse-client adapter executed inside the Compose container."""
 
@@ -297,6 +318,7 @@ def migrate(directory: Path, client: ClickHouseClient) -> tuple[Migration, ...]:
         _ensure_ledger(client)
         applied = _read_ledger(client)
         pending = plan_migrations(migrations, applied)
+        _assert_writer_quiescence(pending)
         for migration in pending:
             print(f"  Applying {migration.name}", flush=True)
             client.execute(migration.sql, multiquery=True)

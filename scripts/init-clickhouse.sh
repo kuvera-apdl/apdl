@@ -63,6 +63,10 @@ if [ "$ready" -ne 1 ]; then
     exit 1
 fi
 
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
+    --anchor-container "$container_id" \
+    --service clickhouse-writer
+
 docker exec "$container_id" clickhouse-client \
     --user "$CLICKHOUSE_USER" \
     --password "$CLICKHOUSE_PASSWORD" \
@@ -73,6 +77,7 @@ CLICKHOUSE_USER="$CLICKHOUSE_USER" \
 CLICKHOUSE_PASSWORD="$CLICKHOUSE_PASSWORD" \
 CLICKHOUSE_DB="$CLICKHOUSE_DB" \
 CLICKHOUSE_MIGRATIONS_DIR="$CLICKHOUSE_MIGRATIONS_DIR" \
+APDL_CLICKHOUSE_WRITERS_QUIESCED=1 \
 PYTHONDONTWRITEBYTECODE=1 \
     python3 "$ROOT_DIR/pipeline/clickhouse/migrate.py"
 

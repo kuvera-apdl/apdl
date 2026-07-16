@@ -17,6 +17,8 @@ from typing import Iterable
 MIGRATION_NAME = re.compile(r"^(?P<version>[0-9]{3})_[a-z0-9_]+\.sql$")
 LEDGER_TABLE = "apdl_schema_migrations"
 ADVISORY_LOCK_ID = 4_158_044_082
+QUIESCENCE_CONFIRMATION_ENV = "APDL_POSTGRES_SERVICES_QUIESCED"
+QUIESCENCE_REQUIRED_VERSIONS = frozenset({28})
 
 
 class MigrationError(RuntimeError):
@@ -105,6 +107,24 @@ def plan_migrations(
             )
 
     return migration_sequence[len(applied_sequence) :]
+
+
+def _assert_service_quiescence(pending: Iterable[Migration]) -> None:
+    dangerous = tuple(
+        migration.name
+        for migration in pending
+        if migration.version in QUIESCENCE_REQUIRED_VERSIONS
+    )
+    if not dangerous:
+        return
+    if os.environ.get(QUIESCENCE_CONFIRMATION_ENV) == "1":
+        return
+    raise MigrationError(
+        "PostgreSQL migrations reconcile active application work and require "
+        f"all application services to be stopped: {', '.join(dangerous)}. "
+        "Run scripts/init-postgres.sh; direct runners must set "
+        f"{QUIESCENCE_CONFIRMATION_ENV}=1 only after proving service quiescence."
+    )
 
 
 def _psql(
@@ -326,6 +346,7 @@ def migrate(directory: Path) -> tuple[Migration, ...]:
     applied = _read_ledger()
     _assert_fresh_database_for_empty_ledger(applied)
     pending = plan_migrations(migrations, applied)
+    _assert_service_quiescence(pending)
     for migration in pending:
         print(f"  Applying {migration.name}", flush=True)
         _apply_migration(migration)
