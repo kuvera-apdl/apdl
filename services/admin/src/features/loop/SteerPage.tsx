@@ -8,6 +8,8 @@ import { Link } from 'react-router-dom'
 
 import { PageHeader } from '@/components/shared/PageHeader'
 import { Card, CardContent } from '@/components/ui/card'
+import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 
 interface Lever {
   icon: LucideIcon
@@ -45,29 +47,53 @@ const LEVERS: Lever[] = [
 ]
 
 export function SteerPage() {
+  const { active } = useWorkspace()
+  const canRun = hasWorkspaceRole(active, 'agents:run')
+  const canManageAgents = hasWorkspaceRole(active, 'agents:manage')
+  const levers = LEVERS.filter((lever) => lever.to !== '/agents/trigger' || canRun).map((lever) =>
+    lever.to === '/agents/custom' && !canManageAgents
+      ? {
+          ...lever,
+          description: 'Inspect the custom-agent definitions used by historical operator runs.',
+          cta: 'View agents',
+        }
+      : lever,
+  )
+
   return (
     <div className="space-y-4">
       <PageHeader
         title="Steer"
-        description="Change how autonomous the loop is, what it runs over, and which agents take part."
+        description={
+          canRun
+            ? 'Change how autonomous the loop is, what it runs over, and which agents take part.'
+            : 'Inspect loop configuration and agent definitions available to this read-only workspace.'
+        }
       />
 
-      <Card>
-        <CardContent className="flex items-start gap-3 p-4">
-          <SlidersHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-          <div className="space-y-1 text-sm">
-            <p className="font-medium">Autonomy is set per run</p>
-            <p className="text-muted-foreground">
-              L1 suggests only · L2 auto-applies safe actions and asks you for the rest · L3 also
-              auto-applies low-risk actions · L4 is full autonomy. Feature proposals always ask you,
-              at every level. Pick the level when you start a run.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      {canRun ? (
+        <Card>
+          <CardContent className="flex items-start gap-3 p-4">
+            <SlidersHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            <div className="space-y-1 text-sm">
+              <p className="font-medium">Autonomy is set per run</p>
+              <p className="text-muted-foreground">
+                L1 suggests only · L2 holds every passing action for approval · L3 auto-applies
+                low-risk actions · L4 is full autonomy. Feature proposals always ask
+                you, at every level. Pick the level when you start a run.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <AgentReadOnlyNote>
+          Starting or configuring agent execution requires agents:run. Read-only run history and
+          definitions remain available.
+        </AgentReadOnlyNote>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {LEVERS.map((lever) => (
+        {levers.map((lever) => (
           <Link key={lever.to} to={lever.to}>
             <Card className="h-full transition-colors hover:border-foreground/20">
               <CardContent className="space-y-2 p-4">
@@ -81,10 +107,12 @@ export function SteerPage() {
         ))}
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        A scheduled-evaluation setting will live here once the agents service runs the loop on a
-        cron; today, schedule runs from your own scheduler against POST /v1/agents/trigger.
-      </p>
+      {canRun ? (
+        <p className="text-xs text-muted-foreground">
+          A scheduled-evaluation setting will live here once the agents service runs the loop on a
+          cron; today, schedule runs from your own scheduler against POST /v1/agents/trigger.
+        </p>
+      ) : null}
     </div>
   )
 }

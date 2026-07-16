@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import Principal, authenticate_request
 from app.main import app
 from app.routers import custom_agents as router_mod
 from app.store.custom_agents import SlugConflictError
@@ -49,6 +51,19 @@ def _client() -> AsyncClient:
     app.state.pg_pool = object()
     app.state.vector_store = object()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _authenticate_self_registered(request: Request) -> Principal:
+    principal = Principal(
+        credential_id="self-registered",
+        project_id="demo",
+        roles=frozenset(
+            {"agents:read", "agents:run", "agents:manage", "agents:approve"}
+        ),
+        self_registered_project=True,
+    )
+    request.state.principal = principal
+    return principal
 
 
 @pytest.fixture
@@ -96,6 +111,54 @@ async def test_create_happy_path(stubbed_store):
 
 
 @pytest.mark.asyncio
+async def test_self_registered_overprivileged_project_cannot_manage_custom_agents(
+    stubbed_store,
+):
+    app.dependency_overrides[authenticate_request] = _authenticate_self_registered
+
+    async with _client() as client:
+        response = await client.post(
+            "/v1/agents/custom?project_id=demo",
+            json=_spec(),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Agents execution is unavailable for self-registered projects"
+    )
+    assert stubbed_store["created"] is None
+
+
+@pytest.mark.asyncio
+async def test_self_registered_custom_agent_test_invokes_no_tools_or_llm(monkeypatch):
+    app.dependency_overrides[authenticate_request] = _authenticate_self_registered
+    calls: list[str] = []
+
+    async def forbidden_preset(*args, **kwargs):
+        calls.append("preset")
+        raise AssertionError("preset tools must not execute")
+
+    async def forbidden_loop(*args, **kwargs):
+        calls.append("llm")
+        raise AssertionError("LLM/tool loop must not execute")
+
+    monkeypatch.setattr(router_mod, "run_preset_tools", forbidden_preset)
+    monkeypatch.setattr(router_mod, "run_tool_loop", forbidden_loop)
+
+    async with _client() as client:
+        response = await client.post(
+            "/v1/agents/custom/test",
+            json={"project_id": "demo", "definition": _spec()},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Agents execution is unavailable for self-registered projects"
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("overrides", "fragment"),
     [
@@ -106,6 +169,7 @@ async def test_create_happy_path(stubbed_store):
         ({"tools": ["create_flag"]}, "unknown tool"),
         ({"max_tool_steps": 0}, "max_tool_steps"),
         ({"requires": ["no_such_output"]}, "does not match"),
+        ({"requires": ["personalizations"]}, "does not match"),
         ({"model_tier": "turbo"}, "model_tier"),
     ],
 )

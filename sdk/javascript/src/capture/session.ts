@@ -1,6 +1,5 @@
 import { generateId } from '../core/types';
 
-const SESSION_KEY = 'apdl_session';
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 interface SessionData {
@@ -18,10 +17,15 @@ interface SessionData {
 export class SessionManager {
   private session: SessionData;
   private persistence: 'localStorage' | 'memory';
+  private storageKey: string;
 
-  constructor(persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage') {
+  constructor(
+    persistence: 'localStorage' | 'cookie' | 'memory' = 'localStorage',
+    projectId: string
+  ) {
     // Cookies are not used for session storage; fall back to localStorage
     this.persistence = persistence === 'memory' ? 'memory' : 'localStorage';
+    this.storageKey = `apdl_session_${projectId}`;
     this.session = this.restore() ?? this.createSession();
   }
 
@@ -95,7 +99,7 @@ export class SessionManager {
 
     try {
       if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(SESSION_KEY, JSON.stringify(this.session));
+        localStorage.setItem(this.storageKey, JSON.stringify(this.session));
       }
     } catch {
       // localStorage may be full or unavailable; silently ignore
@@ -108,7 +112,7 @@ export class SessionManager {
     try {
       if (typeof localStorage === 'undefined') return null;
 
-      const raw = localStorage.getItem(SESSION_KEY);
+      const raw = localStorage.getItem(this.storageKey);
       if (!raw) return null;
 
       const data = JSON.parse(raw) as SessionData;

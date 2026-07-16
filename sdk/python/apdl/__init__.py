@@ -4,7 +4,10 @@ Quick start::
 
     from apdl import APDL
 
-    client = APDL.init(api_key="proj_demo_0123456789abcdef")
+    client = APDL.init(
+        api_key="proj_demo_0123456789abcdef",
+        endpoint="https://apdl.example.com",
+    )
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
 
     if client.get_variant("new-checkout", user_id="u_123") == "treatment":
@@ -14,7 +17,10 @@ Quick start::
 
 Or as a context manager::
 
-    with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
+    with APDL.init(
+        api_key="proj_demo_0123456789abcdef",
+        endpoint="https://apdl.example.com",
+    ) as client:
         client.identify("u_123", {"plan": "pro"})
 """
 
@@ -24,6 +30,7 @@ from typing import Any
 
 from .client import APDLClient
 from .config import APDLConfig
+from .queue import DeliveryReport
 from .flags import (
     ConditionOperator,
     EvalContext,
@@ -55,16 +62,18 @@ class APDL:
         config: APDLConfig | None = None,
         *,
         api_key: str | None = None,
+        endpoint: str | None = None,
         **kwargs: Any,
     ) -> APDLClient:
-        """Creates and starts a client. Pass an ``APDLConfig`` or ``api_key=...``."""
-        return APDLClient(config, api_key=api_key, **kwargs)
+        """Create a client from one config or explicit key and endpoint options."""
+        return APDLClient(config, api_key=api_key, endpoint=endpoint, **kwargs)
 
 
 __all__ = [
     "APDL",
     "APDLClient",
     "APDLConfig",
+    "DeliveryReport",
     "IngestionEvent",
     "SDK_VERSION",
     "__version__",

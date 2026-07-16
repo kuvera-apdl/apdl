@@ -33,7 +33,7 @@ def make_experiment(flag_config: dict | None = None) -> dict:
             "rules": [],
             "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
             "evaluation_mode": "client",
-            "auto_disable": True,
+            "auto_disable": False,
         },
     }
 
@@ -109,7 +109,10 @@ def test_create_experiment_treats_variant_weights_as_relative():
                 "key": "exp_checkout",
                 "name": "Checkout experiment",
                 "default_variant": "missing",
-                "variants": [{"key": "control", "weight": 1}],
+                "variants": [
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
                 "rules": [],
                 "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
             },
@@ -120,22 +123,28 @@ def test_create_experiment_treats_variant_weights_as_relative():
                 "key": "exp_checkout",
                 "name": "Checkout experiment",
                 "default_variant": "control",
-                "variants": [{"key": "control", "weight": 0.5}],
+                "variants": [
+                    {"key": "control", "weight": 0.5},
+                    {"key": "treatment", "weight": 1},
+                ],
                 "rules": [],
                 "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
             },
-            "non-negative integers",
+            "positive integers",
         ),
         (
             {
                 "key": "exp_checkout",
                 "name": "Checkout experiment",
                 "default_variant": "control",
-                "variants": [{"key": "control", "weight": -1}],
+                "variants": [
+                    {"key": "control", "weight": -1},
+                    {"key": "treatment", "weight": 1},
+                ],
                 "rules": [],
                 "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
             },
-            "non-negative integers",
+            "positive integers",
         ),
         (
             {
@@ -149,7 +158,7 @@ def test_create_experiment_treats_variant_weights_as_relative():
                 "rules": [],
                 "fallthrough": {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}},
             },
-            "positive weight",
+            "positive integers",
         ),
         (
             {

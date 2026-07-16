@@ -80,7 +80,7 @@ requires **no pipeline change**.
 from etl import EtlPipeline, CollectingLoader, EtlContext
 
 pipeline = EtlPipeline(CollectingLoader())
-ctx = EtlContext(project_id=42, received_at=..., ip="203.0.113.7", source="sdk-js@2.4.1")
+ctx = EtlContext(project_id="project42", received_at=..., ip="203.0.113.7", source="sdk-js@2.4.1")
 result = pipeline.process_record(raw_envelope, ctx)
 ```
 

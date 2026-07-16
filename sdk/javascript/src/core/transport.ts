@@ -7,6 +7,11 @@ import {
 const DEFAULT_TIMEOUT = 10000;
 const RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
 
+export type TransportOutcome =
+  | 'accepted'
+  | 'retryable'
+  | 'permanent_rejection';
+
 /**
  * HTTP transport layer with retry logic and beacon support.
  */
@@ -23,17 +28,22 @@ export class Transport {
 
   /**
    * Sends a payload to the given URL with retry on transient failures.
-   * Returns true if the payload was accepted (2xx), false otherwise.
+   * The final outcome distinguishes an accepted payload, a retryable delivery
+   * failure, and a permanent HTTP/client rejection that must not be requeued.
    */
-  async send(url: string, payload: unknown): Promise<boolean> {
-    const body = JSON.stringify(payload);
+  async send(
+    url: string,
+    payload: unknown,
+    signal?: AbortSignal
+  ): Promise<TransportOutcome> {
+    const body = this.serialize(payload);
+    if (body === null) return 'permanent_rejection';
 
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+      if (signal?.aborted) return 'retryable';
 
-        const response = await fetch(url, {
+      try {
+        const response = await this.fetchWithTimeout(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -41,27 +51,25 @@ export class Transport {
             [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
           },
           body,
-          signal: controller.signal,
-          keepalive: true,
-        });
-
-        clearTimeout(timeoutId);
+        }, signal);
 
         if (response.ok) {
-          return true;
+          return 'accepted';
         }
 
-        // Client errors (4xx except 429) are not retryable
-        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+        // Only the explicit transient statuses below are retryable. Any other
+        // received non-2xx response is a permanent rejection; network errors
+        // and timeouts take the exception path instead.
+        if (!this.isRetryableStatus(response.status)) {
           if (this.debug) {
             console.warn(
               `APDL: Non-retryable error ${response.status} from ${url}`
             );
           }
-          return false;
+          return 'permanent_rejection';
         }
 
-        // 429 or 5xx — retry
+        // 408/425/429 or 5xx — retry.
         if (this.debug) {
           console.warn(
             `APDL: Retryable error ${response.status} from ${url}, attempt ${attempt + 1}`
@@ -74,12 +82,13 @@ export class Transport {
           if (retryAfter) {
             const retryMs = parseInt(retryAfter, 10) * 1000;
             if (!isNaN(retryMs) && retryMs > 0) {
-              await this.sleep(Math.min(retryMs, 60000));
+              await this.sleep(Math.min(retryMs, 60000), signal);
               continue;
             }
           }
         }
       } catch (err) {
+        if (signal?.aborted) return 'retryable';
         if (this.debug) {
           console.warn(`APDL: Network error on attempt ${attempt + 1}:`, err);
         }
@@ -88,15 +97,22 @@ export class Transport {
       // Wait before retry, unless this was the last attempt
       if (attempt < RETRY_DELAYS.length) {
         const delay = RETRY_DELAYS[attempt];
-        await this.sleep(delay);
+        await this.sleep(delay, signal);
       }
     }
 
-    return false;
+    return 'retryable';
   }
 
   /** Sends one header-authenticated request that may outlive page unload. */
-  async sendKeepalive(url: string, payload: unknown): Promise<boolean> {
+  async sendKeepalive(
+    url: string,
+    payload: unknown,
+    signal?: AbortSignal
+  ): Promise<TransportOutcome> {
+    const body = this.serialize(payload);
+    if (body === null) return 'permanent_rejection';
+
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -105,16 +121,73 @@ export class Transport {
           [API_KEY_HEADER]: this.clientKey,
           [SDK_IDENTIFIER_HEADER]: SDK_IDENTIFIER,
         },
-        body: JSON.stringify(payload),
+        body,
         keepalive: true,
+        signal,
       });
-      return response.ok;
+      if (response.ok) return 'accepted';
+      return this.isRetryableStatus(response.status)
+        ? 'retryable'
+        : 'permanent_rejection';
     } catch {
-      return false;
+      return 'retryable';
     }
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  private serialize(payload: unknown): string | null {
+    try {
+      const body = JSON.stringify(payload);
+      return typeof body === 'string' ? body : null;
+    } catch (err) {
+      if (this.debug) {
+        console.warn('APDL: Payload is not JSON serializable:', err);
+      }
+      return null;
+    }
+  }
+
+  private isRetryableStatus(status: number): boolean {
+    return (
+      status === 408 ||
+      status === 425 ||
+      status === 429 ||
+      (status >= 500 && status <= 599)
+    );
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    externalSignal?: AbortSignal
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const abortFromExternal = () => controller.abort();
+    if (externalSignal?.aborted) {
+      controller.abort();
+    } else {
+      externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+    }
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+      externalSignal?.removeEventListener('abort', abortFromExternal);
+    }
+  }
+
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timeoutId);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timeoutId = setTimeout(finish, ms);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
   }
 }

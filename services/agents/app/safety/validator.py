@@ -90,7 +90,11 @@ def _validate_variant_flag_config(
         return "default_variant must be a non-empty string."
 
     if variants is not None:
-        error = _validate_variants(variants, default_variant)
+        error = _validate_variants(
+            variants,
+            default_variant,
+            experiment=require_complete,
+        )
         if error is not None:
             return error
     elif require_complete:
@@ -114,12 +118,22 @@ def _validate_variant_flag_config(
         if error is not None:
             return error
 
+    if config.get("auto_disable") not in {None, False}:
+        return "auto_disable must be false; automatic guardrail mutation is unavailable."
+
     return None
 
 
-def _validate_variants(variants: Any, default_variant: Any) -> str | None:
+def _validate_variants(
+    variants: Any,
+    default_variant: Any,
+    *,
+    experiment: bool,
+) -> str | None:
     if not isinstance(variants, list) or not variants:
         return "variants must contain at least one variant."
+    if experiment and not 2 <= len(variants) <= 10:
+        return "experiment variants must contain between 2 and 10 variants."
 
     keys: set[str] = set()
     total_weight = 0
@@ -142,9 +156,17 @@ def _validate_variants(variants: Any, default_variant: Any) -> str | None:
 
         weight = variant.get("weight")
         if not isinstance(weight, int) or isinstance(weight, bool):
-            return "variant weights must be non-negative integers."
-        if weight < 0:
-            return "variant weights must be non-negative integers."
+            return (
+                "experiment variant weights must be positive integers."
+                if experiment
+                else "variant weights must be non-negative integers."
+            )
+        if weight < 0 or (experiment and weight == 0):
+            return (
+                "experiment variant weights must be positive integers."
+                if experiment
+                else "variant weights must be non-negative integers."
+            )
         total_weight += weight
 
     if total_weight <= 0:
@@ -618,6 +640,12 @@ class SafetyValidator:
                     "name": "guardrails",
                     "passed": False,
                     "message": "Primary metric event is not defined.",
+                }
+            if primary_metric.get("type", "conversion") != "conversion":
+                return {
+                    "name": "guardrails",
+                    "passed": False,
+                    "message": "Primary metric type must be conversion.",
                 }
 
             hypothesis = str(config.get("hypothesis") or "")

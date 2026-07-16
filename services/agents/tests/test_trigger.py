@@ -78,6 +78,7 @@ async def test_trigger_requires_agents_run_role():
             credential_id="reader",
             project_id="demo",
             roles=frozenset({"agents:read"}),
+            self_registered_project=False,
         )
         request.state.principal = principal
         return principal
@@ -92,6 +93,43 @@ async def test_trigger_requires_agents_run_role():
 
     assert response.status_code == 403
     assert pool.conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_self_registered_overprivileged_project_cannot_start_run(monkeypatch):
+    async def authenticate_self_registered(request: Request):
+        principal = Principal(
+            credential_id="self-registered",
+            project_id="demo",
+            roles=frozenset(
+                {"agents:read", "agents:run", "agents:manage", "agents:approve"}
+            ),
+            self_registered_project=True,
+        )
+        request.state.principal = principal
+        return principal
+
+    supervisor_calls: list[dict[str, Any]] = []
+
+    async def forbidden_supervisor(**kwargs: Any):
+        supervisor_calls.append(kwargs)
+
+    app.dependency_overrides[authenticate_request] = authenticate_self_registered
+    monkeypatch.setattr(triggers, "run_supervisor", forbidden_supervisor)
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "demo", "trigger_type": "manual"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Agents execution is unavailable for self-registered projects"
+    )
+    assert pool.conn.executed == []
+    assert supervisor_calls == []
 
 
 @pytest.mark.asyncio
@@ -240,9 +278,9 @@ async def test_trigger_rejects_slug_not_active_in_project(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trigger_rejects_disabled_builtin(monkeypatch):
-    """personalization is registered but disabled — a run naming it is rejected
-    up front, not accepted and silently skipped by the supervisor."""
+@pytest.mark.parametrize("disabled", ["personalization", "experiment_evaluation"])
+async def test_trigger_rejects_disabled_builtin(monkeypatch, disabled):
+    """Disabled built-ins are rejected before a run or job is created."""
 
     async def fake_supervisor(**kwargs):
         raise AssertionError("supervisor must not start for a disabled agent")
@@ -256,9 +294,29 @@ async def test_trigger_rejects_disabled_builtin(monkeypatch):
             json={
                 "project_id": "demo",
                 "trigger_type": "manual",
-                "analysis_types": ["behavior_analysis", "personalization"],
+                "analysis_types": ["behavior_analysis", disabled],
             },
         )
 
     assert resp.status_code == 422
-    assert "personalization" in resp.json()["detail"]
+    assert disabled in resp.json()["detail"]
+    assert pool.conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_rejects_removed_target_experiment_contract():
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        resp = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["behavior_analysis"],
+                "target_experiment_id": "exp_checkout",
+            },
+        )
+
+    assert resp.status_code == 422
+    assert pool.conn.executed == []

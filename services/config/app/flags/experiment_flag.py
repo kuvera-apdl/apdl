@@ -15,7 +15,6 @@ from __future__ import annotations
 from app.models.schemas import (
     FallthroughConfig,
     FlagCreate,
-    FlagUpdate,
     GateRule,
     RolloutConfig,
     VariantConfig,
@@ -31,6 +30,7 @@ DEFAULT_BUCKET_BY = "user_id"
 # pairs must stay consistent.
 _STATUS_TO_FLAG_STATE: dict[str, tuple[str, bool]] = {
     "draft": ("draft", False),
+    "scheduled": ("draft", False),
     "running": ("active", True),
     "completed": ("disabled", False),
     "stopped": ("disabled", False),
@@ -72,7 +72,7 @@ def _flag_fields(
             rollout=RolloutConfig(percentage=traffic_percentage, bucket_by=bucket_by),
         ),
         "evaluation_mode": "client",
-        "auto_disable": True,
+        "auto_disable": False,
     }
 
 
@@ -105,9 +105,8 @@ def build_flag_create(
     )
 
 
-def build_flag_update(
+def build_flag_projection(
     *,
-    version: int,
     flag_key: str,
     name: str,
     description: str,
@@ -117,14 +116,14 @@ def build_flag_update(
     traffic_percentage: float,
     targeting_rules: list[GateRule],
     bucket_by: str = DEFAULT_BUCKET_BY,
-) -> FlagUpdate:
-    """Full resync of the backing flag to the experiment's current state.
+) -> dict:
+    """Return lifecycle-owned fields for an experiment backing flag.
 
-    Carries every derivable field (not a partial diff) so the flag can never
-    drift from the experiment; ``version`` drives the flag's optimistic lock.
+    The public ``FlagUpdate`` request intentionally excludes lifecycle fields;
+    only the atomic experiment command applies this internal projection.
     """
-    return FlagUpdate(
-        version=version,
+    projection = FlagCreate(
+        key=flag_key,
         **_flag_fields(
             flag_key=flag_key,
             name=name,
@@ -136,4 +135,8 @@ def build_flag_update(
             targeting_rules=targeting_rules,
             bucket_by=bucket_by,
         ),
+    )
+    return projection.model_dump(
+        mode="json",
+        exclude={"key", "owners", "review_by", "guardrails"},
     )

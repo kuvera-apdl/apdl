@@ -73,3 +73,46 @@ def test_out_of_order_ledger_fails_closed(tmp_path: Path):
 
     with pytest.raises(migrate.MigrationError, match="ordered prefix"):
         migrate.plan_migrations(migrations, applied)
+
+
+def test_empty_ledger_accepts_only_an_empty_public_schema(monkeypatch):
+    calls: list[tuple[str, bool]] = []
+
+    def fake_psql(sql: str, *, variables=None, capture: bool = False):
+        del variables
+        calls.append((sql, capture))
+        return ""
+
+    monkeypatch.setattr(migrate, "_psql", fake_psql)
+
+    migrate._assert_fresh_database_for_empty_ledger(())
+
+    assert len(calls) == 1
+    assert calls[0][1] is True
+    assert "pg_catalog.pg_tables" in calls[0][0]
+    assert "tablename <> 'apdl_schema_migrations'" in calls[0][0]
+
+
+def test_empty_ledger_rejects_unversioned_public_tables(monkeypatch):
+    monkeypatch.setattr(
+        migrate,
+        "_psql",
+        lambda *args, **kwargs: "experiments\nflags\n",
+    )
+
+    with pytest.raises(
+        migrate.MigrationError,
+        match="Fresh-install-only release found public tables.*experiments, flags",
+    ):
+        migrate._assert_fresh_database_for_empty_ledger(())
+
+
+def test_existing_ledger_prefix_skips_fresh_database_preflight(monkeypatch):
+    migration = migrate.AppliedMigration(1, "001_auth.sql", "a" * 64)
+
+    def unexpected_psql(*args, **kwargs):
+        raise AssertionError("fresh-install preflight must not run for a ledger prefix")
+
+    monkeypatch.setattr(migrate, "_psql", unexpected_psql)
+
+    migrate._assert_fresh_database_for_empty_ledger((migration,))

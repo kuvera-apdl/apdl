@@ -9,9 +9,9 @@ import {
 import type { TrackEvent } from '../../src/core/types';
 import { ENDPOINT } from '../helpers';
 
-const PROJECT_A_KEY = 'proj_projectA_0123456789abcdef';
-const PROJECT_A_ROTATED_KEY = 'proj_projectA_abcdef0123456789';
-const PROJECT_B_KEY = 'proj_projectB_fedcba9876543210';
+const PROJECT_A_KEY = 'client_projectA_0123456789abcdef';
+const PROJECT_A_ROTATED_KEY = 'client_projectA_abcdef0123456789';
+const PROJECT_B_KEY = 'client_projectB_fedcba9876543210';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function createEvent(
@@ -35,7 +35,7 @@ function serializedBytes(event: TrackEvent): number {
 }
 
 function createLargeEvent(event: string, payloadBytes: number): TrackEvent {
-  return createEvent(event, { payload: 'x'.repeat(payloadBytes) });
+  return createEvent(event, { payload: { value: 'x'.repeat(payloadBytes) } });
 }
 
 function storageForKey(clientKey: string): OfflineStorage {
@@ -123,7 +123,7 @@ describe('OfflineStorage', () => {
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      schema_version: 1,
+      schema_version: 2,
       owner_id: 'project:projectA',
       serialized_bytes: serializedBytes(event),
     });
@@ -178,22 +178,23 @@ describe('OfflineStorage', () => {
 
   it('enforces the per-project serialized-byte bound in IndexedDB', async () => {
     const storage = storageForKey(PROJECT_A_KEY);
-    const payloadBytes = Math.floor(
-      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT / 2
+    const events = Array.from(
+      { length: 90 },
+      (_, index) => createLargeEvent(`large_event_${index}`, 60_000)
     );
-    const older = createLargeEvent('older_large_event', payloadBytes);
-    const newer = createLargeEvent('newer_large_event', payloadBytes);
-
-    expect(serializedBytes(older)).toBeLessThan(
-      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
-    );
-    expect(serializedBytes(older) + serializedBytes(newer)).toBeGreaterThan(
+    expect(events.reduce((total, event) => total + serializedBytes(event), 0)).toBeGreaterThan(
       MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
     );
 
-    await storage.store([older, newer]);
+    await storage.store(events);
 
-    expect(await storage.drain()).toEqual([newer]);
+    const retained = await storage.drain();
+    expect(retained.length).toBeLessThan(events.length);
+    expect(retained.reduce((total, event) => total + serializedBytes(event), 0)).toBeLessThanOrEqual(
+      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
+    );
+    expect(retained.at(-1)?.event).toBe('large_event_89');
+    expect(retained[0].event).toBe(`large_event_${events.length - retained.length}`);
 
     await storage.store([
       createLargeEvent(
@@ -218,15 +219,19 @@ describe('OfflineStorage', () => {
     expect(countRetained[0].event).toBe('memory_count_1');
 
     const byteStorage = storageForKey(PROJECT_B_KEY);
-    const payloadBytes = Math.floor(
-      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT / 2
+    const byteEvents = Array.from(
+      { length: 90 },
+      (_, index) => createLargeEvent(`memory_large_${index}`, 60_000)
     );
-    const older = createLargeEvent('memory_older_large', payloadBytes);
-    const newer = createLargeEvent('memory_newer_large', payloadBytes);
 
-    await byteStorage.store([older, newer]);
+    await byteStorage.store(byteEvents);
 
-    expect(await byteStorage.drain()).toEqual([newer]);
+    const byteRetained = await byteStorage.drain();
+    expect(byteRetained.length).toBeLessThan(byteEvents.length);
+    expect(byteRetained.reduce((total, event) => total + serializedBytes(event), 0)).toBeLessThanOrEqual(
+      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
+    );
+    expect(byteRetained.at(-1)?.event).toBe('memory_large_89');
   });
 
   it('does not retain events that cannot be serialized for transport', async () => {
@@ -255,6 +260,25 @@ describe('OfflineStorage', () => {
       stored_at: Date.now() - WEEK_MS - 1,
       serialized_bytes: serializedBytes(expiredEvent),
       data: expiredEvent,
+    });
+
+    expect(await projectA.drain()).toEqual([]);
+    expect(await readRawRecords()).toEqual([]);
+  });
+
+  it('purges current version 1 records that can contain unsafe click text', async () => {
+    const projectA = storageForKey(PROJECT_A_KEY);
+    await projectA.count();
+    const unsafeEvent = createEvent('$click', {
+      text: 'stored-password',
+      tag: 'input',
+    });
+    await addRawRecord({
+      schema_version: 1,
+      owner_id: 'project:projectA',
+      stored_at: Date.now(),
+      serialized_bytes: serializedBytes(unsafeEvent),
+      data: unsafeEvent,
     });
 
     expect(await projectA.drain()).toEqual([]);

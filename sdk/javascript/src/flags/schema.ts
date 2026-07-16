@@ -1,5 +1,4 @@
 import type {
-  ConditionOperator,
   FallthroughConfig,
   FlagCondition,
   FlagConfig,
@@ -7,6 +6,14 @@ import type {
   RolloutConfig,
   VariantConfig,
 } from './types';
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_RULES,
+  SUPPORTED_OPERATORS,
+  isBoundedString,
+  isConditionValueValid,
+  isIdentifier,
+} from './targeting-contract';
 
 type RawRecord = Record<string, unknown>;
 
@@ -14,24 +21,6 @@ export interface FlagConfigParseResult {
   flags: FlagConfig[];
   invalid_keys: string[];
 }
-
-const CONDITION_OPERATORS = new Set<ConditionOperator>([
-  'equals',
-  'not_equals',
-  'gt',
-  'gte',
-  'lt',
-  'lte',
-  'contains',
-  'not_contains',
-  'starts_with',
-  'ends_with',
-  'regex',
-  'in',
-  'not_in',
-  'exists',
-  'not_exists',
-]);
 
 const FLAG_KEYS = new Set([
   'key',
@@ -107,8 +96,7 @@ export function extractFlagConfig(input: unknown): FlagConfig | null {
 export function extractInvalidFlagKey(input: unknown): string | null {
   if (
     isRecord(input)
-    && typeof input.key === 'string'
-    && input.key.length > 0
+    && isIdentifier(input.key)
     && !isFlagConfig(input)
     && (hasAnyKey(input, REJECTED_FLAG_KEYS) || hasAllKeys(input, FLAG_KEYS))
   ) {
@@ -121,15 +109,14 @@ export function extractInvalidFlagKey(input: unknown): string | null {
 export function isFlagConfig(input: unknown): input is FlagConfig {
   return isRecord(input)
     && hasOnlyKeys(input, FLAG_KEYS)
-    && typeof input.key === 'string'
-    && input.key.length > 0
+    && isIdentifier(input.key)
     && typeof input.enabled === 'boolean'
-    && typeof input.default_variant === 'string'
-    && input.default_variant.length > 0
+    && isIdentifier(input.default_variant)
     && Array.isArray(input.variants)
     && isVariantList(input.variants, input.default_variant)
-    && typeof input.salt === 'string'
+    && isBoundedString(input.salt)
     && Array.isArray(input.rules)
+    && input.rules.length <= MAX_RULES
     && input.rules.every(isFlagRule)
     && isFallthroughConfig(input.fallthrough)
     && typeof input.version === 'number'
@@ -143,8 +130,7 @@ function extractCandidates(input: unknown): unknown[] | null {
     && hasOnlyKeys(input, COLLECTION_KEYS)
     && Array.isArray(input.flags)
     && input.schema_version === 2
-    && typeof input.project_id === 'string'
-    && input.project_id.length > 0
+    && isIdentifier(input.project_id)
   ) {
     return input.flags;
   }
@@ -155,10 +141,10 @@ function extractCandidates(input: unknown): unknown[] | null {
 function isFlagRule(input: unknown): input is FlagRule {
   return isRecord(input)
     && hasOnlyKeys(input, RULE_KEYS)
-    && typeof input.id === 'string'
-    && input.id.length > 0
-    && typeof input.name === 'string'
+    && isIdentifier(input.id)
+    && isBoundedString(input.name)
     && Array.isArray(input.conditions)
+    && input.conditions.length <= MAX_CONDITIONS_PER_RULE
     && input.conditions.every(isFlagCondition)
     && isRolloutConfig(input.rollout);
 }
@@ -167,10 +153,9 @@ function isFlagCondition(input: unknown): input is FlagCondition {
   if (
     !isRecord(input)
     || !hasOnlyKeys(input, CONDITION_KEYS)
-    || typeof input.attribute !== 'string'
-    || input.attribute.length === 0
+    || !isIdentifier(input.attribute)
     || typeof input.operator !== 'string'
-    || !CONDITION_OPERATORS.has(input.operator as ConditionOperator)
+    || !SUPPORTED_OPERATORS.has(input.operator)
   ) {
     return false;
   }
@@ -180,7 +165,10 @@ function isFlagCondition(input: unknown): input is FlagCondition {
     return !hasValue;
   }
 
-  return hasValue && input.value !== null && input.value !== undefined;
+  return hasValue
+    && input.value !== null
+    && input.value !== undefined
+    && isConditionValueValid(input.operator, input.value);
 }
 
 function isRolloutConfig(input: unknown): input is RolloutConfig {
@@ -190,8 +178,7 @@ function isRolloutConfig(input: unknown): input is RolloutConfig {
     && Number.isFinite(input.percentage)
     && input.percentage >= 0.0
     && input.percentage <= 100.0
-    && typeof input.bucket_by === 'string'
-    && input.bucket_by.length > 0;
+    && isIdentifier(input.bucket_by);
 }
 
 function isFallthroughConfig(input: unknown): input is FallthroughConfig {
@@ -213,8 +200,7 @@ function isVariantList(input: unknown[], defaultVariant: string): input is Varia
     if (
       !isRecord(variant)
       || !hasOnlyKeys(variant, VARIANT_KEYS)
-      || typeof variant.key !== 'string'
-      || variant.key.length === 0
+      || !isIdentifier(variant.key)
       || !Number.isInteger(weight)
       || (weight as number) < 0
     ) {

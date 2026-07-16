@@ -1,6 +1,6 @@
 // RuleBuilder (plan §5.3.3): card order = evaluation order; operator-adaptive
-// value inputs (none for existence, chips for in/not_in, numbers, live regex
-// validity). Reordering is keyboard-operable via the up/down buttons.
+// value inputs (none for existence, chips for in/not_in, canonical decimals
+// for numeric comparisons). Reordering is keyboard-operable via up/down.
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react'
 import { Controller, useFieldArray, useFormContext, type FieldPath } from 'react-hook-form'
 
@@ -10,6 +10,12 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_RULES,
+  MAX_STRING_LENGTH,
+} from '@/core/evaluator/targetingContract'
 
 import {
   EXISTENCE_OPERATORS,
@@ -26,7 +32,6 @@ const OPERATOR_GROUPS: { label: string; operators: ConditionOperator[] }[] = [
   { label: 'String', operators: ['contains', 'not_contains', 'starts_with', 'ends_with'] },
   { label: 'Numeric', operators: ['gt', 'gte', 'lt', 'lte'] },
   { label: 'Collection', operators: ['in', 'not_in'] },
-  { label: 'Regex', operators: ['regex'] },
 ]
 
 const COMMON_ATTRIBUTES = ['user_id', 'anonymous_id', 'plan', 'country', 'email', 'device', 'beta_opt_in']
@@ -46,6 +51,7 @@ function ConditionRow({ rulePath, index, onRemove }: { rulePath: string; index: 
           placeholder="attribute"
           className="font-mono text-xs"
           list="apdl-common-attributes"
+          maxLength={MAX_IDENTIFIER_LENGTH}
           {...register(`${base}.attribute` as FieldPath<FlagFormValues>)}
         />
         {attributeError ? <p className="mt-1 text-xs text-destructive">{attributeError.message}</p> : null}
@@ -75,7 +81,7 @@ function ConditionRow({ rulePath, index, onRemove }: { rulePath: string; index: 
               name={`${base}.values` as FieldPath<FlagFormValues>}
               render={({ field }) => (
                 <TagInput
-                  value={(field.value as string[]) ?? []}
+                  value={((field.value as unknown[]) ?? []).map(String)}
                   onChange={field.onChange}
                   placeholder="add value, press Enter"
                   aria-label="Condition values"
@@ -83,15 +89,14 @@ function ConditionRow({ rulePath, index, onRemove }: { rulePath: string; index: 
               )}
             />
             {valuesError ? <p className="mt-1 text-xs text-destructive">{valuesError.message}</p> : null}
-            <p className="mt-1 text-xs text-muted-foreground">compared as exact string values</p>
+            <p className="mt-1 text-xs text-muted-foreground">compared as exact scalar values</p>
           </>
         ) : (
           <>
             <Input
-              placeholder={NUMERIC_OPERATORS.has(operator) ? 'number' : operator === 'regex' ? 'pattern' : 'value'}
-              type={NUMERIC_OPERATORS.has(operator) ? 'number' : 'text'}
-              step="any"
-              className={operator === 'regex' ? 'font-mono text-xs' : undefined}
+              placeholder={NUMERIC_OPERATORS.has(operator) ? 'canonical decimal' : 'value'}
+              type="text"
+              maxLength={MAX_STRING_LENGTH}
               {...register(`${base}.value` as FieldPath<FlagFormValues>)}
             />
             {valueError ? <p className="mt-1 text-xs text-destructive">{valueError.message}</p> : null}
@@ -116,7 +121,12 @@ function RuleCard({ index, total, onMove, onRemove }: { index: number; total: nu
         <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs tabular-nums">
           {index + 1}
         </span>
-        <Input placeholder="rule name (optional)" className="max-w-xs" {...register(`rules.${index}.name`)} />
+        <Input
+          placeholder="rule name (optional)"
+          className="max-w-xs"
+          maxLength={MAX_STRING_LENGTH}
+          {...register(`rules.${index}.name`)}
+        />
         <span className="ml-auto flex items-center gap-1">
           <Button type="button" variant="ghost" size="icon" disabled={index === 0} onClick={() => onMove(index, index - 1)} aria-label="Move rule up">
             <ArrowUp />
@@ -147,6 +157,7 @@ function RuleCard({ index, total, onMove, onRemove }: { index: number; total: nu
             type="button"
             variant="outline"
             size="sm"
+            disabled={conditions.fields.length >= MAX_CONDITIONS_PER_RULE}
             onClick={() => conditions.append({ attribute: '', operator: 'equals', value: '', values: [] })}
           >
             <Plus />
@@ -191,6 +202,7 @@ export function RuleBuilder() {
         type="button"
         variant="outline"
         size="sm"
+        disabled={fields.length >= MAX_RULES}
         onClick={() =>
           append({
             id: newRuleId(),

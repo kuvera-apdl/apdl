@@ -10,13 +10,13 @@ import { WorkspaceProvider } from '../../src/core/workspace'
 import { isCleanupCandidate, LifecycleDialog } from '../../src/features/flags/LifecycleDialog'
 import { makeFlag, seedWorkspace } from '../helpers/fixtures'
 
-const requests: { method: string; path: string; body: unknown }[] = []
+const requests: { method: string; path: string; body: unknown; query?: string }[] = []
 
 const server = setupServer(
-  http.put('*/api/projects/demo/config/v1/admin/flags/:key', async ({ request, params }) => {
+  http.post('*/api/projects/demo/config/v1/admin/flags/:key/transition', async ({ request, params }) => {
     requests.push({
-      method: 'PUT',
-      path: String(params.key),
+      method: 'POST',
+      path: `${String(params.key)}/transition`,
       body: await request.json(),
     })
     return HttpResponse.json({ updated: true, flag: makeFlag({ version: 4 }) })
@@ -32,14 +32,27 @@ const server = setupServer(
       flag: makeFlag({ state: 'disabled', enabled: false, disabled_reason: 'guardrail_failed' }),
     })
   }),
-  http.delete('*/api/projects/demo/config/v1/admin/flags/:key', ({ params }) => {
+  http.delete('*/api/projects/demo/config/v1/admin/flags/:key', ({ request, params }) => {
     requests.push({
       method: 'DELETE',
       path: String(params.key),
       body: null,
+      query: new URL(request.url).search,
     })
     return HttpResponse.json({
       archived: true,
+      flag: makeFlag({ state: 'archived', enabled: false, archived_at: '2026-06-10T00:00:00+00:00' }),
+    })
+  }),
+  http.post('*/api/projects/demo/config/v1/admin/flags/:key/cleanup', async ({ request, params }) => {
+    requests.push({
+      method: 'POST',
+      path: `${String(params.key)}/cleanup`,
+      body: await request.json(),
+    })
+    return HttpResponse.json({
+      cleaned_up: true,
+      cleanup_reasons: ['fully_rolled_out'],
       flag: makeFlag({ state: 'archived', enabled: false, archived_at: '2026-06-10T00:00:00+00:00' }),
     })
   }),
@@ -67,7 +80,7 @@ function renderDialog(ui: React.ReactElement) {
 }
 
 describe('LifecycleDialog', () => {
-  test('activate sends PUT {state: active} with the optimistic-lock version', async () => {
+  test('activate uses the dedicated versioned transition endpoint', async () => {
     const flag = makeFlag({ state: 'draft', enabled: false })
     const onClose = vi.fn()
     renderDialog(<LifecycleDialog flag={flag} action="activate" onClose={onClose} />)
@@ -75,9 +88,9 @@ describe('LifecycleDialog', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Activate' }))
     await waitFor(() => expect(onClose).toHaveBeenCalled())
     expect(requests[0]).toMatchObject({
-      method: 'PUT',
-      path: 'checkout-cta',
-      body: { version: 3, state: 'active' },
+      method: 'POST',
+      path: 'checkout-cta/transition',
+      body: { version: 3, target_state: 'active' },
     })
   })
 
@@ -95,7 +108,7 @@ describe('LifecycleDialog', () => {
     expect(requests[0]).toMatchObject({
       method: 'POST',
       path: 'checkout-cta/disable',
-      body: { reason: 'guardrail_failed', source: 'admin', evidence: { note: 'errors spiking' } },
+      body: { version: 3, reason: 'guardrail_failed', evidence: { note: 'errors spiking' } },
     })
   })
 
@@ -110,7 +123,33 @@ describe('LifecycleDialog', () => {
     expect(confirmButton).toBeEnabled()
     await userEvent.click(confirmButton)
     await waitFor(() => expect(onClose).toHaveBeenCalled())
-    expect(requests[0]).toMatchObject({ method: 'DELETE', path: 'checkout-cta' })
+    expect(requests[0]).toMatchObject({
+      method: 'DELETE',
+      path: 'checkout-cta',
+      query: '?version=3',
+    })
+  })
+
+  test('cleanup sends only version and evidence', async () => {
+    const flag = makeFlag({
+      rules: [],
+      fallthrough: { rollout: { percentage: 100, bucket_by: 'user_id' } },
+      variants: [
+        { key: 'control', weight: 0 },
+        { key: 'treatment', weight: 1 },
+      ],
+    })
+    const onClose = vi.fn()
+    renderDialog(<LifecycleDialog flag={flag} action="cleanup" onClose={onClose} />)
+
+    await userEvent.type(await screen.findByPlaceholderText('Recorded in the audit evidence'), 'done')
+    await userEvent.click(screen.getByRole('button', { name: 'Clean up & archive' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(requests[0]).toMatchObject({
+      method: 'POST',
+      path: 'checkout-cta/cleanup',
+      body: { version: 3, evidence: { note: 'done' } },
+    })
   })
 })
 

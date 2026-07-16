@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from copy import deepcopy
 from types import TracebackType
 from typing import Any
 
@@ -19,7 +20,7 @@ from .flags.cache import FlagCache
 from .flags.evaluator import FlagEvaluator
 from .flags.models import EvalContext, GateConfig, GateEvaluationResult
 from .flags.parse import parse_flag_config_result
-from .queue import EventQueue
+from .queue import DeliveryReport, EventQueue
 from .transport import Transport
 from .types import (
     FEATURE_FLAG_EXPOSURE_EVENT,
@@ -43,13 +44,20 @@ class APDLClient:
         config: APDLConfig | None = None,
         *,
         api_key: str | None = None,
+        endpoint: str | None = None,
         transport: Transport | None = None,
         **kwargs: Any,
     ) -> None:
         if config is None:
-            if api_key is None:
-                raise ValueError("APDL: api_key (or a config) is required")
-            config = APDLConfig(api_key=api_key, **kwargs)
+            if api_key is None or endpoint is None:
+                raise ValueError(
+                    "APDL: api_key and endpoint are required when config is omitted"
+                )
+            config = APDLConfig(api_key=api_key, endpoint=endpoint, **kwargs)
+        elif api_key is not None or endpoint is not None or kwargs:
+            raise ValueError(
+                "APDL: pass either config or explicit api_key/endpoint/options, not both"
+            )
         self._config = config
 
         self._transport = transport or Transport(
@@ -72,7 +80,10 @@ class APDLClient:
 
         self._poll_stop = threading.Event()
         self._poll_thread: threading.Thread | None = None
+        self._lifecycle = threading.Condition()
+        self._closing = False
         self._closed = False
+        self._shutdown_report: DeliveryReport | None = None
 
         self._flag_cache.on_change(lambda _flags: self._notify_variant_listeners())
 
@@ -108,7 +119,7 @@ class APDLClient:
         anonymous_id: str | None = None,
     ) -> None:
         """Associates traits with a user identity."""
-        self._enqueue("identify", event="$identify", traits=traits,
+        self._enqueue("identify", event="identify", traits=traits,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     def group(
@@ -120,7 +131,7 @@ class APDLClient:
         anonymous_id: str | None = None,
     ) -> None:
         """Associates a user with a group/account."""
-        self._enqueue("group", event="$group", group_id=group_id, traits=traits,
+        self._enqueue("group", event="group", group_id=group_id, traits=traits,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     def page(
@@ -135,7 +146,7 @@ class APDLClient:
         props = dict(properties or {})
         if name is not None:
             props.setdefault("name", name)
-        self._enqueue("page", event="$page", properties=props or None,
+        self._enqueue("page", event="page", properties=props or None,
                       user_id=user_id, anonymous_id=anonymous_id)
 
     # ── Feature flags ─────────────────────────────────────────────
@@ -276,21 +287,60 @@ class APDLClient:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def flush(self) -> None:
-        """Blocks until all queued events have been sent (or dropped)."""
-        self._queue.flush()
+    def flush(self) -> DeliveryReport:
+        """Drain currently queued events and report anything still retryable."""
+        return self._queue.flush()
 
-    def shutdown(self) -> None:
-        """Stops background threads after a final flush. Idempotent."""
-        if self._closed:
-            return
-        self._closed = True
+    def shutdown(self) -> DeliveryReport:
+        """Fence intake, drain-or-retain events, then close transport.
+
+        Concurrent callers receive the same idempotent report. Retryable events
+        remain in memory and are returned in ``undelivered_events``; callers
+        that require process-restart durability must persist that snapshot.
+        """
+        with self._lifecycle:
+            while self._closing and not self._closed:
+                self._lifecycle.wait()
+            if self._closed:
+                assert self._shutdown_report is not None
+                return _copy_delivery_report(self._shutdown_report)
+            self._closing = True
+
         self._poll_stop.set()
         poll = self._poll_thread
-        if poll is not None:
-            poll.join(timeout=self._config.request_timeout)
-        self._queue.stop()
-        self._transport.close()
+        if poll is not None and poll is not threading.current_thread():
+            poll.join()
+
+        try:
+            report = self._queue.stop()
+        except BaseException:
+            with self._lifecycle:
+                self._closing = False
+                self._lifecycle.notify_all()
+            raise
+
+        if report.undelivered:
+            logger.warning(
+                "APDL: shutdown retained %d retryable events; persist or replay "
+                "DeliveryReport.undelivered_events",
+                report.undelivered,
+            )
+
+        close_error: BaseException | None = None
+        try:
+            self._transport.close()
+        except BaseException as exc:  # preserve the delivery report before surfacing close
+            close_error = exc
+
+        with self._lifecycle:
+            self._shutdown_report = report
+            self._closed = True
+            self._closing = False
+            self._lifecycle.notify_all()
+
+        if close_error is not None:
+            raise close_error
+        return _copy_delivery_report(report)
 
     def __enter__(self) -> APDLClient:
         return self
@@ -321,19 +371,28 @@ class APDLClient:
         group_id: str | None = None,
         session_id: str | None = None,
     ) -> None:
+        with self._lifecycle:
+            if self._closing or self._closed:
+                raise RuntimeError("APDL: client is shutting down; event rejected")
         if not user_id and not anonymous_id:
             raise ValueError("APDL: track/identify/group/page require user_id or anonymous_id")
-        model = IngestionEvent(
-            event=event,
-            type=type_,  # type: ignore[arg-type]
-            user_id=user_id,
-            anonymous_id=anonymous_id,
-            group_id=group_id,
-            properties=properties,
-            traits=traits,
-            context=default_context(),
-            session_id=session_id,
-        )
+        event_data: dict[str, Any] = {
+            "event": event,
+            "type": type_,
+            "context": default_context(),
+        }
+        optional_fields = {
+            "user_id": user_id,
+            "anonymous_id": anonymous_id,
+            "group_id": group_id,
+            "properties": properties,
+            "traits": traits,
+            "session_id": session_id,
+        }
+        event_data.update({
+            key: value for key, value in optional_fields.items() if value is not None
+        })
+        model = IngestionEvent.model_validate(event_data, strict=True)
         self._queue.enqueue(model.to_payload())
 
     def _log_exposure(
@@ -415,3 +474,11 @@ class APDLClient:
                 listener()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _copy_delivery_report(report: DeliveryReport) -> DeliveryReport:
+    return DeliveryReport(
+        accepted=report.accepted,
+        permanently_rejected=report.permanently_rejected,
+        undelivered_events=tuple(deepcopy(list(report.undelivered_events))),
+    )

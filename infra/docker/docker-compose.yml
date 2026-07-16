@@ -91,6 +91,17 @@ services:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       LOG_LEVEL: info
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8081/health', timeout=2)",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       redis:
         condition: service_healthy
@@ -114,11 +125,6 @@ services:
       CLICKHOUSE_DB: apdl
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       CONFIG_SERVICE_URL: http://config:8081
-      APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
-      APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
-      GUARDRAIL_MONITOR_ENABLED: ${GUARDRAIL_MONITOR_ENABLED:-true}
-      GUARDRAIL_PROJECT_IDS: ${GUARDRAIL_PROJECT_IDS:-apdl}
-      GUARDRAIL_MONITOR_INTERVAL_SECONDS: ${GUARDRAIL_MONITOR_INTERVAL_SECONDS:-60}
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -126,6 +132,8 @@ services:
         condition: service_healthy
       postgres-migrate:
         condition: service_completed_successfully
+      config:
+        condition: service_healthy
 
   agents:
     build:

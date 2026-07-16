@@ -12,6 +12,8 @@ import {
   flagCreateSchema,
   flagDisableResponseSchema,
   flagDisableSchema,
+  flagTransitionResponseSchema,
+  flagTransitionSchema,
   flagsListResponseSchema,
   flagUpdateResponseSchema,
   flagUpdateSchema,
@@ -27,6 +29,8 @@ import type {
   FlagCreateResponse,
   FlagDisable,
   FlagDisableResponse,
+  FlagTransition,
+  FlagTransitionResponse,
   FlagsListResponse,
   FlagUpdate,
   FlagUpdateResponse,
@@ -96,6 +100,18 @@ export function updateFlag(
   })
 }
 
+export function transitionFlag(
+  conn: ServiceConnection,
+  key: string,
+  body: FlagTransition,
+): Promise<FlagTransitionResponse> {
+  return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}/transition`, {
+    method: 'POST',
+    body: flagTransitionSchema.parse(body),
+    schema: flagTransitionResponseSchema,
+  })
+}
+
 export function disableFlag(
   conn: ServiceConnection,
   key: string,
@@ -108,9 +124,14 @@ export function disableFlag(
   })
 }
 
-export function archiveFlag(conn: ServiceConnection, key: string): Promise<FlagArchiveResponse> {
+export function archiveFlag(
+  conn: ServiceConnection,
+  key: string,
+  version: number,
+): Promise<FlagArchiveResponse> {
   return request(conn, `/v1/admin/flags/${encodeURIComponent(key)}`, {
     method: 'DELETE',
+    query: { version },
     schema: flagArchiveResponseSchema,
   })
 }
@@ -184,12 +205,21 @@ export function updateFlagCurl(conn: ServiceConnection, key: string, body: FlagU
   return writeCurl(conn, 'PUT', `/v1/admin/flags/${encodeURIComponent(key)}`, body)
 }
 
+export function transitionFlagCurl(
+  conn: ServiceConnection,
+  key: string,
+  body: FlagTransition,
+): CurlSpec {
+  return writeCurl(conn, 'POST', `/v1/admin/flags/${encodeURIComponent(key)}/transition`, body)
+}
+
 export function disableFlagCurl(conn: ServiceConnection, key: string, body: FlagDisable): CurlSpec {
   return writeCurl(conn, 'POST', `/v1/admin/flags/${encodeURIComponent(key)}/disable`, body)
 }
 
-export function archiveFlagCurl(conn: ServiceConnection, key: string): CurlSpec {
-  return writeCurl(conn, 'DELETE', `/v1/admin/flags/${encodeURIComponent(key)}`)
+export function archiveFlagCurl(conn: ServiceConnection, key: string, version: number): CurlSpec {
+  const spec = writeCurl(conn, 'DELETE', `/v1/admin/flags/${encodeURIComponent(key)}`)
+  return { ...spec, url: buildUrl(conn.baseUrl, `/v1/admin/flags/${encodeURIComponent(key)}`, { version }) }
 }
 
 export function cleanupFlagCurl(conn: ServiceConnection, key: string, body: FlagCleanup): CurlSpec {

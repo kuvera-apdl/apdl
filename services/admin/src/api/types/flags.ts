@@ -15,6 +15,8 @@ import type {
   flagCreateSchema,
   flagDisableResponseSchema,
   flagDisableSchema,
+  flagTransitionResponseSchema,
+  flagTransitionSchema,
   flagUpdateResponseSchema,
   flagUpdateSchema,
   gateEvaluateRequestSchema,
@@ -23,6 +25,7 @@ import type {
   fallthroughConfigSchema,
   flagAuditActionSchema,
   flagAuditEntrySchema,
+  flagAuditOriginSchema,
   flagAuditResponseSchema,
   flagCollectionSchema,
   flagConfigSchema,
@@ -56,6 +59,7 @@ export type FlagConfig = z.infer<typeof flagConfigSchema>
 export type StaleReason = z.infer<typeof staleReasonSchema>
 export type StaleFlag = z.infer<typeof staleFlagSchema>
 export type FlagAuditAction = z.infer<typeof flagAuditActionSchema>
+export type FlagAuditOrigin = z.infer<typeof flagAuditOriginSchema>
 export type FlagAuditEntry = z.infer<typeof flagAuditEntrySchema>
 export type FlagsListResponse = z.infer<typeof flagsListResponseSchema>
 export type StaleFlagsResponse = z.infer<typeof staleFlagsResponseSchema>
@@ -68,10 +72,12 @@ export type ExperimentUpdatePayload = z.infer<typeof experimentUpdatePayloadSche
 export type WritableFlagState = z.infer<typeof writableFlagStateSchema>
 export type FlagCreate = z.infer<typeof flagCreateSchema>
 export type FlagUpdate = z.infer<typeof flagUpdateSchema>
+export type FlagTransition = z.infer<typeof flagTransitionSchema>
 export type FlagDisable = z.infer<typeof flagDisableSchema>
 export type FlagCleanup = z.infer<typeof flagCleanupSchema>
 export type FlagCreateResponse = z.infer<typeof flagCreateResponseSchema>
 export type FlagUpdateResponse = z.infer<typeof flagUpdateResponseSchema>
+export type FlagTransitionResponse = z.infer<typeof flagTransitionResponseSchema>
 export type FlagDisableResponse = z.infer<typeof flagDisableResponseSchema>
 export type FlagArchiveResponse = z.infer<typeof flagArchiveResponseSchema>
 export type FlagCleanupResponse = z.infer<typeof flagCleanupResponseSchema>

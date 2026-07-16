@@ -1,6 +1,7 @@
 import type { APDLApi } from './api';
 import { APDLClient } from './client';
 import { type PartialAPDLConfig, resolveConfig } from './config';
+import type { DeliveryReport } from './types';
 import { noopClient } from './noop-client';
 
 const REGISTRY_KEY = '__APDL_SINGLETONS__';
@@ -74,11 +75,11 @@ export function init(config: PartialAPDLConfig = {}): APDLApi {
 
   // Evict on shutdown so a later init() with the same key starts fresh.
   const baseShutdown = client.shutdown.bind(client);
-  client.shutdown = async (): Promise<void> => {
+  client.shutdown = (): Promise<DeliveryReport> => {
     if (store.get(key) === client) {
       store.delete(key);
     }
-    await baseShutdown();
+    return baseShutdown();
   };
 
   return client;

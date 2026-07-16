@@ -1,5 +1,8 @@
 """Integration tests for query service router endpoints with mocked ClickHouse."""
 
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,9 +11,12 @@ from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
 from app.auth import Principal, authenticate_request
+from app.config_client import ConfigExperimentAnalysis
 from app.main import app
+from app.routers import experiments
 
 PROJECT_ID = "apiasport"
+PROJECT_API_KEY = "proj_apiasport_0123456789abcdef"
 VARIANT_CONTEXT = {
     "default_variant": "control",
     "variants": [
@@ -18,6 +24,12 @@ VARIANT_CONTEXT = {
         {"key": "treatment", "weight": 1},
     ],
 }
+EXPERIMENT_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "fixtures"
+    / "experiments"
+    / "three-arm-analysis.json"
+)
 
 
 def _guardrail_request(flag_key: str, guardrail: dict) -> dict:
@@ -56,7 +68,11 @@ def _setup_mock_ch():
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-API-Key": PROJECT_API_KEY},
+    ) as ac:
         yield ac
 
 
@@ -100,8 +116,9 @@ async def test_readiness_fail(client):
 @pytest.mark.asyncio
 async def test_event_count(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"selector": "click", "event_name": "click", "event_count": 100, "unique_users": 50},
-        {"selector": "view", "event_name": "view", "event_count": 200, "unique_users": 80},
+        {"is_total": 0, "selector": "click", "event_name": "click", "event_count": 100, "unique_users": 50},
+        {"is_total": 0, "selector": "view", "event_name": "view", "event_count": 200, "unique_users": 80},
+        {"is_total": 1, "selector": "", "event_name": "", "event_count": 300, "unique_users": 100},
     ])
 
     resp = await client.post("/v1/query/events/count", json={
@@ -117,7 +134,7 @@ async def test_event_count(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["total_events"] == 300
-    assert body["total_users"] == 130
+    assert body["total_users"] == 100
     assert len(body["results"]) == 2
 
 
@@ -322,8 +339,16 @@ async def test_guardrail_query_requires_active_flag_snapshot(client):
 async def test_event_count_with_selector_filter(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
         {
+            "is_total": 0,
             "selector": "$click[href eq /pricing]",
             "event_name": "$click",
+            "event_count": 100,
+            "unique_users": 50,
+        },
+        {
+            "is_total": 1,
+            "selector": "",
+            "event_name": "",
             "event_count": 100,
             "unique_users": 50,
         },
@@ -615,8 +640,9 @@ async def test_funnel_no_data(client):
 @pytest.mark.asyncio
 async def test_cohort_comparison(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"cohort_value": "free", "day": "2025-01-01", "event_count": 100, "unique_users": 50},
-        {"cohort_value": "pro", "day": "2025-01-01", "event_count": 200, "unique_users": 80},
+        {"cohort_value": "free", "day": "2025-01-01", "event_count": 100, "unique_users": 50, "total_users": 60},
+        {"cohort_value": "free", "day": "2025-01-02", "event_count": 20, "unique_users": 40, "total_users": 60},
+        {"cohort_value": "pro", "day": "2025-01-01", "event_count": 200, "unique_users": 80, "total_users": 80},
     ])
 
     resp = await client.post("/v1/query/cohort", json={
@@ -635,6 +661,8 @@ async def test_cohort_comparison(client):
     assert body["metric_selector"] == "purchase[amount gte 50]"
     assert body["cohort_property"] == "plan"
     assert len(body["cohorts"]) == 2
+    assert body["cohorts"][0]["cohort_value"] == "free"
+    assert body["cohorts"][0]["total_users"] == 60
     query, params = app.state.ch_client.execute.await_args.args
     assert "JSONExtractFloat" in query
     assert params["cohort_metric_filter_0_value"] == 50
@@ -707,98 +735,459 @@ async def test_retention_weekly(client):
 # ------------------------------------------------------------------
 
 
+def _experiment_metadata(
+    *,
+    status: str = "running",
+    variants: list[str] | None = None,
+    control_variant: str = "control",
+    duration_days: int = 14,
+    start_date: str | datetime | None = None,
+    end_date: str | datetime | None = None,
+) -> ConfigExperimentAnalysis:
+    start = start_date or datetime(2025, 1, 1, tzinfo=UTC)
+    end = end_date or start + timedelta(days=duration_days)
+    return ConfigExperimentAnalysis.model_validate(
+        {
+            "key": "exp_123",
+            "flag_key": "checkout-experiment",
+            "status": status,
+            "control_variant": control_variant,
+            "variants": variants or ["control", "treatment"],
+            "metric_event": "purchase",
+            "start_date": start,
+            "end_date": end,
+            "version": 7,
+        }
+    )
+
+
 @pytest.mark.asyncio
-async def test_experiment_results_frequentist(client):
-    """Experiment endpoint with mocked metric/exposure data."""
-    # First call: metric rows, second call: exposure rows
-    app.state.ch_client.execute = AsyncMock(side_effect=[
-        # EXPERIMENT_METRICS_QUERY result
-        [
-            {"variant": "control", "user_id": f"u{i}", "metric_value": 1} for i in range(50)
-        ] + [
-            {"variant": "treatment", "user_id": f"t{i}", "metric_value": 2} for i in range(50)
-        ],
-        # EXPERIMENT_EXPOSURES_QUERY result
-        [
-            {"variant": "control", "user_id": f"u{i}"} for i in range(50)
-        ] + [
-            {"variant": "treatment", "user_id": f"t{i}"} for i in range(50)
-        ],
-    ])
+async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch):
+    metadata = _experiment_metadata(
+        variants=["blue", "baseline", "green"],
+        control_variant="baseline",
+    )
+    fetch = AsyncMock(return_value=metadata)
+    monkeypatch.setattr(experiments, "fetch_experiment_analysis", fetch)
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "baseline",
+                "sample_size": 100,
+                "conversions": 10,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "blue",
+                "sample_size": 100,
+                "conversions": 20,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "green",
+                "sample_size": 100,
+                "conversions": 15,
+                "crossover_actors": 0,
+            },
+        ]
+    )
 
     resp = await client.get(
         "/v1/query/experiment/exp_123",
-        params={
-            "metric": "purchase",
-            "flag_key": "checkout-experiment",
-            "method": "frequentist",
-            "project_id": PROJECT_ID,
-        },
+        params={"project_id": PROJECT_ID},
     )
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["experiment_id"] == "exp_123"
+    assert body["analysis_status"] == "ready"
+    assert body["experiment_key"] == "exp_123"
     assert body["flag_key"] == "checkout-experiment"
-    assert body["metric"] == "purchase"
-    assert body["method"] == "frequentist"
-    assert len(body["variants"]) == 2
-    assert body["is_significant"] is True
-    metric_call = app.state.ch_client.execute.await_args_list[0]
-    exposure_call = app.state.ch_client.execute.await_args_list[1]
-    assert "FROM feature_flag_exposures" in metric_call.args[0]
-    assert "FROM feature_flag_exposures" in exposure_call.args[0]
-    assert "$experiment_exposure" not in metric_call.args[0]
-    assert metric_call.args[1]["flag_key"] == "checkout-experiment"
-    assert exposure_call.args[1]["flag_key"] == "checkout-experiment"
-    assert "experiment_id" not in metric_call.args[1]
+    assert body["metric_event"] == "purchase"
+    assert [arm["variant"] for arm in body["arms"]] == [
+        "blue",
+        "baseline",
+        "green",
+    ]
+    assert [item["treatment_variant"] for item in body["comparisons"]] == [
+        "blue",
+        "green",
+    ]
+    assert all(
+        comparison["control_variant"] == "baseline"
+        for comparison in body["comparisons"]
+    )
+    assert body["correction"] == "bonferroni"
+    for comparison in body["comparisons"]:
+        assert comparison["adjusted_p_value"] == pytest.approx(
+            min(comparison["raw_p_value"] * 2, 1.0)
+        )
+    assert "recommendation" not in body
+    assert "is_significant" not in body
+    fetch.assert_awaited_once_with(PROJECT_ID, "exp_123", PROJECT_API_KEY)
 
 
 @pytest.mark.asyncio
-async def test_experiment_no_data_returns_404(client):
-    """When no metric data exists, return 404."""
+async def test_experiment_shared_three_arm_fixture_is_finite_and_complete(
+    client,
+    monkeypatch,
+):
+    fixture = json.loads(EXPERIMENT_FIXTURE_PATH.read_text())
+    contract = ConfigExperimentAnalysis.model_validate(fixture["config_contract"])
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=contract),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=fixture["clickhouse_aggregates"]
+    )
+
+    response = await client.get(
+        f"/v1/query/experiment/{contract.key}",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    expected = fixture["expected"]
+    assert body["analysis_status"] == expected["analysis_status"]
+    assert [arm["variant"] for arm in body["arms"]] == expected["arm_order"]
+    assert [
+        comparison["treatment_variant"]
+        for comparison in body["comparisons"]
+    ] == expected["comparison_order"]
+    assert body["crossover_actors"] == expected["crossover_actors"]
+    assert body["unknown_variant_actors"] == expected["unknown_variant_actors"]
+    assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
+    assert all(
+        comparison["raw_p_value"] == expected["raw_p_value"]
+        and comparison["adjusted_p_value"] == expected["adjusted_p_value"]
+        for comparison in body["comparisons"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 0,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 20,
+                "conversions": 0,
+                "crossover_actors": 0,
+            },
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["analysis_status"] == "ready"
+    comparison = body["comparisons"][0]
+    assert comparison["raw_p_value"] == 1.0
+    assert comparison["adjusted_p_value"] == 1.0
+    assert comparison["rate_difference"] == 0.0
+    assert comparison["confidence_interval"] == [0.0, 0.0]
+    assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
+
+
+@pytest.mark.asyncio
+async def test_experiment_underpowered_declared_arm_is_typed(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 5,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 1,
+                "conversions": 1,
+                "crossover_actors": 0,
+            },
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["analysis_status"] == "insufficient_data"
+    assert body["reason"] == "underpowered_arms"
+    assert body["underpowered_variants"] == ["treatment"]
+    assert body["minimum_sample_size_per_arm"] == 2
+    assert "comparisons" not in body
+
+
+@pytest.mark.asyncio
+async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(
+            return_value=_experiment_metadata(
+                variants=["control", "blue", "green"],
+            )
+        ),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 5,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "blue",
+                "sample_size": 20,
+                "conversions": 6,
+                "crossover_actors": 0,
+            },
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["analysis_status"] == "insufficient_data"
+    assert body["underpowered_variants"] == ["green"]
+    assert body["arms"][2] == {
+        "variant": "green",
+        "sample_size": 0,
+        "conversions": 0,
+        "conversion_rate": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_experiment_reports_crossovers_and_unknown_variants(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 10,
+                "conversions": 1,
+                "crossover_actors": 1,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 10,
+                "conversions": 2,
+                "crossover_actors": 1,
+            },
+            {
+                "variant": "removed-arm",
+                "sample_size": 4,
+                "conversions": 4,
+                "crossover_actors": 2,
+            },
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["analysis_status"] == "ready"
+    assert body["crossover_actors"] == 4
+    assert body["unknown_variant_actors"] == 4
+    assert [arm["sample_size"] for arm in body["arms"]] == [10, 10]
+
+
+@pytest.mark.asyncio
+async def test_experiment_rejects_non_integer_clickhouse_aggregates(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 2.5,
+                "conversions": 0,
+                "crossover_actors": 0,
+            }
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "ClickHouse returned invalid experiment aggregates"
+
+
+@pytest.mark.asyncio
+async def test_experiment_uses_authoritative_metric_and_window(client, monkeypatch):
+    metadata = _experiment_metadata(
+        start_date="2025-01-01T01:00:00.123456+01:00",
+        end_date="2025-01-31T01:00:00.654321+01:00",
+    )
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=metadata),
+    )
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
     resp = await client.get(
-        "/v1/query/experiment/exp_missing",
-        params={
-            "metric": "purchase",
-            "flag_key": "checkout-experiment",
-            "project_id": PROJECT_ID,
-        },
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
     )
 
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    call = app.state.ch_client.execute.await_args
+    assert "FROM feature_flag_exposures FINAL" in call.args[0]
+    assert call.args[1] == {
+        "project_id": PROJECT_ID,
+        "flag_key": metadata.flag_key,
+        "metric_event": metadata.metric_event,
+        "start_ms": 1_735_689_600_124,
+        "end_ms": 1_738_281_600_655,
+    }
 
 
 @pytest.mark.asyncio
-async def test_experiment_single_variant_returns_400(client):
-    """Experiment with only one variant should return 400."""
-    app.state.ch_client.execute = AsyncMock(side_effect=[
-        # metric rows - only control
-        [{"variant": "control", "user_id": f"u{i}", "metric_value": 1} for i in range(10)],
-        # exposure rows - only control
-        [{"variant": "control", "user_id": f"u{i}"} for i in range(10)],
-    ])
-
-    resp = await client.get(
-        "/v1/query/experiment/exp_single",
-        params={
-            "metric": "purchase",
-            "flag_key": "checkout-experiment",
-            "project_id": PROJECT_ID,
-        },
+async def test_scheduled_experiment_does_not_query_clickhouse(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata(status="scheduled")),
     )
 
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_experiment_requires_flag_key(client):
-    """Experiment analysis requires canonical flag metadata."""
     resp = await client.get(
         "/v1/query/experiment/exp_123",
-        params={"metric": "purchase", "project_id": PROJECT_ID},
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["reason"] == "experiment_not_started"
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_experiment_window_over_90_days_fails_closed(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata(duration_days=91)),
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
     )
 
     assert resp.status_code == 422
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_parameter", ["metric", "flag_key", "method"])
+async def test_experiment_forbids_legacy_caller_parameters(
+    client,
+    monkeypatch,
+    legacy_parameter,
+):
+    fetch = AsyncMock(return_value=_experiment_metadata())
+    monkeypatch.setattr(experiments, "fetch_experiment_analysis", fetch)
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID, legacy_parameter: "caller-controlled"},
+    )
+
+    assert resp.status_code == 422
+    fetch.assert_not_awaited()
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_experiment_preserves_exact_zero_p_value(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 1_000_000,
+                "conversions": 0,
+                "crossover_actors": 0,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 1_000_000,
+                "conversions": 1_000_000,
+                "crossover_actors": 0,
+            },
+        ]
+    )
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert resp.status_code == 200
+    comparison = resp.json()["comparisons"][0]
+    assert comparison["raw_p_value"] == 0.0
+    assert comparison["adjusted_p_value"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_experiment_project_assertion_is_tenant_scoped(client, monkeypatch):
+    fetch = AsyncMock(return_value=_experiment_metadata())
+    monkeypatch.setattr(experiments, "fetch_experiment_analysis", fetch)
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": "another-project"},
+    )
+
+    assert resp.status_code == 403
+    fetch.assert_not_awaited()

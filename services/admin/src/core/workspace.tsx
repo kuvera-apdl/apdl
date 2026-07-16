@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import type { ServiceConnection } from '@/api/http'
+import type { AdminRole, AuthIdentity } from '@/api/auth'
 import { useOptionalAuth } from '@/core/auth'
 
 export type ServiceName = 'ingestion' | 'config' | 'query' | 'agents' | 'codegen'
@@ -10,6 +11,7 @@ export interface Workspace {
   name: string
   projectId: string
   actor: string
+  roles: AdminRole[]
 }
 
 const ACTIVE_KEY = 'apdl-admin:active-project'
@@ -31,6 +33,25 @@ export function serviceConnection(workspace: Workspace, service: ServiceName): S
     baseUrl: serviceBaseUrl(workspace, service),
     actor: workspace.actor,
   }
+}
+
+export function hasWorkspaceRole(
+  workspace: Workspace | null | undefined,
+  role: AdminRole,
+): boolean {
+  return workspace?.roles.includes(role) ?? false
+}
+
+export function workspacesForIdentity(identity: AuthIdentity | null): Workspace[] {
+  return (
+    identity?.projects.map(({ project_id, roles }) => ({
+      id: project_id,
+      name: project_id,
+      projectId: project_id,
+      actor: identity.email,
+      roles: [...roles],
+    })) ?? []
+  )
 }
 
 interface WorkspaceContextValue {
@@ -57,13 +78,7 @@ export function WorkspaceProvider({
   const identity = auth?.identity ?? null
   const [activeId, setActiveId] = useState<string | null>(loadActiveId)
   const workspaces = useMemo<Workspace[]>(
-    () =>
-      initialWorkspaces ?? identity?.projects.map(({ project_id }) => ({
-        id: project_id,
-        name: project_id,
-        projectId: project_id,
-        actor: identity.email,
-      })) ?? [],
+    () => initialWorkspaces ?? workspacesForIdentity(identity),
     [identity, initialWorkspaces],
   )
   const active = workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null

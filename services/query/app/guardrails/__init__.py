@@ -1,1 +1,1 @@
-"""Guardrail monitoring helpers."""
+"""Read-only guardrail analytics helpers."""

@@ -14,7 +14,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { queryKeys } from '@/core/queryClient'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentRoleUnavailable } from '@/features/agents/AgentAccessNotice'
 import { AUTONOMY_LEVELS, MATRIX_ROWS, type GateOutcome } from '@/features/agents/gatingMatrix'
 import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
@@ -41,14 +42,6 @@ const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
     description: 'Turns insights into experiment designs with flags and variants.',
     isCustom: false,
   },
-  // personalization is parked (disabled server-side) until its UI-config
-  // delivery path exists — keep this fallback in sync with /definitions.
-  {
-    type: 'experiment_evaluation',
-    label: 'Experiment evaluation',
-    description: 'Evaluates mature running experiments: ship, rollback, iterate, or extend.',
-    isCustom: false,
-  },
   {
     type: 'feature_proposal',
     label: 'Feature proposals',
@@ -59,7 +52,7 @@ const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
 
 // code_implementation is deliberately absent from the manual trigger list —
 // it runs via the approval flow. Filter it out of the live listing too.
-const HIDDEN_AGENTS = new Set(['code_implementation'])
+const HIDDEN_AGENTS = new Set(['code_implementation', 'experiment_evaluation'])
 
 const OUTCOME_STYLES: Record<GateOutcome, string> = {
   halt: 'text-muted-foreground',
@@ -68,6 +61,23 @@ const OUTCOME_STYLES: Record<GateOutcome, string> = {
 }
 
 export function TriggerPage() {
+  const { active } = useWorkspace()
+  if (!hasWorkspaceRole(active, 'agents:run')) {
+    return (
+      <div className="max-w-3xl space-y-5">
+        <PageHeader
+          backTo={{ to: '/agents', label: 'Agent runs' }}
+          title="Trigger agent run"
+          description="Agent execution is restricted to operator-provisioned workspaces."
+        />
+        <AgentRoleUnavailable role="agents:run" title="Agent execution unavailable" />
+      </div>
+    )
+  }
+  return <TriggerForm />
+}
+
+function TriggerForm() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
   // 'default' runs the full built-in loop; 'custom' hand-picks agents.

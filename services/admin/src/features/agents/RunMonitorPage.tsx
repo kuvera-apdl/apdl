@@ -21,7 +21,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { ResultCard, ResultList } from '@/features/agents/ResultCards'
 import { AgentsInspectorSection } from '@/features/agents/AgentInspector'
 import { RunAuditSection } from '@/features/agents/RunAuditSection'
@@ -285,9 +286,51 @@ function ApprovalPanel({
   )
 }
 
+function ReadOnlyApprovalPanel({ run, results }: { run: RunStatus; results: RunResults | null }) {
+  const agent = run.phase.replace(/_approval$/, '').replace(/_/g, ' ')
+  const gated = gatedItems(run, results)
+  const items = gated?.items ?? []
+  const kind = gated?.kind
+
+  return (
+    <Card className="border-amber-400 dark:border-amber-700">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ShieldAlert className="h-5 w-5 text-amber-500" />
+          {agent} awaiting operator approval
+        </CardTitle>
+        <CardDescription>
+          The pending decision and persisted outputs remain visible, but this workspace cannot
+          submit a verdict or resume the run.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.length > 0 && kind !== undefined ? (
+          <div className="space-y-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Pending items ({items.length})
+            </p>
+            {items.map((item, index) => (
+              <ResultCard
+                key={itemId(item, kind, index)}
+                item={item}
+                kind={GATE_CARD_KIND[kind]}
+              />
+            ))}
+          </div>
+        ) : null}
+        <AgentReadOnlyNote>
+          Approval requires agents:approve on an operator-provisioned workspace.
+        </AgentReadOnlyNote>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function RunMonitorPage() {
   const { runId = '' } = useParams()
   const { active } = useWorkspace()
+  const canApprove = hasWorkspaceRole(active, 'agents:approve')
   const now = useNow(1000)
 
   const statusQuery = useQuery({
@@ -383,14 +426,18 @@ export function RunMonitorPage() {
       <AgentsInspectorSection runId={runId} run={run} results={results} />
 
       {run.status === 'waiting_approval' ? (
-        <ApprovalPanel
-          run={run}
-          results={results}
-          onDecided={() => {
-            void statusQuery.refetch()
-            void resultsQuery.refetch()
-          }}
-        />
+        canApprove ? (
+          <ApprovalPanel
+            run={run}
+            results={results}
+            onDecided={() => {
+              void statusQuery.refetch()
+              void resultsQuery.refetch()
+            }}
+          />
+        ) : (
+          <ReadOnlyApprovalPanel run={run} results={results} />
+        )
       ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2">

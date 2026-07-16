@@ -14,6 +14,8 @@ export const adminRoleSchema = z.enum([
   'agents:approve',
 ])
 
+export type AdminRole = z.infer<typeof adminRoleSchema>
+
 export const projectAccessSchema = z
   .object({
     project_id: z.string().regex(/^[A-Za-z0-9]{1,64}$/),

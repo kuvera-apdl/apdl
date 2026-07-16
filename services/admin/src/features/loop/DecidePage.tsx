@@ -16,7 +16,8 @@ import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
 import { SectionHeading } from '@/components/shared/SectionHeading'
 import { Skeleton } from '@/components/ui/skeleton'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { decisionsForRun, type Decision } from '@/lib/gates'
 
 const AGENT_ICON = {
@@ -67,6 +68,7 @@ function useDecisions() {
 
 export function DecidePage() {
   const { active } = useWorkspace()
+  const canApprove = hasWorkspaceRole(active, 'agents:approve')
   const queryClient = useQueryClient()
   const { decisions, isPending, error, refetch, endpointMissing } = useDecisions()
 
@@ -96,6 +98,7 @@ export function DecidePage() {
   })
 
   const actionsFor = (decision: Decision) => {
+    if (!canApprove) return []
     const accept = { experiment_design: 'Approve design', feature_proposal: 'Make permanent', code_implementation: 'Open PR' }
     return [
       {
@@ -119,10 +122,20 @@ export function DecidePage() {
         title="Decide"
         description={
           decisions.length > 0
-            ? `${decisions.length} decision${decisions.length === 1 ? '' : 's'} waiting — everything the loop can't do without you`
-            : 'Everything the loop needs a human for lands here.'
+            ? canApprove
+              ? `${decisions.length} decision${decisions.length === 1 ? '' : 's'} waiting — everything the loop can't do without you`
+              : `${decisions.length} operator decision${decisions.length === 1 ? '' : 's'} pending — read-only in this workspace`
+            : canApprove
+              ? 'Everything the loop needs a human for lands here.'
+              : 'Pending operator decisions remain visible here without approval controls.'
         }
       />
+
+      {!canApprove ? (
+        <AgentReadOnlyNote>
+          Decisions are read-only. Submitting a verdict and resuming a run requires agents:approve.
+        </AgentReadOnlyNote>
+      ) : null}
 
       {isPending ? <Skeleton className="h-40 w-full" /> : null}
 
@@ -137,14 +150,21 @@ export function DecidePage() {
       {!isPending && !error && decisions.length === 0 ? (
         <EmptyState
           icon={<ShieldCheck className="h-8 w-8 text-emerald-500" />}
-          title="Nothing needs you"
-          description="The loop keeps measuring on its own. New decisions will appear here the moment an agent needs a human."
+          title={canApprove ? 'Nothing needs you' : 'No pending operator decisions'}
+          description={
+            canApprove
+              ? 'The loop keeps measuring on its own. New decisions will appear here the moment an agent needs a human.'
+              : 'This workspace can inspect decisions when an operator action is pending.'
+          }
         />
       ) : null}
 
       {decisions.length > 0 ? (
         <div className="space-y-2">
-          <SectionHeading title="Waiting on you" count={decisions.length} />
+          <SectionHeading
+            title={canApprove ? 'Waiting on you' : 'Waiting on an operator'}
+            count={decisions.length}
+          />
           {decisions.map((decision, index) => (
             <DecisionCard
               key={`${decision.runId}:${decision.itemId}`}

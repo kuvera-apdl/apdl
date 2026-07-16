@@ -41,6 +41,12 @@ def test_validate_tool_names_rejects_unknown_tool():
         tool_catalog.validate_tool_names(["create_flag"])
 
 
+def test_catalog_excludes_undeliverable_ui_config_tool():
+    assert "list_ui_configs" not in tool_catalog.TOOL_CATALOG
+    with pytest.raises(ValueError, match="unknown tool 'list_ui_configs'"):
+        tool_catalog.validate_tool_names(["list_ui_configs"])
+
+
 def test_validate_tool_names_aggregates_errors():
     with pytest.raises(ValueError) as exc:
         tool_catalog.validate_tool_names(["nope", {"tool": "discover_events"}])

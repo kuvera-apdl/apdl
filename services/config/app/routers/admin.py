@@ -5,27 +5,27 @@ import logging
 import secrets
 from datetime import date, datetime, timezone
 
+import asyncpg
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from app.auth import authorized_project
 from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentCreate,
+    ExperimentMetric,
     ExperimentUpdate,
     FlagCleanup,
     FlagCreate,
     FlagDisable,
+    FlagTransition,
     FlagUpdate,
-    GateRule,
     VariantConfig,
-    derive_default_variant,
-    validate_flag_variant_config,
+    validate_experiment_lifecycle,
 )
 from app.store import postgres as pg_store
-from app.store import redis_cache
-from app.utils import serialize_client_flag, serialize_flag
+from app.store import mutations
+from app.utils import serialize_flag
 
 logger = logging.getLogger(__name__)
 
@@ -38,40 +38,42 @@ def _actor(request: Request) -> str:
     return f"credential:{request.state.principal.credential_id}"
 
 
-def _enabled_for_state(state: str) -> bool:
-    return state == "active"
-
-
-def _sync_lifecycle_update(updates: dict) -> None:
-    if "state" in updates and "enabled" not in updates:
-        updates["enabled"] = _enabled_for_state(updates["state"])
-    elif "enabled" in updates and "state" not in updates:
-        updates["state"] = "active" if updates["enabled"] else "disabled"
-
-
-def _validate_merged_variant_contract(flag: dict) -> str | None:
-    try:
-        validate_flag_variant_config(flag)
-    except (TypeError, ValueError, ValidationError) as exc:
-        return str(exc)
-    return None
-
-
-async def _broadcast_flag_change(request: Request, project_id: str, action: str, flag: dict | None, key: str) -> None:
-    payload: dict
-    if (
-        flag
-        and flag.get("evaluation_mode") in {"client", "both"}
-        and not flag.get("archived_at")
-    ):
-        payload = {"action": action, "flag": serialize_client_flag(flag)}
-    else:
-        payload = {"action": "flag_removed", "key": key}
-
-    await request.app.state.broadcaster.broadcast(
-        project_id,
-        "flag_update",
-        json.dumps(payload, separators=(",", ":")),
+def _mutation_error(exc: mutations.MutationError) -> JSONResponse:
+    if isinstance(exc, mutations.NotFoundError):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "not_found", "message": str(exc)},
+        )
+    if isinstance(exc, mutations.ExperimentOwnedFlagError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "experiment_managed_flag",
+                "message": str(exc),
+                "experiment_key": exc.experiment_key,
+            },
+        )
+    if isinstance(exc, mutations.VersionConflictError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "version_conflict",
+                "message": str(exc),
+                "current_version": exc.current_version,
+            },
+        )
+    if isinstance(exc, mutations.ImmutableExperimentError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "immutable_experiment_contract",
+                "message": str(exc),
+                "fields": exc.fields,
+            },
+        )
+    return JSONResponse(
+        status_code=409,
+        content={"error": "conflict", "message": str(exc)},
     )
 
 
@@ -218,14 +220,6 @@ async def create_flag(body: FlagCreate, request: Request):
     """Create a new flag. Returns 409 on duplicate, 201 on success."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
-
-    if await pg_store.get_flag(pool, project_id, body.key, include_archived=True) is not None:
-        return JSONResponse(
-            status_code=409,
-            content={"error": "conflict", "message": f"Flag with key '{body.key}' already exists"},
-        )
-
     body_data = body.model_dump(mode="json", exclude_none=True)
     flag = {
         **body_data,
@@ -233,26 +227,20 @@ async def create_flag(body: FlagCreate, request: Request):
         "salt": secrets.token_urlsafe(16),
     }
 
-    created = await pg_store.create_flag(pool, flag)
-    if created is None:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to create flag in database"},
+    try:
+        created = await mutations.create_standalone_flag(
+            request.app.state.pg_pool,
+            flag,
+            actor=_actor(request),
         )
-
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=created["key"],
-        action="flag_created",
-        actor=_actor(request),
-        before=None,
-        after=created,
-    )
-
-    redis = request.app.state.redis
-    await redis_cache.invalidate_flags(redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_created", created, created["key"])
+    except asyncpg.UniqueViolationError:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "conflict",
+                "message": f"Flag with key '{body.key}' already exists",
+            },
+        )
     logger.info("Flag '%s' created for project %s", created["key"], project_id)
     return JSONResponse(status_code=201, content={"created": True, "flag": serialize_flag(created)})
 
@@ -262,68 +250,44 @@ async def update_flag(key: str, body: FlagUpdate, request: Request):
     """Update an existing flag (partial update). Returns 404 if not found."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
-    existing = await pg_store.get_flag(pool, project_id, key)
-    if existing is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Flag '{key}' not found"},
-        )
-    if body.version != existing["version"]:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "version_conflict",
-                "message": f"Flag '{key}' is at version {existing['version']}",
-                "current_version": existing["version"],
-            },
-        )
-
-    updates = body.model_dump(exclude_unset=True, exclude_none=True, mode="json")
+    updates = body.model_dump(exclude_unset=True, mode="json")
     updates.pop("version", None)
-    _sync_lifecycle_update(updates)
     if not updates:
         return JSONResponse(
             status_code=400,
             content={"error": "invalid_request", "message": "No flag fields provided to update"},
         )
 
-    flag = dict(existing)
-    flag.update(updates)
-    variant_error = _validate_merged_variant_contract(flag)
-    if variant_error is not None:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "invalid_request",
-                "message": variant_error,
-            },
+    try:
+        updated = await mutations.update_standalone_flag(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=body.version,
+            updates=updates,
+            actor=_actor(request),
         )
-
-    updated = await pg_store.update_flag(pool, flag, body.version)
-    if updated is None:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "version_conflict",
-                "message": f"Flag '{key}' was modified before this update completed",
-            },
-        )
-
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=updated["key"],
-        action="flag_updated",
-        actor=_actor(request),
-        before=existing,
-        after=updated,
-    )
-
-    redis = request.app.state.redis
-    await redis_cache.invalidate_flags(redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     logger.info("Flag '%s' updated for project %s", updated["key"], project_id)
+    return JSONResponse(content={"updated": True, "flag": serialize_flag(updated)})
+
+
+@router.post("/flags/{key}/transition")
+async def transition_flag(key: str, body: FlagTransition, request: Request):
+    """Use the dedicated lifecycle path for draft/active transitions."""
+    project_id = authorized_project(request, "config:write")
+    try:
+        updated = await mutations.transition_standalone_flag(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=body.version,
+            target_state=body.target_state,
+            actor=_actor(request),
+        )
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     return JSONResponse(content={"updated": True, "flag": serialize_flag(updated)})
 
 
@@ -332,100 +296,49 @@ async def disable_flag(key: str, body: FlagDisable, request: Request):
     """Disable a flag through the canonical rollback path."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
-    existing = await pg_store.get_flag(pool, project_id, key)
-    if existing is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Flag '{key}' not found"},
+    try:
+        updated, changed = await mutations.disable_standalone_flag(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=body.version,
+            reason=body.reason,
+            evidence=body.evidence,
+            actor=_actor(request),
         )
-
-    if not existing.get("enabled", False):
-        return JSONResponse(content={"disabled": False, "flag": serialize_flag(existing)})
-
-    if body.source == "system" and not existing.get("auto_disable", True):
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "auto_disable_disabled",
-                "message": f"Flag '{key}' does not allow automatic disable actions",
-            },
-        )
-
-    updated = await pg_store.disable_flag(
-        pool,
-        project_id=project_id,
-        key=key,
-        reason=body.reason,
-        source=body.source,
-    )
-    if updated is None:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "disable_conflict",
-                "message": f"Flag '{key}' was modified before disable completed",
-            },
-        )
-
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=updated["key"],
-        action="flag_auto_disabled" if body.source == "system" else "flag_disabled",
-        actor=body.source,
-        before=existing,
-        after=updated,
-        reason=body.reason,
-        evidence=body.evidence,
-    )
-
-    redis = request.app.state.redis
-    await redis_cache.invalidate_flags(redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     logger.warning(
         "Flag '%s' disabled for project %s by %s: %s",
         updated["key"],
         project_id,
-        body.source,
+        _actor(request),
         body.reason,
     )
-    return JSONResponse(content={"disabled": True, "flag": serialize_flag(updated)})
+    return JSONResponse(
+        content={"disabled": changed, "flag": serialize_flag(updated)}
+    )
 
 
 @router.delete("/flags/{key}")
-async def delete_flag(key: str, request: Request):
+async def delete_flag(
+    key: str,
+    request: Request,
+    version: int = Query(..., ge=1),
+):
     """Delete a flag. Returns 404 if not found."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
-    existing = await pg_store.get_flag(pool, project_id, key)
-    if existing is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Flag '{key}' not found or already archived"},
+    try:
+        archived = await mutations.archive_standalone_flag(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=version,
+            actor=_actor(request),
         )
-
-    archived = await pg_store.archive_flag(pool, project_id, key)
-    if archived is None:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to archive flag"},
-        )
-
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=key,
-        action="flag_archived",
-        actor=_actor(request),
-        before=existing,
-        after=archived,
-    )
-
-    redis = request.app.state.redis
-    await redis_cache.invalidate_flags(redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_archived", archived, key)
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     logger.info("Flag '%s' archived for project %s", key, project_id)
     return JSONResponse(content={"archived": True, "flag": serialize_flag(archived)})
 
@@ -435,68 +348,22 @@ async def cleanup_flag(key: str, body: FlagCleanup, request: Request):
     """Archive a fully rolled out flag through the cleanup workflow."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
-    existing = await pg_store.get_flag(pool, project_id, key)
-    if existing is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Flag '{key}' not found or already archived"},
+    try:
+        archived, cleanup_reasons = await mutations.cleanup_standalone_flag(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=body.version,
+            evidence=body.evidence,
+            actor=_actor(request),
         )
-    if body.version != existing["version"]:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "version_conflict",
-                "message": f"Flag '{key}' is at version {existing['version']}",
-                "current_version": existing["version"],
-            },
-        )
-
-    cleanup_reasons = _cleanup_reasons(existing)
-    if "fully_rolled_out" not in cleanup_reasons:
+    except mutations.IntegrityError as exc:
         return JSONResponse(
             status_code=409,
-            content={
-                "error": "not_cleanup_candidate",
-                "message": f"Flag '{key}' is not eligible for rollout cleanup",
-                "cleanup_reasons": cleanup_reasons,
-            },
+            content={"error": "not_cleanup_candidate", "message": str(exc)},
         )
-
-    archived = await pg_store.archive_flag(
-        pool,
-        project_id,
-        key,
-        expected_version=body.version,
-    )
-    if archived is None:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "version_conflict",
-                "message": f"Flag '{key}' was modified before cleanup completed",
-            },
-        )
-
-    evidence = {
-        **body.evidence,
-        "cleanup_reasons": cleanup_reasons,
-    }
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=key,
-        action="flag_cleanup_archived",
-        actor=body.source,
-        before=existing,
-        after=archived,
-        reason="fully_rolled_out",
-        evidence=evidence,
-    )
-
-    redis = request.app.state.redis
-    await redis_cache.invalidate_flags(redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_archived", archived, key)
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     logger.info("Flag '%s' cleaned up for project %s", key, project_id)
     return JSONResponse(content={
         "cleaned_up": True,
@@ -542,11 +409,15 @@ async def get_flag_audit(
 # no resume (settled decision). 'draft → stopped' abandons a never-launched
 # experiment.
 _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
-    "draft": {"draft", "running", "stopped"},
+    "draft": {"draft", "scheduled", "running", "stopped"},
+    "scheduled": {"scheduled", "running", "stopped"},
     "running": {"running", "completed", "stopped"},
     "completed": {"completed"},
     "stopped": {"stopped"},
 }
+_FROZEN_EXPERIMENT_REQUEST_FIELDS = frozenset(
+    {"default_variant", "variants", "primary_metric", "start_date", "end_date"}
+)
 
 
 def _load_json(raw, fallback):
@@ -556,6 +427,23 @@ def _load_json(raw, fallback):
         return json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _as_datetime(value) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def _iso_or_none(value) -> str | None:
+    parsed = _as_datetime(value)
+    return parsed.isoformat() if parsed is not None else None
+
+
+def _metric_or_none(value: dict) -> ExperimentMetric | None:
+    return ExperimentMetric.model_validate(value) if value else None
 
 
 def _experiment_to_response(e: dict) -> dict:
@@ -571,10 +459,11 @@ def _experiment_to_response(e: dict) -> dict:
         "variants": _load_json(e.get("variants_json", "[]"), []),
         "targeting_rules": _load_json(e.get("targeting_rules_json", "[]"), []),
         "primary_metric": primary_metric or None,
-        "start_date": e.get("start_date", ""),
-        "end_date": e.get("end_date", ""),
-        "created_at": e.get("created_at", ""),
-        "updated_at": e.get("updated_at", ""),
+        "start_date": _iso_or_none(e.get("start_date")),
+        "end_date": _iso_or_none(e.get("end_date")),
+        "version": e.get("version", 1),
+        "created_at": _iso_or_none(e.get("created_at")),
+        "updated_at": _iso_or_none(e.get("updated_at")),
     }
 
 
@@ -583,120 +472,14 @@ def _experiment_variant_keys(variants_json: str) -> list[str]:
     return [v["key"] for v in variants if isinstance(v, dict) and isinstance(v.get("key"), str)]
 
 
-def _projected_variants(variants_json: str) -> list[VariantConfig]:
-    """Project stored experiment variants down to the flag's strict {key, weight}."""
-    variants = _load_json(variants_json, [])
-    return [VariantConfig(key=v["key"], weight=int(v["weight"])) for v in variants]
-
-
-def _experiment_rules(targeting_rules_json: str) -> list[GateRule]:
-    rules = _load_json(targeting_rules_json, [])
-    return [GateRule.model_validate(r) for r in rules]
-
-
 def _resolve_update_default_variant(
     existing_default: str, effective_keys: list[str], body: ExperimentUpdate
 ) -> str:
-    """Default variant after an update: an explicit choice (validated), else keep
-    the existing one if still valid, else re-derive."""
-    if body.default_variant is not None:
-        if body.default_variant not in effective_keys:
-            raise ValueError("default_variant must match a variant key")
-        return body.default_variant
-    if existing_default in effective_keys:
-        return existing_default
-    return derive_default_variant(effective_keys, None)
-
-
-async def _create_experiment_flag(
-    request: Request, project_id: str, flag_create: FlagCreate, actor: str
-) -> dict | None:
-    """Create the experiment's backing flag through the canonical flag store."""
-    pool = request.app.state.pg_pool
-    body_data = flag_create.model_dump(mode="json", exclude_none=True)
-    flag = {**body_data, "project_id": project_id, "salt": secrets.token_urlsafe(16)}
-    created = await pg_store.create_flag(pool, flag)
-    if created is None:
-        return None
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=created["key"],
-        action="flag_created",
-        actor=actor,
-        before=None,
-        after=created,
-    )
-    await redis_cache.invalidate_flags(request.app.state.redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_created", created, created["key"])
-    return created
-
-
-async def _sync_experiment_flag(
-    request: Request, project_id: str, backing: dict, flag_update: FlagUpdate, actor: str
-) -> tuple[dict | None, str | None]:
-    """Resync the backing flag. Returns (updated_flag, validation_error)."""
-    pool = request.app.state.pg_pool
-    updates = flag_update.model_dump(exclude_unset=True, exclude_none=True, mode="json")
-    updates.pop("version", None)
-    _sync_lifecycle_update(updates)
-
-    merged = {**backing, **updates}
-    variant_error = _validate_merged_variant_contract(merged)
-    if variant_error is not None:
-        return None, variant_error
-
-    updated = await pg_store.update_flag(pool, merged, backing["version"])
-    if updated is None:
-        return None, None
-
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=updated["key"],
-        action="flag_updated",
-        actor=actor,
-        before=backing,
-        after=updated,
-    )
-    await redis_cache.invalidate_flags(request.app.state.redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_updated", updated, updated["key"])
-    return updated, None
-
-
-async def _archive_experiment_flag(
-    request: Request, project_id: str, flag_key: str, actor: str
-) -> None:
-    """Archive the backing flag when its experiment is deleted (never orphan it)."""
-    pool = request.app.state.pg_pool
-    existing = await pg_store.get_flag(pool, project_id, flag_key)
-    if existing is None:
-        return
-    archived = await pg_store.archive_flag(pool, project_id, flag_key)
-    if archived is None:
-        return
-    await pg_store.create_flag_audit_entry(
-        pool,
-        project_id=project_id,
-        flag_key=flag_key,
-        action="flag_archived",
-        actor=actor,
-        before=existing,
-        after=archived,
-    )
-    await redis_cache.invalidate_flags(request.app.state.redis, project_id)
-    await _broadcast_flag_change(request, project_id, "flag_archived", archived, flag_key)
-
-
-async def _broadcast_experiment_change(
-    request: Request, project_id: str, action: str, key: str, **extra
-) -> None:
-    payload = {"action": action, "key": key, **extra}
-    await request.app.state.broadcaster.broadcast(
-        project_id,
-        "experiment_update",
-        json.dumps(payload, separators=(",", ":")),
-    )
+    """Resolve the explicitly authored default without inventing a fallback."""
+    effective_default = body.default_variant or existing_default
+    if effective_default not in effective_keys:
+        raise ValueError("default_variant must match a variant key")
+    return effective_default
 
 
 @router.get("/experiments")
@@ -717,34 +500,17 @@ async def create_experiment(body: ExperimentCreate, request: Request):
     """
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
     actor = _actor(request)
 
-    if await pg_store.get_experiment(pool, project_id, body.key) is not None:
-        return JSONResponse(
-            status_code=409,
-            content={"error": "conflict", "message": f"Experiment with key '{body.key}' already exists"},
-        )
-
     flag_key = body.flag_key or body.key
-    if await pg_store.get_flag(pool, project_id, flag_key, include_archived=True) is not None:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": "conflict",
-                "message": f"Flag with key '{flag_key}' already exists; choose a different flag_key",
-            },
-        )
 
-    variant_keys = [v.key for v in body.variants]
-    default_variant = derive_default_variant(variant_keys, body.default_variant)
     flag_create = experiment_flag.build_flag_create(
         flag_key=flag_key,
         name=body.key,
         description=body.description,
         status=body.status,
         variants=[VariantConfig(key=v.key, weight=v.weight) for v in body.variants],
-        default_variant=default_variant,
+        default_variant=body.default_variant,
         traffic_percentage=body.traffic_percentage,
         targeting_rules=body.targeting_rules,
     )
@@ -755,10 +521,14 @@ async def create_experiment(body: ExperimentCreate, request: Request):
         "status": body.status,
         "description": body.description,
         "flag_key": flag_key,
-        "default_variant": default_variant,
+        "default_variant": body.default_variant,
         "variants_json": json.dumps([v.model_dump() for v in body.variants], separators=(",", ":")),
         "targeting_rules_json": json.dumps(
-            [r.model_dump(mode="json") for r in body.targeting_rules], separators=(",", ":")
+            [
+                r.model_dump(mode="json", exclude_none=True)
+                for r in body.targeting_rules
+            ],
+            separators=(",", ":"),
         ),
         "primary_metric_json": (
             json.dumps(body.primary_metric.model_dump(), separators=(",", ":"))
@@ -769,28 +539,38 @@ async def create_experiment(body: ExperimentCreate, request: Request):
         "start_date": body.start_date,
         "end_date": body.end_date,
     }
-
-    # Create the flag first so an experiment is never persisted without one.
-    created_flag = await _create_experiment_flag(request, project_id, flag_create, actor)
-    if created_flag is None:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to create backing flag"},
+    flag = {
+        **flag_create.model_dump(mode="json", exclude_none=True),
+        "project_id": project_id,
+        "salt": secrets.token_urlsafe(16),
+    }
+    try:
+        created_exp, _ = await mutations.create_experiment_bundle(
+            request.app.state.pg_pool,
+            experiment=exp,
+            flag=flag,
+            actor=actor,
         )
-
-    if not await pg_store.create_experiment(pool, exp):
-        await _archive_experiment_flag(request, project_id, flag_key, actor)
+    except asyncpg.UniqueViolationError:
         return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to create experiment"},
+            status_code=409,
+            content={
+                "error": "conflict",
+                "message": (
+                    f"Experiment '{body.key}' or flag '{flag_key}' already exists"
+                ),
+            },
         )
-
-    await redis_cache.invalidate_experiments(request.app.state.redis, project_id)
-    await _broadcast_experiment_change(
-        request, project_id, "experiment_created", exp["key"], status=exp["status"], flag_key=flag_key
-    )
     logger.info("Experiment '%s' created for project %s (flag '%s')", exp["key"], project_id, flag_key)
-    return JSONResponse(status_code=201, content={"created": True, "key": exp["key"], "flag_key": flag_key})
+    return JSONResponse(
+        status_code=201,
+        content={
+            "created": True,
+            "key": exp["key"],
+            "flag_key": flag_key,
+            "version": created_exp["version"],
+        },
+    )
 
 
 @router.put("/experiments/{key}")
@@ -806,6 +586,14 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             status_code=404,
             content={"error": "not_found", "message": f"Experiment '{key}' not found"},
         )
+    if body.version != existing["version"]:
+        return _mutation_error(
+            mutations.VersionConflictError(
+                "Experiment",
+                key,
+                existing["version"],
+            )
+        )
 
     current_status = existing["status"]
     new_status = body.status if body.status is not None else current_status
@@ -819,15 +607,24 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             },
         )
 
+    if current_status != "draft":
+        frozen_fields = sorted(
+            body.model_fields_set & _FROZEN_EXPERIMENT_REQUEST_FIELDS
+        )
+        if frozen_fields:
+            return _mutation_error(
+                mutations.ImmutableExperimentError(key, frozen_fields)
+            )
+
     exp = dict(existing)
     exp["status"] = new_status
     if body.description is not None:
         exp["description"] = body.description
     if body.traffic_percentage is not None:
         exp["traffic_percentage"] = body.traffic_percentage
-    if body.start_date is not None:
+    if "start_date" in body.model_fields_set:
         exp["start_date"] = body.start_date
-    if body.end_date is not None:
+    if "end_date" in body.model_fields_set:
         exp["end_date"] = body.end_date
     if body.variants is not None:
         exp["variants_json"] = json.dumps(
@@ -835,10 +632,35 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
         )
     if body.targeting_rules is not None:
         exp["targeting_rules_json"] = json.dumps(
-            [r.model_dump(mode="json") for r in body.targeting_rules], separators=(",", ":")
+            [
+                r.model_dump(mode="json", exclude_none=True)
+                for r in body.targeting_rules
+            ],
+            separators=(",", ":"),
         )
-    if body.primary_metric is not None:
-        exp["primary_metric_json"] = json.dumps(body.primary_metric.model_dump(), separators=(",", ":"))
+    if "primary_metric" in body.model_fields_set:
+        exp["primary_metric_json"] = (
+            json.dumps(
+                body.primary_metric.model_dump(mode="json"),
+                separators=(",", ":"),
+            )
+            if body.primary_metric is not None
+            else "{}"
+        )
+
+    primary_metric_data = _load_json(exp.get("primary_metric_json", "{}"), {})
+    try:
+        validate_experiment_lifecycle(
+            status=exp["status"],
+            start_date=_as_datetime(exp.get("start_date")),
+            end_date=_as_datetime(exp.get("end_date")),
+            primary_metric=_metric_or_none(primary_metric_data),
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid_request", "message": str(exc)},
+        )
 
     effective_keys = _experiment_variant_keys(exp["variants_json"])
     try:
@@ -851,95 +673,54 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             content={"error": "invalid_request", "message": str(exc)},
         )
 
-    # Resync the backing flag from the merged state before persisting the
-    # experiment, so a stored experiment never describes a flag that failed to
-    # apply.
     flag_key = existing.get("flag_key") or existing["key"]
-    projected = _projected_variants(exp["variants_json"])
-    rules = _experiment_rules(exp["targeting_rules_json"])
-    backing = await pg_store.get_flag(pool, project_id, flag_key)
-    if backing is None:
-        flag_create = experiment_flag.build_flag_create(
-            flag_key=flag_key,
-            name=flag_key,
-            description=exp["description"],
-            status=exp["status"],
-            variants=projected,
-            default_variant=exp["default_variant"],
-            traffic_percentage=float(exp["traffic_percentage"]),
-            targeting_rules=rules,
+    try:
+        updated_exp, _ = await mutations.update_experiment_bundle(
+            pool,
+            desired=exp,
+            expected_version=body.version,
+            actor=actor,
         )
-        if await _create_experiment_flag(request, project_id, flag_create, actor) is None:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "internal_error", "message": "Failed to initialize backing flag"},
-            )
-    else:
-        flag_update = experiment_flag.build_flag_update(
-            version=backing["version"],
-            flag_key=flag_key,
-            name=backing.get("name") or flag_key,
-            description=exp["description"],
-            status=exp["status"],
-            variants=projected,
-            default_variant=exp["default_variant"],
-            traffic_percentage=float(exp["traffic_percentage"]),
-            targeting_rules=rules,
-        )
-        updated_flag, variant_error = await _sync_experiment_flag(
-            request, project_id, backing, flag_update, actor
-        )
-        if variant_error is not None:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "invalid_request", "message": variant_error},
-            )
-        if updated_flag is None:
-            return JSONResponse(
-                status_code=500,
-                content={"error": "internal_error", "message": "Failed to sync backing flag"},
-            )
-
-    if not await pg_store.update_experiment(pool, exp):
-        return JSONResponse(
-            status_code=500,
-            content={"error": "internal_error", "message": "Failed to update experiment"},
-        )
-
-    await redis_cache.invalidate_experiments(request.app.state.redis, project_id)
-    await _broadcast_experiment_change(
-        request, project_id, "experiment_updated", exp["key"], status=exp["status"], flag_key=flag_key
-    )
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
     logger.info("Experiment '%s' updated for project %s (flag '%s')", exp["key"], project_id, flag_key)
-    return JSONResponse(content={"updated": True, "key": exp["key"], "flag_key": flag_key})
+    return JSONResponse(
+        content={
+            "updated": True,
+            "key": exp["key"],
+            "flag_key": flag_key,
+            "version": updated_exp["version"],
+        }
+    )
 
 
 @router.delete("/experiments/{key}")
-async def delete_experiment(key: str, request: Request):
+async def delete_experiment(
+    key: str,
+    request: Request,
+    version: int = Query(..., ge=1),
+):
     """Delete an experiment and archive its backing flag. Returns 404 if missing."""
     project_id = authorized_project(request, "config:write")
 
-    pool = request.app.state.pg_pool
     actor = _actor(request)
-    existing = await pg_store.get_experiment(pool, project_id, key)
-    if existing is None:
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Experiment '{key}' not found or already deleted"},
+    try:
+        deleted, _ = await mutations.delete_experiment_bundle(
+            request.app.state.pg_pool,
+            project_id=project_id,
+            key=key,
+            expected_version=version,
+            actor=actor,
         )
-
-    flag_key = existing.get("flag_key") or existing["key"]
-    if not await pg_store.delete_experiment(pool, project_id, key):
-        return JSONResponse(
-            status_code=404,
-            content={"error": "not_found", "message": f"Experiment '{key}' not found or already deleted"},
-        )
-
-    await _archive_experiment_flag(request, project_id, flag_key, actor)
-
-    await redis_cache.invalidate_experiments(request.app.state.redis, project_id)
-    await _broadcast_experiment_change(
-        request, project_id, "experiment_deleted", key, flag_key=flag_key
-    )
+    except mutations.MutationError as exc:
+        return _mutation_error(exc)
+    flag_key = deleted["flag_key"]
     logger.info("Experiment '%s' deleted for project %s (flag '%s' archived)", key, project_id, flag_key)
-    return JSONResponse(content={"deleted": True, "key": key, "flag_key": flag_key})
+    return JSONResponse(
+        content={
+            "deleted": True,
+            "key": key,
+            "flag_key": flag_key,
+            "version": deleted["version"],
+        }
+    )

@@ -13,6 +13,7 @@ export function gateOutcome(
 ): GateOutcome {
   if (autonomyLevel <= 1) return 'halt'
   if (alwaysRequireApproval) return 'approve'
+  if (autonomyLevel >= 4) return 'deploy'
   if (autonomyLevel >= 3 && risk === 'low') return 'deploy'
   if (autonomyLevel >= 2) return 'approve'
   return 'halt'
@@ -37,8 +38,7 @@ export const AUTONOMY_LEVELS: AutonomyLevelDef[] = [
   {
     level: 4,
     label: 'L4',
-    summary:
-      'Low-risk actions auto-deploy; medium/high still held — the gate treats L3 and L4 identically today.',
+    summary: 'Every safety-passing action auto-deploys except actions explicitly marked always-gated.',
   },
 ]
 

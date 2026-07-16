@@ -1,0 +1,367 @@
+{
+  "fixture_schema_version": 1,
+  "limits": {
+    "max_rules": 50,
+    "max_conditions_per_rule": 20,
+    "max_identifier_length": 128,
+    "max_string_length": 256,
+    "max_membership_values": 100
+  },
+  "numeric_pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$",
+  "condition_cases": [
+    {
+      "name": "equals matching strings",
+      "condition": {"attribute": "value", "operator": "equals", "value": "pro"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "pro"}},
+      "expected_match": true
+    },
+    {
+      "name": "equals matching booleans",
+      "condition": {"attribute": "value", "operator": "equals", "value": false},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": true
+    },
+    {
+      "name": "equals keeps booleans distinct from numbers",
+      "condition": {"attribute": "value", "operator": "equals", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": false
+    },
+    {
+      "name": "equals keeps booleans distinct from strings",
+      "condition": {"attribute": "value", "operator": "equals", "value": "false"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": false
+    },
+    {
+      "name": "equals compares JSON numbers",
+      "condition": {"attribute": "value", "operator": "equals", "value": 1},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": 1.0}},
+      "expected_match": true
+    },
+    {
+      "name": "equals rejects array actual",
+      "condition": {"attribute": "value", "operator": "equals", "value": "a,b"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": ["a", "b"]}},
+      "expected_match": false
+    },
+    {
+      "name": "not equals compares valid scalars",
+      "condition": {"attribute": "value", "operator": "not_equals", "value": "free"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "pro"}},
+      "expected_match": true
+    },
+    {
+      "name": "not equals rejects object actual",
+      "condition": {"attribute": "value", "operator": "not_equals", "value": "free"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": {"plan": "pro"}}},
+      "expected_match": false
+    },
+    {
+      "name": "contains requires strings",
+      "condition": {"attribute": "value", "operator": "contains", "value": "company"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "alice@company.test"}},
+      "expected_match": true
+    },
+    {
+      "name": "contains rejects array actual",
+      "condition": {"attribute": "value", "operator": "contains", "value": "a"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": ["a"]}},
+      "expected_match": false
+    },
+    {
+      "name": "not contains compares strings",
+      "condition": {"attribute": "value", "operator": "not_contains", "value": "blocked"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "allowed"}},
+      "expected_match": true
+    },
+    {
+      "name": "not contains rejects numeric actual",
+      "condition": {"attribute": "value", "operator": "not_contains", "value": "1"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": 10}},
+      "expected_match": false
+    },
+    {
+      "name": "starts with compares strings",
+      "condition": {"attribute": "value", "operator": "starts_with", "value": "pro"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "product"}},
+      "expected_match": true
+    },
+    {
+      "name": "ends with compares strings",
+      "condition": {"attribute": "value", "operator": "ends_with", "value": ".test"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "alice@company.test"}},
+      "expected_match": true
+    },
+    {
+      "name": "in compares type strict scalars",
+      "condition": {"attribute": "value", "operator": "in", "value": ["US", "CA"]},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "CA"}},
+      "expected_match": true
+    },
+    {
+      "name": "in keeps booleans distinct from numbers",
+      "condition": {"attribute": "value", "operator": "in", "value": [0]},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": false
+    },
+    {
+      "name": "not in compares type strict scalars",
+      "condition": {"attribute": "value", "operator": "not_in", "value": ["US", "CA"]},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "GB"}},
+      "expected_match": true
+    },
+    {
+      "name": "not in keeps booleans distinct from numbers",
+      "condition": {"attribute": "value", "operator": "not_in", "value": [0]},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": true
+    },
+    {
+      "name": "gt accepts finite JSON numbers",
+      "condition": {"attribute": "value", "operator": "gt", "value": 10},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": 11}},
+      "expected_match": true
+    },
+    {
+      "name": "gte accepts canonical decimal strings",
+      "condition": {"attribute": "value", "operator": "gte", "value": "1.5e2"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "150.0"}},
+      "expected_match": true
+    },
+    {
+      "name": "lt accepts signed decimal strings",
+      "condition": {"attribute": "value", "operator": "lt", "value": "-1.25"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "-2"}},
+      "expected_match": true
+    },
+    {
+      "name": "lte accepts exponent sign",
+      "condition": {"attribute": "value", "operator": "lte", "value": "1e+2"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": 100}},
+      "expected_match": true
+    },
+    {
+      "name": "numeric rejects empty string actual",
+      "condition": {"attribute": "value", "operator": "gte", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": ""}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects whitespace actual",
+      "condition": {"attribute": "value", "operator": "gte", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": " "}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects hexadecimal actual",
+      "condition": {"attribute": "value", "operator": "gt", "value": 15},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "0x10"}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects infinity actual",
+      "condition": {"attribute": "value", "operator": "gt", "value": 1},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "Infinity"}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects overflow actual",
+      "condition": {"attribute": "value", "operator": "gt", "value": 1},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "1e309"}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects boolean actual",
+      "condition": {"attribute": "value", "operator": "gte", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects leading zero actual",
+      "condition": {"attribute": "value", "operator": "gt", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "01"}},
+      "expected_match": false
+    },
+    {
+      "name": "numeric rejects leading plus actual",
+      "condition": {"attribute": "value", "operator": "gt", "value": 0},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": "+1"}},
+      "expected_match": false
+    },
+    {
+      "name": "exists treats empty string as present",
+      "condition": {"attribute": "value", "operator": "exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": ""}},
+      "expected_match": true
+    },
+    {
+      "name": "exists treats false as present",
+      "condition": {"attribute": "value", "operator": "exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": true
+    },
+    {
+      "name": "exists treats zero as present",
+      "condition": {"attribute": "value", "operator": "exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": 0}},
+      "expected_match": true
+    },
+    {
+      "name": "exists treats null as absent",
+      "condition": {"attribute": "value", "operator": "exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": null}},
+      "expected_match": false
+    },
+    {
+      "name": "not exists matches null",
+      "condition": {"attribute": "value", "operator": "not_exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": null}},
+      "expected_match": true
+    },
+    {
+      "name": "not exists matches omitted attribute",
+      "condition": {"attribute": "value", "operator": "not_exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {}},
+      "expected_match": true
+    },
+    {
+      "name": "not exists rejects present falsy value",
+      "condition": {"attribute": "value", "operator": "not_exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": false}},
+      "expected_match": false
+    },
+    {
+      "name": "not exists ignores inherited object properties",
+      "condition": {"attribute": "toString", "operator": "not_exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {}},
+      "expected_match": true
+    },
+    {
+      "name": "null never reaches value comparison",
+      "condition": {"attribute": "value", "operator": "equals", "value": "null"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {"value": null}},
+      "expected_match": false
+    },
+    {
+      "name": "omitted user identity is absent",
+      "condition": {"attribute": "user_id", "operator": "not_exists"},
+      "context": {"anonymous_id": "fixture-unit", "attributes": {}},
+      "expected_match": true
+    }
+  ],
+  "invalid_condition_cases": [
+    {
+      "name": "regex is not a supported operator",
+      "condition": {"attribute": "value", "operator": "regex", "value": "^pro$"}
+    },
+    {
+      "name": "equals rejects array expected",
+      "condition": {"attribute": "value", "operator": "equals", "value": ["pro"]}
+    },
+    {
+      "name": "not equals rejects object expected",
+      "condition": {"attribute": "value", "operator": "not_equals", "value": {"plan": "pro"}}
+    },
+    {
+      "name": "contains rejects non-string expected",
+      "condition": {"attribute": "value", "operator": "contains", "value": 1}
+    },
+    {
+      "name": "not contains rejects non-string expected",
+      "condition": {"attribute": "value", "operator": "not_contains", "value": false}
+    },
+    {
+      "name": "in rejects empty list",
+      "condition": {"attribute": "value", "operator": "in", "value": []}
+    },
+    {
+      "name": "not in rejects scalar expected",
+      "condition": {"attribute": "value", "operator": "not_in", "value": "US"}
+    },
+    {
+      "name": "in rejects object member",
+      "condition": {"attribute": "value", "operator": "in", "value": [{"country": "US"}]}
+    },
+    {
+      "name": "numeric rejects boolean expected",
+      "condition": {"attribute": "value", "operator": "gt", "value": true}
+    },
+    {
+      "name": "numeric rejects whitespace expected",
+      "condition": {"attribute": "value", "operator": "gt", "value": " 1"}
+    },
+    {
+      "name": "numeric rejects hexadecimal expected",
+      "condition": {"attribute": "value", "operator": "gt", "value": "0x10"}
+    },
+    {
+      "name": "numeric rejects overflow expected",
+      "condition": {"attribute": "value", "operator": "gt", "value": "1e309"}
+    },
+    {
+      "name": "presence operator rejects explicit null value",
+      "condition": {"attribute": "value", "operator": "exists", "value": null}
+    },
+    {
+      "name": "value operator rejects null",
+      "condition": {"attribute": "value", "operator": "equals", "value": null}
+    }
+  ],
+  "unit_cases": [
+    {
+      "name": "non-empty user identity is available",
+      "bucket_by": "user_id",
+      "context": {"user_id": "user-1", "attributes": {}},
+      "expected_available": true
+    },
+    {
+      "name": "non-empty custom string identity is available",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": "account-1"}},
+      "expected_available": true
+    },
+    {
+      "name": "empty string identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": ""}},
+      "expected_available": false
+    },
+    {
+      "name": "null identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": null}},
+      "expected_available": false
+    },
+    {
+      "name": "missing identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {}},
+      "expected_available": false
+    },
+    {
+      "name": "boolean identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": false}},
+      "expected_available": false
+    },
+    {
+      "name": "numeric identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": 1}},
+      "expected_available": false
+    },
+    {
+      "name": "array identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": ["account-1"]}},
+      "expected_available": false
+    },
+    {
+      "name": "object identity is unavailable",
+      "bucket_by": "account_id",
+      "context": {"attributes": {"account_id": {"id": "account-1"}}},
+      "expected_available": false
+    }
+  ]
+}

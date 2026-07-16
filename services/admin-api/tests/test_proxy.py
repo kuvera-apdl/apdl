@@ -65,9 +65,11 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
     )
     credential_id = insert[1][0]
     assert insert[1][1] == "demo"
-    assert insert[1][2] == hashlib.sha256(seen_key.encode()).hexdigest()
-    assert insert[1][3] == sorted(admin_session.projects["demo"])
-    assert insert[1][4] == 300
+    assert insert[1][2] == "proj_demo_"
+    assert insert[1][3] == hashlib.sha256(seen_key.encode()).hexdigest()
+    assert insert[1][4] == sorted(admin_session.projects["demo"])
+    assert insert[1][5] == 300
+    assert "'confidential'" in insert[0]
     removal = next(
         statement
         for statement in statements
@@ -203,6 +205,48 @@ async def test_proxy_requires_role_before_calling_upstream(
 
     assert response.status_code == 403
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_self_registered_project_cannot_mint_agents_execution_credential(
+    admin_session: AdminSession,
+) -> None:
+    self_registered = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {
+                "demo": frozenset(
+                    {
+                        "events:write",
+                        "config:read",
+                        "config:write",
+                        "config:evaluate",
+                        "query:read",
+                        "agents:read",
+                    }
+                )
+            },
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(202)
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        self_registered,
+        make_settings(service_api_keys={}),
+    ) as client:
+        response = client.post("/api/projects/demo/agents/v1/agents/trigger")
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient role"}
+    assert not called
+    assert statements == []
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,11 @@
-// Experiment status is a free-form string (loose schema, plan §1.5) — known
-// values get semantic colors, anything else renders neutrally.
+// Canonical experiment statuses get semantic colors.
 import { cn } from '@/lib/utils'
 
 const KNOWN_STATUS_STYLES: Record<string, string> = {
   draft:
     'border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300',
+  scheduled:
+    'border-violet-200 bg-violet-100 text-violet-800 dark:border-violet-900 dark:bg-violet-950/60 dark:text-violet-300',
   running:
     'border-emerald-200 bg-emerald-100 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/60 dark:text-emerald-300',
   completed:

@@ -84,6 +84,7 @@ describe('FlagDetailPage', () => {
     renderDetail('/flags/checkout-cta?tab=audit')
     expect(await screen.findByText('v2 → v3')).toBeInTheDocument()
     expect(screen.getAllByText('kirill').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('manual').length).toBeGreaterThan(0)
     expect(screen.getByText('created')).toBeInTheDocument()
   })
 

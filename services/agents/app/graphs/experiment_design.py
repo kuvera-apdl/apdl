@@ -255,6 +255,7 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
             experiment_id=experiment_id or flag_key,
             hypothesis=description,
             variants=variants,
+            default_variant=flag_config.get("default_variant"),
             primary_metric=experiment.get("primary_metric", {}),
             secondary_metrics=experiment.get("secondary_metrics"),
             guardrail_metrics=experiment.get("guardrail_metrics"),

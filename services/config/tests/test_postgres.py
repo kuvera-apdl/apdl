@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -46,74 +45,6 @@ async def test_get_flag_uses_explicit_canonical_projection():
     assert "variants" in pool.sql
     assert "default_value" not in pool.sql
     assert pool.args == ("apdl", "checkout")
-
-
-@pytest.mark.asyncio
-async def test_create_flag_writes_canonical_defaults_when_internal_payload_omits_them():
-    pool = RecordingFetchRowPool(row=make_row())
-
-    created = await postgres.create_flag(pool, {
-        "key": "checkout",
-        "project_id": "apdl",
-        "name": "Checkout",
-        "salt": "salt_123",
-    })
-
-    assert created is not None
-    assert "RETURNING *" not in pool.sql
-    assert "default_value" not in pool.sql
-    assert json.loads(pool.args[9]) == [
-        {"key": "control", "weight": 1},
-        {"key": "treatment", "weight": 1},
-    ]
-    assert json.loads(pool.args[11]) == {
-        "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
-    }
-
-
-@pytest.mark.asyncio
-async def test_update_flag_uses_explicit_canonical_returning():
-    pool = RecordingFetchRowPool(row=make_row())
-
-    updated = await postgres.update_flag(pool, make_row(), expected_version=1)
-
-    assert updated is not None
-    assert "RETURNING *" not in pool.sql
-    assert "default_variant" in pool.sql
-    assert "variants" in pool.sql
-    assert "default_value" not in pool.sql
-
-
-@pytest.mark.asyncio
-async def test_archive_flag_uses_explicit_canonical_returning():
-    pool = RecordingFetchRowPool(row=make_row({"state": "archived"}))
-
-    archived = await postgres.archive_flag(pool, "apdl", "checkout")
-
-    assert archived is not None
-    assert "RETURNING *" not in pool.sql
-    assert "default_variant" in pool.sql
-    assert "variants" in pool.sql
-    assert "default_value" not in pool.sql
-
-
-@pytest.mark.asyncio
-async def test_disable_flag_uses_explicit_canonical_returning():
-    pool = RecordingFetchRowPool(row=make_row({"state": "disabled"}))
-
-    disabled = await postgres.disable_flag(
-        pool,
-        project_id="apdl",
-        key="checkout",
-        reason="guardrail_failed",
-        source="system",
-    )
-
-    assert disabled is not None
-    assert "RETURNING *" not in pool.sql
-    assert "default_variant" in pool.sql
-    assert "variants" in pool.sql
-    assert "default_value" not in pool.sql
 
 
 def test_row_to_flag_omits_obsolete_columns_from_legacy_records():
@@ -195,54 +126,15 @@ async def test_get_experiment_uses_explicit_projection():
 
 
 @pytest.mark.asyncio
-async def test_create_experiment_writes_canonical_columns():
-    pool = RecordingExecutePool()
+async def test_get_due_experiments_uses_database_timestamp_comparison():
+    pool = RecordingPool()
+    now = object()
 
-    ok = await postgres.create_experiment(pool, {
-        "key": "checkout",
-        "project_id": "apdl",
-        "status": "running",
-        "description": "d",
-        "flag_key": "checkout",
-        "default_variant": "control",
-        "variants_json": '[{"key":"control","weight":1}]',
-        "targeting_rules_json": "[]",
-        "primary_metric_json": '{"event":"purchase"}',
-        "traffic_percentage": 100.0,
-        "start_date": "",
-        "end_date": "",
-    })
+    await postgres.get_due_experiments(pool, now)
 
-    assert ok is True
-    assert "flag_key" in pool.sql
-    assert "primary_metric_json" in pool.sql
-    assert "checkout" in pool.args
-    assert '{"event":"purchase"}' in pool.args
-
-
-@pytest.mark.asyncio
-async def test_update_experiment_writes_canonical_columns_and_not_flag_key():
-    pool = RecordingExecutePool(result="UPDATE 1")
-
-    ok = await postgres.update_experiment(pool, {
-        "key": "checkout",
-        "project_id": "apdl",
-        "status": "stopped",
-        "description": "d",
-        "default_variant": "treatment",
-        "variants_json": "[]",
-        "targeting_rules_json": "[]",
-        "primary_metric_json": "{}",
-        "traffic_percentage": 50.0,
-        "start_date": "",
-        "end_date": "",
-    })
-
-    assert ok is True
-    assert "default_variant" in pool.sql
-    assert "primary_metric_json" in pool.sql
-    # flag_key is an immutable link — never rewritten on update.
-    assert "flag_key" not in pool.sql
+    assert "status = 'scheduled' AND start_date <= $1" in pool.sql
+    assert "status = 'running' AND end_date <= $1" in pool.sql
+    assert pool.args == (now,)
 
 
 def test_row_to_experiment_includes_canonical_columns():
@@ -259,6 +151,7 @@ def test_row_to_experiment_includes_canonical_columns():
         "traffic_percentage": 100.0,
         "start_date": "",
         "end_date": "",
+        "version": 3,
         "created_at": "2026-06-01T00:00:00+00:00",
         "updated_at": "2026-06-01T00:00:00+00:00",
     }
@@ -269,6 +162,7 @@ def test_row_to_experiment_includes_canonical_columns():
     assert exp["default_variant"] == "control"
     assert exp["primary_metric_json"] == "{}"
     assert exp["traffic_percentage"] == 100.0
+    assert exp["version"] == 3
 
 
 def test_create_experiments_table_defines_canonical_columns():
@@ -300,18 +194,6 @@ class RecordingPool:
         self.sql = sql
         self.args = args
         return []
-
-
-class RecordingExecutePool:
-    def __init__(self, result: str = "INSERT 0 1"):
-        self.result = result
-        self.sql = ""
-        self.args = ()
-
-    async def execute(self, sql: str, *args):
-        self.sql = sql
-        self.args = args
-        return self.result
 
 
 class RecordingFetchRowPool:
@@ -347,7 +229,7 @@ def make_row(overrides: dict | None = None) -> dict:
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
-        "auto_disable": True,
+        "auto_disable": False,
         "guardrails": [],
         "disabled_reason": "",
         "disabled_by": "",

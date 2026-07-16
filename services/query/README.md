@@ -8,12 +8,13 @@ against ClickHouse over FastAPI (port **8082**).
 
 - Translates declarative event selectors into parameterized ClickHouse SQL
   against the `events` table (funnels use `windowFunnel`)
-- Computes experiment results from `$experiment_exposure` events with
-  frequentist, Bayesian, or sequential statistics (SciPy/NumPy)
-- Evaluates feature-flag guardrails (frontend error rate/count) against the
-  `feature_flag_exposures` and `frontend_health_events` tables, with an
-  optional background monitor that polls and reports to the config service
-- Maintains an async ClickHouse connection pool (native protocol via `asynch`)
+- Computes conversion experiment results from authoritative Config metadata
+  and first-exposure attribution, including crossover diagnostics and
+  Bonferroni-corrected comparisons against the declared control
+- Evaluates feature-flag guardrails read-only against the
+  `feature_flag_exposures` and `frontend_health_events` tables
+- Enforces bounded execution time, ClickHouse read/result/memory limits, and
+  fail-fast per-project concurrency across every analytics route
 
 ## API
 
@@ -29,7 +30,7 @@ credential; health and readiness probes remain public.
 | `POST` | `/v1/query/funnel` | N-step funnel (2–20 steps, 1–90 day window) |
 | `POST` | `/v1/query/cohort` | Compare a metric across values of a user property |
 | `POST` | `/v1/query/retention` | Day/week retention from a cohort selector to a return selector |
-| `GET`  | `/v1/query/experiment/{id}?metric=...&flag_key=...&method=...` | Statistical experiment analysis (`flag_key` required) |
+| `GET`  | `/v1/query/experiment/{key}` | Config-owned conversion experiment analysis |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate a feature-flag guardrail on demand |
 | `GET`  | `/health` / `/ready` | Liveness / ClickHouse readiness probes |
 
@@ -50,6 +51,15 @@ plus up to 25 property filters, AND-combined. Supported operators: `eq`, `neq`,
 
 See the [main README](../../README.md) for more selector examples across
 endpoints.
+
+## Actor identity and totals
+
+All user-counting queries use one namespaced actor identity: `u:<user_id>`
+when `user_id` is present, otherwise `a:<anonymous_id>`. Events with neither
+identity do not contribute to unique-user counts. The namespace prevents the
+same raw text in the two identity domains from being collapsed accidentally.
+Range-wide totals are computed directly with `uniqExact`; they are never
+derived by summing per-bucket unique counts.
 
 ### Example: event counts
 
@@ -72,22 +82,23 @@ curl -s http://localhost:8082/v1/query/events/count \
 
 ## Experiment statistics
 
-`GET /v1/query/experiment/{id}` joins `$experiment_exposure` assignments with
-post-exposure metric events (zero-filling exposed non-converters) and runs one
-of three implemented methods. `flag_key` is a **required** query parameter —
-exposures are keyed by flag, so it selects the data; `{id}` is a label only and
-does not filter (by convention the flag key equals the experiment id):
+`GET /v1/query/experiment/{key}` accepts only the experiment key and optional
+tenant-matching `project_id`. Query obtains the flag key, declared variants,
+control, conversion metric, lifecycle state, immutable analysis window, and
+version from Config; caller-supplied analysis metadata is rejected.
 
-- **`frequentist`** — Welch's t-test with Cohen's d effect size and a CI for
-  the difference in means
-- **`bayesian`** — Beta-Binomial conversion model (metric binarized as
-  converted/not), Monte Carlo `P(treatment > control)`, expected loss;
-  significant past 95%
-- **`sequential`** — mixture sequential probability ratio test (mSPRT) with an
-  always-valid p-value, safe to peek at any time
-
-The analyzer also ships CUPED variance reduction and sample-size calculation
-helpers (not yet exposed over HTTP).
+The query assigns each namespaced actor to its first exposure, counts only
+post-exposure conversions inside the authoritative window, zero-fills exposed
+non-converters, reports crossover and unknown-variant actors, and compares
+every treatment with the declared control. Responses are a strict
+`analysis_status` union: `ready` contains finite two-proportion statistics with
+Bonferroni correction; `insufficient_data` contains a machine-readable reason.
+Config timestamps are converted to explicit UTC epoch-millisecond boundaries
+before querying ClickHouse's `DateTime64(3)` columns, preserving the declared
+half-open `[start, end)` window across offsets and fractional seconds.
+Scheduled experiments do not query ClickHouse. Draft or malformed experiments
+are rejected by Config. Automatic stopping, shipping, and rollback are not
+supported in the OSS developer preview.
 
 ## Configuration
 
@@ -99,13 +110,24 @@ helpers (not yet exposed over HTTP).
 | `CLICKHOUSE_PASSWORD` | `""` | ClickHouse password |
 | `CLICKHOUSE_DB` | `apdl` | Database name |
 | `CLICKHOUSE_POOL_SIZE` | `10` | Connection pool size |
+| `CONFIG_SERVICE_URL` | `http://localhost:8081` | Authoritative experiment metadata service |
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
-| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for guardrail automation |
-| `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
-| `GUARDRAIL_MONITOR_ENABLED` | `false` | Enable the background guardrail monitor |
-| `GUARDRAIL_PROJECT_IDS` | `""` | Comma-separated projects to monitor |
-| `GUARDRAIL_MONITOR_INTERVAL_SECONDS` | `60` | Monitor poll interval |
-| `CONFIG_SERVICE_URL` | `http://localhost:8081` | Config service for guardrail actions |
+| `QUERY_TIMEOUT_SECONDS` | `10` | Wall-clock and ClickHouse execution limit (1–30s) |
+| `QUERY_MAX_CONCURRENT_PER_PROJECT` | `2` | Fail-fast active-query limit per project (1–10) |
+| `QUERY_MAX_ROWS_TO_READ` | `5000000` | ClickHouse rows-read limit |
+| `QUERY_MAX_BYTES_TO_READ` | `536870912` | ClickHouse bytes-read limit |
+| `QUERY_MAX_RESULT_ROWS` | `10000` | Maximum result rows |
+| `QUERY_MAX_RESULT_BYTES` | `16777216` | Maximum result bytes |
+| `QUERY_MAX_MEMORY_BYTES` | `536870912` | Per-query ClickHouse memory limit |
+| `QUERY_MAX_THREADS` | `4` | Per-query ClickHouse thread limit |
+
+Automatic guardrail enforcement is disabled in the OSS developer preview.
+Guardrail queries are read-only and never mutate Config state.
+
+Experiment analysis synchronously delegates the already authenticated
+project-scoped `X-API-Key` to Config. Config independently reauthenticates it
+and permits only its read-only analysis projection to credentials carrying
+`query:read`; no second service credential or caller-selected project is used.
 
 ## Running locally
 

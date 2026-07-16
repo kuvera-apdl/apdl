@@ -54,8 +54,9 @@ def test_event_count_qualifies_event_name_to_avoid_alias_shadow():
     # would match all events (returning the grand total). The filter must
     # target the real column, events.event_name.
     sql = build_event_count_query([_sel("page"), _sel("$click")], {})
-    assert sql.count("events.event_name =") == 2
+    assert sql.count("events.event_name =") == 4
     assert "AS event_name" in sql
+    assert "1 AS is_total" in sql
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { FlagCache } from '../../src/flags/cache';
 import { SSEHandlers } from '../../src/sse/handlers';
 import type { FlagConfig } from '../../src/flags/types';
@@ -48,6 +48,7 @@ describe('SSEHandlers', () => {
       type: 'flag_update',
       data: JSON.stringify({
         action: 'flag_created',
+        version: 1,
         flag: makeFlag('created', {
           fallthrough: {
             rollout: { percentage: 20, bucket_by: 'user_id' },
@@ -83,6 +84,7 @@ describe('SSEHandlers', () => {
       data: JSON.stringify({
         action: 'flag_removed',
         key: 'delete-me',
+        version: 2,
       }),
     });
 
@@ -168,10 +170,153 @@ describe('SSEHandlers', () => {
         action: 'flag_updated',
         key: 'toggle-me',
         enabled: false,
+        version: 2,
       }),
     });
 
     expect(cache.get('toggle-me')?.enabled).toBe(true);
+  });
+
+  it('ignores stale and duplicate updates without notifying listeners', () => {
+    const cache = new FlagCache();
+    const handlers = new SSEHandlers(cache, null);
+
+    handlers.handle({
+      type: 'config',
+      data: JSON.stringify({
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('checkout', { version: 3 })],
+      }),
+    });
+
+    const listener = vi.fn();
+    cache.onChange(listener);
+    const cacheVersion = cache.getVersion();
+
+    for (const version of [2, 3]) {
+      handlers.handle({
+        type: 'flag_update',
+        data: JSON.stringify({
+          action: 'flag_updated',
+          version,
+          flag: makeFlag('checkout', { enabled: false, version }),
+        }),
+      });
+    }
+
+    expect(cache.get('checkout')).toMatchObject({ enabled: true, version: 3 });
+    expect(cache.getAuthoritativeVersion('checkout')).toBe(3);
+    expect(cache.getVersion()).toBe(cacheVersion);
+    expect(listener).not.toHaveBeenCalled();
+
+    handlers.handle({
+      type: 'flag_update',
+      data: JSON.stringify({
+        action: 'flag_updated',
+        version: 4,
+        flag: makeFlag('checkout', { enabled: false, version: 4 }),
+      }),
+    });
+
+    expect(cache.get('checkout')).toMatchObject({ enabled: false, version: 4 });
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores stale removals and prevents old creates from resurrecting tombstones', () => {
+    const cache = new FlagCache();
+    const handlers = new SSEHandlers(cache, null);
+
+    handlers.handle({
+      type: 'config',
+      data: JSON.stringify({
+        schema_version: 2,
+        project_id: 'apdl',
+        flags: [makeFlag('checkout', { version: 3 })],
+      }),
+    });
+
+    for (const version of [2, 3]) {
+      handlers.handle({
+        type: 'flag_update',
+        data: JSON.stringify({
+          action: 'flag_removed',
+          key: 'checkout',
+          version,
+        }),
+      });
+    }
+
+    expect(cache.get('checkout')).toBeDefined();
+    expect(cache.getAuthoritativeVersion('checkout')).toBe(3);
+
+    handlers.handle({
+      type: 'flag_update',
+      data: JSON.stringify({
+        action: 'flag_removed',
+        key: 'checkout',
+        version: 4,
+      }),
+    });
+
+    expect(cache.get('checkout')).toBeUndefined();
+    expect(cache.getAuthoritativeVersion('checkout')).toBe(4);
+
+    for (const version of [3, 4]) {
+      handlers.handle({
+        type: 'flag_update',
+        data: JSON.stringify({
+          action: 'flag_created',
+          version,
+          flag: makeFlag('checkout', { version }),
+        }),
+      });
+    }
+
+    expect(cache.get('checkout')).toBeUndefined();
+    expect(cache.getAuthoritativeVersion('checkout')).toBe(4);
+  });
+
+  it('records removals for unknown keys before any older create arrives', () => {
+    const cache = new FlagCache();
+    const handlers = new SSEHandlers(cache, null);
+
+    handlers.handle({
+      type: 'flag_update',
+      data: JSON.stringify({
+        action: 'flag_removed',
+        key: 'ghost',
+        version: 5,
+      }),
+    });
+    handlers.handle({
+      type: 'flag_update',
+      data: JSON.stringify({
+        action: 'flag_created',
+        version: 4,
+        flag: makeFlag('ghost', { version: 4 }),
+      }),
+    });
+
+    expect(cache.get('ghost')).toBeUndefined();
+    expect(cache.getAuthoritativeVersion('ghost')).toBe(5);
+  });
+
+  it('rejects update envelopes whose version disagrees with the flag', () => {
+    const cache = new FlagCache();
+    const handlers = new SSEHandlers(cache, null);
+
+    handlers.handle({
+      type: 'flag_update',
+      data: JSON.stringify({
+        action: 'flag_created',
+        version: 4,
+        flag: makeFlag('mismatch', { version: 5 }),
+      }),
+    });
+
+    expect(cache.get('mismatch')).toBeUndefined();
+    expect(cache.getAuthoritativeVersion('mismatch')).toBeNull();
   });
 });
 

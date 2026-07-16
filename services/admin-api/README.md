@@ -20,8 +20,10 @@ and every proxied request is authorized against a user, project, and role.
   rows in `admin_user_projects`, so registration cannot grant tenant access or
   service roles.
 - Authenticated users can create a project through `POST /api/projects`. The
-  project record and full creator membership are committed together, and the
-  updated project list is returned to the console.
+  project record and creator membership are committed together, and the
+  updated project list is returned to the console. Creator membership includes
+  core analytics plus `agents:read`, but excludes Agents run, management, and
+  approval authority.
 - Unsafe requests require an exact allowed `Origin`, a CSRF cookie, a matching
   header, and the session-bound CSRF digest.
 - `/api/projects/{project_id}/{service}/...` is deny-by-default. The proxy
@@ -47,9 +49,10 @@ make run-admin
 ```
 
 Open `http://localhost:5173/register` and create an account. Registration starts
-an authenticated session with an empty project list. An operator must add
-project membership and roles separately before the account can access service
-data.
+an authenticated session with an empty project list. The user may create a
+core analytics project from the workspace settings, or an operator may grant
+membership to an operator-provisioned project. Self-created projects expose
+Agents history read-only and cannot execute LLM work.
 
 `make create-admin-user` remains available for bootstrap, recovery, and
 non-browser provisioning. It prompts for the password without placing it in

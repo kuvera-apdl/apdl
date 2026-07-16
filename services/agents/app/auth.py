@@ -19,14 +19,19 @@ _DUMMY_KEY_HASH = "0" * 64
 
 logger = logging.getLogger(__name__)
 
+_SELF_REGISTERED_DENIED_ROLES = frozenset(
+    {"agents:run", "agents:manage", "agents:approve"}
+)
+
 
 @dataclass(frozen=True)
 class Principal:
-    """Verified credential authority. Project and roles only come from storage."""
+    """Verified credential authority derived only from canonical storage."""
 
     credential_id: str
     project_id: str
     roles: frozenset[str]
+    self_registered_project: bool
 
 
 class PostgresAuthenticator:
@@ -44,10 +49,15 @@ class PostgresAuthenticator:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT credential_id, project_id, key_hash, roles,
-                           active, expires_at
-                    FROM auth_credentials
-                    WHERE key_hash = $1
+                    SELECT credential.credential_id, credential.project_id,
+                           credential.key_hash, credential.roles,
+                           credential.active, credential.expires_at,
+                           (project.created_by IS NOT NULL)
+                               AS self_registered_project
+                    FROM auth_credentials AS credential
+                    JOIN admin_projects AS project
+                      ON project.project_id = credential.project_id
+                    WHERE credential.key_hash = $1
                     """,
                     provided_hash,
                 )
@@ -72,6 +82,7 @@ class PostgresAuthenticator:
             credential_id=str(row["credential_id"]),
             project_id=stored_project,
             roles=frozenset(str(role) for role in row["roles"]),
+            self_registered_project=bool(row["self_registered_project"]),
         )
 
 
@@ -99,6 +110,11 @@ async def authenticate_request(request: Request) -> Principal:
 
 def require_role(request: Request, role: str) -> Principal:
     principal: Principal = request.state.principal
+    if principal.self_registered_project and role in _SELF_REGISTERED_DENIED_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Agents execution is unavailable for self-registered projects",
+        )
     if role not in principal.roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

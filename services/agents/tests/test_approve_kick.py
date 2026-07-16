@@ -207,6 +207,7 @@ async def test_approval_requires_agents_approve_role():
             credential_id="runner",
             project_id="demo",
             roles=frozenset({"agents:run"}),
+            self_registered_project=False,
         )
         request.state.principal = principal
         return principal
@@ -221,6 +222,47 @@ async def test_approval_requires_agents_approve_role():
 
     assert response.status_code == 403
     assert app.state.pg_pool.conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_self_registered_overprivileged_project_cannot_apply_approval(
+    monkeypatch,
+):
+    async def authenticate_self_registered(request: Request):
+        principal = Principal(
+            credential_id="self-registered",
+            project_id="demo",
+            roles=frozenset(
+                {"agents:read", "agents:run", "agents:manage", "agents:approve"}
+            ),
+            self_registered_project=True,
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_self_registered
+    enqueued, supervisor_calls, deployed = _patch(monkeypatch)
+    store = {
+        "run": _run_row(),
+        "results": [{"output": json.dumps([_PROPOSAL])}],
+    }
+
+    async with _client(store) as client:
+        response = await client.post(
+            "/v1/agents/run-1/approve",
+            json={"approved": True},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Agents execution is unavailable for self-registered projects"
+    )
+    assert store["run"]["status"] == "waiting_approval"
+    assert app.state.pg_pool.conn.fetchvals == []
+    assert app.state.pg_pool.conn.executed == []
+    assert enqueued == []
+    assert deployed == []
+    assert supervisor_calls == []
 
 
 @pytest.mark.asyncio

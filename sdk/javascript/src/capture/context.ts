@@ -26,7 +26,9 @@ export class ContextCollector {
       context.browser = browserInfo;
       context.os = osInfo;
       context.device = { type: deviceType };
-      context.locale = navigator.language || undefined;
+      if (navigator.language) {
+        context.locale = navigator.language;
+      }
     }
 
     if (typeof screen !== 'undefined') {
@@ -44,11 +46,16 @@ export class ContextCollector {
     }
 
     if (typeof document !== 'undefined') {
-      context.referrer = document.referrer || undefined;
+      if (document.referrer) {
+        context.referrer = document.referrer;
+      }
     }
 
     try {
-      context.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (timezone) {
+        context.timezone = timezone;
+      }
     } catch {
       // Intl not available
     }

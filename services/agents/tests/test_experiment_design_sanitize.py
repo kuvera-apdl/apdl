@@ -17,7 +17,7 @@ def _design() -> dict:
             {"key": "control", "weight": 50, "description": "human-readable rationale"},
             {"key": "treatment", "weight": 50, "description": "human-readable rationale"},
         ],
-        "primary_metric": {"event": "page", "type": "count", "direction": "increase"},
+        "primary_metric": {"event": "page", "type": "conversion", "direction": "increase"},
         "guardrail_metrics": [{"event": "$frontend_error", "threshold": "x", "direction": "decrease"}],
         "targeting": {"conditions": []},
         "flag_config": {
@@ -37,7 +37,7 @@ def _design() -> dict:
             ],
             "fallthrough": {"rollout": {"percentage": 100, "bucket_by": "user_id"}},
             "evaluation_mode": "client",
-            "auto_disable": True,
+            "auto_disable": False,
         },
     }
 

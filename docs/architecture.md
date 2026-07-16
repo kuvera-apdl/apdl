@@ -34,15 +34,18 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 ```
 
 - Ingestion verifies API keys against the hashed credential registry, derives
-  project/role authority server-side, rate-limits per project (token bucket:
-  1000 capacity, 100/s refill), validates batches
-  (1–500 events), and appends to `events:raw:{project_id}` (`MAXLEN ~1M`).
+  project/role authority server-side, applies a shared Redis token bucket
+  charged by event count and bytes, validates bounded strict JSON batches
+  (1–100 canonical events), and atomically appends each complete batch to
+  `events:raw:{project_id}` (`MAXLEN ~1M`).
 - The ClickHouse writer consumes via a consumer group and flushes batches of
-  1000 events or every 5 s, retrying up to 5 times before dropping a batch.
-- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) handles
-  custom-event records on a canonical envelope (`_schema` discriminator) into
-  the v2 tables (`events_v2`, `decisions_v2`, `feeds_v2`) — the same transforms
-  run for live traffic, backfills, and replays.
+  1000 events or every 5 s. Redis deliveries are acknowledged only after a
+  durable ClickHouse insert or bounded DLQ record. Stable client message IDs
+  and `ReplacingMergeTree` keys make supported `FINAL` reads idempotent after
+  an insert-before-ACK replay.
+- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) and its
+  v2 tables are experimental and are not part of the live developer-preview
+  event path.
 
 ### 2. Flags & experiments (config path)
 
@@ -76,10 +79,13 @@ ClickHouse ──→ Query Service ──→ Agents ──(safety gate)──→
 - The LLM router tries providers in order (OpenAI → Anthropic → Google →
   local), skipping providers without keys; agent memory is embedded into a
   pgvector table for retrieval across runs.
-- Every proposed action passes a safety validator and an autonomy gate
-  (L1 suggest-only → L4 full-auto); risky actions queue for human approval,
-  everything is audit-logged, and a rollback monitor disables an experiment's
-  flag if error-rate/latency/primary-metric guardrails breach.
+- Agents execution is available only to operator-provisioned projects;
+  self-created projects retain read-only history and definitions. Every
+  proposed action for an eligible project passes a safety validator and an
+  autonomy gate (L1 suggest-only → L4 full-auto), risky actions queue for
+  human approval, and every attempt is audit-logged. Guardrail and rollback
+  assessment is read-only in this release: it never disables an experiment or
+  mutates Config automatically.
 - Codegen is reachable only through the private service network. A project role
   cannot choose a GitHub repository: a trusted operator separately grants one
   immutable repository ID, and each GitHub mutation uses a token restricted to

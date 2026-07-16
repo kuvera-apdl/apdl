@@ -86,7 +86,12 @@ class DecisionEnvelope(BaseModel):
 
     id: UUID = Field(alias="_id")
     schema_: _DecisionSchema = Field(alias="_schema")
-    project_id: int = Field(alias="_project_id", ge=1)
+    project_id: str = Field(
+        alias="_project_id",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
     idempotency_key: str = Field(alias="_idempotency_key", min_length=1, max_length=128)
     correlation_id: UUID | None = Field(default=None, alias="_correlation_id")
     source: str = Field(alias="_source", min_length=1, max_length=64)
@@ -98,16 +103,30 @@ class DecisionEnvelope(BaseModel):
 
 # ---------- idempotency helpers ----------
 
-def flag_eval_idempotency_key(project_id: int, flag_key: str, user_or_anon: str, bucket: int) -> str:
+def flag_eval_idempotency_key(
+    project_id: str,
+    flag_key: str,
+    user_or_anon: str,
+    bucket: int,
+) -> str:
     """Stable key so re-evaluating the same flag for the same user in the
     same bucket window collapses to one row in decisions_v2."""
     return f"feval:{project_id}:{flag_key}:{user_or_anon}:{bucket}"
 
 
-def exposure_idempotency_key(project_id: int, experiment_key: str, user_or_anon: str) -> str:
+def exposure_idempotency_key(
+    project_id: str,
+    experiment_key: str,
+    user_or_anon: str,
+) -> str:
     """One exposure per (experiment, user) — ever. Re-runs are no-ops in CH."""
     return f"expo:{project_id}:{experiment_key}:{user_or_anon}"
 
 
-def personalization_idempotency_key(project_id: int, slot_id: str, user_or_anon: str, variant: str) -> str:
+def personalization_idempotency_key(
+    project_id: str,
+    slot_id: str,
+    user_or_anon: str,
+    variant: str,
+) -> str:
     return f"pers:{project_id}:{slot_id}:{user_or_anon}:{variant}"

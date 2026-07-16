@@ -26,7 +26,10 @@ cd sdk/python && uv pip install -e ".[dev]"
 ```python
 from apdl import APDL
 
-client = APDL.init(api_key="proj_<project>_<secret>")  # secret: 16-128 alphanumeric chars
+client = APDL.init(
+    api_key="proj_<project>_<secret>",  # secret: 16-128 alphanumeric chars
+    endpoint="https://apdl.example.com",  # your APDL gateway origin
+)
 # The key format is validated at init (same regex as the ingestion/config
 # services); a malformed key raises immediately instead of 401-ing on first send.
 # client.project_id  -> "<project>" (client hint; servers verify authority)
@@ -41,13 +44,36 @@ client.page("/checkout", user_id="u_123")
 if client.get_variant("new-checkout", user_id="u_123") == "treatment":
     ...
 
-client.shutdown()  # flushes pending events and stops background threads
+report = client.shutdown()  # drains or returns every pending event, then stops
+if not report.complete:
+    persist_for_replay(report.undelivered_events)
 ```
+
+Event properties and traits must be canonical JSON: strings, finite numbers,
+booleans, nulls, arrays, and string-keyed objects. Cycles, Python-only values,
+excessive nesting/cardinality, and events over 64 KiB raise `ValueError`
+synchronously and never enter the background queue. Delivery batches stay
+within the ingestion service's 512 KiB request limit. HTTP 408/425/429,
+5xx, and network failures remain queued with their original `message_id`;
+permanent rejections are discarded so they cannot block later valid events.
+Optional event and context fields use omission as their only absent wire form;
+explicit `null`, unknown context fields, and context aliases are rejected.
+
+The Python server SDK accepts only confidential `proj_<project>_<secret>`
+credentials. Browser-safe `client_...` credentials belong to the JavaScript
+SDK and are intentionally rejected here.
+
+`endpoint` is always required: the SDK has no hosted-service fallback. Pass
+the HTTP(S) origin of the gateway you operate, without credentials, a path,
+query parameters, or a fragment.
 
 Or as a context manager (auto-shutdown):
 
 ```python
-with APDL.init(api_key="proj_demo_0123456789abcdef") as client:
+with APDL.init(
+    api_key="proj_demo_0123456789abcdef",
+    endpoint="http://localhost:8000",
+) as client:
     client.track("signup", user_id="u_999")
 ```
 
@@ -60,10 +86,10 @@ from apdl import APDL, APDLConfig
 
 client = APDL.init(APDLConfig(
     api_key="proj_demo_0123456789abcdef",
-    endpoint="https://api.apdl.dev",       # gateway origin for events + flags
+    endpoint="https://apdl.example.com",   # required gateway origin for events + flags
     batch_size=20,                         # 1..100
     flush_interval=3.0,                    # seconds between background flushes
-    max_queue_size=1000,                   # oldest events dropped past this
+    max_queue_size=1000,                   # new capture raises BufferError when full
     enable_flags=True,                     # fetch + poll flag configs
     flag_poll_interval=30.0,               # seconds between flag refreshes
     log_exposures=True,                    # emit $feature_flag_exposure events
@@ -71,6 +97,37 @@ client = APDL.init(APDLConfig(
     debug=False,
 ))
 ```
+
+## Lifecycle and delivery reports
+
+`flush()` and `shutdown()` return a `DeliveryReport` with `accepted`,
+`permanently_rejected`, and `undelivered_events`. A normal `flush()` serializes
+concurrent flush callers and completes one drain attempt. `shutdown()` first
+rejects new tracking calls, interrupts retry backoff, waits for any in-flight
+HTTP request to finish within `request_timeout`, makes at most one final attempt,
+and closes the transport only after the queue worker has stopped.
+
+Retryable events remain in the closed client's in-memory queue and are returned
+as detached snapshots with their original `message_id`. Persist that snapshot
+before process exit if it must survive a restart:
+
+```python
+report = client.shutdown()
+if report.undelivered:
+    save_json("apdl-undelivered.json", report.undelivered_events)
+```
+
+`shutdown()` is idempotent: concurrent or later callers receive the same report
+without another send or transport close. `client.pending_events` continues to
+report retained events, while `track`, `identify`, `group`, and `page` raise
+`RuntimeError` after shutdown starts. If a context manager performed shutdown,
+calling `client.shutdown()` once more retrieves the same report.
+
+The queue never evicts an event it already accepted. When `max_queue_size` is
+full, new tracking calls raise `BufferError` synchronously. If concurrent intake
+uses space temporarily freed by an in-flight request, a retry preserves both
+the original batch and the newer events even when this temporarily exceeds the
+intake cap; further intake is rejected until the queue drains.
 
 ## Variant feature flags
 

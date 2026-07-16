@@ -50,15 +50,20 @@ async def event_counts(body: EventCountRequest, request: Request) -> EventCountR
     query = build_event_count_query(body.selectors, params)
     rows = await client.execute(query, params)
 
-    total_events = sum(r.get("event_count", 0) for r in rows)
-    # Unique users across events requires a separate uniq, but as a pragmatic
-    # approximation we take the max unique_users across rows (for the overview)
-    # or sum them (which over-counts).  For accuracy we'd run a dedicated query.
-    # Here we return the sum-of-unique which is an upper bound.
-    total_users = sum(r.get("unique_users", 0) for r in rows)
+    total_rows = [row for row in rows if row.get("is_total") == 1]
+    if len(total_rows) != 1:
+        raise RuntimeError("event count query did not return one total row")
+    total = total_rows[0]
+    results = [
+        {key: value for key, value in row.items() if key != "is_total"}
+        for row in rows
+        if row.get("is_total") == 0
+    ]
 
     return EventCountResponse(
-        results=rows, total_events=total_events, total_users=total_users
+        results=results,
+        total_events=int(total["event_count"]),
+        total_users=int(total["unique_users"]),
     )
 
 

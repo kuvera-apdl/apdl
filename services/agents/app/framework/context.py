@@ -31,9 +31,6 @@ class AgentContext:
     #: When set, a forked code_implementation run targets exactly this proposal
     #: (one PR per approved proposal) instead of draining the project queue.
     target_proposal_id: str | None = None
-    #: When set, an experiment_evaluation run evaluates exactly this experiment
-    #: (a human's "evaluate now") instead of sweeping every running experiment.
-    target_experiment_id: str | None = None
 
 
 @dataclass

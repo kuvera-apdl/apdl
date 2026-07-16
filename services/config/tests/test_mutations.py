@@ -1,0 +1,513 @@
+"""Failure-injection tests for the sole Config write authority."""
+
+from copy import deepcopy
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.store import mutations
+
+
+class _Context:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _Transaction:
+    def __init__(self, conn):
+        self.conn = conn
+        self.snapshot = None
+        self.committed = False
+        self.rolled_back = False
+
+    async def __aenter__(self):
+        self.snapshot = deepcopy(self.conn.state)
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        if exc_type is None:
+            self.committed = True
+        else:
+            self.conn.state = self.snapshot
+            self.rolled_back = True
+        return False
+
+
+class FakeConn:
+    def __init__(self, owner: str | None = None):
+        self.owner = owner
+        self.state = {"flags": {}, "experiments": {}, "audits": [], "outbox": []}
+        self.last_transaction = None
+
+    def transaction(self):
+        self.last_transaction = _Transaction(self)
+        return self.last_transaction
+
+    async def fetchrow(self, sql: str, *args):
+        if "SELECT key" in sql and "FROM experiments" in sql:
+            return {"key": self.owner} if self.owner is not None else None
+        raise AssertionError(sql)
+
+
+class FakePool:
+    def __init__(self, conn: FakeConn):
+        self.conn = conn
+
+    def acquire(self):
+        return _Context(self.conn)
+
+
+def make_flag(overrides: dict | None = None) -> dict:
+    flag = {
+        "key": "checkout",
+        "project_id": "apdl",
+        "name": "Checkout",
+        "state": "active",
+        "owners": [],
+        "review_by": None,
+        "enabled": True,
+        "description": "",
+        "default_variant": "control",
+        "variants": [{"key": "control", "weight": 1}],
+        "rules": [],
+        "fallthrough": {
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"}
+        },
+        "salt": "salt",
+        "evaluation_mode": "client",
+        "auto_disable": False,
+        "guardrails": [],
+        "disabled_reason": "",
+        "disabled_by": "",
+        "disabled_at": None,
+        "archived_at": None,
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    if overrides:
+        flag.update(overrides)
+    return flag
+
+
+def make_experiment(overrides: dict | None = None) -> dict:
+    experiment = {
+        "key": "checkout_exp",
+        "project_id": "apdl",
+        "status": "draft",
+        "description": "",
+        "flag_key": "checkout",
+        "default_variant": "control",
+        "variants_json": '[{"key":"control","weight":1}]',
+        "targeting_rules_json": "[]",
+        "primary_metric_json": "{}",
+        "traffic_percentage": 100.0,
+        "start_date": None,
+        "end_date": None,
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    if overrides:
+        experiment.update(overrides)
+    return experiment
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["audit", "outbox"])
+async def test_flag_audit_or_outbox_failure_rolls_back_domain_row(
+    monkeypatch,
+    failure_stage,
+):
+    conn = FakeConn()
+    pool = FakePool(conn)
+
+    async def insert_flag(current, flag):
+        created = make_flag(flag)
+        current.state["flags"][created["key"]] = created
+        return created
+
+    async def audit_flag(current, **kwargs):
+        current.state["audits"].append(kwargs)
+        if failure_stage == "audit":
+            raise RuntimeError("injected audit failure")
+
+    async def enqueue_flag(current, action, flag):
+        current.state["outbox"].append((action, flag["version"]))
+        if failure_stage == "outbox":
+            raise RuntimeError("injected outbox failure")
+
+    monkeypatch.setattr(mutations, "_insert_flag", insert_flag)
+    monkeypatch.setattr(mutations, "_audit_flag", audit_flag)
+    monkeypatch.setattr(mutations, "_enqueue_flag_change", enqueue_flag)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        await mutations.create_standalone_flag(
+            pool,
+            make_flag(),
+            actor="credential:test",
+        )
+
+    assert conn.state == {
+        "flags": {},
+        "experiments": {},
+        "audits": [],
+        "outbox": [],
+    }
+    assert conn.last_transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_experiment_outbox_failure_rolls_back_flag_experiment_and_audit(
+    monkeypatch,
+):
+    conn = FakeConn()
+    pool = FakePool(conn)
+
+    async def insert_flag(current, flag):
+        created = make_flag(flag)
+        current.state["flags"][created["key"]] = created
+        return created
+
+    async def insert_experiment(current, experiment):
+        created = make_experiment(experiment)
+        current.state["experiments"][created["key"]] = created
+        return created
+
+    async def audit_flag(current, **kwargs):
+        current.state["audits"].append(kwargs)
+
+    async def enqueue_flag(current, action, flag):
+        current.state["outbox"].append((action, flag["version"]))
+
+    async def fail_experiment_outbox(current, action, experiment):
+        current.state["outbox"].append((action, experiment["version"]))
+        raise RuntimeError("injected experiment outbox failure")
+
+    monkeypatch.setattr(mutations, "_insert_flag", insert_flag)
+    monkeypatch.setattr(mutations, "_insert_experiment", insert_experiment)
+    monkeypatch.setattr(mutations, "_audit_flag", audit_flag)
+    monkeypatch.setattr(mutations, "_enqueue_flag_change", enqueue_flag)
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_experiment_change",
+        fail_experiment_outbox,
+    )
+
+    with pytest.raises(RuntimeError, match="injected"):
+        await mutations.create_experiment_bundle(
+            pool,
+            experiment=make_experiment(),
+            flag=make_flag(),
+            actor="credential:test",
+        )
+
+    assert not any(conn.state.values())
+    assert conn.last_transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command,kwargs",
+    [
+        (
+            mutations.update_standalone_flag,
+            {"expected_version": 1, "updates": {"description": "new"}},
+        ),
+        (
+            mutations.transition_standalone_flag,
+            {"expected_version": 1, "target_state": "draft"},
+        ),
+        (
+            mutations.disable_standalone_flag,
+            {
+                "expected_version": 1,
+                "reason": "guardrail_failed",
+                "evidence": {},
+            },
+        ),
+        (mutations.archive_standalone_flag, {"expected_version": 1}),
+        (
+            mutations.cleanup_standalone_flag,
+            {"expected_version": 1, "evidence": {}},
+        ),
+    ],
+)
+async def test_every_generic_flag_mutation_rejects_experiment_ownership(
+    monkeypatch,
+    command,
+    kwargs,
+):
+    conn = FakeConn(owner="checkout_exp")
+    pool = FakePool(conn)
+    monkeypatch.setattr(
+        mutations,
+        "_locked_flag",
+        AsyncMock(return_value=make_flag()),
+    )
+
+    with pytest.raises(mutations.ExperimentOwnedFlagError) as caught:
+        await command(
+            pool,
+            project_id="apdl",
+            key="checkout",
+            actor="credential:test",
+            **kwargs,
+        )
+
+    assert caught.value.experiment_key == "checkout_exp"
+    assert conn.last_transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "delete"])
+async def test_stale_experiment_version_fails_before_touching_backing_flag(
+    monkeypatch,
+    operation,
+):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=make_experiment({"version": 4})),
+    )
+    locked_flag = AsyncMock()
+    monkeypatch.setattr(mutations, "_locked_flag", locked_flag)
+
+    with pytest.raises(mutations.VersionConflictError) as caught:
+        if operation == "update":
+            await mutations.update_experiment_bundle(
+                pool,
+                desired=make_experiment({"version": 3}),
+                expected_version=3,
+                actor="credential:test",
+            )
+        else:
+            await mutations.delete_experiment_bundle(
+                pool,
+                project_id="apdl",
+                key="checkout_exp",
+                expected_version=3,
+                actor="credential:test",
+            )
+
+    assert caught.value.current_version == 4
+    locked_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_atomic_authority_freezes_analysis_fields_after_draft(monkeypatch):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    existing = make_experiment(
+        {
+            "status": "running",
+            "default_variant": "control",
+            "variants_json": (
+                '[{"key":"control","weight":1},'
+                '{"key":"treatment","weight":1}]'
+            ),
+            "primary_metric_json": (
+                '{"event":"purchase","type":"conversion"}'
+            ),
+            "start_date": "2026-07-01T00:00:00+00:00",
+            "end_date": "2026-08-01T00:00:00+00:00",
+        }
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=existing),
+    )
+    locked_flag = AsyncMock()
+    monkeypatch.setattr(mutations, "_locked_flag", locked_flag)
+
+    with pytest.raises(mutations.ImmutableExperimentError) as caught:
+        await mutations.update_experiment_bundle(
+            pool,
+            desired={**existing, "default_variant": "treatment"},
+            expected_version=1,
+            actor="credential:test",
+        )
+
+    assert caught.value.fields == ["default_variant"]
+    locked_flag.assert_not_awaited()
+    assert conn.last_transaction.rolled_back is True
+
+
+def test_atomic_authority_allows_status_only_change_after_draft():
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": "2026-07-01T00:00:00+00:00",
+            "end_date": "2026-08-01T00:00:00+00:00",
+        }
+    )
+
+    mutations.ensure_experiment_analysis_fields_immutable(
+        existing,
+        {**existing, "status": "stopped"},
+    )
+
+
+def test_terminal_transition_persists_actual_analysis_end():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    stop_time = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    planned_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": start.isoformat(),
+            "end_date": planned_end.isoformat(),
+        }
+    )
+
+    desired, allowed = mutations.finalize_terminal_analysis_window(
+        existing,
+        {**existing, "status": "stopped"},
+        now=stop_time,
+    )
+
+    assert desired["end_date"] == stop_time
+    assert allowed == frozenset({"end_date"})
+    mutations.ensure_experiment_analysis_fields_immutable(
+        existing,
+        desired,
+        allowed_fields=allowed,
+    )
+
+
+def test_terminal_transition_never_extends_planned_analysis_end():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    planned_end = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": start.isoformat(),
+            "end_date": planned_end.isoformat(),
+        }
+    )
+
+    desired, _ = mutations.finalize_terminal_analysis_window(
+        existing,
+        {**existing, "status": "completed"},
+        now=datetime(2026, 7, 11, tzinfo=timezone.utc),
+    )
+
+    assert desired["end_date"] == planned_end
+
+
+@pytest.mark.parametrize("status", ["draft", "scheduled"])
+def test_stopped_never_started_experiment_persists_no_analysis_window(status):
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    existing = make_experiment(
+        {
+            "status": status,
+            "start_date": start.isoformat(),
+            "end_date": datetime(2026, 8, 10, tzinfo=timezone.utc).isoformat(),
+        }
+    )
+
+    desired, allowed = mutations.finalize_terminal_analysis_window(
+        existing,
+        {**existing, "status": "stopped"},
+        now=datetime(2026, 7, 20, tzinfo=timezone.utc),
+    )
+
+    assert desired["end_date"] is None
+    assert allowed == frozenset({"end_date"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,start,end,expected",
+    [
+        (
+            "scheduled",
+            "2026-06-01T00:00:00+00:00",
+            "2026-07-01T00:00:00+00:00",
+            "running",
+        ),
+        (
+            "scheduled",
+            "2026-05-01T00:00:00+00:00",
+            "2026-06-01T00:00:00+00:00",
+            "stopped",
+        ),
+        (
+            "running",
+            "2026-05-01T00:00:00+00:00",
+            "2026-06-01T00:00:00+00:00",
+            "completed",
+        ),
+    ],
+)
+async def test_due_lifecycle_transition_is_one_atomic_bundle(
+    monkeypatch,
+    status,
+    start,
+    end,
+    expected,
+):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    experiment = make_experiment(
+        {"status": status, "start_date": start, "end_date": end}
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=experiment),
+    )
+    update_bundle = AsyncMock(return_value=(experiment, make_flag()))
+    monkeypatch.setattr(mutations, "_update_experiment_bundle", update_bundle)
+
+    await mutations.transition_due_experiment(
+        pool,
+        project_id="apdl",
+        key="checkout_exp",
+        expected_version=1,
+        now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+    )
+
+    assert update_bundle.await_args.kwargs["desired"]["status"] == expected
+    assert update_bundle.await_args.kwargs["origin"] == "scheduler"
+
+
+def test_exposure_retry_ignores_only_generated_timestamp():
+    first = {
+        "stream_key": "events:raw:apdl",
+        "event": {
+            "message_id": "stable",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "user_id": "user-1",
+        },
+    }
+    retry = deepcopy(first)
+    retry["event"]["timestamp"] = "2026-01-01T00:00:01Z"
+    conflict = deepcopy(retry)
+    conflict["event"]["user_id"] = "user-2"
+
+    assert mutations._same_exposure_payload(first, retry)
+    assert not mutations._same_exposure_payload(first, conflict)
+
+
+def test_delivery_payloads_carry_authoritative_versions():
+    flag_payload = mutations._flag_delivery("flag_updated", make_flag())
+    experiment_payload = mutations._experiment_delivery(
+        "experiment_updated",
+        make_experiment(),
+    )
+
+    assert flag_payload["version"] == 1
+    assert flag_payload["data"]["version"] == 1
+    assert experiment_payload["version"] == 1
+    assert experiment_payload["data"]["version"] == 1

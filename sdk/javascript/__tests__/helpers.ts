@@ -1,6 +1,6 @@
 import type { APDLConfig } from '../src/core/config';
 
-export const CLIENT_KEY = 'proj_apdl_0123456789abcdef';
+export const CLIENT_KEY = 'client_apdl_0123456789abcdef';
 export const ENDPOINT = 'https://api.test.dev';
 
 export type TestConfigOverrides = Partial<Omit<APDLConfig, 'auth'>> & {
@@ -37,33 +37,84 @@ export function emptyFlagsResponse() {
   };
 }
 
+/** Controlled fetch response used by tests for the header-authenticated SSE stream. */
 export class MockEventSource {
   static instances: MockEventSource[] = [];
-  onopen: ((ev: Event) => void) | null = null;
-  onmessage: ((ev: MessageEvent) => void) | null = null;
-  onerror: ((ev: Event) => void) | null = null;
-  readyState = 0;
-  private listeners: Map<string, Set<(ev: MessageEvent) => void>> = new Map();
+  readonly response: Response;
+  readonly onopen = (): void => {};
+  readonly onmessage: (event: MessageEvent) => void;
+  readonly onerror = (): void => this.fail(new Error('mock SSE failure'));
+  readyState = 1;
+  private streamController!: ReadableStreamDefaultController<Uint8Array>;
+  private readonly encoder = new TextEncoder();
 
-  constructor(public url: string) {
+  constructor(
+    public readonly url: string,
+    public readonly init: RequestInit
+  ) {
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        this.streamController = controller;
+      },
+    });
+    this.response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/event-stream' }),
+      body,
+    } as Response;
+    this.onmessage = (event) => {
+      this.emit('message', String(event.data), event.lastEventId || undefined);
+    };
+    init.signal?.addEventListener('abort', () => this.fail(
+      new DOMException('Aborted', 'AbortError')
+    ), { once: true });
     MockEventSource.instances.push(this);
   }
 
-  addEventListener(type: string, listener: EventListener) {
-    if (!this.listeners.has(type)) {
-      this.listeners.set(type, new Set());
-    }
-    this.listeners.get(type)!.add(listener as (ev: MessageEvent) => void);
+  emit(type: string, data: string, id?: string): void {
+    const message = [
+      ...(id === undefined ? [] : [`id: ${id}`]),
+      ...(type === 'message' ? [] : [`event: ${type}`]),
+      ...data.split('\n').map((line) => `data: ${line}`),
+      '',
+      '',
+    ].join('\n');
+    this.streamController.enqueue(this.encoder.encode(message));
   }
 
-  emit(type: string, data: string) {
-    const event = new MessageEvent(type, { data });
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener(event);
-    }
+  emitRaw(value: string): void {
+    this.streamController.enqueue(this.encoder.encode(value));
   }
 
-  close() {
+  close(): void {
+    if (this.readyState === 2) return;
     this.readyState = 2;
+    this.streamController.close();
   }
+
+  fail(error: Error): void {
+    if (this.readyState === 2) return;
+    this.readyState = 2;
+    this.streamController.error(error);
+  }
+}
+
+/** Default fetch implementation for SDK tests. */
+export function mockApiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<unknown> {
+  const url = String(input);
+  if (url.endsWith('/v1/stream')) {
+    return Promise.resolve(new MockEventSource(url, init).response);
+  }
+  if (url.endsWith('/v1/events')) {
+    return Promise.resolve({
+      ok: true,
+      status: 202,
+      headers: new Headers(),
+    } as Response);
+  }
+  return Promise.resolve(emptyFlagsResponse());
 }

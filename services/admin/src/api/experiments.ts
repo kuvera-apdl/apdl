@@ -10,7 +10,6 @@ import {
   experimentUpdateSchema,
 } from './schemas/experiments'
 import type {
-  AnalysisMethod,
   ExperimentCreate,
   ExperimentCreateResponse,
   ExperimentDeleteResponse,
@@ -57,34 +56,32 @@ export function updateExperiment(
 export function deleteExperiment(
   conn: ServiceConnection,
   key: string,
+  version: number,
 ): Promise<ExperimentDeleteResponse> {
   return request(conn, `/v1/admin/experiments/${encodeURIComponent(key)}`, {
     method: 'DELETE',
+    query: { version },
     schema: experimentDeleteResponseSchema,
   })
 }
 
 export interface ExperimentResultsParams {
   projectId: string
-  metric: string
-  flagKey: string
-  method: AnalysisMethod
 }
 
 /** Query-service connection, not config. project_id is a query param here. */
 export function experimentResults(
   queryConn: ServiceConnection,
-  experimentId: string,
+  experimentKey: string,
   params: ExperimentResultsParams,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ExperimentResult> {
-  return request(queryConn, `/v1/query/experiment/${encodeURIComponent(experimentId)}`, {
+  return request(queryConn, `/v1/query/experiment/${encodeURIComponent(experimentKey)}`, {
     query: {
-      metric: params.metric,
-      flag_key: params.flagKey,
-      method: params.method,
       project_id: params.projectId,
     },
     schema: experimentResultSchema,
+    signal: options.signal,
   })
 }
 
@@ -94,14 +91,11 @@ export function listExperimentsCurl(conn: ServiceConnection): CurlSpec {
 
 export function experimentResultsCurl(
   queryConn: ServiceConnection,
-  experimentId: string,
+  experimentKey: string,
   params: ExperimentResultsParams,
 ): CurlSpec {
-  return apiCurl(queryConn, 'GET', `/v1/query/experiment/${encodeURIComponent(experimentId)}`, {
+  return apiCurl(queryConn, 'GET', `/v1/query/experiment/${encodeURIComponent(experimentKey)}`, {
     query: {
-      metric: params.metric,
-      flag_key: params.flagKey,
-      method: params.method,
       project_id: params.projectId,
     },
   })

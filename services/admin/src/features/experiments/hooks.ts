@@ -53,30 +53,27 @@ export function useDeleteExperimentMutation(key: string) {
   const { active } = useWorkspace()
   const invalidate = useInvalidateExperiments()
   return useMutation({
-    mutationFn: () => deleteExperiment(serviceConnection(active!, 'config'), key),
+    mutationFn: (version: number) =>
+      deleteExperiment(serviceConnection(active!, 'config'), key, version),
     onSuccess: invalidate,
   })
 }
 
-/**
- * Manual-run experiment statistics (plan §5.4.3): heavy queries — results are
- * never auto-refreshed faster than 60s; the page offers an explicit refresh.
- */
-export function useExperimentResultsQuery(
-  experimentId: string,
-  params: ExperimentResultsParams | null,
-) {
-  const { active } = useWorkspace()
+/** Query resolves the flag, metric, variants, control, and analysis window from Config. */
+export function useExperimentResultsQuery(experimentId: string) {
+  const { active, projectId } = useWorkspace()
+  const params: ExperimentResultsParams | null = projectId ? { projectId } : null
   return useQuery({
     queryKey: [
       active?.id ?? 'none',
       'experiments',
       experimentId,
       'results',
-      JSON.stringify(params),
+      projectId,
     ],
     enabled: active !== null && params !== null,
     staleTime: 60_000,
-    queryFn: () => experimentResults(serviceConnection(active!, 'query'), experimentId, params!),
+    queryFn: ({ signal }) =>
+      experimentResults(serviceConnection(active!, 'query'), experimentId, params!, { signal }),
   })
 }

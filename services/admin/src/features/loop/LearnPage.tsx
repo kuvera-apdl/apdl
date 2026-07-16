@@ -1,6 +1,4 @@
-// Learn — the knowledge the loop produces (admin-console-purpose-ia.md).
-// Insights from recent runs today; experiment verdicts join here once a
-// GET verdicts endpoint is exposed. Links into Analytics to investigate.
+// Learn — recent behavior-analysis insights with links into Analytics.
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { BarChart3, Lightbulb } from 'lucide-react'
 import { useMemo } from 'react'
@@ -83,7 +81,7 @@ export function LearnPage() {
     <div className="space-y-4">
       <PageHeader
         title="Learn"
-        description="What the loop has learned about your users and what worked."
+        description="Recent agent-produced insights about your users."
         actions={
           <Button size="sm" variant="outline" asChild>
             <Link to="/analytics/funnels">
@@ -137,10 +135,6 @@ export function LearnPage() {
         </div>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
-        Experiment verdicts (what shipped, what rolled back, and why) will appear here once the
-        agents service exposes a verdicts endpoint — the loop already records them.
-      </p>
     </div>
   )
 }

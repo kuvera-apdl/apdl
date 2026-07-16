@@ -79,14 +79,17 @@ SDK; each call enqueues to the SDK's transport → the ingestion backend.
 ```python
 from apdl import APDL
 
-client = APDL.init(api_key="...")           # or APDL.init(APDLConfig(...))
+client = APDL.init(
+    api_key="...",
+    endpoint="https://apdl.example.com",
+)                                           # or APDL.init(APDLConfig(...))
 client.track("event_name", {"key": "value"})
 client.identify(user_id, {"plan": "pro"})
 client.page("/route", {"section": "home"})
 client.flush()                              # force-send buffered events
 
 # or manage lifecycle with the context manager (flushes on exit):
-with APDL.init(api_key="...") as client:
+with APDL.init(api_key="...", endpoint="https://apdl.example.com") as client:
     client.track("event_name", {"key": "value"})
 ```
 

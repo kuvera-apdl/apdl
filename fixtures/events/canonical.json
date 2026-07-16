@@ -1,0 +1,125 @@
+{
+  "valid": [
+    {
+      "event": "order_completed",
+      "type": "track",
+      "user_id": "user-42",
+      "anonymous_id": "anon-42",
+      "timestamp": "2026-07-13T12:00:00.000Z",
+      "properties": {"total": 42},
+      "context": {
+        "library": {"name": "@apdl-oss/sdk", "version": "0.2.0"},
+        "browser": {"name": "Firefox", "version": "128"},
+        "device": {"type": "desktop"}
+      },
+      "message_id": "message-track-1",
+      "session_id": "session-1"
+    },
+    {
+      "event": "identify",
+      "type": "identify",
+      "user_id": "user-42",
+      "timestamp": "2026-07-13T12:00:01.000Z",
+      "traits": {"plan": "pro"},
+      "context": {"library": {"name": "apdl-python", "version": "0.1.0"}},
+      "message_id": "message-identify-1"
+    },
+    {
+      "event": "group",
+      "type": "group",
+      "user_id": "user-42",
+      "group_id": "account-7",
+      "timestamp": "2026-07-13T12:00:02.000Z",
+      "traits": {"name": "Acme"},
+      "context": {"library": {"name": "apdl-python", "version": "0.1.0"}},
+      "message_id": "message-group-1"
+    },
+    {
+      "event": "page",
+      "type": "page",
+      "anonymous_id": "anon-42",
+      "timestamp": "2026-07-13T12:00:03.000Z",
+      "properties": {"name": "Pricing"},
+      "context": {
+        "page": {
+          "url": "https://example.test/pricing",
+          "title": "Pricing",
+          "path": "/pricing",
+          "search": ""
+        }
+      },
+      "message_id": "message-page-1",
+      "session_id": "session-1"
+    },
+    {
+      "event": "$feature_flag_exposure",
+      "type": "track",
+      "user_id": "user-42",
+      "timestamp": "2026-07-13T12:00:04.000Z",
+      "properties": {
+        "flag_key": "checkout-gate",
+        "variant": "treatment",
+        "reason": "fallthrough",
+        "rule_id": null,
+        "rollout_bucket": 7.31,
+        "variant_bucket": 74.2,
+        "rollout_percentage": 100,
+        "bucket_by": "user_id",
+        "config_version": 3,
+        "source": "initial_fetch",
+        "page": "/checkout",
+        "component": "CheckoutPage"
+      },
+      "context": {"library": {"name": "@apdl-oss/sdk", "version": "0.2.0"}},
+      "message_id": "message-exposure-1",
+      "session_id": "session-1"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "camel_case_identity",
+      "event": {
+        "event": "click",
+        "type": "track",
+        "anonymousId": "anon-42",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-invalid-1"
+      }
+    },
+    {
+      "name": "unknown_context_field",
+      "event": {
+        "event": "click",
+        "type": "track",
+        "anonymous_id": "anon-42",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {"device_type": "desktop"},
+        "message_id": "message-invalid-2"
+      }
+    },
+    {
+      "name": "noncanonical_page_name",
+      "event": {
+        "event": "Pricing",
+        "type": "page",
+        "anonymous_id": "anon-42",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-invalid-3"
+      }
+    },
+    {
+      "name": "unknown_envelope_field",
+      "event": {
+        "event": "click",
+        "type": "track",
+        "anonymous_id": "anon-42",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-invalid-4",
+        "extra": true
+      }
+    }
+  ]
+}

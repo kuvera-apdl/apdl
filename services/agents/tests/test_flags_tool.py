@@ -179,3 +179,61 @@ async def test_update_flag_posts_canonical_variant_updates(monkeypatch):
             {"key": "treatment", "weight": 2},
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_transition_flag_uses_dedicated_versioned_endpoint(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_post(project_id, path, payload, params=None):
+        captured.update(
+            project_id=project_id,
+            path=path,
+            payload=payload,
+            params=params,
+        )
+        return {"updated": True}
+
+    monkeypatch.setattr(flags, "_post", fake_post)
+
+    await flags.transition_flag(
+        "apdl",
+        "checkout",
+        version=3,
+        target_state="active",
+    )
+
+    assert captured == {
+        "project_id": "apdl",
+        "path": "/v1/admin/flags/checkout/transition",
+        "payload": {"version": 3, "target_state": "active"},
+        "params": {"project_id": "apdl"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_disable_flag_sends_version_without_source_alias(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_post(project_id, path, payload, params=None):
+        captured.update(path=path, payload=payload, params=params)
+        return {"disabled": True}
+
+    monkeypatch.setattr(flags, "_post", fake_post)
+
+    await flags.disable_flag(
+        "apdl",
+        "checkout",
+        version=4,
+        evidence={"verdict": "rollback"},
+    )
+
+    assert captured == {
+        "path": "/v1/admin/flags/checkout/disable",
+        "payload": {
+            "version": 4,
+            "reason": "experiment_rollback",
+            "evidence": {"verdict": "rollback"},
+        },
+        "params": {"project_id": "apdl"},
+    }

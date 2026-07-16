@@ -16,6 +16,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .targeting_contract import (
+    MAX_CONDITIONS_PER_RULE,
+    MAX_IDENTIFIER_LENGTH,
+    MAX_RULES,
+    MAX_STRING_LENGTH,
+    is_condition_value_valid,
+    is_identifier,
+)
+
 
 class ConditionOperator(str, Enum):
     EQUALS = "equals"
@@ -28,7 +37,6 @@ class ConditionOperator(str, Enum):
     NOT_CONTAINS = "not_contains"
     STARTS_WITH = "starts_with"
     ENDS_WITH = "ends_with"
-    REGEX = "regex"
     IN = "in"
     NOT_IN = "not_in"
     EXISTS = "exists"
@@ -42,13 +50,13 @@ class RolloutConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     percentage: float = Field(ge=0.0, le=100.0)
-    bucket_by: str = Field(min_length=1)
+    bucket_by: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
 
 
 class GateCondition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    attribute: str = Field(min_length=1)
+    attribute: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     operator: ConditionOperator
     value: Any = None
 
@@ -67,13 +75,21 @@ class GateCondition(BaseModel):
                 raise ValueError(f"operator '{operator}' requires a non-null value")
         return data
 
+    @model_validator(mode="after")
+    def _check_operator_value(self) -> GateCondition:
+        if self.operator not in _PRESENCE_OPERATORS and not is_condition_value_valid(
+            self.operator.value, self.value
+        ):
+            raise ValueError(f"invalid value for operator '{self.operator.value}'")
+        return self
+
 
 class GateRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(min_length=1)
-    name: str = ""
-    conditions: list[GateCondition]
+    id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    name: str = Field(default="", max_length=MAX_STRING_LENGTH)
+    conditions: list[GateCondition] = Field(max_length=MAX_CONDITIONS_PER_RULE)
     rollout: RolloutConfig
 
 
@@ -82,7 +98,7 @@ class VariantConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    key: str = Field(min_length=1)
+    key: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     # ``strict`` rejects floats (incl. ``1.0``), booleans, and numeric strings,
     # matching ``services/config/app/models/schemas.py``.
     weight: int = Field(ge=0, strict=True)
@@ -122,12 +138,12 @@ class GateConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    key: str = Field(min_length=1)
+    key: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     enabled: bool
-    default_variant: str = Field(min_length=1)
+    default_variant: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     variants: list[VariantConfig]
-    salt: str
-    rules: list[GateRule]
+    salt: str = Field(max_length=MAX_STRING_LENGTH)
+    rules: list[GateRule] = Field(max_length=MAX_RULES)
     fallthrough: FallthroughConfig
     # ``strict`` rejects booleans and floats; ``ge=1`` matches the JS parser.
     version: int = Field(ge=1, strict=True)
@@ -157,9 +173,22 @@ class EvalContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str | None = None
-    anonymous_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
+    anonymous_id: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
     attributes: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_attributes(self) -> EvalContext:
+        for key, value in self.attributes.items():
+            if not is_identifier(key):
+                raise ValueError(
+                    f"attribute keys must be 1..{MAX_IDENTIFIER_LENGTH} characters"
+                )
+            if isinstance(value, str) and len(value) > MAX_STRING_LENGTH:
+                raise ValueError(
+                    f"string attributes must be at most {MAX_STRING_LENGTH} characters"
+                )
+        return self
 
 
 class GateEvaluationResult(BaseModel):

@@ -19,13 +19,15 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
+import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 
 export function RunsPage() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
   const [statusFilter, setStatusFilter] = useState('')
+  const canRun = hasWorkspaceRole(active, 'agents:run')
 
   const runsQuery = useQuery<RunsListResponse>({
     queryKey: [active?.id ?? 'none', 'agent-runs-list', statusFilter],
@@ -58,15 +60,24 @@ export function RunsPage() {
                 title="List runs"
               />
             ) : null}
-            <Button size="sm" asChild>
-              <Link to="/agents/trigger">
-                <Play />
-                Trigger run
-              </Link>
-            </Button>
+            {canRun ? (
+              <Button size="sm" asChild>
+                <Link to="/agents/trigger">
+                  <Play />
+                  Trigger run
+                </Link>
+              </Button>
+            ) : null}
           </>
         }
       />
+
+      {!canRun ? (
+        <AgentReadOnlyNote>
+          Run history is read-only. Starting a run requires agents:run on an
+          operator-provisioned workspace.
+        </AgentReadOnlyNote>
+      ) : null}
 
       {endpointMissing ? (
         <EmptyState
@@ -104,14 +115,20 @@ export function RunsPage() {
                 {runsQuery.data.runs.length === 0 ? (
                   <EmptyState
                     title="No runs yet"
-                    description="Trigger a run to watch the autonomous loop analyze, design, and propose."
+                    description={
+                      canRun
+                        ? 'Trigger a run to watch the autonomous loop analyze, design, and propose.'
+                        : 'No run history exists for this read-only workspace.'
+                    }
                   >
-                    <Button size="sm" asChild>
-                      <Link to="/agents/trigger">
-                        <Play />
-                        Trigger run
-                      </Link>
-                    </Button>
+                    {canRun ? (
+                      <Button size="sm" asChild>
+                        <Link to="/agents/trigger">
+                          <Play />
+                          Trigger run
+                        </Link>
+                      </Button>
+                    ) : null}
                   </EmptyState>
                 ) : (
                   <Table>

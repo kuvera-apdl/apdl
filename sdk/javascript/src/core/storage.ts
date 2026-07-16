@@ -1,28 +1,22 @@
 import type { TrackEvent } from './types';
+import {
+  assertSerializedEventSize,
+  canonicalizeTrackEvent,
+  serializedJsonBytes,
+} from './event-validation';
 
 const DB_NAME = 'apdl-offline';
 const STORE_NAME = 'events';
 const DB_VERSION = 2;
-const RECORD_SCHEMA_VERSION = 1;
+// Version 1 may contain click text captured before the mandatory privacy guard.
+// Reject it rather than replaying potentially sensitive legacy telemetry.
+const RECORD_SCHEMA_VERSION = 2;
 const MAX_RECORD_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 export const MAX_OFFLINE_EVENTS_PER_PROJECT = 1000;
 export const MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT = 5 * 1024 * 1024;
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9]{1,64}$/;
 const OWNER_ID_PATTERN = /^project:[a-zA-Z0-9]{1,64}$/;
-const TRACK_EVENT_FIELDS = new Set([
-  'type',
-  'event',
-  'userId',
-  'anonymousId',
-  'groupId',
-  'properties',
-  'traits',
-  'context',
-  'timestamp',
-  'messageId',
-  'sessionId',
-]);
 const OFFLINE_RECORD_FIELDS = new Set([
   'id',
   'schema_version',
@@ -337,7 +331,15 @@ export class OfflineStorage {
   }
 
   private createRecord(event: TrackEvent): StoredOfflineEvent | null {
-    const serializedBytes = serializedEventBytes(event);
+    let canonical: TrackEvent;
+    let serializedBytes: number | null;
+    try {
+      canonical = canonicalizeTrackEvent(event);
+      assertSerializedEventSize(canonical);
+      serializedBytes = serializedEventBytes(canonical);
+    } catch {
+      return null;
+    }
     if (serializedBytes === null) return null;
 
     return {
@@ -345,7 +347,7 @@ export class OfflineStorage {
       owner_id: this.ownerId,
       stored_at: Date.now(),
       serialized_bytes: serializedBytes,
-      data: event,
+      data: canonical,
     };
   }
 
@@ -487,81 +489,25 @@ function isStoredOfflineEvent(value: unknown): value is StoredOfflineEvent {
 }
 
 function isTrackEvent(value: unknown): value is TrackEvent {
-  if (!isPlainObject(value)) return false;
-  if (Object.keys(value).some((field) => !TRACK_EVENT_FIELDS.has(field))) {
+  try {
+    const canonical = canonicalizeTrackEvent(value);
+    assertSerializedEventSize(canonical);
+    return true;
+  } catch {
     return false;
   }
-
-  if (!['track', 'identify', 'group', 'page'].includes(String(value.type))) {
-    return false;
-  }
-
-  if (
-    !isNonEmptyString(value.anonymousId) ||
-    !isPlainObject(value.context) ||
-    !isNonEmptyString(value.timestamp) ||
-    !isNonEmptyString(value.messageId) ||
-    !isNonEmptyString(value.sessionId)
-  ) {
-    return false;
-  }
-
-  return (
-    isOptionalString(value.event) &&
-    isOptionalString(value.userId) &&
-    isOptionalString(value.groupId) &&
-    isOptionalObject(value.properties) &&
-    isOptionalObject(value.traits)
-  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
-}
-
-function isOptionalString(value: unknown): boolean {
-  return value === undefined || typeof value === 'string';
-}
-
-function isOptionalObject(value: unknown): boolean {
-  return value === undefined || isPlainObject(value);
-}
-
 function serializedEventBytes(event: TrackEvent): number | null {
   try {
-    const serialized = JSON.stringify(event);
-    return typeof serialized === 'string' ? utf8ByteLength(serialized) : null;
+    return serializedJsonBytes(event);
   } catch {
     // Circular references and BigInt values cannot be sent as JSON, so they
     // cannot be safely retained for a later transport attempt either.
     return null;
   }
-}
-
-function utf8ByteLength(value: string): number {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit <= 0x7f) {
-      bytes += 1;
-    } else if (codeUnit <= 0x7ff) {
-      bytes += 2;
-    } else if (
-      codeUnit >= 0xd800 &&
-      codeUnit <= 0xdbff &&
-      index + 1 < value.length &&
-      value.charCodeAt(index + 1) >= 0xdc00 &&
-      value.charCodeAt(index + 1) <= 0xdfff
-    ) {
-      bytes += 4;
-      index += 1;
-    } else {
-      bytes += 3;
-    }
-  }
-  return bytes;
 }

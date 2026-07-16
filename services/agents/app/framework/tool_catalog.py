@@ -26,7 +26,6 @@ from app.framework.context import AgentContext
 from app.tools import clickhouse
 from app.tools.experiments import get_active_experiments
 from app.tools.flags import get_active_flags
-from app.tools.ui_config import list_ui_configs
 
 FilterScalar = str | int | float | bool
 
@@ -96,11 +95,6 @@ class BreakdownParams(BaseModel):
     selector: EventSelector
     property_name: str = Field(min_length=1, max_length=200)
     limit: int = Field(default=20, ge=1, le=100)
-
-
-class UiConfigsParams(BaseModel):
-    model_config = {"extra": "forbid"}
-    component: str | None = Field(default=None, max_length=200)
 
 
 ToolRunner = Callable[[AgentContext, BaseModel, str, str], Awaitable[Any]]
@@ -191,10 +185,6 @@ async def _run_active_experiments(ctx: AgentContext, p: EmptyParams, start: str,
     return await get_active_experiments(ctx.project_id)
 
 
-async def _run_list_ui_configs(ctx: AgentContext, p: UiConfigsParams, start: str, end: str) -> Any:
-    return await list_ui_configs(ctx.project_id, component=p.component)
-
-
 TOOL_CATALOG: dict[str, ToolSpec] = {
     spec.name: spec
     for spec in (
@@ -251,12 +241,6 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
             "Active experiments configured for the project.",
             EmptyParams,
             _run_active_experiments,
-        ),
-        ToolSpec(
-            "list_ui_configs",
-            "Server-driven UI configurations for the project.",
-            UiConfigsParams,
-            _run_list_ui_configs,
         ),
     )
 }

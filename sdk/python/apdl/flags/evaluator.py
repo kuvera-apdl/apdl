@@ -10,8 +10,6 @@ the config service would return for the same context — the shared
 
 from __future__ import annotations
 
-import logging
-import re
 from typing import Any
 
 from .cache import FlagCache
@@ -25,8 +23,15 @@ from .models import (
     RolloutConfig,
     VariantConfig,
 )
-
-logger = logging.getLogger("apdl")
+from .targeting_contract import (
+    is_bounded_string,
+    is_condition_value_valid,
+    is_identifier,
+    is_membership_list,
+    is_scalar,
+    parse_numeric,
+    scalar_equal,
+)
 
 _NUMERIC_OPS = {
     ConditionOperator.GT,
@@ -194,43 +199,39 @@ class FlagEvaluator:
             return False
 
         expected = condition.value
-        actual_value = str(actual)
+        if not is_condition_value_valid(op.value, expected):
+            return False
 
         if op is ConditionOperator.EQUALS:
-            return actual_value == str(expected)
+            return scalar_equal(actual, expected)
         if op is ConditionOperator.NOT_EQUALS:
-            return actual_value != str(expected)
+            return is_scalar(actual) and not scalar_equal(actual, expected)
         if op is ConditionOperator.CONTAINS:
-            return isinstance(expected, str) and expected in actual_value
+            return is_bounded_string(actual) and expected in actual
         if op is ConditionOperator.NOT_CONTAINS:
-            return isinstance(expected, str) and expected not in actual_value
+            return is_bounded_string(actual) and expected not in actual
         if op is ConditionOperator.STARTS_WITH:
-            return isinstance(expected, str) and actual_value.startswith(expected)
+            return is_bounded_string(actual) and actual.startswith(expected)
         if op is ConditionOperator.ENDS_WITH:
-            return isinstance(expected, str) and actual_value.endswith(expected)
+            return is_bounded_string(actual) and actual.endswith(expected)
         if op is ConditionOperator.IN:
-            return isinstance(expected, list) and actual in expected
+            return is_scalar(actual) and is_membership_list(expected) and any(
+                scalar_equal(actual, item) for item in expected
+            )
         if op is ConditionOperator.NOT_IN:
-            return not isinstance(expected, list) or actual not in expected
+            return is_scalar(actual) and is_membership_list(expected) and not any(
+                scalar_equal(actual, item) for item in expected
+            )
         if op in _NUMERIC_OPS:
             return self._compare_numeric(op, actual, expected)
-        if op is ConditionOperator.REGEX:
-            if not isinstance(expected, str):
-                return False
-            try:
-                return bool(re.search(expected, actual_value))
-            except re.error:
-                logger.warning("Invalid regex in flag rule: %s", expected)
-                return False
 
         return False
 
     @staticmethod
     def _compare_numeric(op: ConditionOperator, actual: Any, expected: Any) -> bool:
-        try:
-            a = float(actual)
-            b = float(expected)
-        except (TypeError, ValueError):
+        a = parse_numeric(actual)
+        b = parse_numeric(expected)
+        if a is None or b is None:
             return False
         if op is ConditionOperator.GT:
             return a > b
@@ -262,9 +263,11 @@ class FlagEvaluator:
         return (variant or flag.default_variant), variant_bucket
 
     def _unit_id(self, ctx: EvalContext, bucket_by: str) -> str:
+        if not is_identifier(bucket_by):
+            return ""
         exists, value = self._resolve_attribute(bucket_by, ctx)
-        if exists and value is not None:
-            return str(value)
+        if exists and is_identifier(value):
+            return value
         return ""
 
     @staticmethod

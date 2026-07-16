@@ -39,6 +39,46 @@ FLUSH_RETRY_MAX_SECONDS = 30.0
 PENDING_CLAIM_IDLE_MS = 60_000
 PENDING_CLAIM_INTERVAL_SECONDS = 30.0
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
+RFC3339_UTC_PATTERN = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
+)
+CANONICAL_EVENT_TYPES = frozenset({"track", "identify", "group", "page"})
+CANONICAL_CONTEXT_FIELDS = frozenset({
+    "library",
+    "browser",
+    "os",
+    "device",
+    "screen",
+    "viewport",
+    "page",
+    "locale",
+    "timezone",
+    "referrer",
+})
+CANONICAL_EVENT_FIELDS = frozenset({
+    "event",
+    "type",
+    "user_id",
+    "anonymous_id",
+    "group_id",
+    "timestamp",
+    "properties",
+    "traits",
+    "context",
+    "message_id",
+    "session_id",
+    # Ingestion-owned authority/metadata added only after public validation.
+    "project_id",
+    "server_timestamp",
+    "ip",
+})
+CANONICAL_REQUIRED_EVENT_FIELDS = frozenset({
+    "event",
+    "type",
+    "timestamp",
+    "context",
+    "message_id",
+})
 
 
 @dataclass(frozen=True)
@@ -597,9 +637,9 @@ class ClickHouseWriter:
     def _execute_insert(self, batch: list[BufferedEvent]) -> None:
         self.ch_client.execute(
             "INSERT INTO events ("
-            "project_id, event_name, user_id, anonymous_id, "
-            "session_id, timestamp, properties, country, "
-            "device_type, browser"
+            "project_id, message_id, event_type, event_name, user_id, "
+            "anonymous_id, group_id, session_id, timestamp, received_at, "
+            "properties, traits, context, ip, country, device_type, browser"
             ") VALUES",
             [event.row for event in batch],
             types_check=True,
@@ -700,15 +740,15 @@ class ClickHouseWriter:
         key. Optional project assertions in the Redis fields or event JSON must
         match that authority.
 
-        The event JSON should contain the ingestion contract fields:
-            - event or type: str (canonical ClickHouse event name)
-            - user_id/userId: str
-            - anonymous_id/anonymousId: str
-            - session_id: str
+        The event JSON must contain the canonical Ingestion contract fields:
+            - event: str (canonical ClickHouse event name)
+            - type: one of track, identify, group, page
+            - user_id: str or null
+            - anonymous_id: str or null
+            - session_id: str (optional for non-browser events)
             - timestamp: str (ISO 8601)
             - properties: dict or null (null normalizes to an empty object)
-            - country: str (optional)
-            - context: dict with device_type, browser, or null (optional)
+            - context: strict nested SDK context
         """
         if not isinstance(data, dict):
             raise TypeError("Redis event fields must be an object")
@@ -718,9 +758,32 @@ class ClickHouseWriter:
         event_json = json.loads(
             raw_event_json,
             parse_constant=self._reject_nonfinite_json,
+            object_pairs_hook=self._reject_duplicate_json_keys,
         )
         if not isinstance(event_json, dict):
             raise ValueError("event_json must decode to an object")
+        unknown_fields = sorted(set(event_json) - CANONICAL_EVENT_FIELDS)
+        if unknown_fields:
+            raise ValueError(
+                "event_json contains unknown fields: " + ", ".join(unknown_fields)
+            )
+        missing_fields = sorted(CANONICAL_REQUIRED_EVENT_FIELDS - set(event_json))
+        if missing_fields:
+            raise ValueError(
+                "event_json is missing required fields: " + ", ".join(missing_fields)
+            )
+        for field in (
+            "user_id",
+            "anonymous_id",
+            "group_id",
+            "properties",
+            "traits",
+            "session_id",
+        ):
+            if field in event_json and event_json[field] is None:
+                raise ValueError(
+                    f"optional event field {field!r} must be omitted rather than null"
+                )
         for asserted_project in (
             data.get("project_id"),
             event_json.get("project_id"),
@@ -728,44 +791,80 @@ class ClickHouseWriter:
             if asserted_project is not None and asserted_project != project_id:
                 raise ValueError("event project ID conflicts with stream authority")
         event_name = self._event_name(event_json)
-        raw_timestamp = event_json.get("timestamp")
-        if raw_timestamp not in (None, ""):
-            if not isinstance(raw_timestamp, str):
-                raise TypeError("timestamp must be an ISO 8601 string")
-            timestamp = datetime.fromisoformat(raw_timestamp)
-        else:
-            timestamp = datetime.now(timezone.utc)
+        event_type = event_json.get("type")
+        if event_type not in CANONICAL_EVENT_TYPES:
+            raise ValueError("type must be one of: track, identify, group, page")
+        expected_event = {
+            "identify": "identify",
+            "group": "group",
+            "page": "page",
+        }.get(event_type)
+        if expected_event is not None and event_name != expected_event:
+            raise ValueError(
+                f"type {event_type!r} requires event {expected_event!r}"
+            )
+        if not event_json.get("user_id") and not event_json.get("anonymous_id"):
+            raise ValueError("event requires user_id or anonymous_id")
+        if event_type == "identify" and not event_json.get("user_id"):
+            raise ValueError("identify events require user_id")
+        if event_type == "group" and not event_json.get("group_id"):
+            raise ValueError("group events require group_id")
+        for required_string in ("message_id",):
+            value = event_json.get(required_string)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{required_string} must be a non-empty string")
+        timestamp = self._parse_timestamp(event_json.get("timestamp"), "timestamp")
+        raw_received_at = event_json.get("server_timestamp")
+        received_at = (
+            self._parse_timestamp(raw_received_at, "server_timestamp")
+            if raw_received_at is not None
+            else datetime.now(timezone.utc)
+        )
 
         context = event_json.get("context")
-        if context is None:
-            context = {}
         if not isinstance(context, dict):
             raise TypeError("context must be an object")
+        self._validate_context(context)
         properties = event_json.get("properties")
         if properties is None:
             properties = {}
         if not isinstance(properties, dict):
             raise TypeError("properties must be an object")
+        traits = event_json.get("traits")
+        if traits is None:
+            traits = {}
+        if not isinstance(traits, dict):
+            raise TypeError("traits must be an object")
+
+        browser = context.get("browser") or {}
+        device = context.get("device") or {}
+        if not isinstance(browser, dict):
+            raise TypeError("context.browser must be an object")
+        if not isinstance(device, dict):
+            raise TypeError("context.device must be an object")
 
         row = {
             "project_id": project_id,
+            "message_id": self._optional_string(event_json, "message_id"),
+            "event_type": event_type,
             "event_name": event_name,
-            "user_id": self._identity_string(event_json, "user_id", "userId"),
-            "anonymous_id": self._identity_string(
-                event_json,
-                "anonymous_id",
-                "anonymousId",
-            ),
+            "user_id": self._identity_string(event_json, "user_id"),
+            "anonymous_id": self._identity_string(event_json, "anonymous_id"),
+            "group_id": self._optional_string(event_json, "group_id"),
             "session_id": self._optional_string(event_json, "session_id"),
             "timestamp": timestamp,
+            "received_at": received_at,
             "properties": json.dumps(
                 properties,
                 allow_nan=False,
                 separators=(",", ":"),
             ),
-            "country": self._optional_string(event_json, "country"),
-            "device_type": self._optional_string(context, "device_type"),
-            "browser": self._optional_string(context, "browser"),
+            "traits": json.dumps(traits, allow_nan=False, separators=(",", ":")),
+            "context": json.dumps(context, allow_nan=False, separators=(",", ":")),
+            "ip": self._optional_string(event_json, "ip"),
+            "country": "",
+            "device_type": self._optional_string(device, "type"),
+            "browser": self._optional_string(browser, "name"),
         }
         self._validate_clickhouse_row(row)
         return row
@@ -775,29 +874,174 @@ class ClickHouseWriter:
         raise ValueError(f"non-finite JSON number {value} is not canonical")
 
     @staticmethod
-    def _event_name(payload: dict[str, Any]) -> str:
-        for field in ("event", "type"):
-            value = payload.get(field)
-            if value is None or value == "":
-                continue
-            if not isinstance(value, str):
-                raise TypeError(f"{field} must be a string")
-            return value
-        raise TypeError("event or type must be a non-empty string")
+    def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            value[key] = item
+        return value
+
+    @classmethod
+    def _validate_context(cls, context: dict[str, Any]) -> None:
+        cls._reject_unknown_object_fields(
+            context,
+            CANONICAL_CONTEXT_FIELDS,
+            "context",
+        )
+        for field in ("library", "browser", "os"):
+            if field in context:
+                cls._validate_nested_object(
+                    context[field],
+                    {"name", "version"},
+                    f"context.{field}",
+                )
+                cls._require_string(
+                    context[field]["name"],
+                    f"context.{field}.name",
+                    128,
+                    non_empty=True,
+                )
+                cls._require_string(
+                    context[field]["version"],
+                    f"context.{field}.version",
+                    128,
+                    non_empty=True,
+                )
+        if "device" in context:
+            cls._validate_nested_object(
+                context["device"], {"type"}, "context.device"
+            )
+            cls._require_string(
+                context["device"]["type"],
+                "context.device.type",
+                64,
+                non_empty=True,
+            )
+        for field in ("screen", "viewport"):
+            if field in context:
+                cls._validate_nested_object(
+                    context[field],
+                    {"width", "height"},
+                    f"context.{field}",
+                )
+                for dimension in ("width", "height"):
+                    cls._require_dimension(
+                        context[field][dimension],
+                        f"context.{field}.{dimension}",
+                    )
+        if "page" in context:
+            cls._validate_nested_object(
+                context["page"],
+                {"url", "title", "path", "search"},
+                "context.page",
+            )
+            for field, maximum in (
+                ("url", 4096),
+                ("title", 1024),
+                ("path", 2048),
+                ("search", 2048),
+            ):
+                cls._require_string(
+                    context["page"][field],
+                    f"context.page.{field}",
+                    maximum,
+                )
+        for field, maximum in (
+            ("locale", 128),
+            ("timezone", 128),
+            ("referrer", 4096),
+        ):
+            if field in context:
+                cls._require_string(context[field], f"context.{field}", maximum)
 
     @staticmethod
-    def _identity_string(payload: dict[str, Any], canonical: str, legacy: str) -> str:
-        canonical_value = payload.get(canonical)
-        legacy_value = payload.get(legacy)
-        for field, value in (
-            (canonical, canonical_value),
-            (legacy, legacy_value),
-        ):
-            if value is not None and not isinstance(value, str):
-                raise TypeError(f"{field} must be a string")
-        if canonical_value and legacy_value and canonical_value != legacy_value:
-            raise ValueError(f"{canonical} and {legacy} conflict")
-        return canonical_value or legacy_value or ""
+    def _require_string(
+        value: Any,
+        path: str,
+        maximum: int,
+        *,
+        non_empty: bool = False,
+    ) -> None:
+        if not isinstance(value, str):
+            raise TypeError(f"{path} must be a string")
+        if non_empty and not value:
+            raise ValueError(f"{path} must not be empty")
+        if len(value) > maximum:
+            raise ValueError(f"{path} exceeds maximum length of {maximum}")
+
+    @staticmethod
+    def _require_dimension(value: Any, path: str) -> None:
+        if type(value) is not int or not 0 <= value <= 100_000:
+            raise ValueError(f"{path} must be an integer from 0 through 100000")
+
+    @classmethod
+    def _validate_nested_object(
+        cls,
+        value: Any,
+        fields: set[str],
+        path: str,
+    ) -> None:
+        if not isinstance(value, dict):
+            raise TypeError(f"{path} must be an object")
+        cls._reject_unknown_object_fields(value, fields, path)
+        missing = sorted(fields - set(value))
+        if missing:
+            raise ValueError(f"{path} is missing fields: {', '.join(missing)}")
+
+    @staticmethod
+    def _reject_unknown_object_fields(
+        value: dict[str, Any],
+        allowed: set[str] | frozenset[str],
+        path: str,
+    ) -> None:
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise ValueError(f"{path} contains unknown fields: {', '.join(unknown)}")
+
+    @staticmethod
+    def _parse_timestamp(value: Any, field: str) -> datetime:
+        if not isinstance(value, str):
+            raise TypeError(f"{field} must be an RFC3339 UTC string")
+        match = RFC3339_UTC_PATTERN.fullmatch(value)
+        if match is None:
+            raise ValueError(f"{field} must use canonical RFC3339 UTC format")
+        year, month, day, hour, minute, second = (
+            int(part) for part in match.groups()[:6]
+        )
+        if year < 1000:
+            raise ValueError(f"{field} year must contain four canonical digits")
+        microsecond = int((match.group(7) or "").ljust(6, "0"))
+        try:
+            parsed = datetime(
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                microsecond,
+                tzinfo=timezone.utc,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{field} must be a valid RFC3339 value") from exc
+        return parsed
+
+    @staticmethod
+    def _event_name(payload: dict[str, Any]) -> str:
+        value = payload.get("event")
+        if not isinstance(value, str) or not value:
+            raise TypeError("event must be a non-empty string")
+        return value
+
+    @staticmethod
+    def _identity_string(payload: dict[str, Any], field: str) -> str:
+        value = payload.get(field)
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise TypeError(f"{field} must be a string")
+        return value
 
     @staticmethod
     def _optional_string(payload: dict[str, Any], field: str) -> str:
@@ -812,11 +1056,17 @@ class ClickHouseWriter:
     def _validate_clickhouse_row(row: dict[str, Any]) -> None:
         for field in (
             "project_id",
+            "message_id",
+            "event_type",
             "event_name",
             "user_id",
             "anonymous_id",
+            "group_id",
             "session_id",
             "properties",
+            "traits",
+            "context",
+            "ip",
             "country",
             "device_type",
             "browser",
@@ -825,6 +1075,8 @@ class ClickHouseWriter:
                 raise TypeError(f"ClickHouse row field {field} must be a string")
         if not isinstance(row["timestamp"], datetime):
             raise TypeError("ClickHouse row field timestamp must be a datetime")
+        if not isinstance(row["received_at"], datetime):
+            raise TypeError("ClickHouse row field received_at must be a datetime")
 
 
 async def main():

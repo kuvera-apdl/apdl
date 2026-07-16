@@ -5,10 +5,10 @@ import { NoopClient } from '../../src/core/noop-client';
 import {
   MockEventSource,
   createTestConfig,
-  emptyFlagsResponse,
+  mockApiFetch,
 } from '../helpers';
 
-const SECOND_CLIENT_KEY = 'proj_other_0123456789abcdef';
+const SECOND_CLIENT_KEY = 'client_other_0123456789abcdef';
 const fetchMock = vi.fn();
 
 function clearRegistry(): void {
@@ -16,15 +16,14 @@ function clearRegistry(): void {
 }
 
 describe('init() singleton and SSR safety', () => {
-  const clients: Array<{ shutdown: () => Promise<void> }> = [];
+  const clients: Array<{ shutdown: () => Promise<unknown> }> = [];
 
   beforeEach(() => {
     vi.useFakeTimers();
     fetchMock.mockReset();
-    fetchMock.mockResolvedValue(emptyFlagsResponse());
+    fetchMock.mockImplementation(mockApiFetch);
     MockEventSource.instances = [];
     vi.stubGlobal('fetch', fetchMock);
-    vi.stubGlobal('EventSource', MockEventSource);
     clearRegistry();
   });
 

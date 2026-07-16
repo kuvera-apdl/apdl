@@ -1,8 +1,9 @@
-"""Personalization agent.
+"""Parked personalization prototype; disabled in the OSS 0.3.0 preview.
 
-Builds user-segment context from event breakdowns, generates server-driven UI
-configurations for those segments, safety-validates each one, and deploys them
-when autonomy allows. Produces ``personalizations``.
+The Config service has no canonical UI-config storage or delivery API, so this
+graph is registered only to preserve internal state-schema validation. Trigger
+and definition routes reject/hide it, and the custom-agent catalog exposes no
+UI-config tool.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ _SEGMENT_PROPERTIES = ("plan", "platform", "country", "source", "device_type")
 
 @register_agent
 class PersonalizationAgent(BaseAgent):
-    """Generates and deploys segment-targeted UI configurations."""
+    """Disabled prototype for a future end-to-end personalization contract."""
 
     name = "personalization"
     description = "Generate server-driven UI configs for user segments."

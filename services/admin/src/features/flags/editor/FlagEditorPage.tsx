@@ -28,7 +28,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Switch } from '@/components/ui/switch'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { useFlagsQuery } from '@/features/flags/hooks'
 import { useCreateFlagMutation, useUpdateFlagMutation } from '@/features/flags/mutations'
@@ -339,25 +338,39 @@ export function FlagEditorPage() {
 
           <Section
             title="State"
-            description="enabled is derived: a flag is enabled exactly when state is active — the database enforces it."
+            description={
+              isEdit
+                ? 'Existing flag lifecycle changes use the dedicated actions on the flag detail page.'
+                : 'enabled is derived: a flag is enabled exactly when state is active.'
+            }
           >
-            <div className="flex flex-wrap gap-3">
-              {WRITABLE_STATES.map((option) => (
-                <label
-                  key={option.value}
-                  className="flex cursor-pointer items-start gap-2 rounded-md border p-3 has-[:checked]:border-foreground"
-                >
-                  <input type="radio" value={option.value} {...register('state')} className="mt-1 accent-foreground" />
-                  <span>
-                    <span className="block text-sm font-medium">{option.label}</span>
-                    <span className="block text-xs text-muted-foreground">{option.hint}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            <p className="mt-3 text-xs text-muted-foreground">
-              Derived: <code className="font-mono">enabled = {String(state === 'active')}</code>
-            </p>
+            {isEdit ? (
+              <p className="text-sm">
+                Current state: <code className="font-mono">{base?.state}</code>. Save configuration
+                edits here, then use Activate, Deactivate, Disable, or Archive from the flag detail
+                page for a version-checked lifecycle change.
+              </p>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-3">
+                  {WRITABLE_STATES.map((option) => (
+                    <label
+                      key={option.value}
+                      className="flex cursor-pointer items-start gap-2 rounded-md border p-3 has-[:checked]:border-foreground"
+                    >
+                      <input type="radio" value={option.value} {...register('state')} className="mt-1 accent-foreground" />
+                      <span>
+                        <span className="block text-sm font-medium">{option.label}</span>
+                        <span className="block text-xs text-muted-foreground">{option.hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Derived: <code className="font-mono">enabled = {String(state === 'active')}</code>
+                </p>
+              </>
+            )}
           </Section>
 
           <Section title="Variants">
@@ -386,22 +399,6 @@ export function FlagEditorPage() {
                   <option value="both">both — distributed and server-evaluable</option>
                 </Select>
               </div>
-              <div className="flex items-center gap-3">
-                <Controller
-                  control={control}
-                  name="auto_disable"
-                  render={({ field }) => (
-                    <Switch id="auto-disable" checked={field.value} onCheckedChange={field.onChange} />
-                  )}
-                />
-                <Label htmlFor="auto-disable">Allow automatic disable (guardrails & rollback monitor)</Label>
-              </div>
-              {!watch('auto_disable') ? (
-                <p className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-                  With auto-disable off, system-initiated kill switches are refused (409) — only
-                  manual admin disables will work.
-                </p>
-              ) : null}
               <GuardrailsEditor />
             </div>
           </Section>

@@ -6,6 +6,7 @@ import {
   parseFlagConfigResult,
   parseFlagConfigs,
 } from '../flags/schema';
+import { isIdentifier } from '../flags/targeting-contract';
 import type { SlotManager } from '../ui/slot';
 
 interface SSEMessage {
@@ -114,24 +115,30 @@ export class SSEHandlers {
         return;
       }
 
-      const current = new Map(this.flagCache.getAll().map((flag) => [flag.key, flag]));
+      const authoritativeVersion = parseAuthoritativeVersion(parsed.version);
+      if (authoritativeVersion === null) return;
 
-      if (parsed.action === 'flag_removed' && typeof parsed.key === 'string') {
-        current.delete(parsed.key);
-        this.flagCache.set(Array.from(current.values()), 'sse');
+      if (
+        parsed.action === 'flag_removed'
+        && isIdentifier(parsed.key)
+      ) {
+        this.flagCache.removeIfNewer(parsed.key, authoritativeVersion);
         return;
       }
 
       const fullFlag = extractFlagConfig(parsed.flag) ?? extractFlagConfig(parsed);
       if (fullFlag) {
-        current.set(fullFlag.key, fullFlag);
-        this.flagCache.set(Array.from(current.values()), 'sse');
+        this.flagCache.upsertIfNewer(fullFlag, authoritativeVersion, 'sse');
         return;
       }
 
       const invalidKey = extractInvalidFlagKey(parsed.flag) ?? extractInvalidFlagKey(parsed);
       if (invalidKey) {
-        this.flagCache.markInvalid([invalidKey], 'sse');
+        this.flagCache.markInvalidIfNewer(
+          invalidKey,
+          authoritativeVersion,
+          'sse'
+        );
       }
     } catch (err) {
       if (this.debug) {
@@ -171,16 +178,18 @@ export class SSEHandlers {
   }
 
   private mergeFlags(flags: FlagConfig[]): void {
-    const existingMap = new Map(this.flagCache.getAll().map((f) => [f.key, f]));
-
     for (const flag of flags) {
-      existingMap.set(flag.key, flag);
+      this.flagCache.upsertIfNewer(flag, flag.version, 'sse');
     }
-
-    this.flagCache.set(Array.from(existingMap.values()), 'sse');
   }
 }
 
 function isRecord(input: unknown): input is Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input);
+}
+
+function parseAuthoritativeVersion(input: unknown): number | null {
+  return typeof input === 'number' && Number.isInteger(input) && input >= 1
+    ? input
+    : null;
 }

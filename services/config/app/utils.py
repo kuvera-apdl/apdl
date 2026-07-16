@@ -13,6 +13,15 @@ def _json_safe(value):
     return value
 
 
+def _omit_presence_values(payload: dict) -> dict:
+    """Presence conditions have no ``value`` member in canonical JSON."""
+    for rule in payload.get("rules", []):
+        for condition in rule.get("conditions", []):
+            if condition.get("operator") in {"exists", "not_exists"}:
+                condition.pop("value", None)
+    return payload
+
+
 def serialize_flag(f: dict) -> dict:
     """Convert a canonical flag DB row to the full admin API representation."""
     payload = {
@@ -30,7 +39,7 @@ def serialize_flag(f: dict) -> dict:
         "fallthrough": f["fallthrough"],
         "salt": f.get("salt", ""),
         "evaluation_mode": f.get("evaluation_mode", "client"),
-        "auto_disable": f.get("auto_disable", True),
+        "auto_disable": f.get("auto_disable", False),
         "guardrails": f.get("guardrails", []),
         "disabled_reason": f.get("disabled_reason", ""),
         "disabled_by": f.get("disabled_by", ""),
@@ -40,7 +49,8 @@ def serialize_flag(f: dict) -> dict:
         "updated_at": _json_safe(f.get("updated_at", "")),
         "archived_at": _json_safe(f.get("archived_at")),
     }
-    return FlagConfig.model_validate(payload).model_dump(mode="json")
+    serialized = FlagConfig.model_validate(payload).model_dump(mode="json")
+    return _omit_presence_values(serialized)
 
 
 def serialize_client_flag(f: dict) -> dict:
@@ -55,7 +65,8 @@ def serialize_client_flag(f: dict) -> dict:
         "fallthrough": f["fallthrough"],
         "version": f.get("version", 1),
     }
-    return ClientFlagConfig.model_validate(payload).model_dump(mode="json")
+    serialized = ClientFlagConfig.model_validate(payload).model_dump(mode="json")
+    return _omit_presence_values(serialized)
 
 
 def serialize_flag_collection(project_id: str, flags: list[dict]) -> dict:

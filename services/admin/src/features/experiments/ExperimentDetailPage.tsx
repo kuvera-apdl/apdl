@@ -47,13 +47,17 @@ export function ExperimentDetailPage() {
   const entry = experimentsQuery.data?.experiments.find((experiment) => experiment.key === key)
 
   const [values, setValues] = useState<ExperimentFormValues | null>(null)
-  const [loadedUpdatedAt, setLoadedUpdatedAt] = useState<string | null>(null)
-  const [staleConfirm, setStaleConfirm] = useState<{ pending: ExperimentUpdate; serverUpdatedAt: string } | null>(null)
+  const [loadedVersion, setLoadedVersion] = useState<number | null>(null)
+  const [staleConfirm, setStaleConfirm] = useState<{
+    pending: ExperimentUpdate
+    serverUpdatedAt: string
+    serverVersion: number
+  } | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
   if (entry && values === null) {
     setValues(entryToFormValues(entry))
-    setLoadedUpdatedAt(entry.updated_at)
+    setLoadedVersion(entry.version)
   }
 
   const submitUpdate = async (body: ExperimentUpdate) => {
@@ -64,7 +68,7 @@ export function ExperimentDetailPage() {
       const current = refreshed.data?.experiments.find((experiment) => experiment.key === key)
       if (current) {
         setValues(entryToFormValues(current))
-        setLoadedUpdatedAt(current.updated_at)
+        setLoadedVersion(current.version)
       }
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : 'Save failed')
@@ -73,13 +77,19 @@ export function ExperimentDetailPage() {
 
   const save = async () => {
     if (!values) return
-    const body = buildUpdate(values)
-    // No optimistic locking on experiments — pre-empt silent last-write-wins
-    // by re-checking updated_at before submitting (plan §5.4.2).
+    if (!entry) return
+    if (loadedVersion === null) return
+    const body = buildUpdate(values, entry, loadedVersion)
+    // Refresh first so the explicit version gate can be explained before the
+    // request rather than surfacing only as a 409.
     const refreshed = await experimentsQuery.refetch()
     const current = refreshed.data?.experiments.find((experiment) => experiment.key === key)
-    if (current && loadedUpdatedAt !== null && current.updated_at !== loadedUpdatedAt) {
-      setStaleConfirm({ pending: body, serverUpdatedAt: current.updated_at })
+    if (current && current.version !== loadedVersion) {
+      setStaleConfirm({
+        pending: body,
+        serverUpdatedAt: current.updated_at,
+        serverVersion: current.version,
+      })
       return
     }
     await submitUpdate(body)
@@ -147,7 +157,7 @@ export function ExperimentDetailPage() {
           <TabsTrigger value="setup">Setup</TabsTrigger>
         </TabsList>
         <TabsContent value="results">
-          <ExperimentResultsTab experimentKey={entry.key} defaultFlagKey={entry.flag_key} />
+          <ExperimentResultsTab experimentKey={entry.key} />
         </TabsContent>
         <TabsContent value="setup">
           {values ? (
@@ -169,8 +179,8 @@ export function ExperimentDetailPage() {
             <DialogTitle>Experiment changed since you loaded it</DialogTitle>
             <DialogDescription>
               It was updated <RelativeTime value={staleConfirm?.serverUpdatedAt ?? null} /> by
-              someone else. Experiments have no version locking — saving now overwrites their
-              changes (last write wins).
+              someone else. Saving with the current server version will explicitly rebase your
+              form values over that version.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -181,8 +191,11 @@ export function ExperimentDetailPage() {
               variant="destructive"
               onClick={() => {
                 const pending = staleConfirm?.pending
+                const serverVersion = staleConfirm?.serverVersion
                 setStaleConfirm(null)
-                if (pending) void submitUpdate(pending)
+                if (pending && serverVersion) {
+                  void submitUpdate({ ...pending, version: serverVersion })
+                }
               }}
             >
               Overwrite anyway
@@ -208,7 +221,7 @@ export function ExperimentDetailPage() {
               variant="destructive"
               onClick={() => {
                 void deleteMutation
-                  .mutateAsync()
+                  .mutateAsync(entry.version)
                   .then(() => {
                     toast.success(`Experiment "${entry.key}" deleted`)
                     navigate('/experiments')
@@ -263,4 +276,3 @@ export function ExperimentCreatePage() {
     </div>
   )
 }
-

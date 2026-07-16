@@ -218,6 +218,40 @@ ORDER BY version;
     return tuple(applied)
 
 
+def _assert_fresh_database_for_empty_ledger(
+    applied: tuple[AppliedMigration, ...],
+) -> None:
+    """Refuse to adopt an unversioned APDL schema.
+
+    The developer-preview release supports fresh databases and exact-prefix
+    migrations created by this ledger only.  In particular, migration 006
+    contains legacy reconciliation that cannot prove the original meaning of
+    every pre-ledger flag row.  An empty ledger beside existing public tables
+    is therefore an unsupported in-place upgrade, not a fresh install.
+    """
+    if applied:
+        return
+
+    output = _psql(
+        f"""
+SELECT tablename
+FROM pg_catalog.pg_tables
+WHERE schemaname = 'public'
+  AND tablename <> '{LEDGER_TABLE}'
+ORDER BY tablename;
+""",
+        capture=True,
+    )
+    existing_tables = tuple(line.strip() for line in output.splitlines() if line.strip())
+    if existing_tables:
+        joined = ", ".join(existing_tables)
+        raise MigrationError(
+            "Fresh-install-only release found public tables without an APDL "
+            f"migration ledger: {joined}. Start with an empty database; "
+            "in-place legacy upgrades are unsupported."
+        )
+
+
 def _apply_migration(migration: Migration) -> None:
     # The lock and second ledger check make two concurrent migrators safe even
     # when both produced their plan from the same earlier ledger snapshot.
@@ -279,7 +313,9 @@ def migrate(directory: Path) -> tuple[Migration, ...]:
     migrations = discover_migrations(directory)
     _wait_for_postgres()
     _ensure_ledger()
-    pending = plan_migrations(migrations, _read_ledger())
+    applied = _read_ledger()
+    _assert_fresh_database_for_empty_ledger(applied)
+    pending = plan_migrations(migrations, applied)
     for migration in pending:
         print(f"  Applying {migration.name}", flush=True)
         _apply_migration(migration)

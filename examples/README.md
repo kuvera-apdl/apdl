@@ -9,10 +9,17 @@ make setup      # first time only
 make dev-all    # ingestion :8080, config :8081, query :8082, agents :8083
 ```
 
-All examples use the demo API key `proj_demo_0123456789abcdef`
-(format: `proj_{project_id}_{secret}`, secret 16+ alphanumeric characters —
-ingestion derives the project from the key, so no extra registration is
-needed locally).
+The local bootstrap provisions two deliberately different credentials for the
+`apdl` project:
+
+- Browser example: `client_apdl_0123456789abcdef0123456789abcdef`, restricted
+  to exactly `events:write` and `config:read`.
+- Server/admin/query examples: `proj_apdl_0123456789abcdef0123456789abcdef`, a
+  confidential local-development credential. Never copy this key into browser
+  code.
+
+Ingestion derives the project from the verified credential record, so no extra
+registration is needed locally.
 
 ## 2. Create a feature flag
 
@@ -20,7 +27,7 @@ The examples check a gate named `new-checkout`. Create it with a 50% rollout:
 
 ```bash
 curl -X POST http://localhost:8081/v1/admin/flags \
-  -H 'x-api-key: proj_demo_0123456789abcdef' \
+  -H 'x-api-key: proj_apdl_0123456789abcdef0123456789abcdef' \
   -H 'Content-Type: application/json' \
   -d '{
     "key": "new-checkout",
@@ -71,10 +78,10 @@ services individually). Query them:
 
 ```bash
 curl -X POST http://localhost:8082/v1/query/events/count \
-  -H 'x-api-key: proj_demo_0123456789abcdef' \
+  -H 'x-api-key: proj_apdl_0123456789abcdef0123456789abcdef' \
   -H 'Content-Type: application/json' \
   -d '{
-    "project_id": "demo",
+    "project_id": "apdl",
     "start_date": "2026-01-01",
     "end_date": "2026-12-31",
     "selectors": [{"event_name": "order_completed"}]

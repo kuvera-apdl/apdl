@@ -1,14 +1,17 @@
 """Unit tests for the experiment→flag mapping and the typed experiment schema."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from pydantic import ValidationError
 
 from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentCreate,
+    ExperimentMetric,
+    ExperimentUpdate,
     GateRule,
     VariantConfig,
-    derive_default_variant,
 )
 
 
@@ -19,6 +22,7 @@ from app.models.schemas import (
     "status,expected",
     [
         ("draft", ("draft", False)),
+        ("scheduled", ("draft", False)),
         ("running", ("active", True)),
         ("completed", ("disabled", False)),
         ("stopped", ("disabled", False)),
@@ -128,12 +132,11 @@ def test_build_flag_create_respects_custom_bucket_by():
     assert flag.fallthrough.rollout.bucket_by == "anonymous_id"
 
 
-# ---- build_flag_update ----
+# ---- internal lifecycle projection ----
 
 
-def test_build_flag_update_carries_version_and_state():
-    update = experiment_flag.build_flag_update(
-        version=7,
+def test_build_flag_projection_carries_lifecycle_state():
+    projection = experiment_flag.build_flag_projection(
         flag_key="checkout",
         name="checkout",
         description="d",
@@ -143,30 +146,10 @@ def test_build_flag_update_carries_version_and_state():
         traffic_percentage=50.0,
         targeting_rules=[],
     )
-    assert update.version == 7
-    assert update.state == "disabled"
-    assert update.enabled is False
-    assert update.fallthrough.rollout.percentage == 50.0
-
-
-# ---- default_variant derivation ----
-
-
-def test_derive_default_variant_prefers_control():
-    assert derive_default_variant(["treatment", "control"]) == "control"
-
-
-def test_derive_default_variant_falls_back_to_first():
-    assert derive_default_variant(["b", "a"]) == "b"
-
-
-def test_derive_default_variant_uses_explicit_when_valid():
-    assert derive_default_variant(["control", "treatment"], "treatment") == "treatment"
-
-
-def test_derive_default_variant_rejects_unknown_explicit():
-    with pytest.raises(ValueError, match="default_variant"):
-        derive_default_variant(["control", "treatment"], "missing")
+    assert projection["state"] == "disabled"
+    assert projection["enabled"] is False
+    assert projection["auto_disable"] is False
+    assert projection["fallthrough"]["rollout"]["percentage"] == 50.0
 
 
 # ---- typed ExperimentCreate validates with the flag validators ----
@@ -175,7 +158,7 @@ def test_derive_default_variant_rejects_unknown_explicit():
 def test_experiment_create_accepts_display_fields_on_variants():
     exp = ExperimentCreate(
         key="checkout",
-        status="running",
+        default_variant="control",
         variants=[
             {"key": "control", "weight": 1, "description": "Current"},
             {"key": "treatment", "weight": 1, "description": "New"},
@@ -188,14 +171,16 @@ def test_experiment_create_rejects_duplicate_variant_keys():
     with pytest.raises(ValidationError, match="unique keys"):
         ExperimentCreate(
             key="checkout",
+            default_variant="control",
             variants=[{"key": "control", "weight": 1}, {"key": "control", "weight": 1}],
         )
 
 
-def test_experiment_create_rejects_zero_total_weight():
-    with pytest.raises(ValidationError, match="positive weight"):
+def test_experiment_create_rejects_any_non_positive_weight():
+    with pytest.raises(ValidationError, match="greater than 0"):
         ExperimentCreate(
             key="checkout",
+            default_variant="control",
             variants=[{"key": "control", "weight": 0}, {"key": "treatment", "weight": 0}],
         )
 
@@ -212,9 +197,110 @@ def test_experiment_create_rejects_default_variant_not_in_variants():
 def test_experiment_create_rejects_legacy_active_status():
     # The agent used to post status="active"; it is no longer a valid literal.
     with pytest.raises(ValidationError):
-        ExperimentCreate(key="checkout", status="active")
+        ExperimentCreate(
+            key="checkout",
+            status="active",
+            default_variant="control",
+            variants=[
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        )
 
 
-def test_experiment_create_defaults_to_control_treatment():
-    exp = ExperimentCreate(key="checkout")
-    assert [v.key for v in exp.variants] == ["control", "treatment"]
+@pytest.mark.parametrize("status", ["completed", "stopped"])
+def test_experiment_create_rejects_terminal_status(status):
+    with pytest.raises(ValidationError):
+        ExperimentCreate(
+            key="checkout",
+            status=status,
+            default_variant="control",
+            variants=[
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        )
+
+
+def test_experiment_create_requires_declared_variants_and_default():
+    with pytest.raises(ValidationError) as exc_info:
+        ExperimentCreate(key="checkout")
+
+    missing = {error["loc"][0] for error in exc_info.value.errors()}
+    assert missing == {"variants", "default_variant"}
+
+
+@pytest.mark.parametrize("field", ["key", "flag_key"])
+@pytest.mark.parametrize("value", ["exp/checkout", "has space", "-leading"])
+def test_experiment_create_rejects_non_path_safe_resource_keys(field, value):
+    payload = {
+        "key": "checkout",
+        "flag_key": "checkout-flag",
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+    }
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        ExperimentCreate.model_validate(payload)
+
+
+@pytest.mark.parametrize("count", [1, 11])
+def test_experiment_create_requires_two_to_ten_variants(count):
+    variants = [
+        {"key": f"variant-{index}", "weight": 1}
+        for index in range(count)
+    ]
+    with pytest.raises(ValidationError):
+        ExperimentCreate(
+            key="checkout",
+            default_variant="variant-0",
+            variants=variants,
+        )
+
+
+def test_experiment_metric_allows_only_conversion():
+    assert ExperimentMetric(event="purchase").type == "conversion"
+    with pytest.raises(ValidationError):
+        ExperimentMetric(event="revenue", type="revenue")
+
+
+def test_experiment_window_is_limited_to_ninety_days():
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    common = {
+        "key": "checkout",
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+        "start_date": start,
+    }
+
+    accepted = ExperimentCreate(
+        **common,
+        end_date=start + timedelta(days=90),
+    )
+    assert accepted.end_date - accepted.start_date == timedelta(days=90)
+
+    with pytest.raises(ValidationError, match="must not exceed 90 days"):
+        ExperimentCreate(
+            **common,
+            end_date=start + timedelta(days=90, seconds=1),
+        )
+
+
+def test_experiment_update_enforces_variant_and_metric_contracts():
+    with pytest.raises(ValidationError):
+        ExperimentUpdate(
+            version=1,
+            variants=[{"key": "only", "weight": 1}],
+        )
+    with pytest.raises(ValidationError):
+        ExperimentUpdate(
+            version=1,
+            primary_metric={"event": "revenue", "type": "revenue"},
+        )

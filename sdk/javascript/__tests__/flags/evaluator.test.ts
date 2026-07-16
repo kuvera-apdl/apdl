@@ -89,7 +89,6 @@ describe('FlagEvaluator', () => {
       { attribute: 'email', operator: 'contains', value: '@company.com' },
       { attribute: 'email', operator: 'starts_with', value: 'alice' },
       { attribute: 'email', operator: 'ends_with', value: '.com' },
-      { attribute: 'email', operator: 'regex', value: '^alice@' },
     ] as const;
 
     for (const [index, condition] of conditions.entries()) {

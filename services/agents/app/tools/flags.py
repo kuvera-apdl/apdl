@@ -86,7 +86,6 @@ async def create_flag(
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
     evaluation_mode: str = "client",
-    auto_disable: bool = True,
     guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create a new canonical variant feature flag.
@@ -105,7 +104,6 @@ async def create_flag(
         rules: Ordered canonical variant flag rules.
         fallthrough: Canonical fallthrough config containing only "rollout".
         evaluation_mode: One of "client", "server", or "both".
-        auto_disable: Whether guardrail automation may disable this flag.
         guardrails: Optional guardrail configs.
 
     Returns:
@@ -131,7 +129,7 @@ async def create_flag(
             "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
         },
         "evaluation_mode": evaluation_mode,
-        "auto_disable": auto_disable,
+        "auto_disable": False,
         "guardrails": guardrails or [],
     }
     return await _post(
@@ -146,10 +144,8 @@ async def update_flag(
     project_id: str,
     key: str,
     version: int,
-    state: str | None = None,
     owners: list[str] | None = None,
     review_by: str | None = None,
-    enabled: bool | None = None,
     name: str | None = None,
     description: str | None = None,
     default_variant: str | None = None,
@@ -157,7 +153,6 @@ async def update_flag(
     rules: list[dict[str, Any]] | None = None,
     fallthrough: dict[str, Any] | None = None,
     evaluation_mode: str | None = None,
-    auto_disable: bool | None = None,
     guardrails: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Update an existing feature flag.
@@ -166,10 +161,8 @@ async def update_flag(
         project_id: Project containing the flag.
         key: Flag key to update.
         version: Expected current config version.
-        state: Updated lifecycle state.
         owners: Updated owner list.
         review_by: Updated ISO review date.
-        enabled: Set flag enabled/disabled state.
         name: Updated name.
         description: Updated description.
         default_variant: Updated disabled/invalid fallback variant.
@@ -177,21 +170,16 @@ async def update_flag(
         rules: Updated canonical variant flag rules.
         fallthrough: Updated fallthrough config.
         evaluation_mode: Updated evaluation mode.
-        auto_disable: Updated guardrail automation setting.
         guardrails: Updated guardrail configs.
 
     Returns:
         The updated flag configuration.
     """
     payload: dict[str, Any] = {"version": version}
-    if state is not None:
-        payload["state"] = state
     if owners is not None:
         payload["owners"] = owners
     if review_by is not None:
         payload["review_by"] = review_by
-    if enabled is not None:
-        payload["enabled"] = enabled
     if name is not None:
         payload["name"] = name
     if description is not None:
@@ -206,8 +194,6 @@ async def update_flag(
         payload["fallthrough"] = fallthrough
     if evaluation_mode is not None:
         payload["evaluation_mode"] = evaluation_mode
-    if auto_disable is not None:
-        payload["auto_disable"] = auto_disable
     if guardrails is not None:
         payload["guardrails"] = guardrails
     # Flag keys are LLM-authored: quote the path segment so a key containing
@@ -220,19 +206,35 @@ async def update_flag(
     )
 
 
+async def transition_flag(
+    project_id: str,
+    key: str,
+    *,
+    version: int,
+    target_state: str,
+) -> dict[str, Any]:
+    """Transition a standalone flag through Config's lifecycle authority."""
+    return await _post(
+        project_id,
+        f"/v1/admin/flags/{quote(key, safe='')}/transition",
+        {"version": version, "target_state": target_state},
+        params={"project_id": project_id},
+    )
+
+
 async def disable_flag(
     project_id: str,
     key: str,
+    *,
+    version: int,
     reason: str = "experiment_rollback",
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Disable a flag through the Config service's canonical rollback path.
 
-    ``source`` is "system": a flag with ``auto_disable`` off makes the config
-    service refuse (409) — the flag owner opted out of automated kill switches,
-    and the evaluation agent must respect that.
+    The expected version makes a concurrent owner edit fail closed.
     """
-    payload = {"reason": reason, "source": "system", "evidence": evidence or {}}
+    payload = {"version": version, "reason": reason, "evidence": evidence or {}}
     return await _post(
         project_id,
         f"/v1/admin/flags/{quote(key, safe='')}/disable",

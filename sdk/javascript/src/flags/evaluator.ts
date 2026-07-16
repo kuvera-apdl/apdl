@@ -9,6 +9,20 @@ import type {
 } from './types';
 import { FlagCache } from './cache';
 import { percentageBucket } from './hash';
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_RULES,
+  NUMERIC_OPERATORS,
+  PRESENCE_OPERATORS,
+  SUPPORTED_OPERATORS,
+  isBoundedString,
+  isConditionValueValid,
+  isIdentifier,
+  isMembershipList,
+  isScalar,
+  parseNumeric,
+  scalarEqual,
+} from './targeting-contract';
 
 type ResolvedAttribute =
   | { exists: true; value: unknown }
@@ -70,6 +84,13 @@ export class FlagEvaluator {
       return {
         ...result,
         reason: 'disabled',
+      };
+    }
+
+    if (!this.rulesWithinLimits(flag.rules)) {
+      return {
+        ...result,
+        reason: 'error',
       };
     }
 
@@ -165,55 +186,85 @@ export class FlagEvaluator {
   }
 
   private matchesRule(rule: FlagRule, context: EvalContext): boolean {
+    if (
+      !Array.isArray(rule.conditions)
+      || rule.conditions.length > MAX_CONDITIONS_PER_RULE
+    ) {
+      return false;
+    }
     return rule.conditions.every((condition) => this.matchesCondition(condition, context));
   }
 
   private matchesCondition(condition: FlagCondition, context: EvalContext): boolean {
+    if (condition === null || typeof condition !== 'object') return false;
     const { attribute, operator } = condition;
-    const actual = this.resolveAttribute(attribute, context);
-
-    if (operator === 'exists') {
-      return actual.exists && actual.value !== null && actual.value !== undefined;
-    }
-    if (operator === 'not_exists') {
-      return !actual.exists || actual.value === null || actual.value === undefined;
-    }
-    if (!actual.exists || !Object.prototype.hasOwnProperty.call(condition, 'value')) {
+    if (
+      !isIdentifier(attribute)
+      || typeof operator !== 'string'
+      || !SUPPORTED_OPERATORS.has(operator)
+    ) {
       return false;
     }
 
+    const hasValue = Object.prototype.hasOwnProperty.call(condition, 'value');
+    if (PRESENCE_OPERATORS.has(operator)) {
+      if (hasValue) return false;
+    } else if (!hasValue || !isConditionValueValid(operator, condition.value)) {
+      return false;
+    }
+
+    if (operator === 'exists') {
+      return this.resolveAttribute(attribute, context).exists;
+    }
+    if (operator === 'not_exists') {
+      return !this.resolveAttribute(attribute, context).exists;
+    }
+
+    const actual = this.resolveAttribute(attribute, context);
+    if (!actual.exists) return false;
     const expected = condition.value;
-    const actualValue = String(actual.value);
 
     if (operator === 'equals') {
-      return actualValue === String(expected);
+      return scalarEqual(actual.value, expected);
     }
     if (operator === 'not_equals') {
-      return actualValue !== String(expected);
+      return isScalar(actual.value) && !scalarEqual(actual.value, expected);
     }
     if (operator === 'contains') {
-      return typeof expected === 'string' && actualValue.includes(expected);
+      return isBoundedString(actual.value)
+        && isBoundedString(expected)
+        && actual.value.includes(expected);
     }
     if (operator === 'not_contains') {
-      return typeof expected === 'string' && !actualValue.includes(expected);
+      return isBoundedString(actual.value)
+        && isBoundedString(expected)
+        && !actual.value.includes(expected);
     }
     if (operator === 'starts_with') {
-      return typeof expected === 'string' && actualValue.startsWith(expected);
+      return isBoundedString(actual.value)
+        && isBoundedString(expected)
+        && actual.value.startsWith(expected);
     }
     if (operator === 'ends_with') {
-      return typeof expected === 'string' && actualValue.endsWith(expected);
+      return isBoundedString(actual.value)
+        && isBoundedString(expected)
+        && actual.value.endsWith(expected);
     }
     if (operator === 'in') {
-      return Array.isArray(expected) && expected.some((item) => Object.is(item, actual.value));
+      return isScalar(actual.value)
+        && isMembershipList(expected)
+        && expected.some((item) => scalarEqual(actual.value, item));
     }
     if (operator === 'not_in') {
-      return !Array.isArray(expected) || !expected.some((item) => Object.is(item, actual.value));
+      return isScalar(actual.value)
+        && isMembershipList(expected)
+        && !expected.some((item) => scalarEqual(actual.value, item));
     }
-    if (operator === 'gt' || operator === 'gte' || operator === 'lt' || operator === 'lte') {
-      const actualNumber = Number(actual.value);
-      const expectedNumber = Number(expected);
+    if (NUMERIC_OPERATORS.has(operator)) {
+      const actualNumber = parseNumeric(actual.value);
+      const expectedNumber = parseNumeric(expected);
 
-      if (!Number.isFinite(actualNumber) || !Number.isFinite(expectedNumber)) {
+      if (actualNumber === null || expectedNumber === null) {
         return false;
       }
 
@@ -222,18 +273,19 @@ export class FlagEvaluator {
       if (operator === 'lt') return actualNumber < expectedNumber;
       return actualNumber <= expectedNumber;
     }
-    if (operator === 'regex') {
-      if (typeof expected !== 'string') {
-        return false;
-      }
-      try {
-        return new RegExp(expected).test(actualValue);
-      } catch {
-        return false;
-      }
-    }
 
     return false;
+  }
+
+  private rulesWithinLimits(rules: FlagRule[]): boolean {
+    if (!Array.isArray(rules) || rules.length > MAX_RULES) return false;
+    return rules.every((rule) => (
+      rule !== null
+      && typeof rule === 'object'
+      && isIdentifier(rule.id)
+      && Array.isArray(rule.conditions)
+      && rule.conditions.length <= MAX_CONDITIONS_PER_RULE
+    ));
   }
 
   private applyRollout(
@@ -282,11 +334,9 @@ export class FlagEvaluator {
   }
 
   private unitId(context: EvalContext, bucketBy: string): string {
+    if (!isIdentifier(bucketBy)) return '';
     const actual = this.resolveAttribute(bucketBy, context);
-    if (actual.exists && actual.value !== null && actual.value !== undefined) {
-      return String(actual.value);
-    }
-    return '';
+    return actual.exists && isIdentifier(actual.value) ? actual.value : '';
   }
 
   private resolveAttribute(attribute: string, context: EvalContext): ResolvedAttribute {
@@ -299,18 +349,34 @@ export class FlagEvaluator {
     // against `String(null)` = "null" here vs `str(None)` = "None" in Python).
     // Falsy non-null values (`''`, `0`, `false`) stay present. See parity.json.
     if (attribute === 'user_id') {
-      return context.user_id != null
-        ? { exists: true, value: context.user_id }
-        : { exists: false, value: null };
+      if (Object.prototype.hasOwnProperty.call(context, 'user_id')) {
+        const value = context.user_id;
+        return value != null
+          ? { exists: true, value }
+          : { exists: false, value: null };
+      }
+      return { exists: false, value: null };
     }
 
     if (attribute === 'anonymous_id') {
-      return context.anonymous_id != null
-        ? { exists: true, value: context.anonymous_id }
-        : { exists: false, value: null };
+      if (Object.prototype.hasOwnProperty.call(context, 'anonymous_id')) {
+        const value = context.anonymous_id;
+        return value != null
+          ? { exists: true, value }
+          : { exists: false, value: null };
+      }
+      return { exists: false, value: null };
     }
 
-    const attributes = context.attributes ?? {};
+    const attributes = context.attributes;
+    if (
+      attributes === null
+      || typeof attributes !== 'object'
+      || Array.isArray(attributes)
+      || !Object.prototype.hasOwnProperty.call(attributes, attribute)
+    ) {
+      return { exists: false, value: null };
+    }
     const value = attributes[attribute];
     return value != null
       ? { exists: true, value }

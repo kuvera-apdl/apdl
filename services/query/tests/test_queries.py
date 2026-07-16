@@ -1,17 +1,31 @@
 """Unit tests for selector SQL generation and analytics query builders."""
 
+import re
+from datetime import datetime
+from pathlib import Path
+
 import pytest
+from asynch.proto.utils.escape import escape_params
 from pydantic import ValidationError
 
+from app.clickhouse.client import normalize_query_params
 from app.clickhouse.queries import (
-    EXPERIMENT_EXPOSURES_QUERY,
-    EXPERIMENT_METRICS_QUERY,
+    EXPERIMENT_ANALYSIS_QUERY,
+    build_cohort_query,
+    build_event_catalog_query,
     build_event_count_query,
     build_feature_flag_frontend_error_guardrail_query,
     build_funnel_query,
+    build_retention_query,
 )
 from app.clickhouse.selectors import build_selector_condition, selector_label
 from app.models.schemas import EventSelector
+from app.routers.experiments import _datetime64_boundary_milliseconds
+
+
+QUERIES_SOURCE = (
+    Path(__file__).resolve().parents[1] / "app" / "clickhouse" / "queries.py"
+).read_text()
 
 
 def _selector(event_name: str, filters: list[dict] | None = None) -> EventSelector:
@@ -146,6 +160,23 @@ class TestSelectorValidation:
 
 
 class TestQueryBuilders:
+    def test_replacing_table_reads_always_apply_final(self):
+        replacing_tables = {
+            "events",
+            "feature_flag_exposures",
+            "frontend_health_events",
+        }
+        table_read = re.compile(r"\b(?:FROM|JOIN)\s+([a-z_]+)\b")
+
+        reads = []
+        for line in QUERIES_SOURCE.splitlines():
+            match = table_read.search(line)
+            if match and match.group(1) in replacing_tables:
+                reads.append(line.strip())
+
+        assert reads
+        assert all(read.endswith(" FINAL") for read in reads)
+
     def test_count_query_returns_one_row_per_selector(self):
         selectors = [
             _selector("$click", [{"property": "href", "operator": "eq", "value": "/a"}]),
@@ -160,6 +191,8 @@ class TestQueryBuilders:
         sql = build_event_count_query(selectors, params)
 
         assert "UNION ALL" in sql
+        assert "1 AS is_total" in sql
+        assert "uniqExactIf" in sql
         assert "count_0_label" in params
         assert params["count_0_label"] == "$click[href eq /a]"
         assert params["count_1_label"] == "$click[href eq /b]"
@@ -187,18 +220,92 @@ class TestQueryBuilders:
         assert "funnel_step_1_filter_0_value" in params
         assert "/checkout" not in sql
         assert "OR" in sql
+        assert "concat('u:', user_id)" in sql
+        assert "concat('a:', anonymous_id)" in sql
 
-    def test_experiment_queries_use_feature_flag_exposures(self):
-        combined_sql = f"{EXPERIMENT_EXPOSURES_QUERY}\n{EXPERIMENT_METRICS_QUERY}"
+    def test_non_experiment_analytics_share_namespaced_actor_identity(self):
+        params = {}
+        queries = [
+            build_event_count_query([_selector("page")], params),
+            build_event_catalog_query(params),
+            build_cohort_query(_selector("purchase"), params),
+            build_retention_query(
+                _selector("signup"),
+                _selector("return"),
+                params,
+                period="day",
+            ),
+        ]
 
-        assert "FROM feature_flag_exposures" in EXPERIMENT_EXPOSURES_QUERY
-        assert "FROM feature_flag_exposures" in EXPERIMENT_METRICS_QUERY
-        assert "flag_key = %(flag_key)s" in combined_sql
-        assert "variant" in combined_sql
-        assert "ev.user_id = e.assignment_id" in EXPERIMENT_METRICS_QUERY
-        assert "ev.anonymous_id = e.assignment_id" in EXPERIMENT_METRICS_QUERY
-        assert "$experiment_exposure" not in combined_sql
-        assert "JSONExtractString(properties, 'experiment_id')" not in combined_sql
+        for sql in queries:
+            assert "concat('u:', user_id)" in sql
+            assert "concat('a:', anonymous_id)" in sql
+
+    def test_guardrail_uses_session_then_namespaced_actor_fallback(self):
+        sql = build_feature_flag_frontend_error_guardrail_query()
+
+        assert "concat('s:', session_id)" in sql
+        assert "concat('u:', user_id)" in sql
+        assert "concat('a:', anonymous_id)" in sql
+        assert "concat('s:', f.session_id)" in sql
+
+    def test_experiment_query_is_exposure_led_and_first_assignment_wins(self):
+        sql = EXPERIMENT_ANALYSIS_QUERY
+
+        assert "FROM feature_flag_exposures FINAL" in sql
+        assert "flag_key = %(flag_key)s" in sql
+        assert "argMin(variant, tuple(first_exposure, message_id))" in sql
+        assert "uniqExact(variant) > 1 AS crossed_over" in sql
+        assert "LEFT JOIN metric_events" in sql
+        assert "countIf(converted) AS conversions" in sql
+        assert "INNER JOIN" not in sql
+
+    def test_experiment_query_namespaces_identities_without_stitching(self):
+        sql = EXPERIMENT_ANALYSIS_QUERY
+
+        assert sql.count("concat('u:', user_id)") >= 2
+        assert sql.count("concat('a:', anonymous_id)") >= 2
+        assert "user_id =" not in sql
+        assert "anonymous_id =" not in sql
+        assert " OR " not in sql
+
+    def test_experiment_query_uses_authoritative_metric_and_half_open_window(self):
+        sql = EXPERIMENT_ANALYSIS_QUERY
+
+        assert "event_name = %(metric_event)s" in sql
+        assert "fromUnixTimestamp64Milli(%(start_ms)s, 'UTC')" in sql
+        assert "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')" in sql
+        assert "first_exposure >= analysis_start" in sql
+        assert "first_exposure < analysis_end" in sql
+        assert "timestamp >= analysis_start" in sql
+        assert "timestamp < analysis_end" in sql
+        assert sql.count("event_date BETWEEN toDate(analysis_start)") == 2
+        assert "%(start_date)s" not in sql
+        assert "%(end_date)s" not in sql
+        assert "%(metric)s" not in sql
+        assert "$experiment_exposure" not in sql
+        assert "experiment_id" not in sql
+
+    def test_experiment_window_keeps_fractional_offset_precision_through_driver(self):
+        start = datetime.fromisoformat("2025-01-01T01:00:00.123000+01:00")
+        end = datetime.fromisoformat("2025-01-01T01:00:00.123456+01:00")
+        params = {
+            "start_ms": _datetime64_boundary_milliseconds(start),
+            "end_ms": _datetime64_boundary_milliseconds(end),
+        }
+
+        assert params == {
+            "start_ms": 1_735_689_600_123,
+            "end_ms": 1_735_689_600_124,
+        }
+        rendered = normalize_query_params(
+            "SELECT fromUnixTimestamp64Milli(%(start_ms)s, 'UTC'), "
+            "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')"
+        ).format(**escape_params(params))
+        assert rendered == (
+            "SELECT fromUnixTimestamp64Milli(1735689600123, 'UTC'), "
+            "fromUnixTimestamp64Milli(1735689600124, 'UTC')"
+        )
 
     def test_guardrail_query_compares_variants_against_default(self):
         sql = build_feature_flag_frontend_error_guardrail_query(

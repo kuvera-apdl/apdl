@@ -1,7 +1,7 @@
-"""Auto-rollback logic for agent-deployed experiments.
+"""Read-only rollback assessment for agent-designed experiments.
 
-Monitors key metrics after an experiment is deployed and triggers
-automatic rollback if degradation thresholds are breached.
+The OSS developer preview may assess degradation, but automatic Config
+mutation is deliberately unavailable.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from app.service_auth import service_headers
 logger = logging.getLogger(__name__)
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
-CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
 
 
@@ -55,21 +54,17 @@ class RollbackDecision:
 
 
 class ExperimentRollbackMonitor:
-    """Monitors a deployed experiment and triggers rollback on degradation.
+    """Assess a deployed experiment without performing automatic mutation.
 
     Usage:
         monitor = ExperimentRollbackMonitor(thresholds=RollbackThresholds())
         decision = await monitor.evaluate(
             project_id="default",
             experiment_id="exp_checkout_v2",
-            flag_key="exp_checkout_v2",
             baseline=MetricSnapshot(error_rate=0.01, p95_latency_ms=200, primary_metric_value=0.12),
         )
-        if decision.should_rollback:
-            await monitor.execute_rollback(
-                project_id="your-project",
-                flag_key="exp_checkout_v2",
-            )
+        # A human operator reviews the recommendation and uses Config's
+        # versioned experiment lifecycle endpoint when action is warranted.
     """
 
     def __init__(self, thresholds: RollbackThresholds | None = None) -> None:
@@ -79,10 +74,7 @@ class ExperimentRollbackMonitor:
         self,
         project_id: str,
         experiment_id: str,
-        flag_key: str,
         baseline: MetricSnapshot,
-        primary_metric_event: str = "purchase",
-        default_variant: str = "control",
     ) -> RollbackDecision:
         """Evaluate whether an experiment should be rolled back.
 
@@ -92,11 +84,7 @@ class ExperimentRollbackMonitor:
         Args:
             project_id: Project scope.
             experiment_id: The experiment to evaluate.
-            flag_key: The feature flag controlling the experiment.
             baseline: Pre-experiment metric snapshot.
-            primary_metric_event: Event name for the primary metric.
-            default_variant: The control/baseline variant key — treatment
-                metrics are read from the other variants.
 
         Returns:
             A RollbackDecision indicating whether rollback is needed.
@@ -107,9 +95,7 @@ class ExperimentRollbackMonitor:
         # must NOT trigger rollback: fabricated zero metrics would make any
         # positive baseline look like total degradation, disabling a healthy
         # experiment because the query service blipped.
-        current = await self._fetch_current_metrics(
-            project_id, experiment_id, flag_key, primary_metric_event, default_variant
-        )
+        current = await self._fetch_current_metrics(project_id, experiment_id)
         if current is None:
             logger.warning(
                 "Cannot evaluate rollback for experiment %s — current metrics "
@@ -168,49 +154,31 @@ class ExperimentRollbackMonitor:
         )
 
     async def execute_rollback(self, project_id: str, flag_key: str) -> bool:
-        """Execute a rollback by disabling the experiment's feature flag.
+        """Decline automatic rollback in the OSS developer preview.
 
-        This forces all users to see the control variant.
+        Experiment-owned flags can only be changed through their owning
+        experiment's versioned lifecycle command. This legacy monitor does not
+        own that authoritative version, so it must never attempt a generic flag
+        mutation.
 
         Args:
             project_id: Project containing the feature flag.
             flag_key: The feature flag to disable.
 
         Returns:
-            True if rollback was successful, False otherwise.
+            Always ``False`` while automatic decisions are unsupported.
         """
-        try:
-            async with httpx.AsyncClient(
-                base_url=CONFIG_SERVICE_URL,
-                timeout=_TIMEOUT,
-                headers=service_headers(project_id),
-            ) as client:
-                resp = await client.post(
-                    f"/v1/admin/flags/{quote(flag_key, safe='')}/disable",
-                    params={"project_id": project_id},
-                    json={
-                        "reason": "experiment_rollback",
-                        "source": "system",
-                        "evidence": {
-                            "rollback_monitor": "experiment",
-                        },
-                    },
-                )
-                resp.raise_for_status()
-
-            logger.info("Rollback executed: flag %s disabled", flag_key)
-            return True
-        except Exception as exc:
-            logger.error("Rollback failed for flag %s: %s", flag_key, exc)
-            return False
+        logger.warning(
+            "Automatic experiment rollback is disabled for project %s flag %s",
+            project_id,
+            flag_key,
+        )
+        return False
 
     async def _fetch_current_metrics(
         self,
         project_id: str,
         experiment_id: str,
-        flag_key: str,
-        primary_metric_event: str,
-        default_variant: str = "control",
     ) -> MetricSnapshot | None:
         """Fetch current metric values from the query service.
 
@@ -230,18 +198,15 @@ class ExperimentRollbackMonitor:
             ) as client:
                 resp = await client.get(
                     f"/v1/query/experiment/{quote(experiment_id, safe='')}",
-                    params={
-                        "metric": primary_metric_event,
-                        "project_id": project_id,
-                        "flag_key": flag_key,
-                    },
+                    params={"project_id": project_id},
                 )
                 resp.raise_for_status()
                 data = resp.json()
 
-            # Extract treatment variant metrics — "treatment" is any variant
-            # other than the experiment's declared control.
-            variants = data.get("variants", [])
+            if data.get("analysis_status") != "ready":
+                return None
+            default_variant = data.get("control_variant")
+            variants = data.get("arms", [])
             treatment_variants = [
                 v for v in variants if v.get("variant") != default_variant
             ]
@@ -250,7 +215,10 @@ class ExperimentRollbackMonitor:
                 # No exposure data yet — indistinguishable from a broken
                 # experiment only by fabricating numbers, so don't.
                 return None
-            primary_value = treatment_variants[0].get("mean", 0.0)
+            primary_value = min(
+                float(variant.get("conversion_rate", 0.0))
+                for variant in treatment_variants
+            )
 
             # Error rate and latency would come from a monitoring stack.
             # For this implementation, we return placeholder values that

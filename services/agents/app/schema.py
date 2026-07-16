@@ -8,10 +8,11 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 5
-MIGRATION_NAME = "005_agent_observability.sql"
+MIGRATION_VERSION = 14
+MIGRATION_NAME = "014_disable_self_registered_agents.sql"
 REQUIRED_COLUMNS = frozenset(
     {
+        ("admin_projects", "created_by"),
         ("agent_memory", "project_id"),
         ("agent_memory", "embedding"),
         ("agent_runs", "run_id"),

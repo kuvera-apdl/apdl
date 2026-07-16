@@ -1,163 +1,331 @@
-"""Experiment results endpoint — statistical analysis of A/B experiments."""
+"""Authoritative, exposure-led experiment analysis."""
 
 from __future__ import annotations
 
-import logging
-from collections import defaultdict
+import math
+from datetime import datetime, timedelta, timezone
+from statistics import NormalDist
 from typing import Any
 
-import numpy as np
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
-from app.clickhouse.queries import EXPERIMENT_EXPOSURES_QUERY, EXPERIMENT_METRICS_QUERY
-from app.models.schemas import AnalysisMethod, ExperimentResult, VariantResult
-from app.models.statistics import ExperimentAnalyzer
+from app.clickhouse.queries import EXPERIMENT_ANALYSIS_QUERY
+from app.config_client import (
+    ConfigExperimentAnalysis,
+    ConfigServiceUnavailable,
+    ExperimentNotAnalyzable,
+    ExperimentNotFound,
+    fetch_experiment_analysis,
+)
+from app.models.schemas import (
+    ExperimentAnalysisInsufficient,
+    ExperimentAnalysisReady,
+    ExperimentAnalysisResponse,
+    ExperimentArmResult,
+    ExperimentComparison,
+)
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/query", tags=["experiments"])
 
-analyzer = ExperimentAnalyzer()
+_ALPHA = 0.05
+_MIN_SAMPLE_SIZE_PER_ARM = 2
+_MAX_EXPERIMENT_WINDOW = timedelta(days=90)
+_ALLOWED_QUERY_PARAMETERS = frozenset({"project_id"})
+_RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _get_client(request: Request) -> ClickHouseClient:
     return request.app.state.ch_client
 
 
-@router.get("/experiment/{experiment_id}", response_model=ExperimentResult)
+def _reject_unknown_query_parameters(request: Request) -> None:
+    unknown = sorted(set(request.query_params) - _ALLOWED_QUERY_PARAMETERS)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown query parameter(s): {', '.join(unknown)}",
+        )
+    if len(request.query_params.getlist("project_id")) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="project_id must be supplied at most once",
+        )
+
+
+def _empty_arms(metadata: ConfigExperimentAnalysis) -> list[ExperimentArmResult]:
+    return [
+        ExperimentArmResult(
+            variant=variant,
+            sample_size=0,
+            conversions=0,
+            conversion_rate=0.0,
+        )
+        for variant in metadata.variants
+    ]
+
+
+def _datetime64_boundary_milliseconds(value: datetime) -> int:
+    """Map an exact instant onto the first DateTime64(3) value at/after it."""
+    utc_value = value.astimezone(timezone.utc)
+    delta = utc_value - _UNIX_EPOCH
+    total_microseconds = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    return -(-total_microseconds // 1_000)
+
+
+def _aggregate_arms(
+    metadata: ConfigExperimentAnalysis,
+    rows: list[dict[str, Any]],
+) -> tuple[list[ExperimentArmResult], int, int]:
+    declared = set(metadata.variants)
+    aggregates: dict[str, tuple[int, int]] = {}
+    seen_variants: set[str] = set()
+    crossover_actors = 0
+    unknown_variant_actors = 0
+
+    for row in rows:
+        variant = row.get("variant")
+        if not isinstance(variant, str) or not variant:
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned invalid experiment aggregates",
+            )
+        if variant in seen_variants:
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned duplicate experiment arm aggregates",
+            )
+        seen_variants.add(variant)
+        values = (
+            row.get("sample_size"),
+            row.get("conversions"),
+            row.get("crossover_actors"),
+        )
+        if any(type(value) is not int for value in values):
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned invalid experiment aggregates",
+            )
+        sample_size, conversions, crossovers = values
+        if (
+            sample_size < 0
+            or conversions < 0
+            or conversions > sample_size
+            or crossovers < 0
+            or crossovers > sample_size
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned inconsistent experiment aggregates",
+            )
+
+        crossover_actors += crossovers
+        if variant not in declared:
+            unknown_variant_actors += sample_size
+            continue
+        aggregates[variant] = (sample_size, conversions)
+
+    arms: list[ExperimentArmResult] = []
+    for variant in metadata.variants:
+        sample_size, conversions = aggregates.get(variant, (0, 0))
+        arms.append(
+            ExperimentArmResult(
+                variant=variant,
+                sample_size=sample_size,
+                conversions=conversions,
+                conversion_rate=(conversions / sample_size if sample_size else 0.0),
+            )
+        )
+    return arms, crossover_actors, unknown_variant_actors
+
+
+def _comparison(
+    control: ExperimentArmResult,
+    treatment: ExperimentArmResult,
+    comparison_count: int,
+) -> ExperimentComparison | None:
+    control_rate = control.conversion_rate
+    treatment_rate = treatment.conversion_rate
+    difference = treatment_rate - control_rate
+
+    pooled_rate = (
+        (control.conversions + treatment.conversions)
+        / (control.sample_size + treatment.sample_size)
+    )
+    pooled_variance = pooled_rate * (1.0 - pooled_rate) * (
+        (1.0 / control.sample_size) + (1.0 / treatment.sample_size)
+    )
+    if pooled_variance == 0.0:
+        raw_p_value = 1.0
+    else:
+        z_score = abs(difference) / math.sqrt(pooled_variance)
+        raw_p_value = math.erfc(z_score / math.sqrt(2.0))
+
+    adjusted_p_value = min(raw_p_value * comparison_count, 1.0)
+    standard_error = math.sqrt(
+        control_rate * (1.0 - control_rate) / control.sample_size
+        + treatment_rate * (1.0 - treatment_rate) / treatment.sample_size
+    )
+    critical_value = NormalDist().inv_cdf(
+        1.0 - (_ALPHA / (2.0 * comparison_count))
+    )
+    lower = max(-1.0, difference - critical_value * standard_error)
+    upper = min(1.0, difference + critical_value * standard_error)
+
+    statistics = (
+        control_rate,
+        treatment_rate,
+        difference,
+        lower,
+        upper,
+        raw_p_value,
+        adjusted_p_value,
+    )
+    if not all(math.isfinite(value) for value in statistics):
+        return None
+    return ExperimentComparison(
+        control_variant=control.variant,
+        treatment_variant=treatment.variant,
+        control_rate=control_rate,
+        treatment_rate=treatment_rate,
+        rate_difference=difference,
+        confidence_interval=(lower, upper),
+        raw_p_value=raw_p_value,
+        adjusted_p_value=adjusted_p_value,
+        is_significant=adjusted_p_value < _ALPHA,
+    )
+
+
+def _common_response(
+    metadata: ConfigExperimentAnalysis,
+    arms: list[ExperimentArmResult],
+    crossover_actors: int,
+    unknown_variant_actors: int,
+) -> dict[str, Any]:
+    return {
+        "experiment_key": metadata.key,
+        "flag_key": metadata.flag_key,
+        "experiment_status": metadata.status,
+        "control_variant": metadata.control_variant,
+        "metric_event": metadata.metric_event,
+        "start_date": metadata.start_date,
+        "end_date": metadata.end_date,
+        "config_version": metadata.version,
+        "arms": arms,
+        "crossover_actors": crossover_actors,
+        "unknown_variant_actors": unknown_variant_actors,
+    }
+
+
+@router.get(
+    "/experiment/{experiment_key}",
+    response_model=ExperimentAnalysisResponse,
+)
 async def experiment_results(
-    experiment_id: str,
+    experiment_key: str = Path(..., pattern=_RESOURCE_KEY_PATTERN),
+    *,
     request: Request,
-    metric: str = Query(
-        ..., description="The conversion/metric event name to evaluate"
-    ),
-    flag_key: str = Query(
-        ...,
-        min_length=1,
-        description="Feature flag key that produced canonical variant exposures",
-    ),
-    method: AnalysisMethod = Query(
-        AnalysisMethod.frequentist,
-        description="Statistical method: frequentist, bayesian, or sequential",
-    ),
-    project_id: str | None = Query(None, description="Optional tenant assertion"),
-) -> ExperimentResult:
-    """Retrieve and statistically analyse experiment results.
-
-    Fetches feature-flag variant assignments and per-user metric values from
-    ClickHouse, then runs the selected statistical test.
-
-    Contract note: ``flag_key`` is **required** — exposures are stored and joined
-    by flag key (``feature_flag_exposures.flag_key``), so it identifies the data
-    to analyse. ``experiment_id`` is a path label only and no longer filters the
-    query; callers must supply the flag key that produced the exposures (by
-    convention this equals the experiment id — see the agents service's
-    ``create_experiment_config``). Omitting ``flag_key`` returns ``422``.
-    """
+    project_id: str | None = Query(None, min_length=1, max_length=64),
+) -> ExperimentAnalysisResponse:
+    """Analyze one Config-owned experiment using first-exposure attribution."""
+    _reject_unknown_query_parameters(request)
     principal = request.state.principal
     pid = project_id if project_id is not None else principal.project_id
     require_project(request, pid, "query:read")
-    client = _get_client(request)
+    api_key = request.headers.get("x-api-key", "")
 
-    params: dict[str, Any] = {
-        "project_id": pid,
-        "flag_key": flag_key,
-        "metric": metric,
-    }
-
-    # ---- Fetch per-user metric values grouped by variant ----
-    metric_rows = await client.execute(EXPERIMENT_METRICS_QUERY, params)
-
-    if not metric_rows:
+    try:
+        metadata = await fetch_experiment_analysis(pid, experiment_key, api_key)
+    except ExperimentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExperimentNotAnalyzable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConfigServiceUnavailable as exc:
         raise HTTPException(
-            status_code=404,
-            detail=(
-                f"No data found for experiment '{experiment_id}' "
-                f"and flag '{flag_key}' with metric '{metric}'."
-            ),
+            status_code=503,
+            detail="Authoritative experiment metadata is unavailable",
+        ) from exc
+
+    if metadata.end_date - metadata.start_date > _MAX_EXPERIMENT_WINDOW:
+        raise HTTPException(
+            status_code=422,
+            detail="Authoritative experiment window must not exceed 90 days",
+        )
+    if metadata.status == "scheduled":
+        arms = _empty_arms(metadata)
+        return ExperimentAnalysisInsufficient(
+            **_common_response(metadata, arms, 0, 0),
+            reason="experiment_not_started",
+            underpowered_variants=list(metadata.variants),
         )
 
-    # Also fetch exposures to include users with zero conversions
-    exposure_rows = await client.execute(EXPERIMENT_EXPOSURES_QUERY, params)
+    rows = await _get_client(request).execute(
+        EXPERIMENT_ANALYSIS_QUERY,
+        {
+            "project_id": pid,
+            "flag_key": metadata.flag_key,
+            "metric_event": metadata.metric_event,
+            "start_ms": _datetime64_boundary_milliseconds(metadata.start_date),
+            "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
+        },
+    )
+    arms, crossover_actors, unknown_variant_actors = _aggregate_arms(
+        metadata,
+        rows,
+    )
+    common = _common_response(
+        metadata,
+        arms,
+        crossover_actors,
+        unknown_variant_actors,
+    )
 
-    # Build per-variant user sets from exposures
-    exposed_users: dict[str, set[str]] = defaultdict(set)
-    for row in exposure_rows:
-        variant = row.get("variant", "unknown")
-        user_id = row.get("user_id", "")
-        exposed_users[variant].add(user_id)
-
-    # Build per-variant metric arrays (include zeros for exposed but non-converting users)
-    user_metrics: dict[str, dict[str, float]] = defaultdict(dict)
-    for row in metric_rows:
-        variant = row.get("variant", "unknown")
-        user_id = row.get("user_id", "")
-        user_metrics[variant][user_id] = float(row.get("metric_value", 0))
-
-    variant_arrays: dict[str, np.ndarray] = {}
-    for variant, users in exposed_users.items():
-        values = [user_metrics.get(variant, {}).get(uid, 0.0) for uid in users]
-        variant_arrays[variant] = np.array(values, dtype=np.float64)
-
-    if len(variant_arrays) < 2:
-        raise HTTPException(
-            status_code=400,
-            detail="Experiment must have at least two variants for statistical analysis.",
+    if sum(arm.sample_size for arm in arms) == 0:
+        return ExperimentAnalysisInsufficient(
+            **common,
+            reason="no_exposures",
+            underpowered_variants=list(metadata.variants),
         )
 
-    # ---- Build variant summaries ----
-    variant_results: list[VariantResult] = []
-    for variant_name, arr in sorted(variant_arrays.items()):
-        variant_results.append(
-            VariantResult(
-                variant=variant_name,
-                users=len(arr),
-                mean=float(np.mean(arr)) if len(arr) > 0 else 0.0,
-                stddev=float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0,
-                total=float(np.sum(arr)),
+    underpowered = [
+        arm.variant
+        for arm in arms
+        if arm.sample_size < _MIN_SAMPLE_SIZE_PER_ARM
+    ]
+    if underpowered:
+        return ExperimentAnalysisInsufficient(
+            **common,
+            reason="underpowered_arms",
+            underpowered_variants=underpowered,
+        )
+
+    by_variant = {arm.variant: arm for arm in arms}
+    treatments = [
+        variant
+        for variant in metadata.variants
+        if variant != metadata.control_variant
+    ]
+    comparisons: list[ExperimentComparison] = []
+    for treatment in treatments:
+        result = _comparison(
+            by_variant[metadata.control_variant],
+            by_variant[treatment],
+            len(treatments),
+        )
+        if result is None:
+            return ExperimentAnalysisInsufficient(
+                **common,
+                reason="non_finite_statistics",
+                underpowered_variants=[],
             )
-        )
+        comparisons.append(result)
 
-    # ---- Identify control and treatment ----
-    sorted_variants = sorted(variant_arrays.keys())
-    control_key = "control" if "control" in sorted_variants else sorted_variants[0]
-    treatment_keys = [k for k in sorted_variants if k != control_key]
-
-    if not treatment_keys:
-        raise HTTPException(status_code=400, detail="No treatment variant found.")
-
-    # For multi-variant experiments, compare each treatment against control.
-    # Return the result for the first treatment variant (most common case).
-    treatment_key = treatment_keys[0]
-
-    control_arr = variant_arrays[control_key]
-    treatment_arr = variant_arrays[treatment_key]
-
-    # ---- Run statistical test ----
-    if method == AnalysisMethod.bayesian:
-        # For Bayesian test, convert metric to binary (>0 means conversion)
-        control_binary = (control_arr > 0).astype(np.float64)
-        treatment_binary = (treatment_arr > 0).astype(np.float64)
-        result = analyzer.bayesian_test(control_binary, treatment_binary)
-    elif method == AnalysisMethod.sequential:
-        result = analyzer.sequential_test(control_arr, treatment_arr)
-    else:
-        result = analyzer.frequentist_test(control_arr, treatment_arr)
-
-    # Extract common fields
-    ci = result.get("confidence_interval")
-    p_value = result.get("p_value") or result.get("always_valid_p_value")
-
-    return ExperimentResult(
-        experiment_id=experiment_id,
-        flag_key=flag_key,
-        metric=metric,
-        method=method.value,
-        variants=variant_results,
-        effect_size=result.get("effect_size"),
-        confidence_interval=ci,
-        p_value=p_value,
-        is_significant=result["is_significant"],
-        recommendation=result["recommendation"],
+    return ExperimentAnalysisReady(
+        **common,
+        comparisons=comparisons,
     )

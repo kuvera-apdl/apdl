@@ -37,10 +37,11 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   comparison — with saved views (localStorage), CSV export, and raw-JSON
   drawers. The query-service filter vocabulary is a distinct type from flag
   rule conditions (AD-6).
-- Experiments (`/experiments`): list/editor against the deliberately loose
-  pre-G5 schema (JSON editors, last-write-wins warning) and a Results tab
-  running frequentist / bayesian / sequential statistics with exposure-count
-  sanity checks and a guardrail glance.
+- Experiments (`/experiments`): strict Config-owned experiment/backing-flag
+  lifecycle with optimistic versions. The read-only Results tab resolves the
+  flag, binary-conversion metric, variants, control, and time window from
+  Config, then displays every Bonferroni-adjusted treatment comparison or a
+  typed insufficient-data state. It does not recommend or trigger actions.
 - Integration verification (`/settings/verify`): the five-step console-native
   `dev.sh smoke` — ingest → pipeline poll (re-send at attempt 5) → flag
   bootstrap with X-Cache observation → SSE freshness.
@@ -58,8 +59,7 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
 - Every panel and write dialog reproduces its exact API call as **curl**.
 
 Remaining backend-tracked work: G4 (event-name discovery for autocomplete),
-G5 (experiment canonicalization), G6–G8 (guardrail/pipeline observability), and
-G10 (pagination).
+G6–G8 (guardrail/pipeline observability), and G10 (pagination).
 
 ## Stack
 
@@ -94,7 +94,10 @@ make run-admin       # :5173
 Open `/register` to create an email/password account. New accounts have zero
 projects and zero roles; project access must be granted separately by an
 operator or created from `/settings/workspace`. Creating a project associates
-it with the current profile and grants the creator the canonical project roles.
+it with the current profile and grants core analytics roles plus
+`agents:read`. The console preserves the returned role set: self-created
+projects can inspect Agents history, while trigger, approval, and custom-agent
+mutation controls remain unavailable.
 
 `scripts/dev.sh up-full` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the

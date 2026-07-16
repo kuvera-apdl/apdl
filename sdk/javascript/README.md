@@ -38,7 +38,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'https://api.example.com',
   auth: {
-    clientKey: 'proj_apdl_0123456789abcdef',
+    clientKey: 'client_apdl_0123456789abcdef',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -130,10 +130,10 @@ returns a no-op client (fail-soft); `new APDLClient(config)` and
 `auth.clientKey` must use the canonical APDL client key format:
 
 ```text
-proj_{project_id}_{secret}
+client_{project_id}_{token}
 ```
 
-The secret must be 16+ alphanumeric characters. The SDK derives the project ID
+The token must be 16+ alphanumeric characters. The SDK derives the project ID
 from the client key internally. Do not pass `projectId`, `apiKey`, `host`,
 `configHost`, or the old `endpoints` object; those fields are not part of the
 public config contract and the SDK rejects them.
@@ -148,8 +148,16 @@ Optional fields include:
 | `privacyMode` | `'standard'`, `'cookieless'`, or `'strict'`. |
 | `consent` | Initial consent state for `analytics`, `personalization`, and `experiments`. |
 | `persistence` | `'localStorage'`, `'cookie'`, or `'memory'`. |
-| `maxQueueSize` | Maximum queued events before dropping the oldest event. |
+| `maxQueueSize` | Maximum events owned in memory. A new event is rejected synchronously when full; an already accepted event is never evicted to make room. |
 | `debug` | Enables SDK diagnostics when `true`. |
+
+Automatic click and rage-click events contain structural element metadata only.
+They never include DOM text, form-control values, URLs, IDs, or CSS classes.
+Known credential, one-time-code, file, and payment controls identified from
+native types and semantic hints are excluded entirely. Page and referrer context
+is also omitted from these events so URL parameters, fragments, paths, and page
+titles cannot disclose secrets. Use manual events when an application needs an
+explicitly chosen semantic label.
 
 ## Local Development Endpoints
 
@@ -160,7 +168,7 @@ gateway URL (`make dev-all` starts the gateway on port 8000):
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'proj_apdl_0123456789abcdef',
+    clientKey: 'client_apdl_0123456789abcdef',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -188,6 +196,16 @@ apdl.page('Pricing', {
 ```
 
 Events are batched and sent to the gateway `endpoint` at `/v1/events`.
+Properties, traits, and custom context must be canonical JSON: finite numbers,
+strings, booleans, nulls, arrays, and plain string-keyed objects. Cycles,
+`BigInt`, accessors, sparse arrays, unsupported values, malformed timestamps,
+unknown context fields, excessive nesting/cardinality, and events over 64 KiB
+are rejected synchronously before queue ownership. Requests are split below
+512 KiB. Network errors, HTTP 408/425/429, and 5xx retain the same stable
+message IDs for retry; other non-2xx responses are permanent and cannot poison
+later queue entries. If both a retryable send and offline persistence fail, the
+batch is requeued once in memory and returned in the drain's `pending` report;
+the SDK does not spin or silently discard it.
 
 ## User Identification
 
@@ -229,7 +247,10 @@ console.log(result.variant, result.reason);
 
 Flag evaluation automatically emits a deduplicated `$feature_flag_exposure`
 event. The SDK fetches initial flag configuration from the gateway `endpoint` at
-`/v1/flags` and listens for real-time updates on `/v1/stream`.
+`/v1/flags` and listens for real-time updates on `/v1/stream`. The SSE request
+uses `X-API-Key` header authentication through a fetch stream; the client key is
+never placed in a URL. Reconnects resume with the standard `Last-Event-ID`
+header.
 
 React to real-time variant changes pushed over SSE:
 
@@ -280,8 +301,19 @@ apdl.privacy.addScrubber(scrubSsn);
 apdl.privacy.removeScrubber(scrubSsn);
 ```
 
-`privacyMode: 'cookieless'` derives a daily-rotating anonymous ID with no
-client-side persistence; `'strict'` additionally enables aggressive scrubbing.
+Baseline email, payment-card, and SSN scrubbers run in every privacy mode.
+`privacyMode: 'cookieless'` additionally derives a daily-rotating anonymous ID
+with no client-side persistence; `'strict'` disables persisted flag caching.
+
+Revoking analytics consent is an immediate delivery fence: the SDK aborts the
+active analytics request when possible, clears its in-memory queue and this
+project's IndexedDB queue, and stops analytics auto-capture and health capture.
+No retained event is restored or sent across a revoke/regrant boundary.
+Regranting consent starts capture again for new events only.
+
+Browser persistence is project-scoped. Anonymous identity, session, consent,
+flag cache, and offline event records use the project ID derived from the client
+key, so two APDL projects on one origin cannot restore each other's state.
 
 Failed analytics deliveries may be retained in IndexedDB for up to seven days.
 Each record is scoped to the canonical project ID derived from the client key;
@@ -315,10 +347,20 @@ apdl.ui.onSlotUpdate((slotId, element) => { /* ... */ });
 ```typescript
 apdl.debug.enable();          // verbose console logging
 apdl.debug.getQueue();        // inspect queued events
-await apdl.debug.flush();     // force a flush
+const report = await apdl.debug.flush();
 
-await apdl.shutdown();        // flush remaining events and tear down
+console.log(report.delivered, report.persisted);
+console.log(report.permanentRejections, report.pending);
+
+const finalReport = await apdl.shutdown();
 ```
+
+`flush()` drains all currently owned in-memory events, and concurrent flushes
+join the same operation. Its frozen `DeliveryReport` distinguishes delivered,
+offline-persisted, permanently rejected, consent-discarded, and still-pending
+events. `shutdown()` stops accepting tracking immediately, joins concurrent
+callers, tears down capture and SSE, and returns the final drain report. Calls
+to `track`, `identify`, `group`, `page`, or `reset` after shutdown throw.
 
 ## SDK Development
 

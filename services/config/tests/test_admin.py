@@ -1,5 +1,6 @@
+"""HTTP contract tests for atomic Config administration."""
+
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -7,403 +8,18 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.routers import admin
+from app.store import mutations
 
 
-@pytest.mark.asyncio
-async def test_flag_update_broadcast_uses_canonical_client_shape():
-    broadcaster = AsyncMock()
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(broadcaster=broadcaster))
-    )
-    flag = {**make_flag(), "evaluation_mode": "both"}
-
-    await admin._broadcast_flag_change(
-        request,
-        "apdl",
-        "flag_updated",
-        flag,
-        "checkout",
-    )
-
-    broadcaster.broadcast.assert_awaited_once()
-    project_id, event_name, data = broadcaster.broadcast.await_args.args
-    payload = json.loads(data)
-    assert project_id == "apdl"
-    assert event_name == "flag_update"
-    assert payload == {
-        "action": "flag_updated",
-        "flag": admin.serialize_client_flag(flag),
-    }
-    assert set(payload["flag"]) == {
-        "key",
-        "enabled",
-        "default_variant",
-        "variants",
-        "salt",
-        "rules",
-        "fallthrough",
-        "version",
-    }
-
-
-@pytest.mark.asyncio
-async def test_admin_create_and_update_reject_legacy_boolean_fields():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        create_response = await client.post(
-            "/v1/admin/flags",
-            params={"project_id": "apdl"},
-            json={
-                "key": "checkout",
-                "name": "Checkout",
-                "default_value": False,
-                "default_variant": "control",
-                "variants": [
-                    {"key": "control", "weight": 1},
-                    {"key": "treatment", "weight": 1},
-                ],
-                "fallthrough": {
-                    "value": True,
-                    "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
-                },
-            },
-        )
-        update_response = await client.put(
-            "/v1/admin/flags/checkout",
-            params={"project_id": "apdl"},
-            json={
-                "version": 4,
-                "default_value": False,
-            },
-        )
-
-    assert create_response.status_code == 422
-    assert update_response.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_disable_flag_writes_audit_and_broadcasts(monkeypatch):
-    existing = make_flag()
-    updated = {
-        **existing,
-        "state": "disabled",
-        "enabled": False,
-        "version": 5,
-        "disabled_reason": "guardrail_failed",
-        "disabled_by": "system",
-        "disabled_at": "2026-06-01T00:00:00+00:00",
-    }
-
-    get_flag = AsyncMock(return_value=existing)
-    disable_flag = AsyncMock(return_value=updated)
-    audit = AsyncMock()
-    invalidate = AsyncMock()
-    broadcaster = AsyncMock()
-
-    monkeypatch.setattr(admin.pg_store, "get_flag", get_flag)
-    monkeypatch.setattr(admin.pg_store, "disable_flag", disable_flag)
-    monkeypatch.setattr(admin.pg_store, "create_flag_audit_entry", audit)
-    monkeypatch.setattr(admin.redis_cache, "invalidate_flags", invalidate)
-    app.state.pg_pool = object()
-    app.state.redis = object()
-    app.state.broadcaster = broadcaster
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/flags/checkout/disable",
-            params={"project_id": "apdl"},
-            json={
-                "reason": "guardrail_failed",
-                "source": "system",
-                "evidence": {"metric": "frontend_error_count", "observed": 1},
-            },
-        )
-
-    assert response.status_code == 200
-    assert response.json()["disabled"] is True
-    disable_flag.assert_awaited_once_with(
-        app.state.pg_pool,
-        project_id="apdl",
-        key="checkout",
-        reason="guardrail_failed",
-        source="system",
-    )
-    audit.assert_awaited_once()
-    audit_kwargs = audit.await_args.kwargs
-    assert audit_kwargs["action"] == "flag_auto_disabled"
-    assert audit_kwargs["evidence"] == {"metric": "frontend_error_count", "observed": 1}
-    invalidate.assert_awaited_once_with(app.state.redis, "apdl")
-    broadcaster.broadcast.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_disable_flag_rejects_flags_without_auto_disable(monkeypatch):
-    existing = {**make_flag(), "auto_disable": False}
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
-    app.state.pg_pool = object()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/flags/checkout/disable",
-            params={"project_id": "apdl"},
-            json={"reason": "guardrail_failed", "source": "system", "evidence": {}},
-        )
-
-    assert response.status_code == 409
-    assert response.json()["error"] == "auto_disable_disabled"
-
-
-@pytest.mark.asyncio
-async def test_disable_flag_allows_admin_source_without_auto_disable(monkeypatch):
-    existing = {**make_flag(), "auto_disable": False}
-    updated = {
-        **existing,
-        "state": "disabled",
-        "enabled": False,
-        "version": 5,
-        "disabled_reason": "guardrail_failed",
-        "disabled_by": "admin",
-        "disabled_at": "2026-06-01T00:00:00+00:00",
-    }
-    disable_flag = AsyncMock(return_value=updated)
-
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "disable_flag", disable_flag)
-    monkeypatch.setattr(admin.pg_store, "create_flag_audit_entry", AsyncMock())
-    monkeypatch.setattr(admin.redis_cache, "invalidate_flags", AsyncMock())
-    app.state.pg_pool = object()
-    app.state.redis = object()
-    app.state.broadcaster = AsyncMock()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/flags/checkout/disable",
-            params={"project_id": "apdl"},
-            json={"reason": "guardrail_failed", "source": "admin", "evidence": {}},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["disabled"] is True
-    disable_flag.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_update_flag_rejects_variants_without_existing_default(monkeypatch):
-    existing = make_flag()
-    update_flag = AsyncMock()
-
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "update_flag", update_flag)
-    app.state.pg_pool = object()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.put(
-            "/v1/admin/flags/checkout",
-            params={"project_id": "apdl"},
-            json={
-                "version": 4,
-                "variants": [{"key": "treatment", "weight": 1}],
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
-    update_flag.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_update_flag_rejects_default_variant_without_matching_existing_variant(monkeypatch):
-    existing = make_flag()
-    update_flag = AsyncMock()
-
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "update_flag", update_flag)
-    app.state.pg_pool = object()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.put(
-            "/v1/admin/flags/checkout",
-            params={"project_id": "apdl"},
-            json={
-                "version": 4,
-                "default_variant": "missing",
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.json()["error"] == "invalid_request"
-    update_flag.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stale_flags_reports_review_and_cleanup_candidates(monkeypatch):
-    reviewed = make_flag()
-    cleanup_candidate = {
-        **make_flag(),
-        "key": "checkout-v2",
-        "variants": [
-            {"key": "control", "weight": 0},
-            {"key": "treatment", "weight": 1},
-        ],
-        "fallthrough": {
-            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
-        },
-    }
-    missing_owner = {
-        **make_flag(),
-        "key": "search-v2",
-        "owners": [],
-        "review_by": None,
-    }
-    monkeypatch.setattr(
-        admin.pg_store,
-        "get_flags",
-        AsyncMock(return_value=[reviewed, cleanup_candidate, missing_owner]),
-    )
-    app.state.pg_pool = object()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/v1/admin/flags/stale",
-            params={"project_id": "apdl"},
-        )
-
-    assert response.status_code == 200
-    body = response.json()
-    reasons_by_key = {
-        flag["key"]: flag["stale_reasons"]
-        for flag in body["flags"]
-    }
-    assert "fully_rolled_out" in reasons_by_key["checkout-v2"]
-    assert reasons_by_key["search-v2"] == ["missing_owner", "missing_review_date"]
-
-
-@pytest.mark.asyncio
-async def test_cleanup_flag_archives_full_rollout_and_writes_audit(monkeypatch):
-    existing = {
-        **make_flag(),
-        "variants": [
-            {"key": "control", "weight": 0},
-            {"key": "treatment", "weight": 1},
-        ],
-        "fallthrough": {
-            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
-        },
-    }
-    archived = {
-        **existing,
-        "state": "archived",
-        "enabled": False,
-        "version": 5,
-        "archived_at": "2026-06-01T00:00:00+00:00",
-    }
-    archive_flag = AsyncMock(return_value=archived)
-    audit = AsyncMock()
-    invalidate = AsyncMock()
-    broadcaster = AsyncMock()
-
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "archive_flag", archive_flag)
-    monkeypatch.setattr(admin.pg_store, "create_flag_audit_entry", audit)
-    monkeypatch.setattr(admin.redis_cache, "invalidate_flags", invalidate)
-    app.state.pg_pool = object()
-    app.state.redis = object()
-    app.state.broadcaster = broadcaster
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/flags/checkout/cleanup",
-            params={"project_id": "apdl"},
-            json={
-                "version": 4,
-                "source": "admin",
-                "evidence": {"ticket": "PD-123"},
-            },
-        )
-
-    assert response.status_code == 200
-    assert response.json()["cleaned_up"] is True
-    archive_flag.assert_awaited_once_with(
-        app.state.pg_pool,
-        "apdl",
-        "checkout",
-        expected_version=4,
-    )
-    audit.assert_awaited_once()
-    audit_kwargs = audit.await_args.kwargs
-    assert audit_kwargs["action"] == "flag_cleanup_archived"
-    assert audit_kwargs["reason"] == "fully_rolled_out"
-    assert audit_kwargs["evidence"] == {
-        "ticket": "PD-123",
-        "cleanup_reasons": ["fully_rolled_out"],
-    }
-    invalidate.assert_awaited_once_with(app.state.redis, "apdl")
-    broadcaster.broadcast.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_flag_audit_returns_entries_for_archived_flag(monkeypatch):
-    archived = {**make_flag(), "state": "archived", "archived_at": "2026-06-01T00:00:00+00:00"}
-    audit_entries = [{
-        "id": 1,
-        "project_id": "apdl",
-        "flag_key": "checkout",
-        "action": "flag_archived",
-        "actor": "admin",
-        "previous_version": 4,
-        "new_version": 5,
-        "before": make_flag(),
-        "after": archived,
-        "evidence": {},
-        "reason": "",
-        "created_at": "2026-06-01T00:00:00+00:00",
-    }]
-
-    get_flag = AsyncMock(return_value=archived)
-    get_entries = AsyncMock(return_value=audit_entries)
-    monkeypatch.setattr(admin.pg_store, "get_flag", get_flag)
-    monkeypatch.setattr(admin.pg_store, "get_flag_audit_entries", get_entries)
-    app.state.pg_pool = object()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/v1/admin/flags/checkout/audit",
-            params={"project_id": "apdl", "limit": 25},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["audit"] == audit_entries
-    get_flag.assert_awaited_once_with(
-        app.state.pg_pool,
-        "apdl",
-        "checkout",
-        include_archived=True,
-    )
-    get_entries.assert_awaited_once_with(
-        app.state.pg_pool,
-        "apdl",
-        "checkout",
-        limit=25,
-    )
-
-
-def make_flag() -> dict:
-    return {
+def make_flag(overrides: dict | None = None) -> dict:
+    flag = {
         "key": "checkout",
         "project_id": "apdl",
         "name": "Checkout",
         "state": "active",
         "owners": ["team-growth"],
         "review_by": "2099-07-01",
-        "description": "Controls the checkout redesign.",
+        "description": "Controls checkout.",
         "enabled": True,
         "default_variant": "control",
         "variants": [
@@ -412,18 +28,12 @@ def make_flag() -> dict:
         ],
         "rules": [],
         "fallthrough": {
-            "rollout": {"percentage": 0.0, "bucket_by": "user_id"},
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         },
         "salt": "salt_123",
         "evaluation_mode": "client",
-        "auto_disable": True,
-        "guardrails": [{
-            "metric": "frontend_error_count",
-            "threshold": "at_least_one",
-            "scope": "page:/checkout",
-            "minimum_exposures": 0,
-            "window_minutes": 10,
-        }],
+        "auto_disable": False,
+        "guardrails": [],
         "disabled_reason": "",
         "disabled_by": "",
         "disabled_at": None,
@@ -432,253 +42,514 @@ def make_flag() -> dict:
         "updated_at": "2026-06-01T00:00:00+00:00",
         "archived_at": None,
     }
-
-
-# ---------- Experiments ----------
+    if overrides:
+        flag.update(overrides)
+    return flag
 
 
 def make_experiment(overrides: dict | None = None) -> dict:
-    exp = {
+    experiment = {
         "key": "checkout_exp",
         "project_id": "apdl",
         "status": "draft",
         "description": "New checkout",
         "flag_key": "checkout_exp",
         "default_variant": "control",
-        "variants_json": '[{"key":"control","weight":1},{"key":"treatment","weight":1}]',
+        "variants_json": (
+            '[{"key":"control","weight":1},'
+            '{"key":"treatment","weight":1}]'
+        ),
         "targeting_rules_json": "[]",
         "primary_metric_json": "{}",
         "traffic_percentage": 100.0,
-        "start_date": "",
-        "end_date": "",
+        "start_date": None,
+        "end_date": None,
+        "version": 3,
         "created_at": "2026-06-01T00:00:00+00:00",
         "updated_at": "2026-06-01T00:00:00+00:00",
     }
     if overrides:
-        exp.update(overrides)
-    return exp
+        experiment.update(overrides)
+    return experiment
 
 
-def _experiment_app_state(monkeypatch, broadcaster):
+async def _request(method: str, path: str, *, json_body=None, params=None):
     app.state.pg_pool = object()
-    app.state.redis = object()
-    app.state.broadcaster = broadcaster
-    monkeypatch.setattr(admin.redis_cache, "invalidate_flags", AsyncMock())
-    monkeypatch.setattr(admin.redis_cache, "invalidate_experiments", AsyncMock())
-    monkeypatch.setattr(admin.pg_store, "create_flag_audit_entry", AsyncMock())
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.request(method, path, json=json_body, params=params)
 
 
 @pytest.mark.asyncio
-async def test_create_experiment_initializes_backing_flag(monkeypatch):
-    created_flag = {**make_flag(), "key": "checkout_exp", "state": "active", "enabled": True}
-    create_flag = AsyncMock(return_value=created_flag)
-    create_experiment = AsyncMock(return_value=True)
-    broadcaster = AsyncMock()
-
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=None))
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=None))
-    monkeypatch.setattr(admin.pg_store, "create_flag", create_flag)
-    monkeypatch.setattr(admin.pg_store, "create_experiment", create_experiment)
-    _experiment_app_state(monkeypatch, broadcaster)
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/experiments",
-            params={"project_id": "apdl"},
-            json={
-                "key": "checkout_exp",
-                "status": "running",
-                "description": "New checkout",
-                "variants": [
-                    {"key": "control", "weight": 1, "description": "Current"},
-                    {"key": "treatment", "weight": 1, "description": "New"},
-                ],
-                "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
+async def test_admin_rejects_legacy_and_generic_lifecycle_fields():
+    create_response = await _request(
+        "POST",
+        "/v1/admin/flags",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout",
+            "name": "Checkout",
+            "default_value": False,
+            "default_variant": "control",
+            "variants": [{"key": "control", "weight": 1}],
+            "fallthrough": {
+                "rollout": {"percentage": 100.0, "bucket_by": "user_id"}
             },
-        )
+        },
+    )
+    update_response = await _request(
+        "PUT",
+        "/v1/admin/flags/checkout",
+        params={"project_id": "apdl"},
+        json_body={"version": 4, "state": "disabled", "enabled": False},
+    )
 
-    assert response.status_code == 201
-    assert response.json() == {"created": True, "key": "checkout_exp", "flag_key": "checkout_exp"}
-
-    # Backing flag derived from the experiment and enabled because it is running.
-    create_flag.assert_awaited_once()
-    flag_arg = create_flag.await_args.args[1]
-    assert flag_arg["key"] == "checkout_exp"
-    assert flag_arg["state"] == "active"
-    assert flag_arg["enabled"] is True
-    assert flag_arg["variants"] == [
-        {"key": "control", "weight": 1},
-        {"key": "treatment", "weight": 1},
-    ]
-    assert flag_arg["fallthrough"] == {"rollout": {"percentage": 100.0, "bucket_by": "user_id"}}
-    assert "salt" in flag_arg
-
-    # Experiment row carries the canonical link + projected fields.
-    create_experiment.assert_awaited_once()
-    exp_arg = create_experiment.await_args.args[1]
-    assert exp_arg["flag_key"] == "checkout_exp"
-    assert exp_arg["default_variant"] == "control"
-    assert json.loads(exp_arg["primary_metric_json"]) == {
-        "event": "purchase",
-        "type": "conversion",
-        "direction": "increase",
-    }
-
-    # Both flag and experiment changes are broadcast.
-    events = [call.args[1] for call in broadcaster.broadcast.await_args_list]
-    assert "flag_update" in events
-    assert "experiment_update" in events
+    assert create_response.status_code == 422
+    assert update_response.status_code == 422
 
 
 @pytest.mark.asyncio
-async def test_create_experiment_conflicts_on_existing_flag(monkeypatch):
-    create_flag = AsyncMock()
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=None))
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=make_flag()))
-    monkeypatch.setattr(admin.pg_store, "create_flag", create_flag)
-    _experiment_app_state(monkeypatch, AsyncMock())
+async def test_update_flag_delegates_to_atomic_authority(monkeypatch):
+    updated = make_flag({"description": "updated", "version": 5})
+    command = AsyncMock(return_value=updated)
+    monkeypatch.setattr(admin.mutations, "update_standalone_flag", command)
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/experiments",
-            params={"project_id": "apdl"},
-            json={"key": "checkout_exp", "status": "draft"},
-        )
-
-    assert response.status_code == 409
-    assert response.json()["error"] == "conflict"
-    create_flag.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_create_experiment_rejects_invalid_variant_weights(monkeypatch):
-    create_flag = AsyncMock()
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=None))
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=None))
-    monkeypatch.setattr(admin.pg_store, "create_flag", create_flag)
-    _experiment_app_state(monkeypatch, AsyncMock())
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/admin/experiments",
-            params={"project_id": "apdl"},
-            json={
-                "key": "checkout_exp",
-                "variants": [
-                    {"key": "control", "weight": 0},
-                    {"key": "treatment", "weight": 0},
-                ],
-            },
-        )
-
-    assert response.status_code == 422
-    create_flag.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_update_experiment_starts_and_enables_flag(monkeypatch):
-    existing = make_experiment({"status": "draft"})
-    backing = {**make_flag(), "key": "checkout_exp", "state": "draft", "enabled": False, "version": 2}
-    updated_flag = {**backing, "state": "active", "enabled": True, "version": 3}
-    update_flag = AsyncMock(return_value=updated_flag)
-    update_experiment = AsyncMock(return_value=True)
-
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value=backing))
-    monkeypatch.setattr(admin.pg_store, "update_flag", update_flag)
-    monkeypatch.setattr(admin.pg_store, "update_experiment", update_experiment)
-    _experiment_app_state(monkeypatch, AsyncMock())
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.put(
-            "/v1/admin/experiments/checkout_exp",
-            params={"project_id": "apdl"},
-            json={"status": "running"},
-        )
+    response = await _request(
+        "PUT",
+        "/v1/admin/flags/checkout",
+        params={"project_id": "apdl"},
+        json_body={"version": 4, "description": "updated"},
+    )
 
     assert response.status_code == 200
-    update_flag.assert_awaited_once()
-    merged_flag = update_flag.await_args.args[1]
-    assert merged_flag["state"] == "active"
-    assert merged_flag["enabled"] is True
-    assert update_flag.await_args.args[2] == 2  # syncs against the current flag version
-    update_experiment.assert_awaited_once()
-    assert update_experiment.await_args.args[1]["status"] == "running"
+    command.assert_awaited_once_with(
+        app.state.pg_pool,
+        project_id="apdl",
+        key="checkout",
+        expected_version=4,
+        updates={"description": "updated"},
+        actor="credential:test-config",
+    )
+
+
+@pytest.mark.asyncio
+async def test_every_generic_owned_flag_mutation_maps_to_409(monkeypatch):
+    error = mutations.ExperimentOwnedFlagError("checkout", "checkout_exp")
+    command = AsyncMock(side_effect=error)
+    monkeypatch.setattr(admin.mutations, "transition_standalone_flag", command)
+
+    response = await _request(
+        "POST",
+        "/v1/admin/flags/checkout/transition",
+        params={"project_id": "apdl"},
+        json_body={"version": 4, "target_state": "draft"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "experiment_managed_flag",
+        "message": "Flag 'checkout' is managed by experiment 'checkout_exp'",
+        "experiment_key": "checkout_exp",
+    }
+
+
+@pytest.mark.asyncio
+async def test_disable_uses_authenticated_actor_and_rejects_source(monkeypatch):
+    command = AsyncMock(return_value=(make_flag({"state": "disabled"}), True))
+    monkeypatch.setattr(admin.mutations, "disable_standalone_flag", command)
+
+    spoofed = await _request(
+        "POST",
+        "/v1/admin/flags/checkout/disable",
+        params={"project_id": "apdl"},
+        json_body={"version": 4, "source": "system"},
+    )
+    accepted = await _request(
+        "POST",
+        "/v1/admin/flags/checkout/disable",
+        params={"project_id": "apdl"},
+        json_body={
+            "version": 4,
+            "reason": "guardrail_failed",
+            "evidence": {"metric": "frontend_error_count"},
+        },
+    )
+
+    assert spoofed.status_code == 422
+    assert accepted.status_code == 200
+    command.assert_awaited_once_with(
+        app.state.pg_pool,
+        project_id="apdl",
+        key="checkout",
+        expected_version=4,
+        reason="guardrail_failed",
+        evidence={"metric": "frontend_error_count"},
+        actor="credential:test-config",
+    )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_atomic_authority(monkeypatch):
+    archived = make_flag(
+        {"state": "archived", "enabled": False, "version": 5}
+    )
+    command = AsyncMock(return_value=(archived, ["fully_rolled_out"]))
+    monkeypatch.setattr(admin.mutations, "cleanup_standalone_flag", command)
+
+    response = await _request(
+        "POST",
+        "/v1/admin/flags/checkout/cleanup",
+        params={"project_id": "apdl"},
+        json_body={"version": 4, "evidence": {"ticket": "PD-123"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["cleanup_reasons"] == ["fully_rolled_out"]
+
+
+@pytest.mark.asyncio
+async def test_archive_flag_requires_and_forwards_version(monkeypatch):
+    command = AsyncMock(
+        return_value=make_flag({"state": "archived", "enabled": False})
+    )
+    monkeypatch.setattr(admin.mutations, "archive_standalone_flag", command)
+
+    missing = await _request(
+        "DELETE",
+        "/v1/admin/flags/checkout",
+        params={"project_id": "apdl"},
+    )
+    archived = await _request(
+        "DELETE",
+        "/v1/admin/flags/checkout",
+        params={"project_id": "apdl", "version": 4},
+    )
+
+    assert missing.status_code == 422
+    assert archived.status_code == 200
+    command.assert_awaited_once_with(
+        app.state.pg_pool,
+        project_id="apdl",
+        key="checkout",
+        expected_version=4,
+        actor="credential:test-config",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_flags_reports_review_and_cleanup_candidates(monkeypatch):
+    cleanup = make_flag(
+        {
+            "key": "checkout-v2",
+            "variants": [
+                {"key": "control", "weight": 0},
+                {"key": "treatment", "weight": 1},
+            ],
+        }
+    )
+    missing_owner = make_flag(
+        {"key": "search-v2", "owners": [], "review_by": None}
+    )
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_flags",
+        AsyncMock(return_value=[cleanup, missing_owner]),
+    )
+
+    response = await _request(
+        "GET",
+        "/v1/admin/flags/stale",
+        params={"project_id": "apdl"},
+    )
+
+    reasons = {entry["key"]: entry["stale_reasons"] for entry in response.json()["flags"]}
+    assert "fully_rolled_out" in reasons["checkout-v2"]
+    assert reasons["search-v2"] == ["missing_owner", "missing_review_date"]
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_delegates_one_bundle_and_omits_presence_value(
+    monkeypatch,
+):
+    command = AsyncMock(
+        return_value=(make_experiment({"version": 1}), make_flag())
+    )
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout_exp",
+            "status": "draft",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+            "start_date": "2026-08-01T00:00:00Z",
+            "end_date": "2026-08-31T00:00:00Z",
+            "primary_metric": {"event": "purchase"},
+            "targeting_rules": [
+                {
+                    "id": "has-plan",
+                    "conditions": [{"attribute": "plan", "operator": "exists"}],
+                    "rollout": {"percentage": 100, "bucket_by": "user_id"},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    kwargs = command.await_args.kwargs
+    stored_rules = json.loads(kwargs["experiment"]["targeting_rules_json"])
+    assert stored_rules[0]["conditions"][0] == {
+        "attribute": "plan",
+        "operator": "exists",
+    }
+    assert kwargs["actor"] == "credential:test-config"
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_requires_running_decision_contract():
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout_exp",
+            "status": "running",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_experiment_rejects_stale_version(monkeypatch):
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=make_experiment({"version": 4})),
+    )
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, "description": "stale"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["current_version"] == 4
+
+
+@pytest.mark.asyncio
+async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
+    existing = make_experiment(
+        {
+            "start_date": "2026-01-01T00:00:00+00:00",
+            "end_date": "2099-01-01T00:00:00+00:00",
+            "primary_metric_json": '{"event":"purchase"}',
+        }
+    )
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=existing),
+    )
+    command = AsyncMock(
+        return_value=(make_experiment({"version": 4}), make_flag())
+    )
+    monkeypatch.setattr(admin.mutations, "update_experiment_bundle", command)
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={
+            "version": 3,
+            "start_date": None,
+            "end_date": None,
+            "primary_metric": None,
+        },
+    )
+
+    assert response.status_code == 200
+    desired = command.await_args.kwargs["desired"]
+    assert desired["start_date"] is None
+    assert desired["end_date"] is None
+    assert desired["primary_metric_json"] == "{}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("default_variant", "treatment"),
+        (
+            "variants",
+            [
+                {"key": "control", "weight": 1},
+                {"key": "new-treatment", "weight": 1},
+            ],
+        ),
+        ("primary_metric", {"event": "checkout_completed", "type": "conversion"}),
+        ("start_date", "2026-07-02T00:00:00Z"),
+        ("end_date", "2026-08-02T00:00:00Z"),
+    ],
+)
+async def test_update_experiment_freezes_analysis_fields_after_draft(
+    monkeypatch,
+    field,
+    value,
+):
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": "2026-07-01T00:00:00+00:00",
+            "end_date": "2026-08-01T00:00:00+00:00",
+            "primary_metric_json": (
+                '{"event":"purchase","type":"conversion"}'
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=existing),
+    )
+    command = AsyncMock()
+    monkeypatch.setattr(admin.mutations, "update_experiment_bundle", command)
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, field: value},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "immutable_experiment_contract"
+    assert response.json()["fields"] == [field]
+    command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_experiment_allows_status_only_transition_after_draft(monkeypatch):
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": "2026-07-01T00:00:00+00:00",
+            "end_date": "2026-08-01T00:00:00+00:00",
+            "primary_metric_json": (
+                '{"event":"purchase","type":"conversion"}'
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=existing),
+    )
+    command = AsyncMock(
+        return_value=(make_experiment({"status": "stopped", "version": 4}), make_flag())
+    )
+    monkeypatch.setattr(admin.mutations, "update_experiment_bundle", command)
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, "status": "stopped"},
+    )
+
+    assert response.status_code == 200
+    desired = command.await_args.kwargs["desired"]
+    assert desired["status"] == "stopped"
+    assert desired["default_variant"] == "control"
+    assert desired["variants_json"] == existing["variants_json"]
+    assert desired["primary_metric_json"] == existing["primary_metric_json"]
+    assert desired["start_date"] == existing["start_date"]
+    assert desired["end_date"] == existing["end_date"]
 
 
 @pytest.mark.asyncio
 async def test_update_experiment_rejects_illegal_transition(monkeypatch):
-    existing = make_experiment({"status": "completed"})
-    get_flag = AsyncMock()
-    update_experiment = AsyncMock()
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=make_experiment({"status": "completed"})),
+    )
 
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "get_flag", get_flag)
-    monkeypatch.setattr(admin.pg_store, "update_experiment", update_experiment)
-    _experiment_app_state(monkeypatch, AsyncMock())
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.put(
-            "/v1/admin/experiments/checkout_exp",
-            params={"project_id": "apdl"},
-            json={"status": "running"},
-        )
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, "status": "running"},
+    )
 
     assert response.status_code == 409
     assert response.json()["error"] == "invalid_transition"
-    # Rejected before touching the flag or the experiment row.
-    get_flag.assert_not_awaited()
-    update_experiment.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_delete_experiment_archives_backing_flag(monkeypatch):
-    existing = make_experiment()
-    archived = {**make_flag(), "key": "checkout_exp", "state": "archived", "archived_at": "2026-06-02T00:00:00+00:00"}
-    archive_flag = AsyncMock(return_value=archived)
+async def test_delete_experiment_requires_and_forwards_version(monkeypatch):
+    command = AsyncMock(return_value=(make_experiment({"version": 4}), make_flag()))
+    monkeypatch.setattr(admin.mutations, "delete_experiment_bundle", command)
 
-    monkeypatch.setattr(admin.pg_store, "get_experiment", AsyncMock(return_value=existing))
-    monkeypatch.setattr(admin.pg_store, "delete_experiment", AsyncMock(return_value=True))
-    monkeypatch.setattr(admin.pg_store, "get_flag", AsyncMock(return_value={**make_flag(), "key": "checkout_exp"}))
-    monkeypatch.setattr(admin.pg_store, "archive_flag", archive_flag)
-    _experiment_app_state(monkeypatch, AsyncMock())
+    missing = await _request(
+        "DELETE",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+    )
+    deleted = await _request(
+        "DELETE",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl", "version": 3},
+    )
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.delete(
-            "/v1/admin/experiments/checkout_exp",
-            params={"project_id": "apdl"},
-        )
-
-    assert response.status_code == 200
-    assert response.json() == {"deleted": True, "key": "checkout_exp", "flag_key": "checkout_exp"}
-    archive_flag.assert_awaited_once()
+    assert missing.status_code == 422
+    assert deleted.status_code == 200
+    command.assert_awaited_once_with(
+        app.state.pg_pool,
+        project_id="apdl",
+        key="checkout_exp",
+        expected_version=3,
+        actor="credential:test-config",
+    )
 
 
 @pytest.mark.asyncio
-async def test_list_experiments_returns_canonical_record(monkeypatch):
+async def test_list_experiments_serializes_datetimes_and_version(monkeypatch):
     monkeypatch.setattr(
         admin.pg_store,
         "get_experiments",
-        AsyncMock(return_value=[make_experiment({"status": "running"})]),
+        AsyncMock(
+            return_value=[
+                make_experiment(
+                    {
+                        "start_date": "2026-06-01 00:00:00+00:00",
+                        "end_date": "2026-07-01 00:00:00+00:00",
+                    }
+                )
+            ]
+        ),
     )
-    app.state.pg_pool = object()
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/v1/admin/experiments", params={"project_id": "apdl"})
+    response = await _request(
+        "GET",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+    )
 
-    assert response.status_code == 200
     entry = response.json()["experiments"][0]
-    assert entry["flag_key"] == "checkout_exp"
-    assert entry["default_variant"] == "control"
-    assert entry["variants"] == [
-        {"key": "control", "weight": 1},
-        {"key": "treatment", "weight": 1},
-    ]
-    assert entry["primary_metric"] is None
+    assert entry["start_date"] == "2026-06-01T00:00:00+00:00"
+    assert entry["end_date"] == "2026-07-01T00:00:00+00:00"
+    assert entry["version"] == 3

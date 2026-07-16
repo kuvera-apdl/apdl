@@ -130,6 +130,14 @@ def _builtin_produces() -> set[str]:
     return {cls.produces for cls in registered_agents().values()}
 
 
+def _enabled_builtin_produces() -> set[str]:
+    return {
+        cls.produces
+        for cls in registered_agents().values()
+        if getattr(cls, "enabled", True)
+    }
+
+
 def _spec_fields(spec: CustomAgentSpec) -> dict[str, Any]:
     return spec.model_dump()
 
@@ -163,7 +171,7 @@ async def _validate_against_project(
         errors.append(
             f"produces '{spec.produces}' is already used by another custom agent in this project"
         )
-    known_keys = _builtin_produces() | sibling_produces
+    known_keys = _enabled_builtin_produces() | sibling_produces
     for key in spec.requires:
         if key == spec.produces:
             errors.append(f"requires '{key}' cannot reference the agent's own produces")

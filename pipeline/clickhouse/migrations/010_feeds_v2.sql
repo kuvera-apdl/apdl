@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS feeds_v2 (
     -- ---------- envelope ----------
     _id                UUID,
     _schema            LowCardinality(String),     -- e.g. 'edi.x12.850@1', 'edi.x12.810@1', 'partner.shipments.csv@1'
-    _project_id        UInt32,
+    _project_id        String,
     _idempotency_key   String,                     -- e.g. sha256(raw_doc) or vendor-supplied control number
     _correlation_id    UUID,
     _source            LowCardinality(String),     -- e.g. 'edi-adapter@1.0', 'partner-acme@2.1'

@@ -107,9 +107,6 @@ function OverviewTab({ flag }: { flag: FlagConfig }) {
             <DefinitionRow label="Evaluation mode">
               <Badge variant="outline">{flag.evaluation_mode}</Badge>
             </DefinitionRow>
-            <DefinitionRow label="Auto-disable">
-              {flag.auto_disable ? 'enabled' : 'disabled — kill switch will refuse system disables'}
-            </DefinitionRow>
             <DefinitionRow label="Salt">
               <SaltField salt={flag.salt} />
             </DefinitionRow>

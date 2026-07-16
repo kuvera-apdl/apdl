@@ -63,11 +63,16 @@ async def _service_credential(
             await conn.execute(
                 """
                 INSERT INTO auth_credentials (
-                    credential_id, project_id, key_hash, roles, expires_at
-                ) VALUES ($1, $2, $3, $4, NOW() + ($5 * INTERVAL '1 second'))
+                    credential_id, project_id, credential_kind, key_prefix,
+                    key_hash, roles, expires_at
+                ) VALUES (
+                    $1, $2, 'confidential', $3, $4, $5,
+                    NOW() + ($6 * INTERVAL '1 second')
+                )
                 """,
                 credential_id,
                 project_id,
+                f"proj_{project_id}_",
                 digest,
                 sorted(roles),
                 _EPHEMERAL_CREDENTIAL_TTL_SECONDS,

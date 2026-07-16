@@ -185,7 +185,12 @@ class EventEnvelope(BaseModel):
     # attribute names stay PEP-8.
     id: UUID = Field(alias="_id")
     schema_: _SchemaLiteral = Field(alias="_schema")
-    project_id: int = Field(alias="_project_id", ge=1)
+    project_id: str = Field(
+        alias="_project_id",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
     idempotency_key: str = Field(alias="_idempotency_key", min_length=1, max_length=128)
     correlation_id: UUID | None = Field(default=None, alias="_correlation_id")
     source: str = Field(alias="_source", min_length=1, max_length=64)
