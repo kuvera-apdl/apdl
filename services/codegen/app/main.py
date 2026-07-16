@@ -47,6 +47,7 @@ from app.editor.environment import codegen_behavior_configuration_sha256
 from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
 from app.github.checks import get_ci_evidence
+from app.github.publisher import GitBranchPublisher
 from app.github.pulls import get_pull_request, open_pull_request
 from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
@@ -195,6 +196,8 @@ async def lifespan(application: FastAPI):
 
     async with pool.acquire() as conn:
         await assert_schema_ready(conn)
+    await token_broker.start()
+    branch_publisher = GitBranchPublisher()
 
     # Recover orphans: in-process background jobs can't survive a restart, so any
     # changeset left in an active (post-claim, pre-PR) state from before this
@@ -234,7 +237,9 @@ async def lifespan(application: FastAPI):
                 pool,
                 observation,
                 editor=editor,
-                mint_token=token_broker.write_changeset,
+                mint_read_token=token_broker.read_changeset,
+                mint_write_token=token_broker.write_changeset,
+                branch_publisher=branch_publisher,
                 publication_gate=publication_gate,
                 platform_safety_policy=platform_safety_policy,
             )
@@ -245,7 +250,9 @@ async def lifespan(application: FastAPI):
     application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
         "editor": editor,
-        "mint_token": token_broker.write_changeset,
+        "mint_read_token": token_broker.read_changeset,
+        "mint_write_token": token_broker.write_changeset,
+        "branch_publisher": branch_publisher,
         "open_pr": open_pull_request,
         "publication_gate": publication_gate,
         "platform_safety_policy": platform_safety_policy,
@@ -330,6 +337,7 @@ async def lifespan(application: FastAPI):
         # worker. Await cancellation while PostgreSQL and broker dependencies
         # are alive so its context manager can revoke the credential cleanly.
         await asyncio.gather(*requeued_jobs, return_exceptions=True)
+    await token_broker.close()
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 

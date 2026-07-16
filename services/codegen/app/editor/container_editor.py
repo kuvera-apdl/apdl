@@ -3,12 +3,14 @@
 Where :class:`~app.editor.aider_editor.AiderEditor` runs Aider inside the
 codegen API process, ``ContainerAiderEditor``
 launches an ephemeral container from the hardened sandbox image
-(``Dockerfile.worker``) and runs the whole clone → Aider → gate → push there —
+(``Dockerfile.worker``) and runs clone → Aider → gate there —
 one container per changeset. The untrusted repo code therefore never executes in
 the API container that holds the GitHub App key, the Postgres DSN, and the
-internal token. The sandbox receives only the short-lived installation token
+internal token. The sandbox receives only a short-lived read installation token
 (kept out of the agent's reach by the reused ``AiderEditor`` token custody) and
-the model provider key.
+the model provider key. It returns a binary patch and Git object identities;
+the controller reconstructs and publishes the approved tree with a separate
+just-in-time write credential.
 
 Selected by default with ``CODEGEN_SANDBOX=docker`` (see ``app.main``). The
 trusted local in-process mode requires an explicit opt-in. It shells out to
@@ -283,6 +285,9 @@ class ContainerAiderEditor:
                 error=data.get("error"),
                 logs_uri=data.get("logs_uri"),
                 head_sha=data.get("head_sha"),
+                base_sha=data.get("base_sha"),
+                candidate_tree_sha=data.get("candidate_tree_sha"),
+                patch_base64=data.get("patch_base64"),
                 prompts=data.get("prompts") or [],
                 contract_bundle=(
                     ContractBundle.model_validate(data["contract_bundle"])

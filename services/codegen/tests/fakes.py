@@ -172,12 +172,16 @@ class FakeConn:
                 for signal in signals
             )
         return any(
-            signal.get("signal_id") == scope
-            and signal.get("conclusion") == "failed"
+            signal.get("signal_id") == scope and signal.get("conclusion") == "failed"
             for signal in signals
         )
 
     async def execute(self, query: str, *args: Any) -> None:
+        if "SELECT pg_notify" in query:
+            self.store.setdefault("grant_notifications", []).append(
+                {"channel": args[0], "grant_id": args[1]}
+            )
+            return None
         if "UPDATE github_repository_grants" in query:
             project_id = args[0]
             for grant in self._rows("repository_grants").values():
@@ -294,8 +298,9 @@ class FakeConn:
         if "INSERT INTO codegen_ci_remediation_attempts" in query:
             return self._insert_remediation_attempt(args)
         if "INSERT INTO codegen_ci_remediation_claims" in query:
-            if "SELECT $1, $2, $3, $4" in query and not self._failed_observation_is_current(
-                args
+            if (
+                "SELECT $1, $2, $3, $4" in query
+                and not self._failed_observation_is_current(args)
             ):
                 return None
             changeset_id, failed_head = args[0], args[1]
@@ -471,8 +476,7 @@ class FakeConn:
             if any(
                 (
                     is_retry
-                    and existing.get("retry_of_changeset_id")
-                    == retry_of_changeset_id
+                    and existing.get("retry_of_changeset_id") == retry_of_changeset_id
                 )
                 or (
                     existing["project_id"] == args[1]
@@ -562,9 +566,7 @@ class FakeConn:
                 None,
             )
 
-        if (
-            "SELECT cs.*, cs.repository_full_name AS connected_repository" in query
-        ):
+        if "SELECT cs.*, cs.repository_full_name AS connected_repository" in query:
             return self._connected_changeset(args[0])
         if "cs.head_sha = $1" in query and "cs.repository_id = $2" in query:
             head_sha, repository_id, installation_id = args
@@ -654,7 +656,9 @@ class FakeConn:
                 if row.get("head_sha") != args[2]:
                     return None
                 row["runtime_evidence_assessment"] = args[1]
-            elif "SET ci_retry_count = $2, ci_remediation_status = 'diagnosing'" in query:
+            elif (
+                "SET ci_retry_count = $2, ci_remediation_status = 'diagnosing'" in query
+            ):
                 row["ci_retry_count"] = args[1]
                 row["ci_remediation_status"] = "diagnosing"
                 row["ci_failure_key"] = args[2]
@@ -696,6 +700,16 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "UPDATE github_repository_grants" in query:
+            project_id = args[0]
+            revoked = []
+            for grant in self._rows("repository_grants").values():
+                if grant["project_id"] == project_id and grant["status"] == "active":
+                    grant["status"] = "revoked"
+                    grant["revoked_at"] = _T0
+                    grant["updated_at"] = _T0
+                    revoked.append({"grant_id": grant["grant_id"]})
+            return revoked
         if "FROM codegen_pull_request_observations" in query:
             changeset_id, head_sha, limit = args
             rows = [
@@ -771,7 +785,10 @@ class FakeConn:
                     row["updated_at"] = _T0
                     swept.append({"changeset_id": row["changeset_id"]})
             return swept
-        if "SELECT changeset_id FROM codegen_changesets" in query and "status = ANY" in query:
+        if (
+            "SELECT changeset_id FROM codegen_changesets" in query
+            and "status = ANY" in query
+        ):
             wanted = set(args[0])
             rows = [
                 {"changeset_id": row["changeset_id"]}
@@ -821,6 +838,7 @@ class FakePool:
             "ci_remediation_claims",
         ):
             self.store.setdefault(name, {})
+        self.store.setdefault("grant_notifications", [])
         self.conn = FakeConn(self.store)
 
     def acquire(self) -> _Acquire:
@@ -833,7 +851,10 @@ class FakePool:
         installation_id: int = 1,
         repository_id: int = 10,
         grant_id: str | None = None,
-        tenant_policy: str | dict[str, Any] | TenantCodegenConnectionPolicy | None = None,
+        tenant_policy: str
+        | dict[str, Any]
+        | TenantCodegenConnectionPolicy
+        | None = None,
     ) -> None:
         """Seed a repo connection so changeset creation is permitted."""
         if tenant_policy is None:
@@ -898,9 +919,7 @@ class FakePool:
             "idempotency_request_sha256": "0" * 64,
             "repository_grant_id": grant["grant_id"] if grant else None,
             "repository_id": grant["repository_id"] if grant else None,
-            "repository_installation_id": (
-                grant["installation_id"] if grant else None
-            ),
+            "repository_installation_id": (grant["installation_id"] if grant else None),
             "repository_full_name": grant["repository_full_name"] if grant else None,
             "repository_target_quarantined": grant is None,
             "run_id": None,

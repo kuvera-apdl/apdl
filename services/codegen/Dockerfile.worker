@@ -1,8 +1,8 @@
 # APDL codegen agent sandbox — the untrusted-code boundary (decision D4 / Option B).
 #
-# One ephemeral container per changeset: it clones the repo, runs the pinned OSS
-# coding agent (Aider), performs sanitized contract inspection, and pushes the
-# branch — all isolated
+# One ephemeral container per changeset: it clones the repo with read authority,
+# runs the pinned OSS coding agent (Aider), performs sanitized contract
+# inspection, and returns a gated candidate patch — all isolated
 # from the codegen API container (which holds the GitHub App key, the Postgres
 # DSN, and the internal token). The orchestrator
 # (app.editor.container_editor.ContainerAiderEditor) launches it with `docker run`;
@@ -14,9 +14,10 @@
 #   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
 #   * egress allowlist: github.com + package registries only; block the APDL
 #     internal CIDR and the cloud metadata IP (169.254.169.254)
-# The install token arrives as GH_TOKEN; the runner drops it from the environment
-# before Aider starts. Repository-defined lint, test, hook, shell-suggestion, and
-# browser commands are disabled; GitHub CI remains the execution authority.
+# A read-only install token arrives as GH_TOKEN; the runner drops it from the
+# environment before Aider starts. The controller owns reconstruction and push.
+# Repository-defined lint, test, hook, shell-suggestion, and browser commands are
+# disabled; GitHub CI remains the execution authority.
 ARG CODEGEN_REVISION
 
 # The evaluation controller contains sealed corpus/oracle material. The candidate

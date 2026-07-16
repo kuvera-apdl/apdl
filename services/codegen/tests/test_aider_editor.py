@@ -1,8 +1,8 @@
 """Tests for the Aider editor's pure helpers + the never-raise contract.
 
-The real agent path (clone → aider → test → push) is integration-untested here;
-these cover the deterministic logic and the token-custody env boundary without
-invoking ``aider`` or touching the network.
+The real agent path (clone → aider → test → candidate patch) is
+integration-untested here; these cover the deterministic logic and the
+token-custody env boundary without invoking ``aider`` or touching the network.
 """
 
 import base64
@@ -519,6 +519,7 @@ class _Pipeline:
         self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
         self._changed_paths = list(changed_paths or ["app/x.ts\n"])
         self._last_changed_paths = ["app/x.ts"]
+        self._head_reads = 0
         repo_path: Path | None = None
 
         async def fake_git(cwd, args, **_kwargs):
@@ -534,6 +535,11 @@ class _Pipeline:
                     target.write_text(content)
             if args[0] == "diff":
                 return 0, self._diff_text
+            if args[:2] == ["rev-parse", "HEAD"]:
+                self._head_reads += 1
+                return 0, ("a" if self._head_reads == 1 else "c") * 40
+            if args[:2] == ["rev-parse", "HEAD^{tree}"]:
+                return 0, "b" * 40
             if args[0] == "rev-list":
                 return 0, "abc123 parent1\n"  # single-parent commit
             if args[0] == "push":
@@ -562,6 +568,8 @@ class _Pipeline:
                         for path in self._last_changed_paths
                     ),
                 )
+            if args[0] == "diff" and "--binary" in args:
+                return 0, self._diff_text.encode("utf-8")
             raise AssertionError(f"unexpected raw Git command: {args}")
 
         async def fake_exec(argv, **_kwargs):
@@ -687,7 +695,11 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
     result = await editor.implement(_request())
 
     assert result.success is True
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
+    assert result.base_sha == "a" * 40
+    assert result.candidate_tree_sha == "b" * 40
+    assert result.head_sha == "c" * 40
+    assert base64.b64decode(result.patch_base64 or "", validate=True)
     assert result.inspection_snapshot is not None
     assert result.dependency_slice is not None
     assert [item.path for item in result.dependency_slice.changed_files] == ["app/x.ts"]
@@ -983,7 +995,7 @@ async def test_medium_risk_missing_test_coverage_retries_before_push(
     result = await editor.implement(request)
 
     assert result.success is True
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
     assert len(pipeline.aider_messages) == 2
     assert "required verification coverage is missing" in pipeline.aider_messages[1]
     assert result.verification_coverage is not None
@@ -1040,7 +1052,7 @@ async def test_local_verify_failures_do_not_block_generation(monkeypatch, tmp_pa
 
     assert result.success is True
     assert len(pipeline.aider_messages) == 1
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
 
 
 @pytest.mark.asyncio
@@ -1110,7 +1122,7 @@ async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
     result = await editor.implement(_request())
 
     assert result.success is True
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
     assert "Build a bot filter." in pipeline.aider_messages[0]
 
 
@@ -1214,7 +1226,7 @@ async def test_revert_applies_git_revert_without_invoking_the_agent(
     result = await editor.implement(_revert_request())
 
     assert result.success is True
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
     assert pipeline.aider_messages == []  # the revert is mechanical, not prose
     reverts = [c for c in pipeline.git_calls if c[0] == "revert"]
     assert reverts == [["revert", "--no-edit", "abc123"]]
@@ -1255,7 +1267,7 @@ async def test_revert_skips_the_quality_review(monkeypatch, tmp_path):
     result = await editor.implement(_revert_request())
 
     assert result.success is True
-    assert pipeline.pushed is True
+    assert pipeline.pushed is False
 
 
 @pytest.mark.asyncio

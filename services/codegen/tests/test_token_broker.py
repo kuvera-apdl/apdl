@@ -1,5 +1,6 @@
 """Tests for DB-authorized GitHub token leases."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -119,7 +120,7 @@ async def test_changeset_lease_revokes_and_never_yields_if_grant_changes_during_
 
 
 @pytest.mark.asyncio
-async def test_write_lease_rejects_token_too_short_for_editor_and_revokes_it():
+async def test_write_lease_rejects_token_too_short_for_jit_mutation_and_revokes_it():
     pool = FakePool()
     pool.add_connection("demo")
     pool.add_changeset("cs_short_ttl", "demo")
@@ -128,7 +129,7 @@ async def test_write_lease_rejects_token_too_short_for_editor_and_revokes_it():
     async def issue(target, *, permissions):
         return InstallationToken(
             token="ghs_short",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=4),
         )
 
     async def revoke(token: str) -> None:
@@ -191,3 +192,102 @@ async def test_revocation_cleanup_failure_does_not_replace_completed_operation(c
         assert token == "ghs_cleanup"
 
     assert "Could not revoke leased GitHub installation token" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_grant_notification_revokes_an_active_lease_without_double_cleanup():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_active", "demo")
+    grant_id = pool.store["connections"]["demo"]["grant_id"]
+    revoked = asyncio.Event()
+    revoked_tokens: list[str] = []
+
+    async def issue(target, *, permissions):
+        return _issued_token("ghs_active")
+
+    async def revoke(token: str) -> None:
+        revoked_tokens.append(token)
+        revoked.set()
+
+    broker = GitHubTokenBroker(pool, issue_token=issue, revoke_token=revoke)
+
+    async with broker.write_changeset("cs_active") as token:
+        assert token == "ghs_active"
+        broker._on_grant_revoked(
+            None,  # type: ignore[arg-type]
+            1,
+            "codegen_repository_grant_revoked",
+            grant_id,
+        )
+        await asyncio.wait_for(revoked.wait(), timeout=1)
+
+    assert revoked_tokens == ["ghs_active"]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_bounded_token_cleanup():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_cancel", "demo")
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def issue(target, *, permissions):
+        return _issued_token("ghs_cancel")
+
+    async def revoke(token: str) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    broker = GitHubTokenBroker(pool, issue_token=issue, revoke_token=revoke)
+
+    async def consume() -> None:
+        async with broker.write_changeset("cs_cancel"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_listener_lifecycle_uses_one_dedicated_pool_connection():
+    calls: list[tuple[str, object]] = []
+
+    class _ListenerConnection:
+        async def add_listener(self, channel, callback):
+            calls.append(("add", channel))
+
+        async def remove_listener(self, channel, callback):
+            calls.append(("remove", channel))
+
+    class _ListenerPool:
+        def __init__(self):
+            self.connection = _ListenerConnection()
+
+        async def acquire(self):
+            calls.append(("acquire", self.connection))
+            return self.connection
+
+        async def release(self, connection):
+            calls.append(("release", connection))
+
+    pool = _ListenerPool()
+    broker = GitHubTokenBroker(pool)  # type: ignore[arg-type]
+
+    await broker.start()
+    await broker.start()
+    await broker.close()
+
+    assert [name for name, _value in calls] == [
+        "acquire",
+        "add",
+        "remove",
+        "release",
+    ]

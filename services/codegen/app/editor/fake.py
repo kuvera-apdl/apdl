@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
+
 from app.editor.base import EditRequest, EditResult
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 
@@ -35,24 +38,17 @@ class FakeEditor:
     async def implement(self, request: EditRequest) -> EditResult:
         self.last_request = request
         result = self._result
-        # Default a successful result's branch to the requested one.
-        if result.success and result.branch is None:
-            return EditResult(
-                success=True,
-                branch=request.branch,
-                diff_stat=result.diff_stat,
-                changed_paths=result.changed_paths,
-                diff_text=result.diff_text,
-                prompts=result.prompts,
+        if result.success:
+            return replace(
+                result,
+                branch=result.branch or request.branch,
                 head_sha=result.head_sha or "fake-head-sha",
-                contract_bundle=result.contract_bundle,
+                base_sha=result.base_sha or "a" * 40,
+                candidate_tree_sha=result.candidate_tree_sha or "b" * 40,
+                patch_base64=(
+                    result.patch_base64
+                    or base64.b64encode(b"fake candidate patch").decode("ascii")
+                ),
                 requirement_ledger=_ledger(request, result),
-                inspection_snapshot=result.inspection_snapshot,
-                dependency_slice=result.dependency_slice,
-                verification_plan=result.verification_plan,
-                verification_coverage=result.verification_coverage,
-                runtime_acceptance_plan=result.runtime_acceptance_plan,
-                generated_runtime_workflow=result.generated_runtime_workflow,
-                review_verdict=result.review_verdict,
             )
         return result

@@ -1,8 +1,9 @@
 """The editing-engine seam.
 
-``Editor`` is the interface codegen uses to turn a task spec into a pushed
-branch. Production uses an Aider-backed implementation (model-agnostic via
-LiteLLM); tests use a fake. Keeping the engine behind a Protocol makes the engine
+``Editor`` is the interface codegen uses to turn a task spec into a gated local
+candidate. Production uses an Aider-backed implementation (model-agnostic via
+LiteLLM); tests use a fake. The controller, not the editor, reconstructs and
+pushes the returned patch. Keeping the engine behind a Protocol makes the engine
 — and the model — a config choice, not a rewrite (plan decision D3).
 """
 
@@ -38,12 +39,12 @@ def _default_effective_safety_policy() -> EffectiveCodegenSafetyPolicy:
 
 @dataclass
 class EditRequest:
-    """Everything the engine needs to implement one change and push a branch."""
+    """Everything the engine needs to implement one local candidate."""
 
     repo: str  # owner/name
     base_branch: str
-    branch: str  # branch the engine must create or update and push
-    token: str  # short-lived installation token, scoped to this repo
+    branch: str  # branch identity the controller will eventually publish
+    token: str  # short-lived read-only installation token, scoped to this repo
     title: str
     spec: str
     #: Tenant boundary for private dependency-contract caches. Legacy/custom
@@ -66,7 +67,8 @@ class EditRequest:
     test_cmd: str | None = None
     #: Trusted, authority-resolved safety policy. Tenant JSON never crosses the
     #: editor boundary. The engine evaluates this policy on the FULL diff before
-    #: it pushes, so a violating branch never reaches the remote.
+    #: returning a publishable patch, so a violating branch never reaches the
+    #: controller's write boundary.
     safety_policy: EffectiveCodegenSafetyPolicy = field(
         default_factory=_default_effective_safety_policy
     )
@@ -77,7 +79,7 @@ class EditRequest:
     #: Update the already-pushed PR branch instead of cutting a new branch.
     existing_branch: bool = False
     #: Exact failed PR head a repair is allowed to extend. A mismatch blocks
-    #: editing and the push uses an explicit force-with-lease for this SHA.
+    #: editing and the controller push uses a force-with-lease for this SHA.
     expected_head_sha: str | None = None
     #: Risk controls whether unavailable/unparseable auxiliary model gates may
     #: fail open. Only low-risk changes may skip them.
@@ -95,7 +97,16 @@ class EditResult:
     diff_text: str = ""
     error: str | None = None
     logs_uri: str | None = None
+    #: Local candidate commit identity. This is not a remote branch identity;
+    #: initial generation and repair replace it with the controller-published
+    #: SHA before durable GitHub projection.
     head_sha: str | None = None
+    #: Exact remote commit the binary patch applies to.
+    base_sha: str | None = None
+    #: Git tree identity the controller must reproduce before it may push.
+    candidate_tree_sha: str | None = None
+    #: Canonical base64 encoding of ``git diff --binary --full-index``.
+    patch_base64: str | None = None
     #: Exact installed dependency evidence used by this attempt. This is model
     #: grounding, never an APDL-local CI result.
     contract_bundle: ContractBundle | None = None
@@ -118,13 +129,12 @@ class EditResult:
 
 
 class Editor(Protocol):
-    """Implements a change and pushes a branch.
+    """Implements, reviews, and gates a local candidate patch.
 
-    Editor implementations are trusted, push-capable service code: they receive
-    a repository-scoped write token and must enforce the canonical gates before
-    pushing. Model output is untrusted input to that implementation. A plugin
-    that cannot satisfy this trust boundary must return a patch to a trusted
-    editor adapter instead of implementing this protocol directly.
+    Editor implementations receive only repository read authority. They must
+    enforce the canonical gates and return an exact base/tree-bound binary
+    patch. Model output remains untrusted until the controller reconstructs and
+    verifies that tree through :mod:`app.github.publisher`.
 
     Implementations MUST NOT raise for an ordinary failed attempt (editing or
     safety budget exhausted) — return ``EditResult(success=False, error=...)``

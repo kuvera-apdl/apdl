@@ -13,16 +13,18 @@ trusted local repositories while publication is disabled. The real isolated path
 still needs integration evidence with a model key and disposable live repository;
 the deterministic boundary and argv/env construction are unit-tested.
 
-Token custody (entirely ours now — there is no Anthropic git proxy): the GitHub
-installation token is used only by the orchestrator for clone/push, injected into
-git as a one-shot ``http.extraHeader`` via ``GIT_CONFIG_*`` environment variables.
-Going through the env (not ``-c`` on the command line) keeps the header — and the
-reversible base64 token inside it — off git's argv, so it can't leak through
-``ps`` / ``/proc/<pid>/cmdline``; it is likewise never written to ``.git/config``.
-It is never handed to Aider: that process runs with an isolated home, empty
-service-owned configuration, and only the required model-provider credentials —
-never the GitHub token or APDL service secrets. Repository-defined commands are
-disabled; GitHub CI is the execution authority.
+Token custody (entirely ours now — there is no Anthropic git proxy): this editor
+receives only a read-scoped GitHub token for its clone. The controller later
+reconstructs the gated patch and acquires a separate just-in-time write token for
+publication. Git credentials are injected as a one-shot ``http.extraHeader`` via
+``GIT_CONFIG_*`` environment variables. Going through the env (not ``-c`` on the
+command line) keeps the header — and the reversible base64 token inside it — off
+git's argv, so it cannot leak through ``ps`` / ``/proc/<pid>/cmdline``; it is
+likewise never written to ``.git/config``. The token is never handed to Aider:
+that process runs with an isolated home, empty service-owned configuration, and
+only the required model-provider credentials — never a GitHub token or APDL
+service secrets. Repository-defined commands are disabled; GitHub CI is the
+execution authority.
 """
 
 from __future__ import annotations
@@ -130,6 +132,7 @@ from app.verification import (
 logger = logging.getLogger(__name__)
 
 _DIFF_TEXT_CAP = 1_000_000  # cap the diff text fed to the secret scan (chars)
+_PATCH_BYTES_CAP = 16 * 1024 * 1024
 _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 # Verification/test failures are the actionable ``tests_failed`` case an operator
 # reads to fix the change, so they get a much larger budget: a build/test log's
@@ -1585,29 +1588,32 @@ class AiderEditor:
                     + "; ".join(gate.violations)
                 )
 
-            # 6. Production publishes the gated branch.  Evaluation deliberately
-            #    leaves the resulting commit only in its materialized workspace;
-            #    the sealed outer harness inspects that tree after this returns.
-            if not workspace_mode:
-                push_args = ["push"]
-                if request.expected_head_sha:
-                    push_args.append(
-                        "--force-with-lease="
-                        f"refs/heads/{request.branch}:{request.expected_head_sha}"
-                    )
-                push_args += ["origin", f"{request.branch}:{request.branch}"]
-                assert header is not None
-                rc, out = await self._git(
-                    repo_dir,
-                    push_args,
-                    auth_header=header,
-                )
-                if rc != 0:
-                    return fail(f"push failed: {_tail(out)}")
+            # 6. Return a content-addressed binary patch. The model worker never
+            #    receives write authority and never pushes. The controller later
+            #    reconstructs this exact tree with read authority, verifies its
+            #    SHA, and acquires a just-in-time write token only for `git push`.
             rc, head_sha = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
-                label = "workspace" if workspace_mode else "pushed"
-                return fail(f"could not resolve {label} head: {_tail(head_sha)}")
+                return fail(f"could not resolve candidate head: {_tail(head_sha)}")
+            rc, tree_sha = await self._git(repo_dir, ["rev-parse", "HEAD^{tree}"])
+            if rc != 0:
+                return fail(f"could not resolve candidate tree: {_tail(tree_sha)}")
+            rc, patch = await self._git_bytes(
+                repo_dir,
+                [
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-renames",
+                    f"{base}..HEAD",
+                ],
+            )
+            if rc != 0:
+                return fail(f"could not render candidate patch: {_git_error(patch)}")
+            if not patch:
+                return fail("candidate patch is empty after successful gating")
+            if len(patch) > _PATCH_BYTES_CAP:
+                return fail(f"candidate patch exceeds {_PATCH_BYTES_CAP} bytes")
 
             return EditResult(
                 success=True,
@@ -1617,6 +1623,9 @@ class AiderEditor:
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
                 prompts=prompts,
                 head_sha=head_sha.strip(),
+                base_sha=baseline,
+                candidate_tree_sha=tree_sha.strip(),
+                patch_base64=base64.b64encode(patch).decode("ascii"),
                 contract_bundle=contract_bundle,
                 requirement_ledger=requirement_ledger,
                 inspection_snapshot=inspection_snapshot,

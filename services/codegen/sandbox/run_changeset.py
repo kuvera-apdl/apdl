@@ -4,20 +4,20 @@ This is how the editor runs under ``CODEGEN_SANDBOX=docker`` (decision D4 /
 Option B). The orchestrator (``app.editor.container_editor.ContainerAiderEditor``)
 launches one ephemeral container per changeset from the hardened sandbox image
 and this script runs *inside* it. It reuses the very same ``AiderEditor`` used by
-the in-process path — clone → Aider → gate → push — so the edit logic lives in
-exactly one place; the only difference is *where* it runs.
+the in-process path — clone → Aider → gate → candidate patch — so the edit logic
+lives in exactly one place; the only difference is *where* it runs. The service
+controller reconstructs and publishes the exact returned tree.
 
 Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
 on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
-Token custody: the short-lived install token arrives as ``GH_TOKEN``. We read it
-into the in-memory request and immediately drop it from ``os.environ`` so it is
-not visible to the Aider child process — not even via
-``/proc/<pid>/environ``. ``AiderEditor`` then uses it only for the one-shot
-clone/push git header. The model provider key necessarily stays in the
-environment (aider needs it); the sandbox never receives the GitHub App private
-key, Postgres DSN, or internal token.
+Token custody: a short-lived read-only installation token arrives as
+``GH_TOKEN``. We read it into the in-memory request and immediately drop it from
+``os.environ`` so it is not inherited by the Aider child process.
+``AiderEditor`` uses it only for the one-shot clone header. The worker never
+receives repository write authority; the sandbox also never receives the GitHub
+App private key, Postgres DSN, or internal token.
 """
 
 from __future__ import annotations
@@ -94,9 +94,13 @@ def main() -> int:
     if result.contract_bundle is not None:
         payload["contract_bundle"] = result.contract_bundle.model_dump(mode="json")
     if result.requirement_ledger is not None:
-        payload["requirement_ledger"] = result.requirement_ledger.model_dump(mode="json")
+        payload["requirement_ledger"] = result.requirement_ledger.model_dump(
+            mode="json"
+        )
     if result.inspection_snapshot is not None:
-        payload["inspection_snapshot"] = result.inspection_snapshot.model_dump(mode="json")
+        payload["inspection_snapshot"] = result.inspection_snapshot.model_dump(
+            mode="json"
+        )
     if result.dependency_slice is not None:
         payload["dependency_slice"] = result.dependency_slice.model_dump(mode="json")
     if result.verification_plan is not None:
@@ -106,8 +110,8 @@ def main() -> int:
             mode="json"
         )
     if result.runtime_acceptance_plan is not None:
-        payload["runtime_acceptance_plan"] = (
-            result.runtime_acceptance_plan.model_dump(mode="json")
+        payload["runtime_acceptance_plan"] = result.runtime_acceptance_plan.model_dump(
+            mode="json"
         )
     if result.generated_runtime_workflow is not None:
         payload["generated_runtime_workflow"] = (

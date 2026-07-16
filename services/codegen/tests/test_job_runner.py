@@ -1,6 +1,7 @@
 """Tests for the changeset job runner (fake editor + fake pool, no network)."""
 
 import asyncio
+import base64
 import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,7 @@ from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
+from tests.publisher_fakes import FakeBranchPublisher
 from tests.publication_fakes import (
     allowing_publication_gate,
     denying_publication_gate,
@@ -72,6 +74,11 @@ _TASK = {
 
 async def run_changeset_job(*args, publication_gate=None, **kwargs):
     """Exercise the production runner with an explicit trusted test gate."""
+    legacy_minter = kwargs.pop("mint_token", None)
+    if legacy_minter is not None:
+        kwargs.setdefault("mint_read_token", legacy_minter)
+        kwargs.setdefault("mint_write_token", legacy_minter)
+    kwargs.setdefault("branch_publisher", FakeBranchPublisher())
     return await _run_changeset_job(
         *args,
         publication_gate=publication_gate or allowing_publication_gate(),
@@ -110,7 +117,9 @@ def _request_hash(
     )
 
 
-async def _seed(pool: FakePool, changeset_id: str, project_id: str = "demo", base="main"):
+async def _seed(
+    pool: FakePool, changeset_id: str, project_id: str = "demo", base="main"
+):
     await store.create_changeset(
         pool,
         changeset_id=changeset_id,
@@ -263,12 +272,122 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert calls["repo"] == "acme/widgets"
     assert calls["base"] == "main"
     assert calls["token"] == "ghs_tok"
-    assert leased == ["cs_abc12345", "cs_abc12345"]
+    assert leased == ["cs_abc12345"] * 4
     assert "## Requirement ledger" in calls["body"]
     assert "`REQ-001`" in calls["body"]
     assert "## Publication rollout" in calls["body"]
     assert "low_risk_canary" in calls["body"]
     assert final.publication_authorization.authorization_sha256 in calls["body"]
+
+
+@pytest.mark.asyncio
+async def test_editor_and_reconstruction_use_read_leases_before_jit_write_leases():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_scoped_tokens")
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+            changed_paths=["src/theme.ts"],
+            requirement_ledger=_implemented_ledger(["src/theme.ts"]),
+        )
+    )
+    publisher = FakeBranchPublisher()
+    reads: list[str] = []
+    writes: list[str] = []
+    opened: dict = {}
+
+    @asynccontextmanager
+    async def mint_read(_changeset_id: str):
+        token = f"read-{len(reads) + 1}"
+        reads.append(token)
+        yield token
+
+    @asynccontextmanager
+    async def mint_write(_changeset_id: str):
+        token = f"write-{len(writes) + 1}"
+        writes.append(token)
+        yield token
+
+    async def open_pr(**kwargs) -> PullRequest:
+        opened.update(kwargs)
+        return _pr(19)
+
+    await run_changeset_job(
+        pool,
+        "cs_scoped_tokens",
+        editor=editor,
+        mint_read_token=mint_read,
+        mint_write_token=mint_write,
+        branch_publisher=publisher,
+        open_pr=open_pr,
+    )
+
+    assert editor.last_request is not None
+    assert editor.last_request.token == "read-1"
+    assert publisher.prepare_calls[0]["read_token"] == "read-2"
+    assert publisher.push_calls[0][1] == "write-1"
+    assert opened["token"] == "write-2"
+    assert reads == ["read-1", "read-2"]
+    assert writes == ["write-1", "write-2"]
+
+
+@pytest.mark.asyncio
+async def test_revocation_after_reconstruction_blocks_jit_push_lease():
+    pool = FakePool()
+    pool.add_connection("demo")
+    await _seed(pool, "cs_revoke_before_push")
+    grant_id = pool.store["connections"]["demo"]["grant_id"]
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 1, "deletions": 0},
+            changed_paths=["src/theme.ts"],
+            requirement_ledger=_implemented_ledger(["src/theme.ts"]),
+        )
+    )
+    issued: list[str] = []
+
+    async def issue(target, *, permissions):
+        issued.append("minted")
+        return InstallationToken(
+            token="must-not-be-issued",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    async def revoke(_token: str) -> None:
+        pass
+
+    broker = GitHubTokenBroker(pool, issue_token=issue, revoke_token=revoke)
+
+    class _RevokingPublisher(FakeBranchPublisher):
+        @asynccontextmanager
+        async def prepare(self, **kwargs):
+            async with super().prepare(**kwargs) as prepared:
+                pool.store["repository_grants"][grant_id]["status"] = "revoked"
+                yield prepared
+
+    publisher = _RevokingPublisher()
+
+    async def open_pr(**kwargs) -> PullRequest:
+        raise AssertionError(f"revoked authority opened a PR: {kwargs}")
+
+    await run_changeset_job(
+        pool,
+        "cs_revoke_before_push",
+        editor=editor,
+        mint_read_token=_mint,
+        mint_write_token=broker.write_changeset,
+        branch_publisher=publisher,
+        open_pr=open_pr,
+    )
+
+    final = await store.get_changeset(pool, "cs_revoke_before_push")
+    assert final.status is ChangesetStatus.error
+    assert "no active repository grant" in (final.error or "")
+    assert publisher.push_calls == []
+    assert issued == []
 
 
 @pytest.mark.asyncio
@@ -442,6 +561,7 @@ async def test_cancellation_during_pr_token_cleanup_keeps_accepted_pr_projected(
         )
     )
     cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
     revoke_count = 0
 
     async def issue(target, *, permissions):
@@ -453,9 +573,9 @@ async def test_cancellation_during_pr_token_cleanup_keeps_accepted_pr_projected(
     async def revoke(token: str) -> None:
         nonlocal revoke_count
         revoke_count += 1
-        if revoke_count == 2:
+        if revoke_count == 4:
             cleanup_started.set()
-            await asyncio.Event().wait()
+            await cleanup_release.wait()
 
     broker = GitHubTokenBroker(pool, issue_token=issue, revoke_token=revoke)
 
@@ -473,6 +593,9 @@ async def test_cancellation_during_pr_token_cleanup_keeps_accepted_pr_projected(
     )
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
     job.cancel()
+    await asyncio.sleep(0)
+    assert not job.done()
+    cleanup_release.set()
     with pytest.raises(asyncio.CancelledError):
         await job
 
@@ -495,7 +618,9 @@ async def test_job_marks_failed_generation_as_error_without_opening_pr():
         opened.append(kwargs)
         return _pr(1)
 
-    await run_changeset_job(pool, "cs_fail0001", editor=editor, mint_token=_mint, open_pr=open_pr)
+    await run_changeset_job(
+        pool, "cs_fail0001", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
 
     final = await store.get_changeset(pool, "cs_fail0001")
     assert final.status == ChangesetStatus.error
@@ -582,10 +707,14 @@ async def test_job_errors_when_repository_grant_is_revoked():
     pool = FakePool()
     pool.add_connection("ghost")
     await store.create_changeset(
-        pool, changeset_id="cs_ghost001", project_id="ghost",
+        pool,
+        changeset_id="cs_ghost001",
+        project_id="ghost",
         idempotency_key="test:cs-ghost001",
         idempotency_request_sha256=_request_hash("ghost", None, "main", _TASK),
-        run_id=None, base_branch="main", task=_TASK,
+        run_id=None,
+        base_branch="main",
+        task=_TASK,
         repository_target=_repository_target(pool, "ghost"),
         tenant_policy_snapshot=TenantCodegenConnectionPolicy(),
     )
@@ -655,7 +784,9 @@ async def test_job_blocks_on_pre_push_gate_violation():
         opened.append(kwargs)
         return _pr(1)
 
-    await run_changeset_job(pool, "cs_secret01", editor=editor, mint_token=_mint, open_pr=open_pr)
+    await run_changeset_job(
+        pool, "cs_secret01", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
 
     final = await store.get_changeset(pool, "cs_secret01")
     assert final.status == ChangesetStatus.error
@@ -802,7 +933,9 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
         )
     )
     await store.create_revert_changeset(
-        pool, changeset_id="cs_pol00001", project_id="demo",
+        pool,
+        changeset_id="cs_pol00001",
+        project_id="demo",
         source_changeset_id="cs_source",
         idempotency_key="test:cs-pol00001",
         idempotency_request_sha256=store.changeset_request_sha256(
@@ -812,7 +945,9 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
             task=task,
             controls=controls,
         ),
-        run_id=None, base_branch="main", task=task,
+        run_id=None,
+        base_branch="main",
+        task=task,
         repository_target=_repository_target(pool),
         tenant_policy_snapshot=TenantCodegenConnectionPolicy(
             test_cmd="make ci",
@@ -891,9 +1026,12 @@ async def test_job_uses_queued_tenant_policy_snapshot_after_connection_is_weaken
     assert editor.last_request is not None
     assert editor.last_request.safety_policy.max_files == 5
     assert final.tenant_policy_snapshot == strict_snapshot
-    assert final.effective_safety_policy_sha256 == resolve_effective_policy(
-        strict_snapshot, PlatformCodegenSafetyPolicy()
-    ).canonical_digest()
+    assert (
+        final.effective_safety_policy_sha256
+        == resolve_effective_policy(
+            strict_snapshot, PlatformCodegenSafetyPolicy()
+        ).canonical_digest()
+    )
     assert opened == []
 
 
@@ -1023,6 +1161,9 @@ class _BlockingEditor:
             branch=request.branch,
             diff_stat={"files": 1, "additions": 1, "deletions": 0},
             head_sha="fake-head-sha",
+            base_sha="a" * 40,
+            candidate_tree_sha="b" * 40,
+            patch_base64=base64.b64encode(b"candidate patch").decode("ascii"),
         )
 
 
@@ -1044,10 +1185,14 @@ async def test_jobs_serialize_at_concurrency_one(monkeypatch):
         return _pr(1)
 
     t1 = asyncio.create_task(
-        run_changeset_job(pool, "cs_one", editor=editor, mint_token=_mint, open_pr=open_pr)
+        run_changeset_job(
+            pool, "cs_one", editor=editor, mint_token=_mint, open_pr=open_pr
+        )
     )
     t2 = asyncio.create_task(
-        run_changeset_job(pool, "cs_two", editor=editor, mint_token=_mint, open_pr=open_pr)
+        run_changeset_job(
+            pool, "cs_two", editor=editor, mint_token=_mint, open_pr=open_pr
+        )
     )
 
     # First job reaches the editor; let the loop spin so the second would too if unbounded.
@@ -1071,8 +1216,13 @@ async def test_jobs_serialize_at_concurrency_one(monkeypatch):
 async def test_job_persists_prompt_transcript_on_success_and_failure():
     """EditResult.prompts lands on the changeset row either way the edit ends."""
     transcript = [
-        {"stage": "edit", "label": "Edit instruction (attempt 1)",
-         "system": None, "user": "do the thing", "notes": None},
+        {
+            "stage": "edit",
+            "label": "Edit instruction (attempt 1)",
+            "system": None,
+            "user": "do the thing",
+            "notes": None,
+        },
     ]
 
     async def open_pr(**kwargs) -> PullRequest:
@@ -1090,13 +1240,19 @@ async def test_job_persists_prompt_transcript_on_success_and_failure():
             prompts=transcript,
         )
     )
-    await run_changeset_job(pool, "cs_prompt_ok", editor=editor, mint_token=_mint, open_pr=open_pr)
+    await run_changeset_job(
+        pool, "cs_prompt_ok", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
     ok = await store.get_changeset(pool, "cs_prompt_ok")
     assert ok.status == ChangesetStatus.pr_open
     assert ok.prompts == transcript
 
-    editor = FakeEditor(EditResult(success=False, error="tests red", prompts=transcript))
-    await run_changeset_job(pool, "cs_prompt_ko", editor=editor, mint_token=_mint, open_pr=open_pr)
+    editor = FakeEditor(
+        EditResult(success=False, error="tests red", prompts=transcript)
+    )
+    await run_changeset_job(
+        pool, "cs_prompt_ko", editor=editor, mint_token=_mint, open_pr=open_pr
+    )
     ko = await store.get_changeset(pool, "cs_prompt_ko")
     assert ko.status == ChangesetStatus.error
     assert ko.prompts == transcript

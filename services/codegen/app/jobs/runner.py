@@ -23,6 +23,7 @@ import asyncpg
 
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
+from app.github.publisher import BranchPublisher
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.models.observations import ExternalCIStatus, PullRequestObservation
 from app.publication import (
@@ -44,7 +45,11 @@ from app.safety.policy import (
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
-from app.verification.models import PlanDisposition, VerificationCoverage, VerificationPlan
+from app.verification.models import (
+    PlanDisposition,
+    VerificationCoverage,
+    VerificationPlan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +94,17 @@ def _pr_body(
         checks = "- [ ] Implements the described change with passing tests"
     requirement_lines = []
     for requirement in ledger.requirements:
-        expected = ", ".join(
-            item.evidence_id for item in requirement.expected_ci_evidence
-        ) or "explicitly blocked/descoped"
+        expected = (
+            ", ".join(item.evidence_id for item in requirement.expected_ci_evidence)
+            or "explicitly blocked/descoped"
+        )
         marker = (
             "x"
             if requirement.implementation_status
-            in {ImplementationStatus.implemented, ImplementationStatus.confirmed_existing}
+            in {
+                ImplementationStatus.implemented,
+                ImplementationStatus.confirmed_existing,
+            }
             else " "
         )
         requirement_lines.append(
@@ -171,7 +180,9 @@ async def run_changeset_job(
     changeset_id: str,
     *,
     editor: Editor,
-    mint_token: TokenMinter,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
     open_pr: PROpener,
     publication_gate: PublicationGate,
     platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
@@ -186,7 +197,9 @@ async def run_changeset_job(
             pool,
             changeset_id,
             editor=editor,
-            mint_token=mint_token,
+            mint_read_token=mint_read_token,
+            mint_write_token=mint_write_token,
+            branch_publisher=branch_publisher,
             open_pr=open_pr,
             publication_gate=publication_gate,
             platform_safety_policy=platform_safety_policy,
@@ -198,7 +211,9 @@ async def _execute_changeset_job(
     changeset_id: str,
     *,
     editor: Editor,
-    mint_token: TokenMinter,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
     open_pr: PROpener,
     publication_gate: PublicationGate,
     platform_safety_policy: PlatformCodegenSafetyPolicy | None,
@@ -224,7 +239,9 @@ async def _execute_changeset_job(
         )
         if connection is None:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error,
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
                 error="Changeset repository grant is unavailable or revoked.",
             )
             return
@@ -242,7 +259,9 @@ async def _execute_changeset_job(
         # Losing the claim (a duplicate enqueue, a concurrent replica) is a
         # clean no-op, not an error that would corrupt the winner's run.
         try:
-            await store.transition_changeset(pool, changeset_id, ChangesetStatus.cloning)
+            await store.transition_changeset(
+                pool, changeset_id, ChangesetStatus.cloning
+            )
         except InvalidTransition:
             logger.info(
                 "Changeset %s is already claimed by another job; skipping.",
@@ -253,18 +272,14 @@ async def _execute_changeset_job(
             pool,
             changeset_id,
             tenant_policy_snapshot=tenant_policy,
-            effective_safety_policy_sha256=(
-                effective_safety_policy.canonical_digest()
-            ),
+            effective_safety_policy_sha256=(effective_safety_policy.canonical_digest()),
         )
         risk = changeset.controls.risk_level
         authorization = publication_gate.authorize(
             risk=risk,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
-        await store.set_publication_authorization(
-            pool, changeset_id, authorization
-        )
+        await store.set_publication_authorization(pool, changeset_id, authorization)
         if not authorization.decision.allowed:
             await store.transition_changeset(
                 pool,
@@ -285,13 +300,14 @@ async def _execute_changeset_job(
             )
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
-        branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
+        branch_identity = changeset_id.removeprefix("cs_")
+        branch = f"apdl/{_slug(changeset.task.title)}-{branch_identity}"
         revert_sha = (
             changeset.controls.revert.merge_sha
             if changeset.controls.revert is not None
             else None
         )
-        async with mint_token(changeset_id) as token:
+        async with mint_read_token(changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
                     repo=connection.repository_full_name,
@@ -332,14 +348,20 @@ async def _execute_changeset_job(
             await store.set_requirement_ledger(
                 pool, changeset_id, result.requirement_ledger
             )
-        if result.inspection_snapshot is not None or result.dependency_slice is not None:
+        if (
+            result.inspection_snapshot is not None
+            or result.dependency_slice is not None
+        ):
             await store.set_inspection_evidence(
                 pool,
                 changeset_id,
                 snapshot=result.inspection_snapshot,
                 dependency_slice=result.dependency_slice,
             )
-        if result.verification_plan is not None or result.verification_coverage is not None:
+        if (
+            result.verification_plan is not None
+            or result.verification_coverage is not None
+        ):
             await store.set_verification_evidence(
                 pool,
                 changeset_id,
@@ -368,7 +390,9 @@ async def _execute_changeset_job(
 
         if not result.success:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error,
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
                 error=result.error or "The edit attempt did not pass tests.",
             )
             return
@@ -402,8 +426,9 @@ async def _execute_changeset_job(
             return
 
         # Backstop only: the editor already ran these gates on the FULL diff
-        # before pushing. This re-check (on the possibly capped diff_text)
-        # guards editors that don't gate themselves (e.g. a fake/custom Editor).
+        # before returning its candidate. This re-check (on the possibly capped
+        # diff_text) guards editors that do not gate themselves (for example, a
+        # fake or custom Editor).
         verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
         if workflow_attestation_is_valid(
             result.generated_runtime_workflow,
@@ -434,16 +459,43 @@ async def _execute_changeset_job(
             )
             return
 
-        if not result.head_sha:
+        if not (
+            result.head_sha
+            and result.base_sha
+            and result.candidate_tree_sha
+            and result.patch_base64
+        ):
             await store.transition_changeset(
                 pool,
                 changeset_id,
                 ChangesetStatus.error,
-                error="Editor pushed a branch without returning its exact head SHA.",
+                error=(
+                    "Editor returned no complete base/tree-bound publication candidate."
+                ),
             )
             return
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.pushing)
+        async with mint_read_token(changeset_id) as token:
+            async with branch_publisher.prepare(
+                repository=connection.repository_full_name,
+                branch=result.branch or branch,
+                base_branch=base_branch,
+                expected_base_sha=result.base_sha,
+                expected_remote_sha=None,
+                candidate_head_sha=result.head_sha,
+                candidate_tree_sha=result.candidate_tree_sha,
+                patch_base64=result.patch_base64,
+                commit_title=changeset.task.title,
+                read_token=token,
+            ) as prepared:
+                async with mint_write_token(changeset_id) as write_token:
+                    published = await branch_publisher.push(
+                        prepared,
+                        write_token=write_token,
+                    )
+        result.branch = published.branch
+        result.head_sha = published.head_sha
         lacks_external_ci = (
             result.verification_plan is not None
             and result.verification_plan.disposition
@@ -454,8 +506,7 @@ async def _execute_changeset_job(
             and result.review_verdict.overall_decision.value == "unverified"
         )
         runtime_unverified = bool(
-            result.runtime_acceptance_plan
-            and result.runtime_acceptance_plan.blockers
+            result.runtime_acceptance_plan and result.runtime_acceptance_plan.blockers
         )
         draft = (
             not authorization.decision.ready_for_review
@@ -474,7 +525,7 @@ async def _execute_changeset_job(
         )
         # Use a new lease for PR creation so the repository grant is checked
         # again after the potentially long editor run and its token is revoked.
-        async with mint_token(changeset_id) as token:
+        async with mint_write_token(changeset_id) as token:
             pr = await open_pr(
                 repo=connection.repository_full_name,
                 head=result.branch or branch,
