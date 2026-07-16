@@ -163,6 +163,7 @@ class _DeadlineCommandExecutor:
                 returncode=124,
                 output="[…Codegen job deadline exhausted before command start…]",
                 timed_out=True,
+                started=False,
             )
         return self._delegate(
             argv,

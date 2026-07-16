@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import app.contracts.installer as contract_installer
 from app.contracts.cache import build_cache_identity
 from app.contracts.installer import (
     BoundedCommandExecutor,
@@ -20,6 +21,8 @@ from app.contracts.models import (
     BlockerCode,
     ContractBlocker,
     ContractCheckRequest,
+    ContractCheckResult,
+    ContractCheckStatus,
     ContractInstallRequest,
     ContractRequest,
     ContractResolution,
@@ -225,11 +228,18 @@ def test_unknown_lockfile_and_failed_command_are_explicit_results(tmp_path):
     assert "registry failed" in (failed.message or "")
 
 
-def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(tmp_path):
+def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(
+    monkeypatch, tmp_path
+):
     installed = tmp_path / "installed"
     work = tmp_path / "work"
     work.mkdir()
-    _write(installed, "node_modules/.bin/tsc", "binary")
+    monkeypatch.setattr(
+        contract_installer,
+        "_trusted_root_executable",
+        lambda _name: Path(sys.executable),
+    )
+    compiler = _write(installed, "node_modules/typescript/bin/tsc", "binary")
     _write(installed, "node_modules/typescript/package.json", '{"version":"5.7.2"}')
     executor = CaptureExecutor(CommandResult(returncode=0, output="clean"))
     request = ContractCheckRequest(
@@ -245,8 +255,10 @@ def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(tmp_path)
         request
     )
 
-    assert passed.passed is True
+    assert passed.status is ContractCheckStatus.passed
     assert passed.tool_version == "5.7.2"
+    assert Path(executor.calls[0]["argv"][0]).is_absolute()
+    assert executor.calls[0]["argv"][1] == compiler.as_posix()
     assert "--noEmit" in executor.calls[0]["argv"]
     assert executor.calls[0]["example_exists"] is True
     assert not Path(executor.calls[0]["argv"][-1]).exists()
@@ -256,7 +268,59 @@ def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(tmp_path)
         executor=CaptureExecutor(CommandResult(returncode=1, output="bad import")),
         workdir_base=work,
     )(request)
-    assert failed.passed is False
+    assert failed.status is ContractCheckStatus.failed
+
+
+@pytest.mark.parametrize(
+    "command_result",
+    [
+        CommandResult(returncode=127, output="permission denied", started=False),
+        CommandResult(returncode=124, output="timed out", timed_out=True),
+        CommandResult(returncode=126, output="cannot execute"),
+    ],
+)
+def test_checker_execution_failures_are_unavailable(
+    monkeypatch, tmp_path, command_result
+):
+    installed = tmp_path / "installed"
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(
+        contract_installer,
+        "_trusted_root_executable",
+        lambda _name: Path(sys.executable),
+    )
+    _write(installed, "node_modules/typescript/bin/tsc", "binary")
+    _write(installed, "node_modules/typescript/package.json", '{"version":"5.7.2"}')
+
+    result = SandboxedCheckRunner(
+        sandboxed=True,
+        executor=CaptureExecutor(command_result),
+        workdir_base=work,
+    )(
+        ContractCheckRequest(
+            ecosystem="node",
+            package_name="example-sdk",
+            exact_version="1.2.3",
+            installed_root=installed.as_posix(),
+            language="TypeScript",
+            snippet="const value = 1;",
+        )
+    )
+
+    assert result.status is ContractCheckStatus.unavailable
+
+
+def test_contract_check_result_rejects_legacy_boolean_schema():
+    with pytest.raises(ValueError):
+        ContractCheckResult.model_validate(
+            {
+                "schema_version": "contract_check_result@1",
+                "passed": True,
+                "command": "tsc --noEmit",
+                "tool_version": "5.7.2",
+            }
+        )
 
 
 def test_checker_refuses_without_explicit_sandbox(tmp_path):
@@ -273,7 +337,7 @@ def test_checker_refuses_without_explicit_sandbox(tmp_path):
             snippet="const value = 1;",
         )
     )
-    assert result.passed is False
+    assert result.status is ContractCheckStatus.unavailable
     assert result.command == "sandbox-required"
     assert executor.calls == []
 
@@ -325,9 +389,10 @@ def test_python_checker_locates_site_packages_without_importing(tmp_path):
     )
 
     assert locate_python_site_packages(installed) == site.resolve()
-    assert result.passed is True
+    assert result.status is ContractCheckStatus.passed
     assert result.tool_version == "1.1.390"
-    assert executor.calls[0]["argv"][0] == checker.as_posix()
+    assert Path(executor.calls[0]["argv"][0]).is_absolute()
+    assert executor.calls[0]["argv"][1] == checker.as_posix()
     assert executor.calls[0]["env"]["PYTHONPATH"] == site.as_posix()
 
 

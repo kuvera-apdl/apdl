@@ -67,6 +67,12 @@ class BlockerCode(str, Enum):
     budget_exceeded = "budget_exceeded"
 
 
+class ContractCheckStatus(str, Enum):
+    passed = "passed"
+    failed = "failed"
+    unavailable = "unavailable"
+
+
 class RuntimeFingerprint(StrictModel):
     schema_version: Literal["runtime_fingerprint@1"] = "runtime_fingerprint@1"
     runtime_name: str = Field(min_length=1)
@@ -243,8 +249,8 @@ class ContractCheckRequest(StrictModel):
 
 
 class ContractCheckResult(StrictModel):
-    schema_version: Literal["contract_check_result@1"] = "contract_check_result@1"
-    passed: bool
+    schema_version: Literal["contract_check_result@2"] = "contract_check_result@2"
+    status: ContractCheckStatus
     command: str = Field(min_length=1)
     tool_version: str = Field(min_length=1)
     output: str = ""

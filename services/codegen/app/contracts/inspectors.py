@@ -21,6 +21,7 @@ from app.contracts.models import (
     ContractCacheIdentity,
     ContractCheckRequest,
     ContractCheckResult,
+    ContractCheckStatus,
     ContractEvidence,
     ContractRequest,
     ContractSource,
@@ -127,7 +128,6 @@ def _example(
             request,
             BlockerCode.compile_check_unavailable,
             "No compile-check runner was supplied; no usage example was emitted.",
-            severity="warning",
         )
     result = check_runner(
         ContractCheckRequest(
@@ -139,13 +139,22 @@ def _example(
             snippet=snippet,
         )
     )
-    if not result.passed:
+    if result.status is ContractCheckStatus.unavailable:
+        return None, _blocker(
+            request,
+            BlockerCode.compile_check_unavailable,
+            "The injected compile checker was unavailable; no usage example "
+            "was emitted.",
+        )
+    if result.status is ContractCheckStatus.failed:
         return None, _blocker(
             request,
             BlockerCode.example_check_failed,
             "The candidate usage example did not pass the injected checker.",
             severity="warning",
         )
+    if result.status is not ContractCheckStatus.passed:
+        raise ValueError(f"unsupported contract check status: {result.status}")
     return (
         CompileCheckedExample(
             language=language,

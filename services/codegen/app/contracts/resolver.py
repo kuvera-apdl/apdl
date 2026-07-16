@@ -29,7 +29,7 @@ from app.contracts.models import (
 
 
 InstallRunner = Callable[[ContractInstallRequest], ContractInstallResult]
-EXTRACTOR_VERSION = "phase2-contract-extractor@1"
+EXTRACTOR_VERSION = "phase2-contract-extractor@2"
 
 
 def _blocking(
@@ -230,6 +230,18 @@ def resolve_contract_request(
                 "Installed dependency inspection produced no evidence.",
             ),
         )
+        return ContractResolution(
+            request=request,
+            cache_identity=identity,
+            disposition="blocked",
+            evidence=None,
+            blockers=[blocking, *[item for item in blockers if item is not blocking]],
+        )
+    blocking = next(
+        (item for item in blockers if item.severity == "blocking"),
+        None,
+    )
+    if blocking is not None:
         return ContractResolution(
             request=request,
             cache_identity=identity,
