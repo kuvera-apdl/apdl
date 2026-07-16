@@ -12,6 +12,9 @@ QUERY_SOURCES = "\n".join(
 SUPPORTED_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
 REMOVED_ETL_MANIFEST = ROOT / "pipeline" / "etl" / "pyproject.toml"
 CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
+CLICKHOUSE_MIGRATION_ENGINE = (
+    ROOT / "pipeline" / "clickhouse" / "migrate.py"
+).read_text()
 
 
 def test_live_writer_and_query_use_the_events_table_only():
@@ -28,11 +31,13 @@ def test_supported_migrations_do_not_create_removed_prototype_v2_tables():
 
     for table in ("events_v2", "decisions_v2", "feeds_v2"):
         assert table not in migration_sql
-        assert table in CLICKHOUSE_INIT
+        assert table in CLICKHOUSE_MIGRATION_ENGINE
 
     assert not REMOVED_ETL_MANIFEST.exists()
     assert not list((ROOT / "pipeline").rglob("*_v2.sql"))
-    assert "Unsupported prototype v2 schema in release migration" in CLICKHOUSE_INIT
+    assert "Unsupported prototype v2 schema operation in migration" in (
+        CLICKHOUSE_MIGRATION_ENGINE
+    )
 
 
 def test_runtime_services_do_not_publish_disconnected_envelope_models():

@@ -49,6 +49,9 @@ CONFIG_LEGACY_FIXTURE = (
 POSTGRES_RUNNER = (ROOT / "scripts" / "init-postgres.sh").read_text()
 MIGRATION_ENGINE = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
 CLICKHOUSE_RUNNER = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
+CLICKHOUSE_MIGRATION_ENGINE = (
+    ROOT / "pipeline" / "clickhouse" / "migrate.py"
+).read_text()
 
 
 def _table_definition(sql: str, table: str) -> str:
@@ -274,5 +277,7 @@ def test_database_runners_enforce_the_single_engine_authority():
     assert "pg_advisory_xact_lock" in MIGRATION_ENGINE
     assert "Migration checksum or name drift detected" in MIGRATION_ENGINE
     assert "apdl_reject_migration_ledger_mutation" in MIGRATION_ENGINE
-    assert "Misplaced PostgreSQL migration" in CLICKHOUSE_RUNNER
+    assert "Misplaced PostgreSQL migration" in CLICKHOUSE_MIGRATION_ENGINE
     assert "Skipping $(basename" not in CLICKHOUSE_RUNNER
+    assert "apdl_schema_migrations" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "checksum drift" in CLICKHOUSE_MIGRATION_ENGINE

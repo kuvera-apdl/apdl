@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime evaluate-codegen codegen-development-prepare codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime evaluate-codegen codegen-development-prepare codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -423,6 +423,9 @@ smoke-fresh:
 
 smoke-experiment-fresh:
 	@bash scripts/smoke_fresh_install.sh experiment
+
+test-clickhouse-upgrade:
+	@bash scripts/test_clickhouse_upgrade.sh
 
 # Container status + service health endpoints.
 status:

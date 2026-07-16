@@ -1,0 +1,21 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    environment:
+      CLICKHOUSE_DB: apdl
+      CLICKHOUSE_USER: apdl
+      CLICKHOUSE_PASSWORD: apdl_dev
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  clickhouse-data:

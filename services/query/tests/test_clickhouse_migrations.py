@@ -22,12 +22,51 @@ IDENTITY_ALIASES_BACKFILL_SQL = (
     BACKFILLS_DIR / "011_identity_aliases.sql"
 ).read_text()
 CLICKHOUSE_INIT_SCRIPT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
+CLICKHOUSE_MIGRATION_ENGINE = (
+    ROOT / "pipeline" / "clickhouse" / "migrate.py"
+).read_text()
+EVENTS_UPGRADE_SQL = (MIGRATIONS_DIR / "005_events_canonical_upgrade.sql").read_text()
 
 
 def test_events_table_replaces_retries_by_project_and_message_id():
     assert "ENGINE = ReplacingMergeTree(received_at)" in EVENTS_SQL
     assert "ORDER BY (project_id, message_id)" in EVENTS_SQL
     assert "ENGINE = MergeTree()" not in EVENTS_SQL
+
+
+def test_pre_ledger_events_upgrade_rebuilds_engine_and_preserves_rows():
+    assert "ALTER TABLE events ADD COLUMN IF NOT EXISTS message_id" in (
+        EVENTS_UPGRADE_SQL
+    )
+    assert "DEFAULT toString(event_id)" in EVENTS_UPGRADE_SQL
+    assert "ALTER TABLE events ADD COLUMN IF NOT EXISTS received_at" in (
+        EVENTS_UPGRADE_SQL
+    )
+    assert "CREATE TABLE events__apdl_migration_005" in EVENTS_UPGRADE_SQL
+    assert "ENGINE = ReplacingMergeTree(received_at)" in EVENTS_UPGRADE_SQL
+    assert "ORDER BY (project_id, message_id)" in EVENTS_UPGRADE_SQL
+    assert "FROM events;" in EVENTS_UPGRADE_SQL
+    assert "EXCHANGE TABLES events AND events__apdl_migration_005" in (
+        EVENTS_UPGRADE_SQL
+    )
+    assert "CREATE TABLE sessions__apdl_migration_005" in EVENTS_UPGRADE_SQL
+    assert "toString(project_id)" in EVENTS_UPGRADE_SQL
+    assert "EXCHANGE TABLES sessions AND sessions__apdl_migration_005" in (
+        EVENTS_UPGRADE_SQL
+    )
+
+
+def test_clickhouse_runner_uses_an_exact_checksummed_ledger():
+    migration_names = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
+    assert [name.split("_", 1)[0] for name in migration_names] == [
+        f"{version:03d}" for version in range(1, len(migration_names) + 1)
+    ]
+    assert "pipeline/clickhouse/migrate.py" in CLICKHOUSE_INIT_SCRIPT
+    assert "apdl_schema_migrations" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "hashlib.sha256(payload).hexdigest()" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "checksum drift" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "ordered prefix" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "ReplacingMergeTree(applied_at)" in CLICKHOUSE_MIGRATION_ENGINE
 
 
 def test_retryable_projection_tables_replace_by_project_and_message_id():
@@ -43,6 +82,14 @@ def test_retryable_projection_tables_replace_by_project_and_message_id():
         "ORDER BY (project_id, message_id, anonymous_id, user_id)"
         in IDENTITY_ALIASES_SQL
     )
+    assert "DROP TABLE IF EXISTS feature_flag_exposures" in (
+        FEATURE_FLAG_EXPOSURES_SQL
+    )
+    assert "FROM events FINAL" in FEATURE_FLAG_EXPOSURES_SQL
+    assert "DROP TABLE IF EXISTS frontend_health_events" in (
+        FRONTEND_HEALTH_EVENTS_SQL
+    )
+    assert "FROM events FINAL" in FRONTEND_HEALTH_EVENTS_SQL
 
 
 def test_duplicate_amplifying_aggregate_views_are_retired():

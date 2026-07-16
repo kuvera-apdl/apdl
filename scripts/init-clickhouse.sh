@@ -68,28 +68,13 @@ docker exec "$container_id" clickhouse-client \
     --password "$CLICKHOUSE_PASSWORD" \
     --query "CREATE DATABASE IF NOT EXISTS \`$CLICKHOUSE_DB\`" >/dev/null
 
-for migration in "$CLICKHOUSE_MIGRATIONS_DIR"/*.sql; do
-    [ -f "$migration" ] || continue
-
-    if grep -qiE "NOT ClickHouse|Target:[[:space:]]*PostgreSQL|psql[[:space:]]+\\\$POSTGRES_URL" "$migration"; then
-        echo "Misplaced PostgreSQL migration in ClickHouse directory: $migration" >&2
-        exit 1
-    fi
-
-    if grep -qiE \
-        '(^|[^A-Za-z0-9_])(events_v2|decisions_v2|feeds_v2)([^A-Za-z0-9_]|$)' \
-        "$migration"; then
-        echo "Unsupported prototype v2 schema in release migration: $migration" >&2
-        exit 1
-    fi
-
-    echo "  Applying $(basename "$migration")"
-    docker exec -i "$container_id" clickhouse-client \
-        --user "$CLICKHOUSE_USER" \
-        --password "$CLICKHOUSE_PASSWORD" \
-        --database "$CLICKHOUSE_DB" \
-        --multiquery < "$migration"
-done
+CLICKHOUSE_CONTAINER_ID="$container_id" \
+CLICKHOUSE_USER="$CLICKHOUSE_USER" \
+CLICKHOUSE_PASSWORD="$CLICKHOUSE_PASSWORD" \
+CLICKHOUSE_DB="$CLICKHOUSE_DB" \
+CLICKHOUSE_MIGRATIONS_DIR="$CLICKHOUSE_MIGRATIONS_DIR" \
+PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$ROOT_DIR/pipeline/clickhouse/migrate.py"
 
 backfill_lock_dir="${TMPDIR:-/tmp}/apdl-clickhouse-backfills-$container_id.lock"
 backfill_snapshot=""
