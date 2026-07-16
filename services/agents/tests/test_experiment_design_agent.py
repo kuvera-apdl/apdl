@@ -43,6 +43,15 @@ async def test_deploy_uses_single_config_owned_creation_path(monkeypatch):
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
+        "statistical_plan": {
+            "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+            "baseline_conversion_rate": 0.5,
+            "minimum_detectable_effect": 0.5,
+            "significance_level": 0.05,
+            "nominal_power": 0.8,
+            "required_sample_size_per_arm": 20,
+            "data_settlement_seconds": 300,
+        },
         "flag_config": {
             "key": "exp_checkout",
             "name": "Checkout experiment",
@@ -62,3 +71,4 @@ async def test_deploy_uses_single_config_owned_creation_path(monkeypatch):
     assert captured["experiment"]["flag_key"] == "exp_checkout"
     assert captured["experiment"]["variants"] == experiment["variants"]
     assert captured["experiment"]["primary_metric"] == experiment["primary_metric"]
+    assert captured["experiment"]["statistical_plan"] == experiment["statistical_plan"]

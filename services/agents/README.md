@@ -7,12 +7,12 @@ FastAPI service on port **8083**.
 
 Closes the product loop autonomously: agents **read analytics** from the Query
 Service (funnels, retention, event counts), **reason** over them with an LLM to
-produce insights, and **act** through bounded experiment and feature-proposal
-workflows. Every action passes a safety validator and an autonomy gate before
-deployment and is written to an audit log. Experiment results are read-only in
-the OSS developer preview: autonomous evaluation, stopping, shipping, and
-rollback are disabled. Insights are persisted to pgvector memory so later runs
-build on earlier findings.
+produce insights, and **act** through bounded experiment-design workflows.
+Every action passes a safety validator and an autonomy gate before deployment
+and is written to an audit log. Experiment results are read-only in the OSS
+developer preview: autonomous evaluation, stopping, shipping, feature-proposal
+generation, and rollback are disabled. Insights are persisted to pgvector
+memory so later runs build on earlier findings.
 
 The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
@@ -73,7 +73,7 @@ Agents self-register via `@register_agent` and run in `order`:
 | `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment and deploys it through the safety gate |
 | `experiment_evaluation` | reasoning | — | — | **Disabled**; experiment results require human interpretation |
 | `personalization` | fast | `insights` | `personalizations` | **Disabled**; no Config storage or delivery contract exists |
-| `feature_proposal` | reasoning | `insights` | `feature_proposals` | Proposes new features; always requires human approval |
+| `feature_proposal` | reasoning | — | — | **Disabled**; statistical snapshots do not assess deployment readiness |
 
 Scaffold a new agent with `scripts/new_agent.py`.
 
@@ -98,7 +98,7 @@ Every acting agent funnels its safety result through `gate_action`
 | L1 | Suggest only — never mutates anything, even if safety passes |
 | L2 | Holds every safety-passing action for human approval |
 | L3 | Auto-deploys validated **low-risk** actions; medium/high risk goes to approval |
-| L4 | Full autonomy — deploys every safety-passing action except always-approve actions such as feature proposals |
+| L4 | Full autonomy — deploys every enabled safety-passing action |
 
 Actions that fail safety validation always halt.
 
@@ -109,8 +109,9 @@ Actions that fail safety validation always halt.
   documented risks and success criteria). Outputs a `low`/`medium`/`high` risk level.
 - **Audit log** (`app/safety/audit.py`) — every step, decision, safety result,
   and approval is written to the `agent_audit_log` table in PostgreSQL.
-- **Rollback assessment** (`app/safety/rollback.py`) — may calculate a read-only
-  degradation assessment. It never mutates Config state in this release.
+- **Rollback assessment** (`app/safety/rollback.py`) — fails closed with an
+  unavailable decision. Statistical snapshots are evidence only and do not
+  establish deployment or rollback readiness.
 
 When upgrading an existing deployment to migration 014, stop the Agents
 service before applying PostgreSQL migrations. The migration fails existing

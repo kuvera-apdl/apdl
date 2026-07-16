@@ -23,6 +23,16 @@ def _metadata(key: str = "exp_123") -> dict:
         "control_variant": "control",
         "variants": ["control", "treatment"],
         "metric_event": "purchase",
+        "metric_direction": "increase",
+        "statistical_plan": {
+            "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+            "baseline_conversion_rate": 0.5,
+            "minimum_detectable_effect": 0.5,
+            "significance_level": 0.05,
+            "nominal_power": 0.8,
+            "required_sample_size_per_arm": 20,
+            "data_settlement_seconds": 5,
+        },
         "start_date": "2025-01-01T00:00:00Z",
         "end_date": "2025-01-15T00:00:00Z",
         "version": 7,
@@ -97,6 +107,29 @@ async def test_fetch_experiment_analysis_rejects_extra_fields(monkeypatch):
         monkeypatch,
         lambda _: httpx.Response(200, json=payload),
     )
+
+    with pytest.raises(ConfigServiceUnavailable, match="invalid.*contract"):
+        await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("significance_level", "0.05"),
+        ("nominal_power", "0.8"),
+        ("required_sample_size_per_arm", "20"),
+        ("data_settlement_seconds", "5"),
+    ],
+)
+async def test_fetch_experiment_analysis_rejects_coerced_plan_numbers(
+    monkeypatch,
+    field,
+    value,
+):
+    payload = _metadata()
+    payload["statistical_plan"][field] = value
+    _install_transport(monkeypatch, lambda _: httpx.Response(200, json=payload))
 
     with pytest.raises(ConfigServiceUnavailable, match="invalid.*contract"):
         await fetch_experiment_analysis(PROJECT_ID, "exp_123", SERVICE_KEY)

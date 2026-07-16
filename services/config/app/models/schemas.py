@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
+from math import ceil, isfinite, sqrt
+from statistics import NormalDist
 from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -59,6 +61,12 @@ ExperimentCreateStatus = Literal["draft", "scheduled", "running"]
 MAX_EXPERIMENT_VARIANTS = 10
 MAX_EXPERIMENT_DURATION_DAYS = 90
 MAX_EXPERIMENT_DURATION = timedelta(days=MAX_EXPERIMENT_DURATION_DAYS)
+EXPERIMENT_STATISTICAL_PROTOCOL = "fixed_horizon_fisher_newcombe_cc_plan_v1"
+MIN_STATISTICAL_VALUE = 1e-6
+MAX_NOMINAL_POWER = 0.9999
+MAX_REQUIRED_SAMPLE_SIZE_PER_ARM = 10_000_000
+MIN_DATA_SETTLEMENT_SECONDS = 1
+MAX_DATA_SETTLEMENT_SECONDS = 86_400
 MAX_ANALYTICS_WINDOW_MINUTES = 90 * 24 * 60
 RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 MAX_EVAL_CONTEXT_DEPTH = 4
@@ -294,6 +302,7 @@ class ExperimentConfig(BaseModel):
     variants_json: str = "[]"
     targeting_rules_json: str = "[]"
     primary_metric_json: str = "{}"
+    statistical_plan: dict[str, Any] | None = None
     traffic_percentage: float = Field(
         default=100.0,
         ge=0.0,
@@ -518,7 +527,151 @@ class ExperimentMetric(StrictModel):
 
     event: str = Field(..., min_length=1)
     type: Literal["conversion"] = "conversion"
-    direction: str = "increase"
+    direction: Literal["increase", "decrease"] = "increase"
+
+
+class ExperimentStatisticalPlan(StrictModel):
+    """Immutable fixed-horizon design declared before traffic is observed."""
+
+    protocol: Literal[EXPERIMENT_STATISTICAL_PROTOCOL]
+    baseline_conversion_rate: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
+    minimum_detectable_effect: float = Field(
+        ...,
+        ge=MIN_STATISTICAL_VALUE,
+        le=1.0,
+        strict=True,
+        allow_inf_nan=False,
+    )
+    significance_level: float = Field(
+        ...,
+        ge=MIN_STATISTICAL_VALUE,
+        le=0.5,
+        strict=True,
+        allow_inf_nan=False,
+    )
+    nominal_power: float = Field(
+        ...,
+        gt=0.5,
+        le=MAX_NOMINAL_POWER,
+        strict=True,
+        allow_inf_nan=False,
+    )
+    required_sample_size_per_arm: int = Field(
+        ...,
+        ge=2,
+        le=MAX_REQUIRED_SAMPLE_SIZE_PER_ARM,
+        strict=True,
+    )
+    data_settlement_seconds: int = Field(
+        ...,
+        ge=MIN_DATA_SETTLEMENT_SECONDS,
+        le=MAX_DATA_SETTLEMENT_SECONDS,
+        strict=True,
+    )
+
+
+def prospective_sample_size_per_arm(
+    *,
+    baseline_conversion_rate: float,
+    minimum_detectable_effect: float,
+    significance_level: float,
+    nominal_power: float,
+    treatment_count: int,
+    direction: Literal["increase", "decrease"],
+) -> int:
+    """Continuity-corrected nominal target for the fixed-horizon protocol.
+
+    The base term is the standard two-proportion prospective calculation with
+    family-wise alpha divided across every declared treatment comparison.
+    Fisher's conditional test is discrete and can be materially more
+    conservative at sparse counts, so a Casagrande-style continuity correction
+    is applied before rounding. ``nominal_power`` is a planning input, not a
+    guarantee of exact achieved Fisher power. Snapshot inference never
+    substitutes this planning approximation for the declared Fisher test.
+    """
+    if treatment_count < 1:
+        raise ValueError("statistical planning requires at least one treatment")
+    signed_effect = (
+        minimum_detectable_effect
+        if direction == "increase"
+        else -minimum_detectable_effect
+    )
+    treatment_rate = baseline_conversion_rate + signed_effect
+    if not 0.0 <= treatment_rate <= 1.0:
+        raise ValueError(
+            "minimum_detectable_effect is incompatible with the baseline "
+            f"conversion rate and {direction!r} metric direction"
+        )
+
+    per_comparison_alpha = significance_level / treatment_count
+    pooled_rate = (baseline_conversion_rate + treatment_rate) / 2.0
+    z_alpha = NormalDist().inv_cdf(1.0 - per_comparison_alpha / 2.0)
+    z_beta = NormalDist().inv_cdf(nominal_power)
+    numerator = (
+        z_alpha * sqrt(2.0 * pooled_rate * (1.0 - pooled_rate))
+        + z_beta
+        * sqrt(
+            baseline_conversion_rate * (1.0 - baseline_conversion_rate)
+            + treatment_rate * (1.0 - treatment_rate)
+        )
+    ) ** 2
+    asymptotic_n = numerator / (minimum_detectable_effect**2)
+    continuity_corrected_n = (
+        asymptotic_n
+        / 4.0
+        * (
+            1.0
+            + sqrt(
+                1.0
+                + 4.0 / (asymptotic_n * minimum_detectable_effect)
+            )
+        )
+        ** 2
+    )
+    if (
+        not isfinite(continuity_corrected_n)
+        or continuity_corrected_n > MAX_REQUIRED_SAMPLE_SIZE_PER_ARM
+    ):
+        raise ValueError(
+            "declared statistical plan exceeds the supported per-arm sample target"
+        )
+    return max(2, ceil(continuity_corrected_n))
+
+
+def validate_statistical_plan(
+    *,
+    status: str,
+    statistical_plan: ExperimentStatisticalPlan | None,
+    primary_metric: ExperimentMetric | None,
+    variant_count: int,
+) -> None:
+    """Require and validate the immutable prospective decision contract."""
+    if statistical_plan is None:
+        if status in {"scheduled", "running"}:
+            raise ValueError(f"{status} experiments require statistical_plan")
+        return
+    if primary_metric is None:
+        raise ValueError("statistical_plan requires primary_metric")
+
+    minimum_target = prospective_sample_size_per_arm(
+        baseline_conversion_rate=statistical_plan.baseline_conversion_rate,
+        minimum_detectable_effect=statistical_plan.minimum_detectable_effect,
+        significance_level=statistical_plan.significance_level,
+        nominal_power=statistical_plan.nominal_power,
+        treatment_count=variant_count - 1,
+        direction=primary_metric.direction,
+    )
+    if statistical_plan.required_sample_size_per_arm < minimum_target:
+        raise ValueError(
+            "required_sample_size_per_arm must be at least "
+            f"{minimum_target} for the declared statistical plan"
+        )
 
 
 def _projected_variants(variants: list[ExperimentVariant]) -> list[VariantConfig]:
@@ -538,6 +691,8 @@ class ExperimentAnalysis(StrictModel):
         max_length=MAX_EXPERIMENT_VARIANTS,
     )
     metric_event: str = Field(..., min_length=1)
+    metric_direction: Literal["increase", "decrease"]
+    statistical_plan: ExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime
     version: int = Field(..., ge=1)
@@ -584,6 +739,7 @@ class ExperimentCreate(StrictModel):
         max_length=MAX_IDENTIFIER_LENGTH,
     )
     primary_metric: ExperimentMetric | None = None
+    statistical_plan: ExperimentStatisticalPlan | None = None
     targeting_rules: list[GateRule] = Field(
         default_factory=list,
         max_length=MAX_RULES,
@@ -599,6 +755,12 @@ class ExperimentCreate(StrictModel):
             start_date=self.start_date,
             end_date=self.end_date,
             primary_metric=self.primary_metric,
+        )
+        validate_statistical_plan(
+            status=self.status,
+            statistical_plan=self.statistical_plan,
+            primary_metric=self.primary_metric,
+            variant_count=len(self.variants),
         )
         return self
 
@@ -627,6 +789,7 @@ class ExperimentUpdate(StrictModel):
         max_length=MAX_IDENTIFIER_LENGTH,
     )
     primary_metric: ExperimentMetric | None = None
+    statistical_plan: ExperimentStatisticalPlan | None = None
     targeting_rules: list[GateRule] | None = Field(
         default=None,
         max_length=MAX_RULES,
@@ -634,7 +797,12 @@ class ExperimentUpdate(StrictModel):
 
     @model_validator(mode="after")
     def validate_experiment(self):
-        nullable_fields = {"start_date", "end_date", "primary_metric"}
+        nullable_fields = {
+            "start_date",
+            "end_date",
+            "primary_metric",
+            "statistical_plan",
+        }
         for field in self.model_fields_set - nullable_fields:
             if getattr(self, field) is None:
                 raise ValueError(f"{field} must not be null")

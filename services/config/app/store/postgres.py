@@ -21,7 +21,7 @@ FLAG_COLUMNS = """
 """
 EXPERIMENT_COLUMNS = """
     key, project_id, status, description, flag_key, default_variant,
-    variants_json, targeting_rules_json, primary_metric_json,
+    variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
     traffic_percentage, start_date, end_date, version, created_at, updated_at
 """
 
@@ -78,6 +78,7 @@ def _row_to_experiment(row) -> dict:
         "variants_json": row["variants_json"],
         "targeting_rules_json": row["targeting_rules_json"],
         "primary_metric_json": row["primary_metric_json"],
+        "statistical_plan": _json_field(row["statistical_plan"], None),
         "traffic_percentage": float(row["traffic_percentage"]),
         "start_date": str(row["start_date"]) if row["start_date"] else None,
         "end_date": str(row["end_date"]) if row["end_date"] else None,

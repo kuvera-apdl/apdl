@@ -13,9 +13,19 @@ import { seedWorkspace } from '../helpers/fixtures'
 const COMMON_RESULT = {
   experiment_key: 'checkout-test',
   flag_key: 'checkout-experiment',
-  experiment_status: 'running',
+  experiment_status: 'completed',
   control_variant: 'control',
   metric_event: 'purchase',
+  metric_direction: 'increase',
+  statistical_plan: {
+    protocol: 'fixed_horizon_fisher_newcombe_cc_plan_v1',
+    baseline_conversion_rate: 0.1,
+    minimum_detectable_effect: 0.02,
+    significance_level: 0.05,
+    nominal_power: 0.8,
+    required_sample_size_per_arm: 100,
+    data_settlement_seconds: 300,
+  },
   start_date: '2026-06-01T00:00:00+00:00',
   end_date: '2026-06-15T00:00:00+00:00',
   config_version: 7,
@@ -26,12 +36,17 @@ const COMMON_RESULT = {
   ],
   crossover_actors: 4,
   unknown_variant_actors: 2,
+  identity_conflict_actors: 0,
+  identity_quality: 'unambiguous',
+  data_completeness: 'not_verified',
+  deployment_readiness: 'not_assessed',
 }
 
-const READY_RESULT = {
-  analysis_status: 'ready',
+const FINAL_RESULT = {
+  analysis_status: 'decision_snapshot',
   ...COMMON_RESULT,
-  significance_level: 0.05,
+  inference_method: 'fisher_exact_two_sided',
+  interval_method: 'newcombe_wilson',
   correction: 'bonferroni',
   comparisons: [
     {
@@ -43,7 +58,7 @@ const READY_RESULT = {
       confidence_interval: [0.02, 0.18],
       raw_p_value: 0.001,
       adjusted_p_value: 0.002,
-      is_significant: true,
+      is_statistically_significant: true,
     },
     {
       control_variant: 'control',
@@ -54,7 +69,7 @@ const READY_RESULT = {
       confidence_interval: [-0.01, 0.11],
       raw_p_value: 0.04,
       adjusted_p_value: 0.08,
-      is_significant: false,
+      is_statistically_significant: false,
     },
   ],
 }
@@ -64,7 +79,7 @@ let requestedUrl: URL | null = null
 const server = setupServer(
   http.get('*/api/projects/demo/query/v1/query/experiment/:key', ({ request }) => {
     requestedUrl = new URL(request.url)
-    return HttpResponse.json(READY_RESULT)
+    return HttpResponse.json(FINAL_RESULT)
   }),
 )
 
@@ -110,6 +125,7 @@ describe('ExperimentResultsTab', () => {
     expect(screen.getByText('blue vs control')).toBeInTheDocument()
     expect(screen.getByText('green vs control')).toBeInTheDocument()
     expect(screen.getByText('+10.00 pp')).toBeInTheDocument()
+    expect(screen.getByText('+10.00 pp')).toHaveClass('text-emerald-600')
     expect(screen.getByText('+5.00 pp')).toBeInTheDocument()
     expect(screen.getByText(/do not trigger or recommend ship\/rollback actions/i)).toBeInTheDocument()
 
@@ -119,11 +135,35 @@ describe('ExperimentResultsTab', () => {
     expect(screen.queryByText('Ship it')).not.toBeInTheDocument()
   })
 
-  test('renders typed insufficient data without a comparison or recommendation', async () => {
+  test('colors effects using the declared metric direction without asserting readiness', async () => {
     server.use(
       http.get('*/api/projects/demo/query/v1/query/experiment/:key', () =>
         HttpResponse.json({
-          analysis_status: 'insufficient_data',
+          ...FINAL_RESULT,
+          metric_direction: 'decrease',
+          comparisons: [
+            {
+              ...FINAL_RESULT.comparisons[0],
+              treatment_rate: 0,
+              rate_difference: -0.1,
+              confidence_interval: [-0.18, -0.02],
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderResults()
+
+    expect(await screen.findByText('-10.00 pp')).toHaveClass('text-emerald-600')
+    expect(screen.getByText('not_assessed')).toBeInTheDocument()
+  })
+
+  test('renders typed non-final data without a comparison or recommendation', async () => {
+    server.use(
+      http.get('*/api/projects/demo/query/v1/query/experiment/:key', () =>
+        HttpResponse.json({
+          analysis_status: 'non_final',
           ...COMMON_RESULT,
           arms: [
             { variant: 'control', sample_size: 20, conversions: 5, conversion_rate: 0.25 },
@@ -131,7 +171,6 @@ describe('ExperimentResultsTab', () => {
             { variant: 'green', sample_size: 20, conversions: 4, conversion_rate: 0.2 },
           ],
           reason: 'underpowered_arms',
-          minimum_sample_size_per_arm: 2,
           underpowered_variants: ['blue'],
         }),
       ),
@@ -140,9 +179,9 @@ describe('ExperimentResultsTab', () => {
     renderResults()
 
     expect(
-      await screen.findByText('Insufficient data — One or more arms need more traffic'),
+      await screen.findByText('Non-final analysis — One or more arms need more traffic'),
     ).toBeInTheDocument()
-    expect(screen.getByText(/minimum sample size per arm/i)).toHaveTextContent('2')
+    expect(screen.getByText(/predeclared sample target per arm/i)).toHaveTextContent('100')
     expect(screen.getByText(/underpowered variants/i)).toHaveTextContent('blue')
     expect(screen.queryByText('All treatment comparisons')).not.toBeInTheDocument()
     expect(screen.queryByText('Keep collecting data')).not.toBeInTheDocument()

@@ -546,6 +546,18 @@ class ExperimentArmResult(_FiniteExperimentModel):
     conversion_rate: float = Field(..., ge=0.0, le=1.0)
 
 
+class ExperimentStatisticalPlan(_FiniteExperimentModel):
+    protocol: Literal["fixed_horizon_fisher_newcombe_cc_plan_v1"]
+    baseline_conversion_rate: float = Field(..., ge=0.0, le=1.0, strict=True)
+    minimum_detectable_effect: float = Field(..., ge=1e-6, le=1.0, strict=True)
+    significance_level: float = Field(..., ge=1e-6, le=0.5, strict=True)
+    nominal_power: float = Field(..., gt=0.5, le=0.9999, strict=True)
+    required_sample_size_per_arm: int = Field(
+        ..., ge=2, le=10_000_000, strict=True
+    )
+    data_settlement_seconds: int = Field(..., ge=1, le=86_400, strict=True)
+
+
 class ExperimentComparison(_FiniteExperimentModel):
     control_variant: str
     treatment_variant: str
@@ -555,7 +567,7 @@ class ExperimentComparison(_FiniteExperimentModel):
     confidence_interval: tuple[float, float]
     raw_p_value: float = Field(..., ge=0.0, le=1.0)
     adjusted_p_value: float = Field(..., ge=0.0, le=1.0)
-    is_significant: bool
+    is_statistically_significant: bool
 
 
 class _ExperimentAnalysisBase(_FiniteExperimentModel):
@@ -564,34 +576,45 @@ class _ExperimentAnalysisBase(_FiniteExperimentModel):
     experiment_status: Literal["scheduled", "running", "completed", "stopped"]
     control_variant: str
     metric_event: str
+    metric_direction: Literal["increase", "decrease"]
+    statistical_plan: ExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime
     config_version: int = Field(..., ge=1)
     arms: list[ExperimentArmResult]
     crossover_actors: int = Field(..., ge=0)
     unknown_variant_actors: int = Field(..., ge=0)
+    identity_conflict_actors: int = Field(..., ge=0)
+    identity_quality: Literal["degraded", "unambiguous"]
+    data_completeness: Literal["not_verified"] = "not_verified"
+    deployment_readiness: Literal["not_assessed"] = "not_assessed"
 
 
-class ExperimentAnalysisReady(_ExperimentAnalysisBase):
-    analysis_status: Literal["ready"] = "ready"
-    significance_level: float = Field(default=0.05, gt=0.0, lt=1.0)
+class ExperimentAnalysisDecisionSnapshot(_ExperimentAnalysisBase):
+    analysis_status: Literal["decision_snapshot"] = "decision_snapshot"
+    inference_method: Literal["fisher_exact_two_sided"] = "fisher_exact_two_sided"
+    interval_method: Literal["newcombe_wilson"] = "newcombe_wilson"
     correction: Literal["bonferroni"] = "bonferroni"
     comparisons: list[ExperimentComparison]
 
 
-class ExperimentAnalysisInsufficient(_ExperimentAnalysisBase):
-    analysis_status: Literal["insufficient_data"] = "insufficient_data"
+class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
+    analysis_status: Literal["non_final"] = "non_final"
     reason: Literal[
         "experiment_not_started",
+        "experiment_window_open",
+        "awaiting_data_settlement",
+        "experiment_running",
+        "experiment_stopped",
         "no_exposures",
         "underpowered_arms",
         "non_finite_statistics",
+        "identity_alias_conflicts",
     ]
-    minimum_sample_size_per_arm: int = Field(default=2, ge=2)
     underpowered_variants: list[str]
 
 
 ExperimentAnalysisResponse = Annotated[
-    ExperimentAnalysisReady | ExperimentAnalysisInsufficient,
+    ExperimentAnalysisDecisionSnapshot | ExperimentAnalysisNonFinal,
     Field(discriminator="analysis_status"),
 ]

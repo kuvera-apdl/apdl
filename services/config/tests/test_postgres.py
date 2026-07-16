@@ -132,6 +132,7 @@ async def test_get_experiments_uses_explicit_projection():
     assert "flag_key" in pool.sql
     assert "default_variant" in pool.sql
     assert "primary_metric_json" in pool.sql
+    assert "statistical_plan" in pool.sql
     assert pool.args == ("apdl",)
 
 
@@ -169,6 +170,7 @@ def test_row_to_experiment_includes_canonical_columns():
         "variants_json": "[]",
         "targeting_rules_json": "[]",
         "primary_metric_json": "{}",
+        "statistical_plan": None,
         "traffic_percentage": 100.0,
         "start_date": "",
         "end_date": "",
@@ -182,6 +184,7 @@ def test_row_to_experiment_includes_canonical_columns():
     assert exp["flag_key"] == "checkout"
     assert exp["default_variant"] == "control"
     assert exp["primary_metric_json"] == "{}"
+    assert exp["statistical_plan"] is None
     assert exp["traffic_percentage"] == 100.0
     assert exp["version"] == 3
 

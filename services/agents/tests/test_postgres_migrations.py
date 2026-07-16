@@ -174,7 +174,7 @@ def test_codegen_development_publication_is_a_separate_draft_only_contract():
 
 def test_custom_agent_contract_migration_is_explicit_and_strict():
     sql = CUSTOM_AGENT_CONTRACT_SQL
-    for tool_name in (
+    legacy_tools = [
         "discover_events",
         "query_events",
         "query_timeseries",
@@ -184,11 +184,14 @@ def test_custom_agent_contract_migration_is_explicit_and_strict():
         "query_breakdown",
         "list_flags",
         "get_active_experiments",
-    ):
+    ]
+    for tool_name in legacy_tools:
         assert f'"{tool_name}"' in sql
     migrated_tools = re.search(r"SET tools = '(\[[^']+\])'::jsonb", sql)
     assert migrated_tools is not None
-    assert json.loads(migrated_tools.group(1)) == list(TOOL_CATALOG)
+    assert json.loads(migrated_tools.group(1)) == legacy_tools
+    assert "calculate_statistical_plan" in TOOL_CATALOG
+    assert '"calculate_statistical_plan"' not in sql
     assert "WHERE tools = '[]'::jsonb" in sql
     assert "DROP COLUMN IF EXISTS parse_as" in sql
     assert "CREATE TABLE custom_agent_test_runs" in sql

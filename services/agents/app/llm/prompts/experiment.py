@@ -37,8 +37,15 @@ code change (e.g. pure traffic/config change)>",
   "guardrail_metrics": [{"event": "...", "threshold": "...", "direction": "..."}],
   "targeting": {"conditions": [...]},
   "estimated_duration_days": 14,
-  "required_sample_size_per_variant": 5000,
-  "minimum_detectable_effect": 0.05,
+  "statistical_plan": {
+    "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+    "baseline_conversion_rate": 0.10,
+    "minimum_detectable_effect": 0.02,
+    "significance_level": 0.05,
+    "nominal_power": 0.80,
+    "required_sample_size_per_arm": 5000,
+    "data_settlement_seconds": 300
+  },
   "flag_config": {
     "key": "...",
     "name": "...",
@@ -68,6 +75,10 @@ other field there; put per-variant descriptions in the top-level "variants".
 experiment targeting in the top-level "targeting", not in flag rules.
 - flag_config.fallthrough must contain only {"rollout": {"percentage": ..., "bucket_by": ...}}.
 - flag_config.auto_disable must be false; automatic guardrail mutation is unavailable in this release.
+- statistical_plan is immutable once the experiment leaves draft. Size it prospectively for a
+two-proportion comparison using the primary metric direction and Bonferroni-adjusted alpha
+(significance_level / number of treatment arms). Never lower required_sample_size_per_arm to fit
+the proposed duration; increase duration or traffic instead.
 
 Be conservative with experiment scope. Prefer smaller, focused experiments over large multi-factorial designs. \
 Always include guardrail metrics for error rate and latency."""
@@ -93,8 +104,9 @@ Baseline metrics:
 
 You have read-only analytics tools. Before finalizing each design, verify its premises with a \
 few focused queries: confirm the primary metric event exists and measure its current baseline \
-(volume / conversion) so required_sample_size_per_variant and estimated_duration_days rest on \
-real numbers, not guesses. Keep it to a handful of calls total.
+(volume / conversion) so statistical_plan.required_sample_size_per_arm and estimated_duration_days rest on \
+real numbers, not guesses. Then call calculate_statistical_plan and copy its returned object exactly
+into statistical_plan; never estimate or rename its fields. Keep it to a handful of calls total.
 
 Design a rigorous A/B experiment per qualifying insight, each with a "source_insight" naming the \
 insight's exact title. When done, return ONLY the JSON array of experiment designs (an empty \

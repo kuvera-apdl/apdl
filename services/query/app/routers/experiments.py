@@ -8,6 +8,7 @@ from statistics import NormalDist
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
+from scipy.stats import fisher_exact
 
 from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
@@ -20,8 +21,8 @@ from app.config_client import (
     fetch_experiment_analysis,
 )
 from app.models.schemas import (
-    ExperimentAnalysisInsufficient,
-    ExperimentAnalysisReady,
+    ExperimentAnalysisDecisionSnapshot,
+    ExperimentAnalysisNonFinal,
     ExperimentAnalysisResponse,
     ExperimentArmResult,
     ExperimentComparison,
@@ -29,8 +30,6 @@ from app.models.schemas import (
 
 router = APIRouter(prefix="/v1/query", tags=["experiments"])
 
-_ALPHA = 0.05
-_MIN_SAMPLE_SIZE_PER_ARM = 2
 _MAX_EXPERIMENT_WINDOW = timedelta(days=90)
 _ALLOWED_QUERY_PARAMETERS = frozenset({"project_id"})
 _RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
@@ -81,12 +80,13 @@ def _datetime64_boundary_milliseconds(value: datetime) -> int:
 def _aggregate_arms(
     metadata: ConfigExperimentAnalysis,
     rows: list[dict[str, Any]],
-) -> tuple[list[ExperimentArmResult], int, int]:
+) -> tuple[list[ExperimentArmResult], int, int, int]:
     declared = set(metadata.variants)
     aggregates: dict[str, tuple[int, int]] = {}
     seen_variants: set[str] = set()
     crossover_actors = 0
     unknown_variant_actors = 0
+    identity_conflict_actors: int | None = None
 
     for row in rows:
         variant = row.get("variant")
@@ -112,6 +112,19 @@ def _aggregate_arms(
                 detail="ClickHouse returned invalid experiment aggregates",
             )
         sample_size, conversions, crossovers = values
+        row_identity_conflicts = row.get("identity_conflict_actors")
+        if type(row_identity_conflicts) is not int or row_identity_conflicts < 0:
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned invalid identity-conflict aggregates",
+            )
+        if identity_conflict_actors is None:
+            identity_conflict_actors = row_identity_conflicts
+        elif identity_conflict_actors != row_identity_conflicts:
+            raise HTTPException(
+                status_code=503,
+                detail="ClickHouse returned inconsistent identity-conflict aggregates",
+            )
         if (
             sample_size < 0
             or conversions < 0
@@ -141,41 +154,70 @@ def _aggregate_arms(
                 conversion_rate=(conversions / sample_size if sample_size else 0.0),
             )
         )
-    return arms, crossover_actors, unknown_variant_actors
+    return (
+        arms,
+        crossover_actors,
+        unknown_variant_actors,
+        identity_conflict_actors or 0,
+    )
 
 
 def _comparison(
     control: ExperimentArmResult,
     treatment: ExperimentArmResult,
     comparison_count: int,
+    significance_level: float,
 ) -> ExperimentComparison | None:
     control_rate = control.conversion_rate
     treatment_rate = treatment.conversion_rate
     difference = treatment_rate - control_rate
 
-    pooled_rate = (
-        (control.conversions + treatment.conversions)
-        / (control.sample_size + treatment.sample_size)
+    raw_p_value = float(
+        fisher_exact(
+            [
+                [
+                    treatment.conversions,
+                    treatment.sample_size - treatment.conversions,
+                ],
+                [
+                    control.conversions,
+                    control.sample_size - control.conversions,
+                ],
+            ],
+            alternative="two-sided",
+        ).pvalue
     )
-    pooled_variance = pooled_rate * (1.0 - pooled_rate) * (
-        (1.0 / control.sample_size) + (1.0 / treatment.sample_size)
-    )
-    if pooled_variance == 0.0:
-        raw_p_value = 1.0
-    else:
-        z_score = abs(difference) / math.sqrt(pooled_variance)
-        raw_p_value = math.erfc(z_score / math.sqrt(2.0))
 
     adjusted_p_value = min(raw_p_value * comparison_count, 1.0)
-    standard_error = math.sqrt(
-        control_rate * (1.0 - control_rate) / control.sample_size
-        + treatment_rate * (1.0 - treatment_rate) / treatment.sample_size
-    )
     critical_value = NormalDist().inv_cdf(
-        1.0 - (_ALPHA / (2.0 * comparison_count))
+        1.0 - (significance_level / (2.0 * comparison_count))
     )
-    lower = max(-1.0, difference - critical_value * standard_error)
-    upper = min(1.0, difference + critical_value * standard_error)
+    control_lower, control_upper = _wilson_interval(
+        control.conversions,
+        control.sample_size,
+        critical_value,
+    )
+    treatment_lower, treatment_upper = _wilson_interval(
+        treatment.conversions,
+        treatment.sample_size,
+        critical_value,
+    )
+    lower = max(
+        -1.0,
+        difference
+        - math.sqrt(
+            (treatment_rate - treatment_lower) ** 2
+            + (control_upper - control_rate) ** 2
+        ),
+    )
+    upper = min(
+        1.0,
+        difference
+        + math.sqrt(
+            (treatment_upper - treatment_rate) ** 2
+            + (control_rate - control_lower) ** 2
+        ),
+    )
 
     statistics = (
         control_rate,
@@ -197,8 +239,29 @@ def _comparison(
         confidence_interval=(lower, upper),
         raw_p_value=raw_p_value,
         adjusted_p_value=adjusted_p_value,
-        is_significant=adjusted_p_value < _ALPHA,
+        is_statistically_significant=adjusted_p_value < significance_level,
     )
+
+
+def _wilson_interval(
+    successes: int,
+    sample_size: int,
+    critical_value: float,
+) -> tuple[float, float]:
+    """Wilson score interval for one binomial proportion."""
+    proportion = successes / sample_size
+    z_squared = critical_value**2
+    denominator = 1.0 + z_squared / sample_size
+    centre = (proportion + z_squared / (2.0 * sample_size)) / denominator
+    half_width = (
+        critical_value
+        * math.sqrt(
+            proportion * (1.0 - proportion) / sample_size
+            + z_squared / (4.0 * sample_size**2)
+        )
+        / denominator
+    )
+    return max(0.0, centre - half_width), min(1.0, centre + half_width)
 
 
 def _common_response(
@@ -206,6 +269,7 @@ def _common_response(
     arms: list[ExperimentArmResult],
     crossover_actors: int,
     unknown_variant_actors: int,
+    identity_conflict_actors: int = 0,
 ) -> dict[str, Any]:
     return {
         "experiment_key": metadata.key,
@@ -213,12 +277,18 @@ def _common_response(
         "experiment_status": metadata.status,
         "control_variant": metadata.control_variant,
         "metric_event": metadata.metric_event,
+        "metric_direction": metadata.metric_direction,
+        "statistical_plan": metadata.statistical_plan.model_dump(),
         "start_date": metadata.start_date,
         "end_date": metadata.end_date,
         "config_version": metadata.version,
         "arms": arms,
         "crossover_actors": crossover_actors,
         "unknown_variant_actors": unknown_variant_actors,
+        "identity_conflict_actors": identity_conflict_actors,
+        "identity_quality": (
+            "degraded" if identity_conflict_actors else "unambiguous"
+        ),
     }
 
 
@@ -256,9 +326,30 @@ async def experiment_results(
             status_code=422,
             detail="Authoritative experiment window must not exceed 90 days",
         )
+    current_time = datetime.now(timezone.utc)
+    if (
+        metadata.status == "completed"
+        and metadata.end_date > current_time
+    ):
+        arms = _empty_arms(metadata)
+        return ExperimentAnalysisNonFinal(
+            **_common_response(metadata, arms, 0, 0),
+            reason="experiment_window_open",
+            underpowered_variants=list(metadata.variants),
+        )
+    settlement_end = metadata.end_date + timedelta(
+        seconds=metadata.statistical_plan.data_settlement_seconds
+    )
+    if metadata.status == "completed" and current_time < settlement_end:
+        arms = _empty_arms(metadata)
+        return ExperimentAnalysisNonFinal(
+            **_common_response(metadata, arms, 0, 0),
+            reason="awaiting_data_settlement",
+            underpowered_variants=list(metadata.variants),
+        )
     if metadata.status == "scheduled":
         arms = _empty_arms(metadata)
-        return ExperimentAnalysisInsufficient(
+        return ExperimentAnalysisNonFinal(
             **_common_response(metadata, arms, 0, 0),
             reason="experiment_not_started",
             underpowered_variants=list(metadata.variants),
@@ -274,7 +365,12 @@ async def experiment_results(
             "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
         },
     )
-    arms, crossover_actors, unknown_variant_actors = _aggregate_arms(
+    (
+        arms,
+        crossover_actors,
+        unknown_variant_actors,
+        identity_conflict_actors,
+    ) = _aggregate_arms(
         metadata,
         rows,
     )
@@ -283,22 +379,43 @@ async def experiment_results(
         arms,
         crossover_actors,
         unknown_variant_actors,
+        identity_conflict_actors,
     )
 
+    required_sample_size = metadata.statistical_plan.required_sample_size_per_arm
+    underpowered = [
+        arm.variant
+        for arm in arms
+        if arm.sample_size < required_sample_size
+    ]
+    if identity_conflict_actors:
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="identity_alias_conflicts",
+            underpowered_variants=underpowered,
+        )
+    if metadata.status == "running":
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="experiment_running",
+            underpowered_variants=underpowered,
+        )
+    if metadata.status == "stopped":
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="experiment_stopped",
+            underpowered_variants=underpowered,
+        )
+
     if sum(arm.sample_size for arm in arms) == 0:
-        return ExperimentAnalysisInsufficient(
+        return ExperimentAnalysisNonFinal(
             **common,
             reason="no_exposures",
             underpowered_variants=list(metadata.variants),
         )
 
-    underpowered = [
-        arm.variant
-        for arm in arms
-        if arm.sample_size < _MIN_SAMPLE_SIZE_PER_ARM
-    ]
     if underpowered:
-        return ExperimentAnalysisInsufficient(
+        return ExperimentAnalysisNonFinal(
             **common,
             reason="underpowered_arms",
             underpowered_variants=underpowered,
@@ -316,16 +433,17 @@ async def experiment_results(
             by_variant[metadata.control_variant],
             by_variant[treatment],
             len(treatments),
+            metadata.statistical_plan.significance_level,
         )
         if result is None:
-            return ExperimentAnalysisInsufficient(
+            return ExperimentAnalysisNonFinal(
                 **common,
                 reason="non_finite_statistics",
                 underpowered_variants=[],
             )
         comparisons.append(result)
 
-    return ExperimentAnalysisReady(
+    return ExperimentAnalysisDecisionSnapshot(
         **common,
         comparisons=comparisons,
     )

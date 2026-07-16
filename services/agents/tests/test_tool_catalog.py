@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from app.framework import tool_catalog
 
@@ -114,6 +115,66 @@ async def test_run_tool_scopes_config_service_tools_to_ctx_project(monkeypatch):
     monkeypatch.setattr(tool_catalog, "get_active_flags", fake_flags)
     await tool_catalog.run_tool(_ctx(project_id="proj-2"), "list_flags", {})
     assert seen == ["proj-2"]
+
+
+@pytest.mark.asyncio
+async def test_experiment_planner_tool_returns_the_canonical_plan(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_plan(**kwargs):
+        captured.update(kwargs)
+        return {"protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1"}
+
+    monkeypatch.setattr(tool_catalog, "calculate_sample_size", fake_plan)
+    result = await tool_catalog.run_tool(
+        _ctx(),
+        "calculate_statistical_plan",
+        {
+            "baseline_conversion_rate": 0.5,
+            "minimum_detectable_effect": 0.5,
+            "significance_level": 0.05,
+            "nominal_power": 0.8,
+            "treatment_count": 2,
+            "direction": "increase",
+            "data_settlement_seconds": 300,
+        },
+    )
+
+    assert result["protocol"] == "fixed_horizon_fisher_newcombe_cc_plan_v1"
+    assert captured == {
+        "baseline_rate": 0.5,
+        "minimum_detectable_effect": 0.5,
+        "alpha": 0.05,
+        "nominal_power": 0.8,
+        "treatment_count": 2,
+        "direction": "increase",
+        "data_settlement_seconds": 300,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("baseline_conversion_rate", "0.5"),
+        ("treatment_count", 2.0),
+        ("data_settlement_seconds", "300"),
+    ],
+)
+async def test_experiment_planner_tool_rejects_numeric_coercion(field, value):
+    params = {
+        "baseline_conversion_rate": 0.5,
+        "minimum_detectable_effect": 0.1,
+        "significance_level": 0.05,
+        "nominal_power": 0.8,
+        "treatment_count": 2,
+        "direction": "increase",
+        "data_settlement_seconds": 300,
+    }
+    params[field] = value
+
+    with pytest.raises(ValidationError):
+        await tool_catalog.run_tool(_ctx(), "calculate_statistical_plan", params)
 
 
 @pytest.mark.asyncio

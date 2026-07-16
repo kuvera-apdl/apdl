@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 17
-MIGRATION_NAME = "017_config_rollout_contract.sql"
+MIGRATION_VERSION = 18
+MIGRATION_NAME = "018_experiment_statistical_plan.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -34,6 +34,7 @@ REQUIRED_COLUMNS = frozenset(
         ("experiments", "variants_json"),
         ("experiments", "targeting_rules_json"),
         ("experiments", "primary_metric_json"),
+        ("experiments", "statistical_plan"),
         ("experiments", "start_date"),
         ("experiments", "end_date"),
         ("experiments", "version"),

@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.framework.context import AgentContext
 from app.tools import clickhouse
-from app.tools.experiments import get_active_experiments
+from app.tools.experiments import calculate_sample_size, get_active_experiments
 from app.tools.flags import get_active_flags
 
 FilterScalar = str | int | float | bool
@@ -95,6 +95,26 @@ class BreakdownParams(BaseModel):
     selector: EventSelector
     property_name: str = Field(min_length=1, max_length=200)
     limit: int = Field(default=20, ge=1, le=100)
+
+
+class StatisticalPlanParams(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    baseline_conversion_rate: float = Field(
+        ge=0.0, le=1.0, strict=True, allow_inf_nan=False
+    )
+    minimum_detectable_effect: float = Field(
+        ge=1e-6, le=1.0, strict=True, allow_inf_nan=False
+    )
+    significance_level: float = Field(
+        default=0.05, ge=1e-6, le=0.5, strict=True, allow_inf_nan=False
+    )
+    nominal_power: float = Field(
+        default=0.8, gt=0.5, le=0.9999, strict=True, allow_inf_nan=False
+    )
+    treatment_count: int = Field(ge=1, le=9, strict=True)
+    direction: Literal["increase", "decrease"]
+    data_settlement_seconds: int = Field(ge=1, le=86_400, strict=True)
 
 
 ToolRunner = Callable[[AgentContext, BaseModel, str, str], Awaitable[Any]]
@@ -185,6 +205,23 @@ async def _run_active_experiments(ctx: AgentContext, p: EmptyParams, start: str,
     return await get_active_experiments(ctx.project_id)
 
 
+async def _run_statistical_plan(
+    ctx: AgentContext,
+    p: StatisticalPlanParams,
+    start: str,
+    end: str,
+) -> Any:
+    return await calculate_sample_size(
+        baseline_rate=p.baseline_conversion_rate,
+        minimum_detectable_effect=p.minimum_detectable_effect,
+        alpha=p.significance_level,
+        nominal_power=p.nominal_power,
+        treatment_count=p.treatment_count,
+        direction=p.direction,
+        data_settlement_seconds=p.data_settlement_seconds,
+    )
+
+
 TOOL_CATALOG: dict[str, ToolSpec] = {
     spec.name: spec
     for spec in (
@@ -241,6 +278,12 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
             "Active experiments configured for the project.",
             EmptyParams,
             _run_active_experiments,
+        ),
+        ToolSpec(
+            "calculate_statistical_plan",
+            "Return Config's canonical continuity-corrected nominal experiment plan.",
+            StatisticalPlanParams,
+            _run_statistical_plan,
         ),
     )
 }

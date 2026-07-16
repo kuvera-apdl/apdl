@@ -17,6 +17,7 @@ import type {
   ExperimentCreate,
   ExperimentEntry,
   ExperimentMetric,
+  ExperimentStatisticalPlan,
   ExperimentStatus,
   ExperimentUpdate,
   ExperimentVariant,
@@ -38,7 +39,7 @@ const STATUS_TRANSITIONS: Record<ExperimentStatus, ExperimentStatus[]> = {
   stopped: ['stopped'],
 }
 
-const METRIC_DIRECTIONS = ['increase', 'decrease']
+const METRIC_DIRECTIONS = ['increase', 'decrease'] as const
 const MAX_EXPERIMENT_VARIANTS = 10
 const MAX_EXPERIMENT_DURATION_MS = 90 * 24 * 60 * 60 * 1000
 
@@ -59,7 +60,13 @@ export interface ExperimentFormValues {
   variants: ExperimentVariantRow[]
   default_variant: string
   metricEvent: string
-  metricDirection: string
+  metricDirection: ExperimentMetric['direction']
+  baselineConversionRate: number
+  minimumDetectableEffect: number
+  significanceLevel: number
+  nominalPower: number
+  requiredSampleSizePerArm: number
+  dataSettlementSeconds: number
   targetingRulesJson: string
 }
 
@@ -79,6 +86,12 @@ export function emptyExperimentValues(): ExperimentFormValues {
     default_variant: 'control',
     metricEvent: '',
     metricDirection: 'increase',
+    baselineConversionRate: 0.1,
+    minimumDetectableEffect: 0.02,
+    significanceLevel: 0.05,
+    nominalPower: 0.8,
+    requiredSampleSizePerArm: 5000,
+    dataSettlementSeconds: 300,
     targetingRulesJson: '',
   }
 }
@@ -100,6 +113,12 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     default_variant: entry.default_variant,
     metricEvent: entry.primary_metric?.event ?? '',
     metricDirection: entry.primary_metric?.direction ?? 'increase',
+    baselineConversionRate: entry.statistical_plan?.baseline_conversion_rate ?? 0.1,
+    minimumDetectableEffect: entry.statistical_plan?.minimum_detectable_effect ?? 0.02,
+    significanceLevel: entry.statistical_plan?.significance_level ?? 0.05,
+    nominalPower: entry.statistical_plan?.nominal_power ?? 0.8,
+    requiredSampleSizePerArm: entry.statistical_plan?.required_sample_size_per_arm ?? 5000,
+    dataSettlementSeconds: entry.statistical_plan?.data_settlement_seconds ?? 300,
     targetingRulesJson:
       entry.targeting_rules.length > 0 ? JSON.stringify(entry.targeting_rules, null, 2) : '',
   }
@@ -138,6 +157,18 @@ function buildMetric(values: ExperimentFormValues): ExperimentMetric | null {
   }
 }
 
+function buildStatisticalPlan(values: ExperimentFormValues): ExperimentStatisticalPlan {
+  return {
+    protocol: 'fixed_horizon_fisher_newcombe_cc_plan_v1',
+    baseline_conversion_rate: values.baselineConversionRate,
+    minimum_detectable_effect: values.minimumDetectableEffect,
+    significance_level: values.significanceLevel,
+    nominal_power: values.nominalPower,
+    required_sample_size_per_arm: values.requiredSampleSizePerArm,
+    data_settlement_seconds: values.dataSettlementSeconds,
+  }
+}
+
 function toAwareDateTime(value: string): string | null {
   const trimmed = value.trim()
   if (trimmed === '') return null
@@ -165,7 +196,10 @@ export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
     targeting_rules: parseTargetingRules(values.targetingRulesJson).value ?? [],
   }
   const metric = buildMetric(values)
-  if (metric) create.primary_metric = metric
+  if (metric) {
+    create.primary_metric = metric
+    create.statistical_plan = buildStatisticalPlan(values)
+  }
   return create
 }
 
@@ -196,6 +230,7 @@ export function buildUpdate(
     const endDate = toAwareDateTime(values.end_date)
     const variants = projectVariants(values.variants)
     const primaryMetric = buildMetric(values)
+    const statisticalPlan = primaryMetric ? buildStatisticalPlan(values) : null
 
     if (startDate !== base.start_date) update.start_date = startDate
     if (endDate !== base.end_date) update.end_date = endDate
@@ -204,6 +239,9 @@ export function buildUpdate(
       update.default_variant = values.default_variant
     }
     if (!same(primaryMetric, base.primary_metric)) update.primary_metric = primaryMetric
+    if (!same(statisticalPlan, base.statistical_plan)) {
+      update.statistical_plan = statisticalPlan
+    }
   }
 
   return update
@@ -217,6 +255,7 @@ interface ExperimentFormErrors {
   targeting?: string
   dates?: string
   metric?: string
+  statisticalPlan?: string
 }
 
 export function validateExperimentForm(values: ExperimentFormValues): ExperimentFormErrors {
@@ -274,6 +313,31 @@ export function validateExperimentForm(values: ExperimentFormValues): Experiment
   ) {
     errors.metric = 'Scheduled and running experiments require a primary metric'
   }
+  if (
+    (values.status === 'scheduled' || values.status === 'running') &&
+    (
+      !Number.isFinite(values.baselineConversionRate) ||
+      values.baselineConversionRate < 0 ||
+      values.baselineConversionRate > 1 ||
+      !Number.isFinite(values.minimumDetectableEffect) ||
+      values.minimumDetectableEffect < 1e-6 ||
+      values.minimumDetectableEffect > 1 ||
+      !Number.isFinite(values.significanceLevel) ||
+      values.significanceLevel < 1e-6 ||
+      values.significanceLevel > 0.5 ||
+      !Number.isFinite(values.nominalPower) ||
+      values.nominalPower <= 0.5 ||
+      values.nominalPower > 0.9999 ||
+      !Number.isInteger(values.requiredSampleSizePerArm) ||
+      values.requiredSampleSizePerArm < 2 ||
+      values.requiredSampleSizePerArm > 10_000_000 ||
+      !Number.isInteger(values.dataSettlementSeconds) ||
+      values.dataSettlementSeconds < 1 ||
+      values.dataSettlementSeconds > 86_400
+    )
+  ) {
+    errors.statisticalPlan = 'Enter a valid fixed-horizon plan and an integer target of at least 2 per arm'
+  }
   return errors
 }
 
@@ -309,6 +373,7 @@ export function ExperimentForm({
   const statusOptions = isCreate ? CREATE_STATUSES : STATUS_TRANSITIONS[currentStatus ?? values.status]
   const terminal = !isCreate && statusOptions.length <= 1
   const variantKeys = values.variants.map((variant) => variant.key.trim()).filter((key) => key !== '')
+  const analysisFieldsLocked = !isCreate && currentStatus !== 'draft'
 
   const submit = () => {
     const nextErrors = validateExperimentForm(values)
@@ -487,13 +552,15 @@ export function ExperimentForm({
             onChange={(event) => set({ metricEvent: event.target.value })}
             placeholder="event (e.g. purchase_completed)"
             aria-label="Metric event"
+            disabled={analysisFieldsLocked}
             className="font-mono text-xs"
           />
           <Input value="conversion" disabled aria-label="Metric type" />
           <Select
             value={values.metricDirection}
-            onChange={(event) => set({ metricDirection: event.target.value })}
+            onChange={(event) => set({ metricDirection: event.target.value as ExperimentMetric['direction'] })}
             aria-label="Metric direction"
+            disabled={analysisFieldsLocked}
           >
             {METRIC_DIRECTIONS.map((direction) => (
               <option key={direction} value={direction}>
@@ -506,6 +573,98 @@ export function ExperimentForm({
           Optional — leave the event blank to skip. Only the event drives results.
         </p>
         {errors.metric ? <p className="text-xs text-destructive">{errors.metric}</p> : null}
+      </div>
+      <div className="space-y-3 rounded-md border p-4">
+        <div>
+          <Label>Fixed-horizon statistical plan</Label>
+          <p className="text-xs text-muted-foreground">
+            Immutable after draft. Config validates the prospective per-arm target using the metric
+            direction and Bonferroni adjustment for every treatment arm.
+          </p>
+        </div>
+        <Input value="fixed_horizon_fisher_newcombe_cc_plan_v1" disabled aria-label="Statistical protocol" />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label>Baseline conversion</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step="any"
+              value={values.baselineConversionRate}
+              onChange={(event) => set({ baselineConversionRate: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Baseline conversion rate"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Minimum detectable effect</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step="any"
+              value={values.minimumDetectableEffect}
+              onChange={(event) => set({ minimumDetectableEffect: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Minimum detectable effect"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Significance level</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step="any"
+              value={values.significanceLevel}
+              onChange={(event) => set({ significanceLevel: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Significance level"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Nominal power</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step="any"
+              value={values.nominalPower}
+              onChange={(event) => set({ nominalPower: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Nominal power"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Required actors / arm</Label>
+            <Input
+              type="number"
+              min={2}
+              step={1}
+              value={values.requiredSampleSizePerArm}
+              onChange={(event) => set({ requiredSampleSizePerArm: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Required sample size per arm"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Settlement hold (seconds)</Label>
+            <Input
+              type="number"
+              min={1}
+              max={86_400}
+              step={1}
+              value={values.dataSettlementSeconds}
+              onChange={(event) => set({ dataSettlementSeconds: Number(event.target.value) })}
+              disabled={analysisFieldsLocked}
+              aria-label="Data settlement seconds"
+            />
+          </div>
+        </div>
+        {errors.statisticalPlan ? (
+          <p className="text-xs text-destructive">{errors.statisticalPlan}</p>
+        ) : null}
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">

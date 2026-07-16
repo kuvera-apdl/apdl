@@ -266,7 +266,7 @@ async def test_self_registered_overprivileged_project_cannot_apply_approval(
 
 
 @pytest.mark.asyncio
-async def test_legacy_approved_forks_single_proposal(monkeypatch):
+async def test_legacy_feature_proposal_approval_is_quarantined(monkeypatch):
     enq, kicked, _ = _patch(monkeypatch)
     store = {"run": _run_row(), "results": [{"output": json.dumps([_PROPOSAL])}]}
 
@@ -278,24 +278,10 @@ async def test_legacy_approved_forks_single_proposal(monkeypatch):
     assert body["status"] == "approved"
     assert body["approved_count"] == 1 and body["rejected_count"] == 0
 
-    forks = _forks(kicked)
-    assert len(forks) == 1
-    assert forks[0]["project_id"] == "demo" and forks[0]["autonomy_level"] == 3
-    assert forks[0]["target_proposal_id"] == "p1"
-    assert body["forked_runs"] == [forks[0]["run_id"]]
-    assert enq and enq[0][2][0]["proposal_id"] == "p1"
-
-    # The forked run's config must be a JSON *string* for the jsonb column;
-    # a raw dict makes asyncpg raise "expected str, got dict".
-    run_insert_query, run_insert_args = next(
-        (q, a) for q, a in app.state.pg_pool.conn.executed if "INSERT INTO agent_runs" in q
-    )
-    assert "lease_expires_at" in run_insert_query
-    assert "now() + ($4 * interval '1 second')" in run_insert_query
-    assert run_insert_args[-2] == approvals.RUN_LEASE_SECONDS
-    assert isinstance(run_insert_args[-1], str)
-    cfg = json.loads(run_insert_args[-1])
-    assert cfg["analysis_types"] == ["code_implementation"] and cfg["target_proposal_id"] == "p1"
+    assert _forks(kicked) == []
+    assert body["forked_runs"] == []
+    assert body["errors"] == ["feature proposal unavailable: p1"]
+    assert enq == []
 
     # Bug B: the run always resumes (so it finalizes instead of wedging at resuming).
     assert _resumes(kicked) and _resumes(kicked)[0]["run_id"] == "run-1"
@@ -324,12 +310,13 @@ async def test_per_item_mixed_forks_only_approved(monkeypatch):
     body = resp.json()
     assert body["approved_count"] == 1 and body["rejected_count"] == 1
     forks = _forks(kicked)
-    assert len(forks) == 1 and forks[0]["target_proposal_id"] == "p1"
-    assert [e[2][0]["proposal_id"] for e in enq] == ["p1"]  # only the approved one enqueued
+    assert forks == []
+    assert body["errors"] == ["feature proposal unavailable: p1"]
+    assert enq == []
 
 
 @pytest.mark.asyncio
-async def test_per_item_approve_all_forks_each_distinctly(monkeypatch):
+async def test_per_item_approve_all_quarantines_each_legacy_proposal(monkeypatch):
     _, kicked, _ = _patch(monkeypatch)
     store = {"run": _run_row(), "results": [{"output": json.dumps([_PROPOSAL, _PROPOSAL2])}]}
 
@@ -341,8 +328,11 @@ async def test_per_item_approve_all_forks_each_distinctly(monkeypatch):
 
     assert resp.status_code == 200
     forks = _forks(kicked)
-    assert sorted(f["target_proposal_id"] for f in forks) == ["p1", "p2"]
-    assert len({f["run_id"] for f in forks}) == 2  # one distinct run per proposal
+    assert forks == []
+    assert resp.json()["errors"] == [
+        "feature proposal unavailable: p1",
+        "feature proposal unavailable: p2",
+    ]
 
 
 @pytest.mark.asyncio

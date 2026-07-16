@@ -327,6 +327,7 @@ def _assert_projection(
     start: datetime,
     end: datetime,
     version: int,
+    expected_status: str,
 ) -> None:
     _assert_keys(
         projection,
@@ -337,6 +338,8 @@ def _assert_projection(
             "control_variant",
             "variants",
             "metric_event",
+            "metric_direction",
+            "statistical_plan",
             "start_date",
             "end_date",
             "version",
@@ -345,7 +348,7 @@ def _assert_projection(
     )
     _assert_equal(projection["key"], experiment_key, "projected experiment key")
     _assert_equal(projection["flag_key"], flag_key, "projected flag key")
-    _assert_equal(projection["status"], "running", "projected status")
+    _assert_equal(projection["status"], expected_status, "projected status")
     _assert_equal(
         projection["control_variant"],
         contract["control_variant"],
@@ -354,6 +357,12 @@ def _assert_projection(
     _assert_equal(projection["variants"], contract["variants"], "projected variants")
     _assert_equal(
         projection["metric_event"], contract["metric_event"], "projected metric"
+    )
+    _assert_equal(
+        projection["metric_direction"], contract["metric_direction"], "metric direction"
+    )
+    _assert_equal(
+        projection["statistical_plan"], contract["statistical_plan"], "statistical plan"
     )
     _assert_equal(_parse_instant(projection["start_date"]), start, "projected start")
     _assert_equal(_parse_instant(projection["end_date"]), end, "projected end")
@@ -380,27 +389,36 @@ def _assert_analysis(
             "experiment_status",
             "control_variant",
             "metric_event",
+            "metric_direction",
+            "statistical_plan",
             "start_date",
             "end_date",
             "config_version",
             "arms",
             "crossover_actors",
             "unknown_variant_actors",
+            "identity_conflict_actors",
+            "identity_quality",
             "analysis_status",
-            "significance_level",
+            "data_completeness",
+            "deployment_readiness",
+            "inference_method",
+            "interval_method",
             "correction",
             "comparisons",
         },
         "Query experiment analysis",
     )
-    _assert_equal(result["analysis_status"], "ready", "analysis status")
+    _assert_equal(result["analysis_status"], "decision_snapshot", "analysis status")
     _assert_equal(result["experiment_key"], experiment_key, "analysis experiment key")
     _assert_equal(result["flag_key"], flag_key, "analysis flag key")
-    _assert_equal(result["experiment_status"], "running", "analysis experiment status")
+    _assert_equal(result["experiment_status"], "completed", "analysis experiment status")
     _assert_equal(
         result["control_variant"], contract["control_variant"], "analysis control"
     )
     _assert_equal(result["metric_event"], contract["metric_event"], "analysis metric")
+    _assert_equal(result["metric_direction"], contract["metric_direction"], "metric direction")
+    _assert_equal(result["statistical_plan"], contract["statistical_plan"], "statistical plan")
     _assert_equal(_parse_instant(result["start_date"]), start, "analysis start")
     _assert_equal(_parse_instant(result["end_date"]), end, "analysis end")
     _assert_equal(result["config_version"], version, "analysis config version")
@@ -432,7 +450,16 @@ def _assert_analysis(
         expected["unknown_variant_actors"],
         "unknown-variant actors",
     )
-    _assert_equal(result["significance_level"], 0.05, "significance level")
+    _assert_equal(
+        result["identity_conflict_actors"],
+        expected["identity_conflict_actors"],
+        "identity-conflict actors",
+    )
+    _assert_equal(result["identity_quality"], "unambiguous", "identity quality")
+    _assert_equal(result["data_completeness"], "not_verified", "data completeness")
+    _assert_equal(result["deployment_readiness"], "not_assessed", "deployment readiness")
+    _assert_equal(result["inference_method"], "fisher_exact_two_sided", "inference method")
+    _assert_equal(result["interval_method"], "newcombe_wilson", "interval method")
     _assert_equal(result["correction"], "bonferroni", "multiple-test correction")
 
     comparisons = result["comparisons"]
@@ -458,7 +485,7 @@ def _assert_analysis(
                 "confidence_interval",
                 "raw_p_value",
                 "adjusted_p_value",
-                "is_significant",
+                "is_statistically_significant",
             },
             f"comparison {comparison.get('treatment_variant')}",
         )
@@ -468,7 +495,12 @@ def _assert_analysis(
         _assert_equal(comparison["control_rate"], 0.0, "comparison control rate")
         _assert_equal(comparison["treatment_rate"], 0.0, "comparison treatment rate")
         _assert_equal(comparison["rate_difference"], 0.0, "comparison rate difference")
-        _assert_equal(comparison["confidence_interval"], [0.0, 0.0], "confidence interval")
+        lower, upper = comparison["confidence_interval"]
+        if not lower < 0.0 < upper:
+            raise SmokeFailure(
+                "all-zero Newcombe/Wilson interval must be finite and span zero: "
+                f"{comparison['confidence_interval']!r}"
+            )
         _assert_equal(
             comparison["raw_p_value"], expected["raw_p_value"], "raw p-value"
         )
@@ -477,7 +509,11 @@ def _assert_analysis(
             expected["adjusted_p_value"],
             "adjusted p-value",
         )
-        _assert_equal(comparison["is_significant"], False, "significance verdict")
+        _assert_equal(
+            comparison["is_statistically_significant"],
+            False,
+            "significance verdict",
+        )
 
 
 def _clickhouse_request(
@@ -567,8 +603,9 @@ def _run(args: argparse.Namespace) -> None:
     message_prefix = f"smoke_{run_id}_"
     now = datetime.now(timezone.utc).replace(microsecond=0)
     start = now - timedelta(minutes=10)
-    end = now + timedelta(minutes=10)
+    end = now + timedelta(seconds=10)
     experiment_path = f"/v1/experiments/{quote(experiment_key, safe='')}/analysis"
+    admin_experiment_path = f"/v1/admin/experiments/{quote(experiment_key, safe='')}"
     query_path = f"/v1/query/experiment/{quote(experiment_key, safe='')}"
     created_version: int | None = None
     primary_failure: Exception | None = None
@@ -600,8 +637,9 @@ def _run(args: argparse.Namespace) -> None:
             "primary_metric": {
                 "event": contract["metric_event"],
                 "type": "conversion",
-                "direction": "increase",
+                "direction": contract["metric_direction"],
             },
+            "statistical_plan": contract["statistical_plan"],
             "targeting_rules": [],
         }
         _, created = _request_json(
@@ -631,6 +669,7 @@ def _run(args: argparse.Namespace) -> None:
             start=start,
             end=end,
             version=created_version,
+            expected_status="running",
         )
         print("  ok  Config returned the strict authoritative projection")
 
@@ -671,6 +710,53 @@ def _run(args: argparse.Namespace) -> None:
             "Ingestion acknowledgement",
         )
         print(f"  ok  Ingestion atomically accepted {len(events)} canonical events")
+
+        _, provisional = _request_json(
+            _join_url(args.query_url, query_path),
+            args.api_key,
+            expected_status={200},
+            timeout=args.request_timeout,
+        )
+        _assert_equal(provisional["analysis_status"], "non_final", "running analysis state")
+        _assert_equal(provisional["reason"], "experiment_running", "running analysis reason")
+        if "comparisons" in provisional:
+            raise SmokeFailure("running experiment unexpectedly exposed snapshot comparisons")
+        print("  ok  Query withheld fixed-horizon comparisons while the experiment was running")
+
+        wait_seconds = (end - datetime.now(timezone.utc)).total_seconds()
+        if wait_seconds > 0:
+            time.sleep(wait_seconds + 0.05)
+        transition_status, transitioned = _request_json(
+            _join_url(args.config_url, admin_experiment_path),
+            args.api_key,
+            method="PUT",
+            payload={"version": created_version, "status": "completed"},
+            expected_status={200, 409},
+            timeout=args.request_timeout,
+        )
+        if transition_status == 200:
+            _assert_equal(transitioned["updated"], True, "Config completion acknowledgement")
+            created_version = int(transitioned["version"])
+
+        _, projection = _request_json(
+            _join_url(args.config_url, experiment_path),
+            args.api_key,
+            timeout=args.request_timeout,
+        )
+        if transition_status == 409:
+            _assert_equal(projection["status"], "completed", "scheduler completion race")
+            created_version = int(projection["version"])
+        _assert_projection(
+            projection,
+            experiment_key=experiment_key,
+            flag_key=flag_key,
+            contract=contract,
+            start=start,
+            end=end,
+            version=created_version,
+            expected_status="completed",
+        )
+        print("  ok  Config preserved the predeclared horizon at completion")
 
         deadline = time.monotonic() + args.pipeline_timeout
         last_result: Any = None

@@ -1,29 +1,17 @@
-"""Feature proposal agent — durable features from winning experiments.
+"""Disabled significance-derived feature proposal surface.
 
-Loop-closure phase 4: proposals are no longer invented from insights. The
-agent drains unconsumed ``ship`` verdicts (the evaluation agent's durable
-work queue) and writes one flag-removal work order per validated win — make
-the treatment permanent, delete the control path. No winning experiment, no
-proposal; the LLM is not even called.
-
-Proposals ALWAYS require human approval — regardless of autonomy level —
-because of their product and engineering blast radius. Produces
-``feature_proposals``.
+Legacy ship verdicts predate the fixed-horizon snapshot contract and are not
+eligible evidence. The registered agent remains fail-closed until a separate
+human deployment-readiness attestation contract exists.
 """
 
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from app.framework import AgentContext, BaseAgent, MemoryEntry, register_agent
-from app.llm.prompts.feature import FEATURE_PROPOSAL_PROMPT, FEATURE_PROPOSAL_SYSTEM
-from app.store.proposals import list_recent_proposals
-from app.store.verdicts import list_unconsumed_ship_verdicts, mark_verdicts_consumed
-from app.tools.code import get_repo_context, list_changesets
-
-logger = logging.getLogger(__name__)
+from app.llm.prompts.feature import FEATURE_PROPOSAL_SYSTEM
 
 
 def _render_repo_capabilities(context: dict[str, Any]) -> str:
@@ -143,11 +131,11 @@ def _render_ship_verdicts(verdicts: list[dict[str, Any]]) -> str:
 
 @register_agent
 class FeatureProposalAgent(BaseAgent):
-    """Turns winning experiments into durable-feature proposals; always routes
-    to human approval."""
+    """Registered but disabled legacy experiment-to-proposal path."""
 
     name = "feature_proposal"
-    description = "Write durable-feature work orders from winning experiments."
+    description = "Unavailable: experiment snapshots do not assess deployment readiness."
+    enabled = False
     order = 40
     system_prompt = FEATURE_PROPOSAL_SYSTEM
     model_tier = "reasoning"
@@ -167,68 +155,12 @@ class FeatureProposalAgent(BaseAgent):
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> dict[str, Any]:
-        # The durable ship-verdict queue is the ONLY proposal source: no
-        # winning experiment, no proposal (the product thesis made structural).
-        ship_verdicts: list[dict[str, Any]] = []
-        if ctx.pool is not None:
-            try:
-                ship_verdicts = await list_unconsumed_ship_verdicts(
-                    ctx.pool, ctx.project_id, self.max_wins_per_run
-                )
-            except Exception as exc:
-                logger.warning("Could not list ship verdicts: %s", exc)
-        if not ship_verdicts:
-            return {"ship_verdicts": []}
-
-        # Repo grounding: what the connected repository actually is. Proposals
-        # written blind demand infrastructure the repo does not have; the coding
-        # agent downstream then fabricates or descopes (the observed junk-PR
-        # failure modes). Fetch failures degrade to an explicit "unavailable".
-        repo_context: dict[str, Any] = {}
-        try:
-            fetched_context = await get_repo_context(ctx.project_id)
-            if isinstance(fetched_context, dict):
-                repo_context = fetched_context
-        except Exception as exc:
-            logger.warning("Could not fetch repo context: %s", exc)
-
-        # Dedup grounding: what was already proposed or is already in flight.
-        recent_proposals: list[dict[str, Any]] = []
-        try:
-            recent_proposals = await list_recent_proposals(ctx.pool, ctx.project_id)
-        except Exception as exc:
-            logger.warning("Could not list recent proposals: %s", exc)
-        changesets: list[dict[str, Any]] = []
-        try:
-            listed = await list_changesets(ctx.project_id)
-            if isinstance(listed, list):
-                changesets = listed
-        except Exception as exc:
-            logger.warning("Could not list changesets: %s", exc)
-
-        return {
-            "ship_verdicts": ship_verdicts,
-            "repo_context": repo_context,
-            "recent_proposals": recent_proposals,
-            "changesets": changesets,
-        }
+        return {"disabled": True, "ship_verdicts": []}
 
     def build_prompt(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> str | None:
-        ship_verdicts = working.get("ship_verdicts", [])
-        if not ship_verdicts:
-            # No winning experiments → no proposals, no LLM call.
-            return None
-        return FEATURE_PROPOSAL_PROMPT.format(
-            ship_verdicts=_render_ship_verdicts(ship_verdicts),
-            context=working.get("context", ""),
-            capabilities=_render_repo_capabilities(working.get("repo_context") or {}),
-            existing_work=_render_existing_work(
-                working.get("recent_proposals") or [],
-                working.get("changesets") or [],
-            ),
-        )
+        return None
 
     async def act(
         self,
@@ -237,26 +169,11 @@ class FeatureProposalAgent(BaseAgent):
         working: dict[str, Any],
         output: Any,
     ) -> dict[str, Any]:
-        # Consume the verdicts this run turned into proposals, so reruns never
-        # propose the same win twice. A win whose proposal the model dropped
-        # (e.g. already in flight) is consumed too — the existing-work list
-        # said it's covered, and re-offering it every run would spam the gate.
-        consumed_ids = [
-            v["id"]
-            for v in working.get("ship_verdicts", [])
-            if isinstance(v.get("id"), int)
-        ]
-        if consumed_ids and ctx.pool is not None:
-            try:
-                await mark_verdicts_consumed(ctx.pool, consumed_ids)
-            except Exception as exc:
-                logger.warning("Could not mark verdicts consumed: %s", exc)
-
-        # Feature proposals never auto-deploy; they wait for human approval.
         return {
-            "proposals_count": len(output),
-            "approval_status": "pending" if output else "none",
-            "needs_approval": bool(output),
+            "disabled": True,
+            "proposals_count": 0,
+            "approval_status": "unavailable",
+            "needs_approval": False,
         }
 
     def memory_entries(

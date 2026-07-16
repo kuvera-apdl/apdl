@@ -14,6 +14,7 @@ from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentCreate,
     ExperimentMetric,
+    ExperimentStatisticalPlan,
     ExperimentUpdate,
     FlagCleanup,
     FlagCreate,
@@ -22,6 +23,7 @@ from app.models.schemas import (
     FlagUpdate,
     VariantConfig,
     validate_experiment_lifecycle,
+    validate_statistical_plan,
 )
 from app.store import postgres as pg_store
 from app.store import mutations
@@ -416,7 +418,14 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
     "stopped": {"stopped"},
 }
 _FROZEN_EXPERIMENT_REQUEST_FIELDS = frozenset(
-    {"default_variant", "variants", "primary_metric", "start_date", "end_date"}
+    {
+        "default_variant",
+        "variants",
+        "primary_metric",
+        "statistical_plan",
+        "start_date",
+        "end_date",
+    }
 )
 
 
@@ -446,6 +455,10 @@ def _metric_or_none(value: dict) -> ExperimentMetric | None:
     return ExperimentMetric.model_validate(value) if value else None
 
 
+def _statistical_plan_or_none(value) -> ExperimentStatisticalPlan | None:
+    return ExperimentStatisticalPlan.model_validate(value) if value else None
+
+
 def _experiment_to_response(e: dict) -> dict:
     """Canonical experiment record returned by the list endpoint."""
     primary_metric = _load_json(e.get("primary_metric_json", "{}"), {})
@@ -459,6 +472,7 @@ def _experiment_to_response(e: dict) -> dict:
         "variants": _load_json(e.get("variants_json", "[]"), []),
         "targeting_rules": _load_json(e.get("targeting_rules_json", "[]"), []),
         "primary_metric": primary_metric or None,
+        "statistical_plan": e.get("statistical_plan"),
         "start_date": _iso_or_none(e.get("start_date")),
         "end_date": _iso_or_none(e.get("end_date")),
         "version": e.get("version", 1),
@@ -534,6 +548,11 @@ async def create_experiment(body: ExperimentCreate, request: Request):
             json.dumps(body.primary_metric.model_dump(), separators=(",", ":"))
             if body.primary_metric is not None
             else "{}"
+        ),
+        "statistical_plan": (
+            body.statistical_plan.model_dump(mode="json")
+            if body.statistical_plan is not None
+            else None
         ),
         "traffic_percentage": body.traffic_percentage,
         "start_date": body.start_date,
@@ -647,6 +666,12 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             if body.primary_metric is not None
             else "{}"
         )
+    if "statistical_plan" in body.model_fields_set:
+        exp["statistical_plan"] = (
+            body.statistical_plan.model_dump(mode="json")
+            if body.statistical_plan is not None
+            else None
+        )
 
     primary_metric_data = _load_json(exp.get("primary_metric_json", "{}"), {})
     try:
@@ -655,6 +680,14 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             start_date=_as_datetime(exp.get("start_date")),
             end_date=_as_datetime(exp.get("end_date")),
             primary_metric=_metric_or_none(primary_metric_data),
+        )
+        validate_statistical_plan(
+            status=exp["status"],
+            statistical_plan=_statistical_plan_or_none(
+                exp.get("statistical_plan")
+            ),
+            primary_metric=_metric_or_none(primary_metric_data),
+            variant_count=len(_experiment_variant_keys(exp["variants_json"])),
         )
     except ValueError as exc:
         return JSONResponse(

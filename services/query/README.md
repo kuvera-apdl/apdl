@@ -88,20 +88,36 @@ curl -s http://localhost:8082/v1/query/events/count \
 `GET /v1/query/experiment/{key}` accepts only the experiment key and optional
 tenant-matching `project_id`. Query obtains the flag key, declared variants,
 control, conversion metric, lifecycle state, immutable analysis window, and
-version from Config; caller-supplied analysis metadata is rejected.
+version and immutable statistical plan from Config; caller-supplied analysis
+metadata is rejected. Scheduled/running traffic requires a strict
+`fixed_horizon_fisher_newcombe_cc_plan_v1` plan with baseline conversion,
+MDE, significance level, nominal power, required actors per arm, and an
+explicit post-horizon settlement hold. The continuity-corrected planner is a
+prospective nominal target, not a guarantee of exact achieved Fisher power.
 
 The query assigns each namespaced actor to its first exposure, counts only
 post-exposure conversions inside the authoritative window, zero-fills exposed
 non-converters, reports crossover and unknown-variant actors, and compares
-every treatment with the declared control. Responses are a strict
-`analysis_status` union: `ready` contains finite two-proportion statistics with
-Bonferroni correction; `insufficient_data` contains a machine-readable reason.
+every treatment with the declared control. Two-sided Fisher exact tests are
+used for every treatment, p-values are Bonferroni-adjusted, and effect
+intervals use simultaneous Newcombe/Wilson bounds. Running, stopped,
+underpowered, identity-conflicted, pre-horizon, and pre-settlement results are
+strict `non_final` responses with no comparisons. A completed experiment whose
+horizon, settlement hold, and arm targets have elapsed returns a
+`decision_snapshot`, never a winner verdict.
+
+The pipeline has no durable processed-through watermark. Therefore every
+snapshot explicitly reports `data_completeness: not_verified`, and late
+durable events can change a later snapshot. It also reports
+`deployment_readiness: not_assessed`; statistical significance is evidence,
+not authorization or a rollout recommendation.
 Config timestamps are converted to explicit UTC epoch-millisecond boundaries
 before querying ClickHouse's `DateTime64(3)` columns, preserving the declared
 half-open `[start, end)` window across offsets and fractional seconds.
-Scheduled experiments do not query ClickHouse. Draft or malformed experiments
-are rejected by Config. Automatic stopping, shipping, and rollback are not
-supported in the OSS developer preview.
+Scheduled and pre-settlement experiments do not query ClickHouse. Draft,
+legacy no-plan, or malformed experiments are rejected by Config. Automatic
+stopping, shipping, proposal generation, and rollback are not supported in the
+OSS developer preview.
 
 ## Configuration
 

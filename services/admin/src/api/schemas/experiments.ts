@@ -38,7 +38,19 @@ export const experimentMetricSchema = z
   .object({
     event: z.string().min(1),
     type: z.literal('conversion'),
-    direction: z.string(),
+    direction: z.enum(['increase', 'decrease']),
+  })
+  .strict()
+
+export const experimentStatisticalPlanSchema = z
+  .object({
+    protocol: z.literal('fixed_horizon_fisher_newcombe_cc_plan_v1'),
+    baseline_conversion_rate: z.number().finite().min(0).max(1),
+    minimum_detectable_effect: z.number().finite().min(1e-6).max(1),
+    significance_level: z.number().finite().min(1e-6).max(0.5),
+    nominal_power: z.number().finite().gt(0.5).max(0.9999),
+    required_sample_size_per_arm: z.number().int().min(2).max(10_000_000),
+    data_settlement_seconds: z.number().int().min(1).max(86_400),
   })
   .strict()
 
@@ -54,6 +66,7 @@ export const experimentEntrySchema = z
     variants: z.array(experimentVariantSchema).min(2).max(MAX_EXPERIMENT_VARIANTS),
     targeting_rules: z.array(gateRuleSchema),
     primary_metric: experimentMetricSchema.nullable(),
+    statistical_plan: experimentStatisticalPlanSchema.nullable(),
     start_date: awareDateTimeSchema.nullable(),
     end_date: awareDateTimeSchema.nullable(),
     version: z.number().int().min(1),
@@ -81,6 +94,7 @@ export const experimentCreateSchema = z
     variants: z.array(experimentVariantSchema).min(2).max(MAX_EXPERIMENT_VARIANTS),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     primary_metric: experimentMetricSchema.optional(),
+    statistical_plan: experimentStatisticalPlanSchema.optional(),
     targeting_rules: z.array(gateRuleSchema),
   })
   .strict()
@@ -96,6 +110,7 @@ export const experimentUpdateSchema = z
     variants: z.array(experimentVariantSchema).min(2).max(MAX_EXPERIMENT_VARIANTS).optional(),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
     primary_metric: experimentMetricSchema.nullable().optional(),
+    statistical_plan: experimentStatisticalPlanSchema.nullable().optional(),
     targeting_rules: z.array(gateRuleSchema).optional(),
   })
   .strict()
@@ -149,7 +164,7 @@ export const experimentComparisonSchema = z
     confidence_interval: z.tuple([finiteNumberSchema, finiteNumberSchema]),
     raw_p_value: probabilitySchema,
     adjusted_p_value: probabilitySchema,
-    is_significant: z.boolean(),
+    is_statistically_significant: z.boolean(),
   })
   .strict()
 
@@ -159,40 +174,51 @@ const experimentAnalysisBaseShape = {
   experiment_status: z.enum(['scheduled', 'running', 'completed', 'stopped']),
   control_variant: z.string().min(1),
   metric_event: z.string().min(1),
+  metric_direction: z.enum(['increase', 'decrease']),
+  statistical_plan: experimentStatisticalPlanSchema,
   start_date: awareDateTimeSchema,
   end_date: awareDateTimeSchema,
   config_version: z.number().int().min(1),
   arms: z.array(experimentArmResultSchema),
   crossover_actors: z.number().int().min(0),
   unknown_variant_actors: z.number().int().min(0),
+  identity_conflict_actors: z.number().int().min(0),
+  identity_quality: z.enum(['degraded', 'unambiguous']),
+  data_completeness: z.literal('not_verified'),
+  deployment_readiness: z.literal('not_assessed'),
 }
 
-export const experimentAnalysisReadySchema = z
+export const experimentAnalysisDecisionSnapshotSchema = z
   .object({
-    analysis_status: z.literal('ready'),
+    analysis_status: z.literal('decision_snapshot'),
     ...experimentAnalysisBaseShape,
-    significance_level: finiteNumberSchema.gt(0).lt(1),
+    inference_method: z.literal('fisher_exact_two_sided'),
+    interval_method: z.literal('newcombe_wilson'),
     correction: z.literal('bonferroni'),
     comparisons: z.array(experimentComparisonSchema),
   })
   .strict()
 
-export const experimentAnalysisInsufficientSchema = z
+export const experimentAnalysisNonFinalSchema = z
   .object({
-    analysis_status: z.literal('insufficient_data'),
+    analysis_status: z.literal('non_final'),
     ...experimentAnalysisBaseShape,
     reason: z.enum([
       'experiment_not_started',
+      'experiment_window_open',
+      'awaiting_data_settlement',
+      'experiment_running',
+      'experiment_stopped',
       'no_exposures',
       'underpowered_arms',
       'non_finite_statistics',
+      'identity_alias_conflicts',
     ]),
-    minimum_sample_size_per_arm: z.number().int().min(2),
     underpowered_variants: z.array(z.string().min(1)),
   })
   .strict()
 
 export const experimentResultSchema = z.discriminatedUnion('analysis_status', [
-  experimentAnalysisReadySchema,
-  experimentAnalysisInsufficientSchema,
+  experimentAnalysisDecisionSnapshotSchema,
+  experimentAnalysisNonFinalSchema,
 ])
