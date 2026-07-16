@@ -1,15 +1,75 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from app import proxy
 from app.auth import AdminSession
 from app.security import token_hash
 from conftest import TEST_API_KEY, make_settings, proxy_client
+
+
+class StreamAuthorityConnection:
+    def __init__(self, results: list[object]) -> None:
+        self.results = list(results)
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchrow(self, query: str, *args):
+        self.calls.append((query, args))
+        if not self.results:
+            raise AssertionError("Unexpected stream authority revalidation")
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class StreamAuthorityPool:
+    def __init__(self, results: list[object]) -> None:
+        self.connection = StreamAuthorityConnection(results)
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.connection
+
+
+class StubStreamingResponse:
+    def __init__(self, *, busy: bool = False) -> None:
+        self.busy = busy
+        self.closed = False
+        self.release = asyncio.Event()
+
+    async def aiter_raw(self):
+        if self.busy:
+            while True:
+                await asyncio.sleep(0)
+                yield b"event: heartbeat\ndata: {}\n\n"
+        await self.release.wait()
+
+    async def aclose(self) -> None:
+        self.closed = True
+        self.release.set()
+
+
+class FiniteAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+
+    async def __aiter__(self):
+        yield self.content
+
+
+def stream_request(pool: StreamAuthorityPool):
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(pg_pool=pool)),
+    )
 
 
 @pytest.mark.asyncio
@@ -204,6 +264,140 @@ async def test_proxy_rejects_credentials_in_the_query_string(
 
     assert response.status_code == 400
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_sse_rechecks_membership_on_a_timer_without_upstream_chunks(
+    admin_session: AdminSession,
+) -> None:
+    pool = StreamAuthorityPool(
+        [
+            {"session_active": True, "project_authorized": True},
+            {"session_active": True, "project_authorized": False},
+        ]
+    )
+    upstream = StubStreamingResponse()
+    generator = proxy._authorized_sse(
+        upstream,
+        stream_request(pool),
+        admin_session,
+        make_settings(stream_authority_check_seconds=0.01),
+        "demo",
+        "config:read",
+        None,
+    )
+
+    terminal = await asyncio.wait_for(anext(generator), timeout=0.2)
+    await generator.aclose()
+
+    assert terminal == (
+        b"event: project_access_revoked\ndata: "
+        b'{"project_id":"demo","required_role":"config:read"}\n\n'
+    )
+    assert upstream.closed
+    assert len(pool.connection.calls) == 2
+    query, args = pool.connection.calls[-1]
+    assert "FROM admin_user_projects AS membership" in query
+    assert "$5::TEXT = ANY(membership.roles)" in query
+    assert args[3:] == ("demo", "config:read")
+
+
+@pytest.mark.asyncio
+async def test_sse_distinguishes_session_expiry_and_fails_closed_on_db_error(
+    admin_session: AdminSession,
+) -> None:
+    settings = make_settings(stream_authority_check_seconds=0.01)
+
+    expired_upstream = StubStreamingResponse()
+    expired = proxy._authorized_sse(
+        expired_upstream,
+        stream_request(
+            StreamAuthorityPool([{"session_active": False, "project_authorized": True}])
+        ),
+        admin_session,
+        settings,
+        "demo",
+        "config:read",
+        None,
+    )
+    assert await anext(expired) == b"event: auth_expired\ndata: {}\n\n"
+    await expired.aclose()
+    assert expired_upstream.closed
+
+    failed_upstream = StubStreamingResponse()
+    failed = proxy._authorized_sse(
+        failed_upstream,
+        stream_request(StreamAuthorityPool([ConnectionError("postgres down")])),
+        admin_session,
+        settings,
+        "demo",
+        "config:read",
+        None,
+    )
+    assert await anext(failed) == (
+        b"event: stream_error\ndata: "
+        b'{"reason":"authorization_unavailable","retryable":true}\n\n'
+    )
+    await failed.aclose()
+    assert failed_upstream.closed
+
+
+@pytest.mark.asyncio
+async def test_busy_sse_cannot_starve_periodic_role_revalidation(
+    admin_session: AdminSession,
+) -> None:
+    pool = StreamAuthorityPool(
+        [
+            {"session_active": True, "project_authorized": True},
+            {"session_active": True, "project_authorized": False},
+        ]
+    )
+    upstream = StubStreamingResponse(busy=True)
+    generator = proxy._authorized_sse(
+        upstream,
+        stream_request(pool),
+        admin_session,
+        make_settings(stream_authority_check_seconds=0.01),
+        "demo",
+        "config:read",
+        None,
+    )
+
+    chunk_count = 0
+    while True:
+        chunk = await asyncio.wait_for(anext(generator), timeout=0.2)
+        if b"project_access_revoked" in chunk:
+            break
+        chunk_count += 1
+    await generator.aclose()
+
+    assert chunk_count > 0
+    assert len(pool.connection.calls) == 2
+    assert upstream.closed
+
+
+@pytest.mark.asyncio
+async def test_every_proxied_event_stream_uses_current_project_role(
+    admin_session: AdminSession,
+) -> None:
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/query/funnels"
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=FiniteAsyncStream(b"event: result\ndata: {}\n\n"),
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get("/api/projects/demo/query/v1/query/funnels")
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert response.content == b"event: result\ndata: {}\n\n"
+    authority_check = next(
+        statement for statement in statements if "AS project_authorized" in statement[0]
+    )
+    assert authority_check[1][3:] == ("demo", "query:read")
 
 
 @pytest.mark.asyncio

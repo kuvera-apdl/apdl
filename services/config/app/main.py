@@ -184,6 +184,10 @@ def _sse_settings_from_environment() -> SSESettings:
             "SSE_PING_INTERVAL_SECONDS",
             15.0,
         ),
+        credential_check_interval_seconds=_positive_float_environment(
+            "SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS",
+            5.0,
+        ),
         send_timeout_seconds=_positive_float_environment(
             "SSE_SEND_TIMEOUT_SECONDS",
             10.0,

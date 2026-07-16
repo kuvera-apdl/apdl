@@ -10,6 +10,7 @@ export type StreamEventName =
   | 'experiment_update'
   | 'heartbeat'
   | 'auth_expired'
+  | 'project_access_revoked'
 
 export type StreamStatus = 'idle' | 'connecting' | 'open' | 'reconnecting'
 
@@ -32,6 +33,7 @@ const STREAM_EVENTS: StreamEventName[] = [
   'experiment_update',
   'heartbeat',
   'auth_expired',
+  'project_access_revoked',
 ]
 const HEARTBEAT_TIMEOUT_MS = 90_000
 const WATCHDOG_INTERVAL_MS = 10_000

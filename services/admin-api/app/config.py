@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -69,6 +70,16 @@ def _positive_int(name: str, default: str) -> int:
     return value
 
 
+def _positive_float(name: str, default: str) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive duration")
+    return value
+
+
 def _service_keys() -> dict[str, str]:
     keys = _json_object(
         "APDL_SERVICE_API_KEYS", os.getenv("APDL_SERVICE_API_KEYS", "{}")
@@ -113,6 +124,9 @@ class Settings:
     login_failure_limit: int
     login_lock_seconds: int
     max_request_bytes: int
+    stream_authority_check_seconds: float
+    upstream_read_timeout_seconds: float
+    readiness_probe_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -149,4 +163,13 @@ class Settings:
             login_failure_limit=_positive_int("APDL_ADMIN_LOGIN_FAILURE_LIMIT", "5"),
             login_lock_seconds=_positive_int("APDL_ADMIN_LOGIN_LOCK_SECONDS", "900"),
             max_request_bytes=_positive_int("APDL_ADMIN_MAX_REQUEST_BYTES", "2097152"),
+            stream_authority_check_seconds=_positive_float(
+                "APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS", "5"
+            ),
+            upstream_read_timeout_seconds=_positive_float(
+                "APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS", "60"
+            ),
+            readiness_probe_timeout_seconds=_positive_float(
+                "APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS", "2"
+            ),
         )

@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 QuotaScope = Literal["global", "project", "credential", "ip"]
 CloseReason = Literal[
     "client_disconnect",
+    "credential_authority_unavailable",
+    "credential_revoked",
     "slow_consumer",
     "max_lifetime",
     "server_shutdown",
@@ -32,6 +34,7 @@ class SSESettings:
     max_connections_per_credential: int = 10
     max_connections_per_ip: int = 20
     ping_interval_seconds: float = 15.0
+    credential_check_interval_seconds: float = 5.0
     send_timeout_seconds: float = 10.0
     max_lifetime_seconds: float = 300.0
 
@@ -48,6 +51,7 @@ class SSESettings:
                 raise ValueError(f"{name} must be a positive integer")
         for name, value in {
             "ping_interval_seconds": self.ping_interval_seconds,
+            "credential_check_interval_seconds": self.credential_check_interval_seconds,
             "send_timeout_seconds": self.send_timeout_seconds,
             "max_lifetime_seconds": self.max_lifetime_seconds,
         }.items():

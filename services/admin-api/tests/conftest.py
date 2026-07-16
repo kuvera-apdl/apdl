@@ -33,6 +33,9 @@ def make_settings(**overrides) -> Settings:
         "login_failure_limit": 5,
         "login_lock_seconds": 900,
         "max_request_bytes": 2_097_152,
+        "stream_authority_check_seconds": 5.0,
+        "upstream_read_timeout_seconds": 60.0,
+        "readiness_probe_timeout_seconds": 2.0,
     }
     values.update(overrides)
     return Settings(**values)
@@ -49,6 +52,12 @@ class AuditConnection:
     async def execute(self, query: str, *args):
         self.statements.append((query, args))
         return "OK"
+
+    async def fetchrow(self, query: str, *args):
+        self.statements.append((query, args))
+        if "AS session_active" in query and "AS project_authorized" in query:
+            return {"session_active": True, "project_authorized": True}
+        raise AssertionError(f"Unexpected fetchrow query: {query}")
 
 
 class AuditPool:

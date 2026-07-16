@@ -6,7 +6,12 @@ import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from app.auth import PostgresAuthenticator, authenticate_request
+from app.auth import (
+    PostgresAuthenticator,
+    Principal,
+    authenticate_request,
+    credential_has_current_role,
+)
 from app.main import app
 
 
@@ -20,6 +25,10 @@ class FakeConnection:
         self.calls = []
 
     async def fetchrow(self, query, *args):
+        self.calls.append((query, args))
+        return self.row
+
+    async def fetchval(self, query, *args):
         self.calls.append((query, args))
         return self.row
 
@@ -152,6 +161,27 @@ async def test_authentication_rejects_revoked_expired_or_wrong_key(overrides):
         FakePool(credential_row(**overrides))
     ).authenticate(API_KEY)
     assert principal is None
+
+
+@pytest.mark.asyncio
+async def test_established_credential_role_is_revalidated_by_stored_identity():
+    principal = Principal(
+        credential_id="credential-1",
+        project_id="verifiedproject",
+        roles=frozenset({"config:read"}),
+    )
+    pool = FakePool(True)
+
+    assert await credential_has_current_role(pool, principal, "config:read")
+
+    query, args = pool.connection.calls[0]
+    assert "credential_id = $1" in query
+    assert "project_id = $2" in query
+    assert "active" in query
+    assert "revoked_at IS NULL" in query
+    assert "(expires_at IS NULL OR expires_at > NOW())" in query
+    assert "$3::TEXT = ANY(roles)" in query
+    assert args == ("credential-1", "verifiedproject", "config:read")
 
 
 @pytest.mark.asyncio

@@ -224,6 +224,10 @@ async def test_max_lifetime_signals_observable_close():
         ({"max_connections": 0}, "max_connections"),
         ({"ping_interval_seconds": 0}, "ping_interval_seconds"),
         ({"ping_interval_seconds": float("nan")}, "ping_interval_seconds"),
+        (
+            {"credential_check_interval_seconds": 0},
+            "credential_check_interval_seconds",
+        ),
         ({"send_timeout_seconds": float("inf")}, "send_timeout_seconds"),
         (
             {"max_connections": 2, "max_connections_per_project": 3},

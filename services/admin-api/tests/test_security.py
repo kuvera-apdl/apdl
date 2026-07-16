@@ -54,3 +54,23 @@ def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None
     assert settings.allowed_origins == frozenset(
         {"http://localhost:5173", "http://localhost:5174"}
     )
+    assert settings.stream_authority_check_seconds == 5.0
+    assert settings.upstream_read_timeout_seconds == 60.0
+    assert settings.readiness_probe_timeout_seconds == 2.0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS",
+        "APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS",
+        "APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS",
+    ],
+)
+def test_settings_reject_invalid_admin_durations(monkeypatch, name: str) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.setenv(name, "0")
+
+    with pytest.raises(ValueError, match="positive duration"):
+        Settings.from_env()
