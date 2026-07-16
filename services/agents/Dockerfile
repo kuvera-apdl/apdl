@@ -2,8 +2,13 @@ FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a
 WORKDIR /app
 
 # onnxruntime (pulled in by fastembed) needs libgomp at runtime.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+ARG DEBIAN_SNAPSHOT=20260623T000000Z
+ARG LIBGOMP_VERSION=14.2.0-19
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie main" \
+        > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends "libgomp1=${LIBGOMP_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.lock .
