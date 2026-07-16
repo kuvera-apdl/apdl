@@ -1,6 +1,5 @@
 // Runs history (plan §5.6.4, upgraded by gap G1): the server-side run list
-// with status filtering. If the agents service predates GET /v1/agents/runs
-// (404), the page degrades to the localStorage-tracked list.
+// with status filtering.
 import { useQuery } from '@tanstack/react-query'
 import { Play } from 'lucide-react'
 import { useState } from 'react'
@@ -21,58 +20,7 @@ import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
-import { loadTrackedRuns } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
-
-function LocalFallback() {
-  const { active } = useWorkspace()
-  const navigate = useNavigate()
-  const runs = active ? loadTrackedRuns(active.id) : []
-  return (
-    <div className="space-y-3">
-      <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-        This agents service predates the runs-list endpoint (plan gap G1) — showing only runs
-        triggered from this browser.
-      </p>
-      {runs.length === 0 ? (
-        <EmptyState title="No runs tracked in this browser" />
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Run</TableHead>
-                  <TableHead>Last seen status</TableHead>
-                  <TableHead>Triggered</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {runs.map((run) => (
-                  <TableRow
-                    key={run.run_id}
-                    className="cursor-pointer"
-                    onClick={() => navigate(`/agents/runs/${encodeURIComponent(run.run_id)}`)}
-                  >
-                    <TableCell>
-                      <code className="font-mono text-xs">{run.run_id.slice(0, 8)}…</code>
-                    </TableCell>
-                    <TableCell>
-                      <RunStatusPill status={run.last_status} />
-                    </TableCell>
-                    <TableCell>
-                      <RelativeTime value={run.triggered_at} className="text-muted-foreground" />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  )
-}
 
 export function RunsPage() {
   const { active, projectId } = useWorkspace()
@@ -121,7 +69,10 @@ export function RunsPage() {
       />
 
       {endpointMissing ? (
-        <LocalFallback />
+        <EmptyState
+          title="Runs list unavailable"
+          description="This agents service predates the runs-list endpoint — upgrade it to browse run history."
+        />
       ) : (
         <>
           <div className="flex items-end gap-3">

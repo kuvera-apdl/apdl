@@ -1,12 +1,14 @@
-// Create/edit wizard for custom agents: Basics → Prompts → Data tools →
-// Behavior → Test & save. Per-step validation gates Next; the final step can
-// dry-run the draft against real project data (POST /custom/test) before
-// anything is persisted.
+// Create/edit wizard for custom agents: Basics → Preset queries → Prompts →
+// Data tools → Behavior → Test & save. Per-step validation gates Next; the
+// final step can dry-run the draft against real project data (POST
+// /custom/test) before anything is persisted.
 //
-// Custom agents are agentic: the model calls the read-only data tools itself
-// (picking parameters at run time) inside a bounded loop. The Data tools step
-// therefore selects which tools are ALLOWED — default all — not pre-baked
-// queries.
+// Custom agents gather data two ways: preset (deterministic queries built in
+// the Preset queries step with structured forms, run on every run before
+// reasoning, results handed to the model up front) and agentic (the model
+// calls the read-only data tools itself, picking parameters at run time
+// inside a bounded loop — the Data tools step selects which tools are
+// ALLOWED, default all).
 import { ArrowLeft, ArrowRight, Check, FlaskConical, Save } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -44,7 +46,23 @@ import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-const STEPS = ['Basics', 'Prompts', 'Data tools', 'Behavior', 'Test & save'] as const
+import { PresetQueriesStep } from './PresetQueriesStep'
+import {
+  MAX_PRESET_TOOLS,
+  draftFromWire,
+  presetProblems,
+  presetToWire,
+  type PresetDraft,
+} from './presetModel'
+
+const STEPS = [
+  'Basics',
+  'Preset queries',
+  'Prompts',
+  'Data tools',
+  'Behavior',
+  'Test & save',
+] as const
 
 const SLUG_RE = /^[a-z][a-z0-9_]{2,63}$/
 
@@ -64,6 +82,8 @@ interface FormState {
   limitTools: boolean
   /** Allowed tool names; only meaningful when limitTools is true. */
   tools: string[]
+  /** Deterministic preset queries, run verbatim on every run before reasoning. */
+  preset_tools: PresetDraft[]
   max_tool_steps: number
   requires: string[]
   produces: string
@@ -83,6 +103,7 @@ const EMPTY_FORM: FormState = {
   model_tier: 'reasoning',
   limitTools: false,
   tools: [],
+  preset_tools: [],
   max_tool_steps: 8,
   requires: [],
   produces: '',
@@ -110,6 +131,7 @@ function toSpec(form: FormState): CustomAgentSpec {
     model_tier: form.model_tier,
     // Empty = whole catalog allowed (the server default).
     tools: form.limitTools ? form.tools : [],
+    preset_tools: form.preset_tools.map(presetToWire),
     max_tool_steps: form.max_tool_steps,
     requires: form.requires,
     produces: form.produces,
@@ -129,16 +151,23 @@ function stepProblems(step: number, form: FormState): string[] {
     if (form.description.length > 500) problems.push('Description is limited to 500 characters.')
   }
   if (step === 1) {
+    if (form.preset_tools.length > MAX_PRESET_TOOLS)
+      problems.push(`At most ${MAX_PRESET_TOOLS} preset queries are allowed.`)
+    form.preset_tools.forEach((draft, index) => {
+      problems.push(...presetProblems(draft, `Preset query ${index + 1}`))
+    })
+  }
+  if (step === 2) {
     if (form.system_prompt.trim() === '') problems.push('System prompt is required.')
     if (form.user_prompt_template.trim() === '') problems.push('User prompt template is required.')
   }
-  if (step === 2) {
+  if (step === 3) {
     if (form.limitTools && form.tools.length === 0)
       problems.push('Select at least one allowed tool, or switch back to allowing all tools.')
     if (form.max_tool_steps < 1 || form.max_tool_steps > 16)
       problems.push('Tool budget must be between 1 and 16 rounds.')
   }
-  if (step === 3) {
+  if (step === 4) {
     if (!SLUG_RE.test(form.produces))
       problems.push('Output key must be 3-64 lowercase letters, digits or underscores.')
     if (form.pipeline_order < 0 || form.pipeline_order > 1000)
@@ -193,6 +222,7 @@ export function CustomAgentWizardPage() {
       model_tier: agent.model_tier,
       limitTools: agent.tools.length > 0,
       tools: agent.tools,
+      preset_tools: agent.preset_tools.map(draftFromWire),
       max_tool_steps: agent.max_tool_steps,
       requires: agent.requires,
       produces: agent.produces,
@@ -295,14 +325,21 @@ export function CustomAgentWizardPage() {
       <Stepper step={step} onStep={setStep} form={form} />
 
       {step === 0 ? <BasicsStep form={form} update={update} /> : null}
-      {step === 1 ? <PromptsStep form={form} update={update} /> : null}
-      {step === 2 ? (
+      {step === 1 ? (
+        <PresetQueriesStep
+          presets={form.preset_tools}
+          onChange={(preset_tools) => update({ preset_tools })}
+          definitions={definitions}
+        />
+      ) : null}
+      {step === 2 ? <PromptsStep form={form} update={update} /> : null}
+      {step === 3 ? (
         <ToolsStep form={form} update={update} definitions={definitions} />
       ) : null}
-      {step === 3 ? (
+      {step === 4 ? (
         <BehaviorStep form={form} update={update} definitions={definitions} />
       ) : null}
-      {step === 4 ? (
+      {step === 5 ? (
         <TestStep
           form={form}
           result={testResult}
@@ -442,7 +479,12 @@ function BasicsStep({ form, update }: { form: FormState; update: (p: Partial<For
 }
 
 function PromptsStep({ form, update }: { form: FormState; update: (p: Partial<FormState>) => void }) {
-  const placeholders = [...BASE_PLACEHOLDERS, ...form.requires.map((key) => `{${key}}`)]
+  const hasPresets = form.preset_tools.length > 0
+  const placeholders = [
+    ...BASE_PLACEHOLDERS,
+    ...(hasPresets ? ['{tool_results}'] : []),
+    ...form.requires.map((key) => `{${key}}`),
+  ]
   return (
     <Card>
       <CardHeader>
@@ -473,10 +515,17 @@ function PromptsStep({ form, update }: { form: FormState; update: (p: Partial<Fo
             className="font-mono text-xs"
             onChange={(event) => update({ user_prompt_template: event.target.value })}
           />
-          {form.user_prompt_template.includes('{tool_results}') ? (
+          {form.user_prompt_template.includes('{tool_results}') && !hasPresets ? (
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              {'{tool_results}'} is a legacy placeholder and now renders empty — the agent calls
-              its data tools itself while reasoning, so the template no longer needs it.
+              {'{tool_results}'} renders empty because no preset queries are configured — add
+              some in the Preset queries step, or remove the placeholder (the agent calls its
+              data tools itself while reasoning).
+            </p>
+          ) : null}
+          {hasPresets && !form.user_prompt_template.includes('{tool_results}') ? (
+            <p className="text-xs text-muted-foreground">
+              Preset query results will be appended to the end of the prompt. Place{' '}
+              {'{tool_results}'} in the template to control where they appear.
             </p>
           ) : null}
         </div>
@@ -811,10 +860,19 @@ function TestStep({
               </h3>
               <JsonView data={result.parsed_output} />
             </section>
+            {result.preset_results.length > 0 ? (
+              <section className="space-y-1">
+                <h3 className="text-sm font-medium">
+                  Preset queries <Badge variant="secondary">{result.preset_results.length}</Badge>
+                </h3>
+                <JsonView data={result.preset_results} />
+              </section>
+            ) : null}
             {result.tool_results.length > 0 ? (
               <section className="space-y-1">
                 <h3 className="text-sm font-medium">
-                  Tool calls <Badge variant="secondary">{result.tool_results.length}</Badge>
+                  Agentic tool calls{' '}
+                  <Badge variant="secondary">{result.tool_results.length}</Badge>
                 </h3>
                 <JsonView data={result.tool_results} />
               </section>

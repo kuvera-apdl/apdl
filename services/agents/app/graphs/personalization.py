@@ -31,6 +31,12 @@ class PersonalizationAgent(BaseAgent):
 
     name = "personalization"
     description = "Generate server-driven UI configs for user segments."
+    # Parked: the config service has no /v1/admin/ui-configs endpoints, so
+    # every deploy 404s and nothing downstream consumes the output. Stays
+    # registered so 'personalizations' remains a valid produces key, but is
+    # hidden from listings and skipped by the supervisor until the delivery
+    # path (config storage + SSE/envelope + SDK) exists.
+    enabled = False
     order = 30
     system_prompt = PERSONALIZATION_SYSTEM
     model_tier = "fast"

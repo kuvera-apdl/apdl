@@ -61,7 +61,7 @@ function SafetyResult({ safety }: { safety: Record<string, unknown> }) {
   )
 }
 
-function AuditEntryRow({ entry }: { entry: RunAuditEntry }) {
+export function AuditEntryRow({ entry }: { entry: RunAuditEntry }) {
   const hasConfig = Object.keys(entry.config).length > 0
   const hasSafety = Object.keys(entry.safety_result).length > 0
   return (

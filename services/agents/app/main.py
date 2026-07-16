@@ -19,7 +19,16 @@ from app.store.custom_agents import (
     CUSTOM_AGENTS_INDEX_DDL,
     CUSTOM_AGENTS_MIGRATE_DDL,
 )
+from app.store.experiments import (
+    DESIGNED_EXPERIMENTS_DDL,
+    DESIGNED_EXPERIMENTS_INDEX_DDL,
+    DESIGNED_EXPERIMENTS_MIGRATE_DDL,
+)
 from app.store.proposals import FEATURE_PROPOSALS_DDL
+from app.store.verdicts import (
+    EXPERIMENT_VERDICTS_DDL,
+    EXPERIMENT_VERDICTS_INDEX_DDL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +135,11 @@ async def lifespan(application: FastAPI):
             );
         """)
         await conn.execute(FEATURE_PROPOSALS_DDL)
+        await conn.execute(DESIGNED_EXPERIMENTS_DDL)
+        await conn.execute(DESIGNED_EXPERIMENTS_INDEX_DDL)
+        await conn.execute(DESIGNED_EXPERIMENTS_MIGRATE_DDL)
+        await conn.execute(EXPERIMENT_VERDICTS_DDL)
+        await conn.execute(EXPERIMENT_VERDICTS_INDEX_DDL)
         await conn.execute(CUSTOM_AGENTS_DDL)
         await conn.execute(CUSTOM_AGENTS_INDEX_DDL)
         await conn.execute(CUSTOM_AGENTS_MIGRATE_DDL)

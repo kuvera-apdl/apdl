@@ -8,6 +8,7 @@ import type {
   approvalResponseSchema,
   customAgentSchema,
   customAgentSpecSchema,
+  presetToolCallSchema,
   runAuditEntrySchema,
   runAuditResponseSchema,
   runResultsSchema,
@@ -32,6 +33,7 @@ export type RunsListResponse = z.infer<typeof runsListResponseSchema>
 export type RunResults = z.infer<typeof runResultsSchema>
 export type RunAuditEntry = z.infer<typeof runAuditEntrySchema>
 export type RunAuditResponse = z.infer<typeof runAuditResponseSchema>
+export type PresetToolCall = z.infer<typeof presetToolCallSchema>
 export type CustomAgentSpec = z.infer<typeof customAgentSpecSchema>
 export type CustomAgent = z.infer<typeof customAgentSchema>
 export type AgentDefinition = z.infer<typeof agentDefinitionSchema>

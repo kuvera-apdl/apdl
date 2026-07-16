@@ -19,6 +19,7 @@ def _definition(**overrides: Any) -> dict[str, Any]:
         "user_prompt_template": "Analyse churn",
         "model_tier": "fast",
         "tools": ["discover_events", "query_events"],
+        "preset_tools": [{"tool": "discover_events", "params": {"limit": 50}}],
         "requires": [],
         "produces": "churn_signals",
         "memory_query": None,
@@ -117,13 +118,49 @@ async def test_create_serializes_jsonb_fields_as_strings():
 
     query, args = pool.conn.executed[0]
     assert "INSERT INTO custom_agents" in query
-    assert "$9::jsonb" in query and "$10::jsonb" in query
+    assert "$9::jsonb" in query and "$10::jsonb" in query and "$11::jsonb" in query
     # asyncpg needs JSON *strings* for ::jsonb parameters, never raw lists.
     tools_arg = args[8]  # $9::jsonb
-    requires_arg = args[9]  # $10::jsonb
-    assert isinstance(tools_arg, str) and isinstance(requires_arg, str)
+    preset_arg = args[9]  # $10::jsonb
+    requires_arg = args[10]  # $11::jsonb
+    assert isinstance(tools_arg, str) and isinstance(preset_arg, str)
+    assert isinstance(requires_arg, str)
     assert json.loads(tools_arg) == ["discover_events", "query_events"]
+    assert json.loads(preset_arg) == [{"tool": "discover_events", "params": {"limit": 50}}]
     assert json.loads(requires_arg) == []
+
+
+def test_row_to_dict_normalizes_preset_tools_defensively():
+    # Hand-edited or partially-written rows must not crash hydration; bogus
+    # entries drop, missing/garbage params degrade to {}.
+    row = _row(
+        preset_tools=json.dumps(
+            [
+                {"tool": "query_events", "params": {"selectors": []}},
+                {"tool": "list_flags"},
+                {"tool": "list_flags", "params": "not-a-dict"},
+                "bare_string",
+                {"bogus": 1},
+            ]
+        )
+    )
+    out = store._row_to_dict(row)
+    assert out["preset_tools"] == [
+        {"tool": "query_events", "params": {"selectors": []}},
+        {"tool": "list_flags", "params": {}},
+        {"tool": "list_flags", "params": {}},
+    ]
+
+
+def test_row_to_dict_defaults_missing_preset_tools_to_empty():
+    # Rows read before the migration ran (or mid-deploy) lack the column.
+    row = _row()
+    del row["preset_tools"]
+    assert store._row_to_dict(row)["preset_tools"] == []
+
+
+def test_migration_adds_preset_tools_column():
+    assert "ADD COLUMN IF NOT EXISTS preset_tools" in store.CUSTOM_AGENTS_MIGRATE_DDL
 
 
 @pytest.mark.asyncio

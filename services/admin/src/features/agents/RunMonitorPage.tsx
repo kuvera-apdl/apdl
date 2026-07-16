@@ -23,18 +23,20 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { ResultCard, ResultList } from '@/features/agents/ResultCards'
+import { AgentsInspectorSection } from '@/features/agents/AgentInspector'
 import { RunAuditSection } from '@/features/agents/RunAuditSection'
-import { loadTrackedRuns, updateTrackedRunStatus } from '@/features/agents/runHistory'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
 import { useNow } from '@/lib/hooks'
 import { parseServerDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
+// personalization is parked (disabled server-side), so it's not a pipeline
+// step. Historical runs that produced personalizations still show them in the
+// Outputs card below — this only drops the stepper node.
 const PIPELINE = [
   'initializing',
   'behavior_analysis',
   'experiment_design',
-  'personalization',
   'feature_proposal',
   'done',
 ] as const
@@ -310,12 +312,9 @@ export function RunMonitorPage() {
   })
   const results = resultsQuery.data ?? null
 
-  useEffect(() => {
-    if (active && run) updateTrackedRunStatus(active.id, run.run_id, run.status)
-  }, [active, run])
-
-  const tracked = active ? loadTrackedRuns(active.id).find((entry) => entry.run_id === runId) : null
-  const requested = tracked ? new Set<string>(tracked.analysis_types) : null
+  // The requested agents come from the run itself (server-side). An older
+  // backend omits them → null → the stepper shows all steps as generic.
+  const requested = run && run.analysis_types?.length ? new Set(run.analysis_types) : null
 
   if (statusQuery.isPending) {
     return (
@@ -372,7 +371,7 @@ export function RunMonitorPage() {
           <CardDescription>
             Phase: <code className="font-mono">{run.phase}</code>
             {requested === null
-              ? ' · requested agents unknown (run not triggered from this browser)'
+              ? ' · requested agents unknown (older agents service)'
               : ''}
           </CardDescription>
         </CardHeader>
@@ -380,6 +379,8 @@ export function RunMonitorPage() {
           <PhaseStepper run={run} requested={requested} />
         </CardContent>
       </Card>
+
+      <AgentsInspectorSection runId={runId} run={run} results={results} />
 
       {run.status === 'waiting_approval' ? (
         <ApprovalPanel

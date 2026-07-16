@@ -11,7 +11,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.framework.registry import is_registered
+from app.framework.registry import is_registered, registered_agents
 from app.graphs.supervisor import run_supervisor
 from app.store.custom_agents import fetch_active_by_slugs
 
@@ -32,7 +32,7 @@ class TriggerRequest(BaseModel):
         default_factory=lambda: ["behavior_analysis"],
         min_length=1,
         max_length=16,
-        description="Agent graphs to run: behavior_analysis, experiment_design, personalization, feature_proposal, code_implementation",
+        description="Agent graphs to run: behavior_analysis, experiment_design, experiment_evaluation, feature_proposal, code_implementation",
     )
     time_range_days: int = Field(default=7, ge=1, le=90)
     autonomy_level: int = Field(
@@ -40,6 +40,14 @@ class TriggerRequest(BaseModel):
         ge=1,
         le=4,
         description="L1=suggest only, L2=auto-safe, L3=auto+approve risky, L4=full auto",
+    )
+    target_experiment_id: str | None = Field(
+        default=None,
+        description=(
+            "Scope an experiment_evaluation run to one experiment (a human's "
+            "'evaluate now'); an immature experiment then gets an explicit "
+            "immature verdict instead of being skipped."
+        ),
     )
 
 
@@ -74,6 +82,23 @@ async def trigger_agent_run(
                 status_code=422,
                 detail=f"Unknown analysis_types: {still_unknown}",
             )
+
+    # Disabled built-ins are registered but not runnable (e.g. personalization
+    # while its delivery path doesn't exist) — reject like unknown names rather
+    # than accepting a run the supervisor would only skip through.
+    builtin = registered_agents()
+    disabled = sorted(
+        {
+            t
+            for t in body.analysis_types
+            if t in builtin and not getattr(builtin[t], "enabled", True)
+        }
+    )
+    if disabled:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Disabled analysis_types: {disabled}",
+        )
 
     # One pipeline per project at a time: concurrent runs duplicate LLM spend
     # and can deploy duplicate experiments from the same insight. (Runs parked
@@ -111,6 +136,11 @@ async def trigger_agent_run(
                 {
                     "analysis_types": body.analysis_types,
                     "time_range_days": body.time_range_days,
+                    **(
+                        {"target_experiment_id": body.target_experiment_id}
+                        if body.target_experiment_id
+                        else {}
+                    ),
                 }
             ),
         )
@@ -127,6 +157,7 @@ async def trigger_agent_run(
         analysis_types=body.analysis_types,
         time_range_days=body.time_range_days,
         autonomy_level=body.autonomy_level,
+        target_experiment_id=body.target_experiment_id,
     )
 
     return TriggerResponse(run_id=run_id, status="started")

@@ -143,7 +143,15 @@ async def _resolve_agents(
     agents: list[BaseAgent] = []
     for name in names:
         if is_registered(name):
-            agents.append(get_agent(name))
+            agent = get_agent(name)
+            if not getattr(agent, "enabled", True):
+                # Older run configs (schedules, resumes) may still name a
+                # since-disabled agent; skip it visibly instead of running it.
+                msg = f"Agent '{name}' is disabled — skipping."
+                logger.warning("[%s] %s", run_id, msg)
+                errors.append(msg)
+                continue
+            agents.append(agent)
         elif name in custom_defs:
             agents.append(CustomAgent(custom_defs[name]))
         else:
@@ -164,6 +172,7 @@ async def run_supervisor(
     autonomy_level: int,
     resume: bool = False,
     target_proposal_id: str | None = None,
+    target_experiment_id: str | None = None,
 ) -> None:
     """Execute the supervisor orchestration as a background task.
 
@@ -186,11 +195,13 @@ async def run_supervisor(
         autonomy_level=autonomy_level,
         time_range_days=time_range_days,
         target_proposal_id=target_proposal_id,
+        target_experiment_id=target_experiment_id,
     )
     state: dict[str, Any] = {
         "project_id": project_id,
         "insights": [],
         "experiment_designs": [],
+        "experiment_verdicts": [],
         "personalizations": [],
         "feature_proposals": [],
         "errors": [],

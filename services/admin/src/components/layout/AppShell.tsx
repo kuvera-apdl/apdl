@@ -5,19 +5,21 @@ import {
   Bot,
   Check,
   ChevronsUpDown,
+  Eye,
   Filter,
   Flag,
   FlaskConical,
+  Gavel,
   GitPullRequest,
   Grid3x3,
   LayoutDashboard,
+  Lightbulb,
   Monitor,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Puzzle,
   Settings,
-  Sparkles,
+  SlidersHorizontal,
   Sun,
   Users,
   type LucideIcon,
@@ -54,32 +56,32 @@ interface NavGroup {
   items: NavItem[]
 }
 
+// Purpose-centric IA (admin-console-purpose-ia.md): Overview, then Loop
+// (verbs — what you came to do), then Features (registries — where objects
+// live), Analytics, and System last.
 const NAV_GROUPS: NavGroup[] = [
   {
     label: null,
     items: [{ to: '/', label: 'Overview', icon: LayoutDashboard, isActive: (path) => path === '/' }],
   },
   {
-    label: 'Flags',
+    label: 'Loop',
+    items: [
+      { to: '/decide', label: 'Decide', icon: Gavel, isActive: (path) => path === '/decide' },
+      { to: '/watch', label: 'Watch', icon: Eye, isActive: (path) => path === '/watch' },
+      { to: '/learn', label: 'Learn', icon: Lightbulb, isActive: (path) => path === '/learn' },
+      { to: '/steer', label: 'Steer', icon: SlidersHorizontal, isActive: (path) => path === '/steer' },
+    ],
+  },
+  {
+    label: 'Features',
     items: [
       {
         to: '/flags',
         label: 'Feature flags',
         icon: Flag,
-        isActive: (path) =>
-          path === '/flags' || (path.startsWith('/flags/') && path !== '/flags/hygiene'),
+        isActive: (path) => path === '/flags' || path.startsWith('/flags/'),
       },
-      {
-        to: '/flags/hygiene',
-        label: 'Flag hygiene',
-        icon: Sparkles,
-        isActive: (path) => path === '/flags/hygiene',
-      },
-    ],
-  },
-  {
-    label: 'Experiments',
-    items: [
       {
         to: '/experiments',
         label: 'Experiments',
@@ -90,18 +92,11 @@ const NAV_GROUPS: NavGroup[] = [
         to: '/agents',
         label: 'Agent runs',
         icon: Bot,
-        isActive: (path) =>
-          (path === '/agents' || path.startsWith('/agents/')) && !path.startsWith('/agents/custom'),
-      },
-      {
-        to: '/agents/custom',
-        label: 'Custom agents',
-        icon: Puzzle,
-        isActive: (path) => path.startsWith('/agents/custom'),
+        isActive: (path) => path === '/agents' || path.startsWith('/agents/'),
       },
       {
         to: '/codegen',
-        label: 'Code changes',
+        label: 'Codegen',
         icon: GitPullRequest,
         isActive: (path) => path === '/codegen' || path.startsWith('/codegen/'),
       },
@@ -140,10 +135,10 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'System',
     items: [
       {
-        to: '/system/health',
-        label: 'System health',
-        icon: Activity,
-        isActive: (path) => path === '/system/health',
+        to: '/settings/workspace',
+        label: 'Workspace',
+        icon: Settings,
+        isActive: (path) => path === '/settings/workspace',
       },
       {
         to: '/settings/verify',
@@ -152,10 +147,10 @@ const NAV_GROUPS: NavGroup[] = [
         isActive: (path) => path === '/settings/verify',
       },
       {
-        to: '/settings/workspace',
-        label: 'Workspace',
-        icon: Settings,
-        isActive: (path) => path === '/settings/workspace',
+        to: '/system/health',
+        label: 'System health',
+        icon: Activity,
+        isActive: (path) => path === '/system/health',
       },
     ],
   },

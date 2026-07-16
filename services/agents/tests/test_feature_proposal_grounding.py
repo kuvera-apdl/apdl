@@ -70,7 +70,10 @@ def test_render_existing_work_empty():
 def test_build_prompt_carries_repo_context_and_existing_work():
     agent = FeatureProposalAgent()
     working = {
-        "experiment_results": [],
+        "ship_verdicts": [
+            {"id": 1, "experiment_id": "exp_cta", "reasoning": "significant win",
+             "results": {}, "durable_feature": "Make the sticky CTA permanent."},
+        ],
         "context": "",
         "repo_context": {
             "repo": "acme/widgets",
@@ -82,10 +85,19 @@ def test_build_prompt_carries_repo_context_and_existing_work():
         "changesets": [],
     }
 
-    prompt = agent.build_prompt(None, {"insights": []}, working)
+    prompt = agent.build_prompt(None, {}, working)
 
+    assert "exp_cta" in prompt
+    assert "Make the sticky CTA permanent." in prompt
     assert "Next.js (App Router)" in prompt
     assert "app/page.tsx" in prompt
     assert "- Bot filter (proposal, implemented)" in prompt
     # The old placeholder must never reach the model again.
     assert "(determined from project configuration)" not in prompt
+
+
+def test_build_prompt_none_without_winning_experiments():
+    # Phase 4: no ship verdict → no proposal, no LLM call. The product thesis
+    # (nothing ships without a winning experiment) made structural.
+    agent = FeatureProposalAgent()
+    assert agent.build_prompt(None, {}, {"ship_verdicts": []}) is None

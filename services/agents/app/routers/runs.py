@@ -16,7 +16,7 @@ import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from app.routers.status import RunStatus
+from app.routers.status import RUN_STATUS_COLUMNS, RunStatus, row_to_status
 from app.safety.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
@@ -54,19 +54,6 @@ class RunAuditResponse(BaseModel):
     count: int
 
 
-def _row_to_status(row: Any) -> RunStatus:
-    return RunStatus(
-        run_id=row["run_id"],
-        project_id=row["project_id"],
-        status=row["status"],
-        phase=row["phase"] or "initializing",
-        insights_count=row["insights_count"],
-        experiments_count=row["experiments_count"],
-        started_at=row["started_at"].isoformat(),
-        updated_at=row["updated_at"].isoformat(),
-    )
-
-
 @router.get("/runs", response_model=RunListResponse)
 async def list_runs(
     request: Request,
@@ -77,12 +64,7 @@ async def list_runs(
     """List agent runs for a project, newest first (gap G1)."""
     pool: asyncpg.Pool = request.app.state.pg_pool
 
-    base = """
-        SELECT run_id, project_id, status, phase, insights_count,
-               experiments_count, started_at, updated_at
-        FROM agent_runs
-        WHERE project_id = $1
-    """
+    base = f"SELECT {RUN_STATUS_COLUMNS} FROM agent_runs WHERE project_id = $1"
     async with pool.acquire() as conn:
         if status is not None:
             rows = await conn.fetch(
@@ -98,7 +80,7 @@ async def list_runs(
                 limit,
             )
 
-    runs = [_row_to_status(row) for row in rows]
+    runs = [row_to_status(row) for row in rows]
     return RunListResponse(runs=runs, count=len(runs))
 
 

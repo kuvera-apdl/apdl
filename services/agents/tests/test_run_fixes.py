@@ -32,24 +32,16 @@ def _ctx(**ov: Any) -> AgentContext:
 
 
 # ---------------------------------------------------------------------------
-# feature_proposal must not crash on an experiment with a null primary_metric
+# feature_proposal without a DB pool (tests, degraded runs) must degrade to
+# "no wins" instead of crashing — and then skip the LLM entirely.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_feature_proposal_handles_null_primary_metric(monkeypatch):
-    async def fake_active(**kwargs):
-        return [{"experiment_id": "e1", "primary_metric": None}]
-
-    async def fake_results(**kwargs):
-        return {}
-
-    monkeypatch.setattr(fp, "get_active_experiments", fake_active)
-    monkeypatch.setattr(fp, "get_experiment_results", fake_results)
-
-    out = await fp.FeatureProposalAgent().gather(_ctx(), {}, {})
-    # The null-metric experiment is skipped, not crashed on.
-    assert out["experiment_results"] == []
-    assert out["active_experiments"] == [{"experiment_id": "e1", "primary_metric": None}]
+async def test_feature_proposal_gather_degrades_without_pool():
+    agent = fp.FeatureProposalAgent()
+    out = await agent.gather(_ctx(), {}, {})
+    assert out == {"ship_verdicts": []}
+    assert agent.build_prompt(_ctx(), {}, out) is None
 
 
 # ---------------------------------------------------------------------------
