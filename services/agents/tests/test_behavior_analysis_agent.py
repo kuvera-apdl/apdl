@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from app.framework import tool_catalog, tool_loop
 from app.framework.tool_catalog import TOOL_CATALOG
+from app.framework.tool_loop import ToolLoopResult, ToolTraceEntry
 from app.graphs.behavior_analysis import BehaviorAnalysisAgent
 from app.llm.router import ToolCall, ToolCompletion
 
@@ -78,8 +80,28 @@ async def test_full_run_investigates_then_produces_insights(monkeypatch):
                     )
                 ]
             )
+        source_ids = [
+            json.loads(message["content"])["source_id"]
+            for message in messages
+            if message["role"] == "tool"
+        ]
         return ToolCompletion(
-            text='[{"title": "Signup drop", "confidence": "high", "impact": "high"}]'
+            text=json.dumps(
+                [
+                    {
+                        "title": "Signup drop",
+                        "description": "Most users leave between page and signup.",
+                        "evidence": {
+                            "summary": "The funnel fell from 100 page users to 20 signups.",
+                            "source_ids": source_ids,
+                        },
+                        "confidence": "high",
+                        "impact": "high",
+                        "recommended_action": "Test a shorter signup flow.",
+                        "action_type": "experiment",
+                    }
+                ]
+            )
         )
 
     monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
@@ -89,7 +111,8 @@ async def test_full_run_investigates_then_produces_insights(monkeypatch):
     result = await agent.run(_ctx(), {"insights": [], "errors": []})
 
     assert tool_calls_seen == ["discover_events", "query_funnel"]
-    assert result.output == [{"title": "Signup drop", "confidence": "high", "impact": "high"}]
+    assert result.output[0]["title"] == "Signup drop"
+    assert len(result.output[0]["evidence"]["source_ids"]) == 2
 
 
 @pytest.mark.asyncio
@@ -115,6 +138,37 @@ async def test_unparseable_investigation_yields_no_insights(monkeypatch):
     # Prose (no JSON) must degrade to zero insights, never a pseudo-insight
     # that would satisfy downstream requires=("insights",).
     assert result.output == []
+
+
+def test_grounded_insight_rejects_model_invented_source_id():
+    result = ToolLoopResult(
+        text=json.dumps(
+            [
+                {
+                    "title": "Suspicious result",
+                    "description": "A claim that is not tied to an observed query.",
+                    "evidence": {
+                        "summary": "The model invented this source.",
+                        "source_ids": ["warehouse:000000000000000000000000"],
+                    },
+                    "confidence": "high",
+                    "impact": "high",
+                    "recommended_action": "Do nothing automatically.",
+                    "action_type": "experiment",
+                }
+            ]
+        ),
+        trace=[
+            ToolTraceEntry(
+                tool="discover_events",
+                params={},
+                result='{"events":[{"event_name":"page"}]}',
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown warehouse source IDs"):
+        BehaviorAnalysisAgent().parse_agentic(result)
 
 
 @pytest.mark.asyncio

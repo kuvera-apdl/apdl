@@ -170,8 +170,10 @@ def test_build_prompt_renders_preset_results_into_placeholder():
         )
     ]
     prompt = agent.build_prompt(_ctx(), {}, {"context": "", "tool_results": trace})
-    assert '### discover_events {"limit": 50}' in prompt
-    assert '{"events": 3}' in prompt
+    assert "### discover_events" in prompt
+    assert '"schema":"warehouse_tool_result@1"' in prompt
+    assert '"params":{"limit":50}' in prompt
+    assert '"data":{"events":3}' in prompt
     assert "{tool_results}" not in prompt
 
 
@@ -183,7 +185,8 @@ def test_build_prompt_appends_preset_results_when_placeholder_missing():
     prompt = agent.build_prompt(_ctx(), {}, {"context": "", "tool_results": trace})
     assert prompt.startswith("Just analyse.")
     assert "## Preset data (gathered automatically)" in prompt
-    assert "### list_flags {}" in prompt
+    assert "### list_flags" in prompt
+    assert '"trust":"untrusted"' in prompt
 
 
 def test_preset_errors_render_as_error_blocks():
@@ -192,8 +195,8 @@ def test_preset_errors_render_as_error_blocks():
         ToolTraceEntry(tool="list_flags", params={}, result="[]"),
     ]
     rendered = render_preset_results(trace)
-    assert "ERROR: ValueError: bad" in rendered
-    assert "### list_flags {}\n[]" in rendered
+    assert '"error":"ValueError: bad"' in rendered
+    assert "### list_flags" in rendered
 
 
 async def _async_noop(*args: Any, **kwargs: Any) -> None:
