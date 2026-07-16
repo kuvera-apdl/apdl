@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock
 
+import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -77,6 +78,8 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "start_date": None,
         "end_date": None,
         "version": 3,
+        "creation_idempotency_key": None,
+        "creation_idempotency_request_sha256": None,
         "created_at": "2026-06-01T00:00:00+00:00",
         "updated_at": "2026-06-01T00:00:00+00:00",
     }
@@ -85,11 +88,15 @@ def make_experiment(overrides: dict | None = None) -> dict:
     return experiment
 
 
-async def _request(method: str, path: str, *, json_body=None, params=None):
+async def _request(
+    method: str, path: str, *, json_body=None, params=None, headers=None
+):
     app.state.pg_pool = object()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.request(method, path, json=json_body, params=params)
+        return await client.request(
+            method, path, json=json_body, params=params, headers=headers
+        )
 
 
 @pytest.mark.asyncio
@@ -321,6 +328,178 @@ async def test_create_experiment_delegates_one_bundle_and_omits_presence_value(
         "operator": "exists",
     }
     assert kwargs["actor"] == "credential:test-config"
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_persists_and_reuses_idempotency_key(monkeypatch):
+    key = "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"
+    command = AsyncMock(
+        return_value=(make_experiment({"version": 1}), make_flag())
+    )
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment_by_creation_idempotency_key",
+        lookup,
+    )
+    payload = {
+        "key": "checkout_exp",
+        "status": "draft",
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+    }
+
+    first = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        headers={"Idempotency-Key": key},
+        json_body=payload,
+    )
+
+    assert first.status_code == 201
+    assert command.await_args.kwargs["experiment"]["creation_idempotency_key"] == key
+    request_sha256 = command.await_args.kwargs["experiment"][
+        "creation_idempotency_request_sha256"
+    ]
+    assert len(request_sha256) == 64
+
+    lookup.return_value = make_experiment(
+        {
+            "version": 1,
+            "creation_idempotency_key": key,
+            "creation_idempotency_request_sha256": request_sha256,
+        }
+    )
+    retried = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        headers={"Idempotency-Key": key},
+        json_body=payload,
+    )
+    assert retried.status_code == 200
+    assert retried.json() == {
+        "created": True,
+        "key": "checkout_exp",
+        "flag_key": "checkout_exp",
+        "version": 1,
+    }
+    assert command.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_reconciles_a_concurrent_idempotent_insert(
+    monkeypatch,
+):
+    key = "test:experiment:concurrent"
+    payload = {
+        "key": "checkout_exp",
+        "status": "draft",
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+    }
+    request_sha256 = admin._experiment_creation_request_sha256(
+        "apdl",
+        admin.ExperimentCreate.model_validate(payload),
+    )
+    existing = make_experiment(
+        {
+            "version": 1,
+            "creation_idempotency_key": key,
+            "creation_idempotency_request_sha256": request_sha256,
+        }
+    )
+    lookup = AsyncMock(side_effect=[None, existing])
+    command = AsyncMock(side_effect=asyncpg.UniqueViolationError("duplicate"))
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment_by_creation_idempotency_key",
+        lookup,
+    )
+
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        headers={"Idempotency-Key": key},
+        json_body=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["key"] == "checkout_exp"
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_rejects_idempotency_key_reuse_for_changed_request(
+    monkeypatch,
+):
+    key = "test:experiment:create"
+    command = AsyncMock()
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment_by_creation_idempotency_key",
+        AsyncMock(
+            return_value=make_experiment(
+                {
+                    "creation_idempotency_key": key,
+                    "creation_idempotency_request_sha256": "0" * 64,
+                }
+            )
+        ),
+    )
+
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        headers={"Idempotency-Key": key},
+        json_body={
+            "key": "checkout_exp",
+            "status": "draft",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "idempotency_conflict"
+    command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_rejects_noncanonical_idempotency_key(monkeypatch):
+    command = AsyncMock()
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        headers={"Idempotency-Key": " contains whitespace"},
+        json_body={
+            "key": "checkout_exp",
+            "status": "draft",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        },
+    )
+    assert response.status_code == 422
+    command.assert_not_awaited()
 
 
 @pytest.mark.asyncio

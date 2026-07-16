@@ -460,9 +460,13 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         INSERT INTO experiments (
             key, project_id, status, description, flag_key, default_variant,
             variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
-            traffic_percentage, start_date, end_date
+            traffic_percentage, start_date, end_date, creation_idempotency_key,
+            creation_idempotency_request_sha256
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
+            $15
+        )
         RETURNING {pg_store.EXPERIMENT_COLUMNS}
         """,
         experiment["key"],
@@ -480,6 +484,8 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         experiment.get("traffic_percentage", 100.0),
         experiment.get("start_date"),
         experiment.get("end_date"),
+        experiment.get("creation_idempotency_key"),
+        experiment.get("creation_idempotency_request_sha256"),
     )
     return pg_store._row_to_experiment(row)
 

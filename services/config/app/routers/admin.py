@@ -1,7 +1,9 @@
 """Admin CRUD endpoints for flags and experiments."""
 
+import hashlib
 import json
 import logging
+import re
 import secrets
 from datetime import date, datetime, timezone
 
@@ -33,6 +35,36 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/admin")
 STALE_STATE_AGE_DAYS = 90
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+
+
+def _experiment_creation_request_sha256(
+    project_id: str,
+    body: ExperimentCreate,
+) -> str:
+    canonical = json.dumps(
+        {
+            "project_id": project_id,
+            "experiment": body.model_dump(mode="json"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _idempotent_experiment_response(existing: dict) -> JSONResponse:
+    return JSONResponse(
+        status_code=200,
+        content={
+            "created": True,
+            "key": existing["key"],
+            "flag_key": existing["flag_key"],
+            "version": existing["version"],
+        },
+    )
 
 
 
@@ -514,6 +546,40 @@ async def create_experiment(body: ExperimentCreate, request: Request):
     """
     project_id = authorized_project(request, "config:write")
 
+    idempotency_key = request.headers.get("Idempotency-Key")
+    if idempotency_key is not None and _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "invalid_idempotency_key",
+                "message": "Idempotency-Key must be a canonical 1 to 200 character key",
+            },
+        )
+
+    idempotency_request_sha256 = (
+        _experiment_creation_request_sha256(project_id, body)
+        if idempotency_key is not None
+        else None
+    )
+    if idempotency_key is not None:
+        existing = await pg_store.get_experiment_by_creation_idempotency_key(
+            request.app.state.pg_pool,
+            project_id,
+            idempotency_key,
+        )
+        if existing is not None:
+            if existing["creation_idempotency_request_sha256"] != idempotency_request_sha256:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "idempotency_conflict",
+                        "message": (
+                            "Idempotency-Key is bound to a different experiment request"
+                        ),
+                    },
+                )
+            return _idempotent_experiment_response(existing)
+
     actor = _actor(request)
 
     flag_key = body.flag_key or body.key
@@ -557,6 +623,8 @@ async def create_experiment(body: ExperimentCreate, request: Request):
         "traffic_percentage": body.traffic_percentage,
         "start_date": body.start_date,
         "end_date": body.end_date,
+        "creation_idempotency_key": idempotency_key,
+        "creation_idempotency_request_sha256": idempotency_request_sha256,
     }
     flag = {
         **flag_create.model_dump(mode="json", exclude_none=True),
@@ -571,6 +639,24 @@ async def create_experiment(body: ExperimentCreate, request: Request):
             actor=actor,
         )
     except asyncpg.UniqueViolationError:
+        if idempotency_key is not None:
+            existing = await pg_store.get_experiment_by_creation_idempotency_key(
+                request.app.state.pg_pool,
+                project_id,
+                idempotency_key,
+            )
+            if existing is not None:
+                if existing["creation_idempotency_request_sha256"] != idempotency_request_sha256:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "idempotency_conflict",
+                            "message": (
+                                "Idempotency-Key is bound to a different experiment request"
+                            ),
+                        },
+                    )
+                return _idempotent_experiment_response(existing)
         return JSONResponse(
             status_code=409,
             content={

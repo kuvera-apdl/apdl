@@ -22,7 +22,8 @@ FLAG_COLUMNS = """
 EXPERIMENT_COLUMNS = """
     key, project_id, status, description, flag_key, default_variant,
     variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
-    traffic_percentage, start_date, end_date, version, created_at, updated_at
+    traffic_percentage, start_date, end_date, version, creation_idempotency_key,
+    creation_idempotency_request_sha256, created_at, updated_at
 """
 
 
@@ -83,6 +84,10 @@ def _row_to_experiment(row) -> dict:
         "start_date": str(row["start_date"]) if row["start_date"] else None,
         "end_date": str(row["end_date"]) if row["end_date"] else None,
         "version": row["version"],
+        "creation_idempotency_key": row.get("creation_idempotency_key"),
+        "creation_idempotency_request_sha256": row.get(
+            "creation_idempotency_request_sha256"
+        ),
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
     }
@@ -221,3 +226,15 @@ async def get_experiment(pool, project_id: str, key: str) -> dict | None:
     if row is None:
         return None
     return _row_to_experiment(row)
+
+
+async def get_experiment_by_creation_idempotency_key(
+    pool, project_id: str, idempotency_key: str
+) -> dict | None:
+    """Fetch the canonical result of a retried experiment-create command."""
+    sql = (
+        f"SELECT {EXPERIMENT_COLUMNS} FROM experiments "
+        "WHERE project_id = $1 AND creation_idempotency_key = $2"
+    )
+    row = await pool.fetchrow(sql, project_id, idempotency_key)
+    return _row_to_experiment(row) if row is not None else None
