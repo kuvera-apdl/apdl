@@ -1,2 +1,2 @@
 redis>=5.0.0
-clickhouse-driver>=0.2.9
+clickhouse-driver>=0.2.10
