@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import threading
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import clickhouse_writer as writer_module
 import pytest
@@ -81,6 +83,7 @@ class FakeRedis:
         self.fail_transaction_after_commit = False
         self.pipeline_transactions: list[bool] = []
         self.transaction_attempts: list[tuple] = []
+        self.closed = False
 
     def pipeline(self, *, transaction):
         self.pipeline_transactions.append(transaction)
@@ -142,16 +145,23 @@ class FakeRedis:
             return self.claim_responses.pop(0)
         return ["0-0", [], []]
 
+    async def aclose(self):
+        self.closed = True
+
 
 class FakeClickHouse:
     def __init__(self, *, fail=False):
         self.fail = fail
         self.inserts: list[list[dict]] = []
+        self.disconnected = False
 
     def execute(self, _query, rows, **_kwargs):
         self.inserts.append(rows)
         if self.fail:
             raise RuntimeError("clickhouse unavailable")
+
+    def disconnect(self):
+        self.disconnected = True
 
 
 def make_writer(
@@ -214,6 +224,169 @@ def finalize_commands(message_ids=("1-0",), stream_key="events:raw:demo"):
         ("xack", stream_key, "clickhouse-writer", message_ids),
         ("xdel", stream_key, message_ids),
     )
+
+
+async def wait_for_thread_event(event: threading.Event) -> None:
+    deadline = asyncio.get_running_loop().time() + 1.0
+    while not event.is_set():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("worker thread did not start")
+        await asyncio.sleep(0)
+
+
+def test_clickhouse_driver_receives_explicit_process_timeouts(monkeypatch):
+    redis_client = FakeRedis()
+    ch_client = FakeClickHouse()
+    captured_urls = []
+    monkeypatch.setattr(
+        writer_module.redis, "from_url", lambda *_args, **_kwargs: redis_client
+    )
+    monkeypatch.setattr(
+        writer_module.ClickHouseClient,
+        "from_url",
+        lambda url: captured_urls.append(url) or ch_client,
+    )
+
+    writer = ClickHouseWriter(
+        "redis://test",
+        "clickhouse://test/apdl?connect_timeout=999&compression=true",
+        clickhouse_connect_timeout=1.5,
+        clickhouse_send_receive_timeout=12.0,
+        clickhouse_sync_request_timeout=2.5,
+    )
+    query = parse_qs(urlsplit(captured_urls[0]).query)
+
+    assert query == {
+        "compression": ["true"],
+        "connect_timeout": ["1.5"],
+        "send_receive_timeout": ["12.0"],
+        "sync_request_timeout": ["2.5"],
+    }
+    asyncio.run(writer.stop())
+
+
+def test_slow_clickhouse_insert_does_not_block_event_loop(monkeypatch):
+    class SlowClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, query, rows, **kwargs):
+            self.started.set()
+            assert self.release.wait(timeout=1.0)
+            super().execute(query, rows, **kwargs)
+
+        def disconnect(self):
+            self.release.set()
+            super().disconnect()
+
+    async def scenario():
+        ch_client = SlowClickHouse()
+        writer, _, _ = make_writer(monkeypatch, ch_client=ch_client)
+        writer.buffer.append(buffered_event())
+
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.started)
+
+        loop_progressed = False
+
+        async def mark_progress():
+            nonlocal loop_progressed
+            await asyncio.sleep(0)
+            loop_progressed = True
+
+        await asyncio.wait_for(mark_progress(), timeout=0.1)
+        assert loop_progressed is True
+
+        ch_client.release.set()
+        assert await flush_task is True
+        await writer.stop()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_flush_observes_original_insert_before_retrying(monkeypatch):
+    class SlowClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, query, rows, **kwargs):
+            self.started.set()
+            assert self.release.wait(timeout=1.0)
+            super().execute(query, rows, **kwargs)
+
+        def disconnect(self):
+            self.release.set()
+            super().disconnect()
+
+    async def scenario():
+        ch_client = SlowClickHouse()
+        writer, redis_client, _ = make_writer(monkeypatch, ch_client=ch_client)
+        writer.buffer.append(buffered_event())
+
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.started)
+        flush_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        assert writer.buffer == [buffered_event()]
+        assert redis_client.acks == []
+
+        ch_client.release.set()
+        assert await writer._flush() is True
+        assert len(ch_client.inserts) == 1
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
+        ]
+        await writer.stop()
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_aborts_slow_insert_and_leaves_delivery_pending(monkeypatch):
+    class AbortableSlowClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def execute(self, _query, rows, **_kwargs):
+            self.inserts.append(rows)
+            self.started.set()
+            assert self.release.wait(timeout=1.0)
+            raise RuntimeError("insert aborted")
+
+        def disconnect(self):
+            self.disconnected = True
+            self.release.set()
+
+    async def scenario():
+        ch_client = AbortableSlowClickHouse()
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            ch_client=ch_client,
+            shutdown_timeout=0.01,
+        )
+        writer.buffer.append(buffered_event())
+
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.started)
+        started_at = asyncio.get_running_loop().time()
+        await writer.stop()
+        elapsed = asyncio.get_running_loop().time() - started_at
+
+        assert elapsed < 0.2
+        assert ch_client.disconnected is True
+        assert redis_client.closed is True
+        assert redis_client.acks == []
+        assert writer.buffer == [buffered_event()]
+        assert await asyncio.wait_for(flush_task, timeout=0.2) is False
+
+    asyncio.run(scenario())
 
 
 def test_ack_and_delete_only_after_clickhouse_insert_succeeds(monkeypatch):

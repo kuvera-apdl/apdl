@@ -23,10 +23,12 @@ covered by the runtime support contract.
 ## ClickHouse writer
 
 `redis/clickhouse_writer.py` is a single-file async consumer
-(deps: `redis`, `clickhouse-driver`). It reads from every `events:raw:*`
-stream — discovered via `SCAN`, or pinned with `PROJECT_IDS` — using the
-`clickhouse-writer` consumer group (consumer name `worker-{pid}`) and
-batch-inserts into the `events` table.
+(deps: `redis`, `clickhouse-driver`). The synchronous ClickHouse driver is
+isolated in one dedicated worker thread, so inserts cannot block Redis reads,
+pending claims, monitoring, or signal handling on the asyncio loop. It reads
+from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
+`PROJECT_IDS` — using the `clickhouse-writer` consumer group (consumer name
+`worker-{pid}`) and batch-inserts into the `events` table.
 
 - **Batching:** rotates fairly across streams and reads one tenant at a time so
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
@@ -60,7 +62,11 @@ batch-inserts into the `events` table.
   backoff shared by the consumer and periodic flusher; events are not dropped
   after an arbitrary retry count. Only narrow client-side row serialization
   errors are terminal—server/schema failures retain the batch.
-- **Shutdown:** SIGINT/SIGTERM trigger a final flush and stats log.
+- **Shutdown:** SIGINT/SIGTERM trigger a bounded final flush and stats log.
+  Cancellation never marks a still-running synchronous insert as complete. If
+  the shutdown deadline expires, the writer closes the native ClickHouse socket
+  and leaves the Redis deliveries pending for replay instead of ACKing an
+  unobserved insert result.
 
 The deletion contract permits any number of consumers in the one required
 `clickhouse-writer` group, but no second durable consumer group. Adding another
@@ -93,11 +99,17 @@ bounded producers. Mixed old/new producers are unsupported because one legacy
 producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
-`CLICKHOUSE_URL` (default `clickhouse://localhost:9000/apdl`), `BUFFER_SIZE`,
+`CLICKHOUSE_NATIVE_URL` (default
+`clickhouse://apdl:apdl_dev@localhost:9000/apdl`), `BUFFER_SIZE`,
 `FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),
 `PENDING_CLAIM_IDLE_MS` (default 60000),
-`PENDING_CLAIM_INTERVAL_SECONDS` (default 30), and `PROJECT_IDS` (optional
-comma-separated allowlist).
+`PENDING_CLAIM_INTERVAL_SECONDS` (default 30),
+`CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` (default 5),
+`CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` (default 30),
+`CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS` (default 5),
+`SHUTDOWN_TIMEOUT_SECONDS` (default 10), and `PROJECT_IDS` (optional
+comma-separated allowlist). The writer owns the three native-driver timeout
+query parameters and replaces conflicting values embedded in the URL.
 
 ## ClickHouse schema
 

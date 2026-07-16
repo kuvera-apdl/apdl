@@ -19,9 +19,11 @@ import os
 import re
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import redis.asyncio as redis
 from clickhouse_driver import Client as ClickHouseClient
@@ -38,6 +40,10 @@ FLUSH_RETRY_BASE_SECONDS = 1.0
 FLUSH_RETRY_MAX_SECONDS = 30.0
 PENDING_CLAIM_IDLE_MS = 60_000
 PENDING_CLAIM_INTERVAL_SECONDS = 30.0
+CLICKHOUSE_CONNECT_TIMEOUT_SECONDS = 5.0
+CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS = 30.0
+CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS = 5.0
+SHUTDOWN_TIMEOUT_SECONDS = 10.0
 EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
@@ -106,6 +112,14 @@ class InsertOutcome:
     transient_error: Exception | None = None
 
 
+@dataclass(frozen=True)
+class InFlightInsert:
+    """The one synchronous insert currently owned by the DB executor."""
+
+    batch: tuple[BufferedEvent, ...]
+    future: asyncio.Future[None]
+
+
 class ClickHouseWriter:
     """Consumes events from Redis Streams and writes to ClickHouse in batches."""
 
@@ -118,13 +132,41 @@ class ClickHouseWriter:
         dlq_maxlen: int = DEFAULT_DLQ_MAXLEN,
         pending_claim_idle_ms: int = PENDING_CLAIM_IDLE_MS,
         pending_claim_interval: float = PENDING_CLAIM_INTERVAL_SECONDS,
+        clickhouse_connect_timeout: float = CLICKHOUSE_CONNECT_TIMEOUT_SECONDS,
+        clickhouse_send_receive_timeout: float = (
+            CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
+        ),
+        clickhouse_sync_request_timeout: float = (
+            CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS
+        ),
+        shutdown_timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
     ):
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive")
         if dlq_maxlen <= 0:
             raise ValueError("dlq_maxlen must be positive")
+        for name, value in (
+            ("clickhouse_connect_timeout", clickhouse_connect_timeout),
+            ("clickhouse_send_receive_timeout", clickhouse_send_receive_timeout),
+            ("clickhouse_sync_request_timeout", clickhouse_sync_request_timeout),
+            ("shutdown_timeout", shutdown_timeout),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
-        self.ch_client = ClickHouseClient.from_url(clickhouse_url)
+        self.ch_client = ClickHouseClient.from_url(
+            self._clickhouse_url_with_timeouts(
+                clickhouse_url,
+                connect_timeout=clickhouse_connect_timeout,
+                send_receive_timeout=clickhouse_send_receive_timeout,
+                sync_request_timeout=clickhouse_sync_request_timeout,
+            )
+        )
+        self._db_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="clickhouse-writer-db",
+        )
+        self._inflight_insert: InFlightInsert | None = None
         self.buffer: list[BufferedEvent] = []
         self._durable_pending_ack: dict[str, list[str]] = {}
         self.buffer_size = buffer_size
@@ -132,7 +174,9 @@ class ClickHouseWriter:
         self.dlq_maxlen = dlq_maxlen
         self.pending_claim_idle_ms = pending_claim_idle_ms
         self.pending_claim_interval = pending_claim_interval
+        self.shutdown_timeout = shutdown_timeout
         self.running = False
+        self._closed = False
         self.last_flush = time.monotonic()
         self._last_pending_claim = 0.0
         self.consumer_name = f"worker-{os.getpid()}"
@@ -147,6 +191,7 @@ class ClickHouseWriter:
         self._flush_retry_count = 0
         self._next_flush_retry_at = 0.0
         self._flush_lock = asyncio.Lock()
+        self._stop_lock = asyncio.Lock()
         self._new_stream_cursor = 0
         self._pending_stream_cursor = 0
         self._known_stream_keys: set[str] = set()
@@ -196,15 +241,82 @@ class ClickHouseWriter:
                 self._monitor_loop(project_ids),
             )
         except asyncio.CancelledError:
-            logger.info("Tasks cancelled, performing final flush")
-            await self._flush()
+            logger.info("Writer task cancelled, starting bounded shutdown")
+            await self.stop()
+            raise
 
     async def stop(self):
-        """Graceful shutdown."""
-        self.running = False
-        await self._flush()
-        await self.redis_client.aclose()
-        logger.info("ClickHouseWriter stopped. Stats: %s", self.stats)
+        """Stop consumption and give the final insert a bounded grace period.
+
+        A synchronous driver call cannot be cancelled safely once its worker
+        thread has entered the socket operation. The coroutine cancellation is
+        therefore detached from the insert itself: unobserved inserts remain
+        buffered and unacknowledged. If the shutdown deadline expires, closing
+        the ClickHouse socket interrupts the driver within its configured I/O
+        timeout while Redis deliveries stay pending for replay.
+        """
+        async with self._stop_lock:
+            if self._closed:
+                return
+
+            self.running = False
+            try:
+                await asyncio.wait_for(
+                    self._flush(),
+                    timeout=self.shutdown_timeout,
+                )
+            except TimeoutError:
+                self.stats["errors"] += 1
+                logger.error(
+                    "ClickHouse final flush exceeded %.1fs; aborting the database "
+                    "connection and leaving deliveries pending",
+                    self.shutdown_timeout,
+                )
+                self._disconnect_clickhouse()
+            except asyncio.CancelledError:
+                self._disconnect_clickhouse()
+                raise
+            finally:
+                self._disconnect_clickhouse()
+                await self.redis_client.aclose()
+                self._db_executor.shutdown(wait=False, cancel_futures=True)
+                self._closed = True
+
+            logger.info("ClickHouseWriter stopped. Stats: %s", self.stats)
+
+    @staticmethod
+    def _clickhouse_url_with_timeouts(
+        clickhouse_url: str,
+        *,
+        connect_timeout: float,
+        send_receive_timeout: float,
+        sync_request_timeout: float,
+    ) -> str:
+        """Return a driver URL with process-owned timeout values."""
+        parsed = urlsplit(clickhouse_url)
+        timeout_names = {
+            "connect_timeout",
+            "send_receive_timeout",
+            "sync_request_timeout",
+        }
+        query = [
+            (name, value)
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if name not in timeout_names
+        ]
+        query.extend([
+            ("connect_timeout", str(connect_timeout)),
+            ("send_receive_timeout", str(send_receive_timeout)),
+            ("sync_request_timeout", str(sync_request_timeout)),
+        ])
+        return urlunsplit(parsed._replace(query=urlencode(query)))
+
+    def _disconnect_clickhouse(self) -> None:
+        """Close the native socket so an in-flight blocking call can unwind."""
+        try:
+            self.ch_client.disconnect()
+        except Exception as exc:
+            logger.warning("ClickHouse disconnect failed during shutdown: %s", exc)
 
     async def _discover_streams(self) -> list[str]:
         """Discover all event streams using SCAN with pattern matching.
@@ -940,10 +1052,47 @@ class ClickHouseWriter:
             types_check=True,
         )
 
+    async def _execute_insert_async(self, batch: list[BufferedEvent]) -> None:
+        """Run the synchronous native driver in one bounded worker thread.
+
+        ``asyncio.shield`` prevents coroutine cancellation from pretending the
+        socket operation was cancelled. The in-flight batch is retained so a
+        later flush observes the same result instead of submitting a duplicate
+        insert while the original call is still running.
+        """
+        batch_key = tuple(batch)
+        inflight = self._inflight_insert
+        if inflight is None:
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                self._db_executor,
+                self._execute_insert,
+                batch,
+            )
+            inflight = InFlightInsert(batch=batch_key, future=future)
+            self._inflight_insert = inflight
+        elif inflight.batch != batch_key:
+            raise RuntimeError(
+                "A different ClickHouse batch was submitted while an insert "
+                "was still in flight"
+            )
+
+        try:
+            await asyncio.shield(inflight.future)
+        except asyncio.CancelledError:
+            # The worker thread is still running. Keep the future so the next
+            # flush can observe its real success/failure without double-write.
+            raise
+        except Exception:
+            self._inflight_insert = None
+            raise
+        else:
+            self._inflight_insert = None
+
     async def _insert_or_isolate(self, batch: list[BufferedEvent]) -> InsertOutcome:
         """Insert valid subsets and DLQ only proven singleton row failures."""
         try:
-            self._execute_insert(batch)
+            await self._execute_insert_async(batch)
             return InsertOutcome(durable=batch, retry=[])
         except Exception as exc:
             if not self._is_terminal_insert_error(exc):
@@ -1393,6 +1542,30 @@ async def main():
             str(PENDING_CLAIM_INTERVAL_SECONDS),
         )
     )
+    clickhouse_connect_timeout = float(
+        os.environ.get(
+            "CLICKHOUSE_CONNECT_TIMEOUT_SECONDS",
+            str(CLICKHOUSE_CONNECT_TIMEOUT_SECONDS),
+        )
+    )
+    clickhouse_send_receive_timeout = float(
+        os.environ.get(
+            "CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS",
+            str(CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS),
+        )
+    )
+    clickhouse_sync_request_timeout = float(
+        os.environ.get(
+            "CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS",
+            str(CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS),
+        )
+    )
+    shutdown_timeout = float(
+        os.environ.get(
+            "SHUTDOWN_TIMEOUT_SECONDS",
+            str(SHUTDOWN_TIMEOUT_SECONDS),
+        )
+    )
 
     # Optional: comma-separated list of project IDs to consume
     project_ids_env = os.environ.get("PROJECT_IDS", "")
@@ -1410,13 +1583,20 @@ async def main():
         dlq_maxlen=dlq_maxlen,
         pending_claim_idle_ms=pending_claim_idle_ms,
         pending_claim_interval=pending_claim_interval,
+        clickhouse_connect_timeout=clickhouse_connect_timeout,
+        clickhouse_send_receive_timeout=clickhouse_send_receive_timeout,
+        clickhouse_sync_request_timeout=clickhouse_sync_request_timeout,
+        shutdown_timeout=shutdown_timeout,
     )
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(writer.stop()))
 
-    await writer.start(project_ids)
+    try:
+        await writer.start(project_ids)
+    finally:
+        await writer.stop()
 
 
 if __name__ == "__main__":
