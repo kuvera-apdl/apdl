@@ -15,14 +15,14 @@ from typing import Any
 
 from app.framework import (
     AgentContext,
+    AgentResult,
     BaseAgent,
     GateDecision,
     gate_action,
     register_agent,
 )
 from app.safety.validator import ActionType, AgentAction, SafetyValidator
-from app.store.proposals import claim_proposals, mark_failed, mark_implemented
-from app.tools.code import open_changeset
+from app.store.proposals import claim_proposals, mark_failed
 
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
@@ -120,48 +120,35 @@ class CodeImplementationAgent(BaseAgent):
             "safety_result": safety,
         }
 
-        if decision is not GateDecision.deploy:
-            # Suggest-only (L1) or awaiting approval (L2). A safety halt is a
-            # genuine failure; an approval hold leaves the proposal claimed
-            # ('implementing') so the approval handler opens its PR on approval
-            # (Phase 6, see routers/approvals.py).
-            if decision is GateDecision.halt and not safety.get("passed", False):
-                await self._safe_fail(ctx, proposal_id, "Failed safety validation.")
-            return result
-
-        try:
-            changeset = await open_changeset(
-                project_id=ctx.project_id,
-                title=title,
-                spec=spec,
-                run_id=ctx.run_id,
-                context={"proposal_id": proposal_id},
-                constraints=["All existing tests must pass."],
-            )
-            result["changeset_id"] = changeset.get("changeset_id", "")
-            result["status"] = changeset.get("status", "")
-        except Exception as exc:
-            logger.error("Failed to open changeset for %s: %s", proposal_id, exc)
-            result["error"] = str(exc)
-            await self._safe_fail(ctx, proposal_id, str(exc))
-            return result
-
-        # The PR is open at this point — a bookkeeping failure must not mark
-        # the proposal 'failed' with a live PR attached (a state that lies and
-        # that no future sweep could distinguish from a real failure).
-        try:
-            await mark_implemented(
-                ctx.pool,
-                ctx.project_id,
-                proposal_id,
-                result["changeset_id"],
-                ctx.run_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "PR opened for %s but could not mark it implemented: %s", proposal_id, exc
-            )
+        # ``always_require_approval`` makes deploy unreachable by contract.
+        # The persisted gate item is the only plan; the approval outbox worker
+        # is the sole caller of Codegen.
+        if decision is GateDecision.deploy:
+            raise RuntimeError("code implementation bypassed its mandatory approval gate")
         return result
+
+    async def after_result_persisted(
+        self,
+        ctx: AgentContext,
+        state: dict[str, Any],
+        result: AgentResult,
+    ) -> None:
+        """Terminalize safety-halted claims only after their result is durable."""
+        await super().after_result_persisted(ctx, state, result)
+        if not isinstance(result.output, list):
+            return
+        for changeset in result.output:
+            if not isinstance(changeset, dict):
+                continue
+            if changeset.get("decision") != GateDecision.halt.value:
+                continue
+            safety = changeset.get("safety_result")
+            if isinstance(safety, dict) and safety.get("passed") is False:
+                await self._safe_fail(
+                    ctx,
+                    str(changeset.get("proposal_id") or ""),
+                    "Failed safety validation.",
+                )
 
     @staticmethod
     async def _safe_fail(ctx: AgentContext, proposal_id: str, error: str) -> None:

@@ -271,10 +271,10 @@ async def test_dry_run_validates_requires_but_skips_only_produces_uniqueness(
 async def test_zero_tool_dry_run_uses_the_same_plain_completion_path_as_real_runs(
     monkeypatch
 ):
-    calls: list[tuple[str, list[dict[str, str]]]] = []
+    calls: list[tuple[str, list[dict[str, str]], Any]] = []
 
     async def plain_completion(*, model_tier, messages, **kwargs):
-        calls.append((model_tier, messages))
+        calls.append((model_tier, messages, kwargs["context"]))
         return '[{"signal": "plain"}]'
 
     async def forbidden_loop(*args, **kwargs):
@@ -293,6 +293,9 @@ async def test_zero_tool_dry_run_uses_the_same_plain_completion_path_as_real_run
     assert response.json()["parsed_output"] == [{"signal": "plain"}]
     assert response.json()["tool_results"] == []
     assert calls[0][0] == "fast"
+    assert calls[0][2].execution_kind == "custom_agent_test"
+    assert calls[0][2].purpose == "custom_agent_test.churn_watch.reason"
+    assert calls[0][2].data_classification == "confidential"
     assert [message["role"] for message in calls[0][1]] == ["system", "user"]
 
 

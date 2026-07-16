@@ -19,6 +19,11 @@ from pydantic import BaseModel
 from app.auth import require_project, require_role
 from app.routers.status import RUN_STATUS_COLUMNS, RunStatus, row_to_status
 from app.safety.audit import AuditLogger
+from app.store.run_leases import (
+    RunCancellationConflictError,
+    RunCancellationNotFoundError,
+    cancel_run,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -53,6 +58,12 @@ class RunAuditResponse(BaseModel):
     run_id: str
     audit: list[dict[str, Any]]
     count: int
+
+
+class RunCancellationResponse(BaseModel):
+    run_id: str
+    previous_status: str
+    status: str
 
 
 @router.get("/runs", response_model=RunListResponse)
@@ -95,6 +106,30 @@ async def _require_run(pool: asyncpg.Pool, run_id: str, project_id: str) -> None
         )
     if exists is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+
+@router.post("/{run_id}/cancel", response_model=RunCancellationResponse)
+async def cancel_agent_run(run_id: str, request: Request) -> RunCancellationResponse:
+    """Cancel a live or approval-gated run and fence all later effects."""
+    principal = require_role(request, "agents:run")
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    try:
+        result = await cancel_run(
+            pool,
+            run_id=run_id,
+            project_id=principal.project_id,
+            actor_credential_id=principal.credential_id,
+            actor_user_id=principal.actor_user_id,
+        )
+    except RunCancellationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RunCancellationConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RunCancellationResponse(
+        run_id=result.run_id,
+        previous_status=result.previous_status,
+        status=result.status,
+    )
 
 
 @router.get("/{run_id}/results", response_model=RunResults)

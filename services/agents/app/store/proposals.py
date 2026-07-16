@@ -173,8 +173,9 @@ async def claim_proposals(
     abandoned by that run. When
     ``proposal_id`` is given, claim only that proposal (one PR per approved
     proposal); the ``status='approved'`` guard still applies, so an
-    already-claimed proposal yields an empty (no-op) claim rather than a
-    duplicate build.
+    proposal already claimed by this same run is returned again so crash
+    recovery can reconstruct its approval gate. Another run's claim remains
+    excluded.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -183,24 +184,35 @@ async def claim_proposals(
                     """
                     SELECT proposal_id, title, spec, priority
                     FROM feature_proposals
-                    WHERE project_id = $1 AND status = 'approved' AND proposal_id = $2
+                    WHERE project_id = $1
+                      AND proposal_id = $2
+                      AND (
+                          status = 'approved'
+                          OR (status = 'implementing' AND claim_run_id = $3)
+                      )
                     FOR UPDATE SKIP LOCKED
                     """,
                     project_id,
                     proposal_id,
+                    run_id,
                 )
             else:
                 rows = await conn.fetch(
                     """
                     SELECT proposal_id, title, spec, priority
                     FROM feature_proposals
-                    WHERE project_id = $1 AND status = 'approved'
+                    WHERE project_id = $1
+                      AND (
+                          status = 'approved'
+                          OR (status = 'implementing' AND claim_run_id = $3)
+                      )
                     ORDER BY created_at
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                     """,
                     project_id,
                     limit,
+                    run_id,
                 )
             claimed = [dict(r) for r in rows]
             if claimed:

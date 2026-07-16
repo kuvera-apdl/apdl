@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 from urllib.parse import quote
 
@@ -23,6 +24,7 @@ _STATISTICAL_PLAN_FIELDS = {
     "required_sample_size_per_arm",
     "data_settlement_seconds",
 }
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 
 
 async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
@@ -178,6 +180,7 @@ def _strict_statistical_plan(plan: Any) -> dict[str, Any]:
 
 async def create_experiment_draft(
     project_id: str,
+    idempotency_key: str,
     experiment_id: str,
     hypothesis: str,
     variants: list[dict[str, Any]],
@@ -212,6 +215,8 @@ async def create_experiment_draft(
     Returns:
         The created experiment configuration.
     """
+    if _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+        raise ValueError("idempotency_key must be a canonical 1 to 200 character key")
     if not isinstance(primary_metric, dict) or not primary_metric.get("event"):
         raise ValueError("primary_metric.event is required for an experiment draft")
     if primary_metric.get("type", "conversion") != "conversion":
@@ -254,7 +259,10 @@ async def create_experiment_draft(
     async with httpx.AsyncClient(
         base_url=CONFIG_SERVICE_URL,
         timeout=_TIMEOUT,
-        headers=service_headers(project_id),
+        headers={
+            **service_headers(project_id),
+            "Idempotency-Key": idempotency_key,
+        },
     ) as client:
         resp = await client.post(
             "/v1/admin/experiments",

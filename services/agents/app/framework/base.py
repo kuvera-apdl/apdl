@@ -2,8 +2,12 @@
 
 Every agent in this codebase runs the same lifecycle:
 
-    retrieve_context  ->  gather  ->  build_prompt  ->  reason  ->  act  ->  persist
-    (vector memory)       (tools)     (LLM input)      (LLM)       (deploy) (memory)
+    retrieve_context -> gather -> build_prompt -> reason -> act (pure plan)
+
+The supervisor then persists the result before invoking
+``after_result_persisted`` for best-effort memory/ledger bookkeeping. External
+mutations are never performed by this template; they are durable outbox
+effects consumed by a separate worker.
 
 ``BaseAgent`` implements that skeleton once in :meth:`run` and exposes the
 varying parts as overridable hooks. Cross-cutting concerns — memory retrieval
@@ -137,11 +141,12 @@ class BaseAgent(ABC):
         working: dict[str, Any],
         output: Any,
     ) -> dict[str, Any]:
-        """Optional side effects (safety validation + deployment).
+        """Build action/gate metadata without external mutation.
 
         ``working`` exposes everything :meth:`gather` collected (tool data,
-        retrieved ``context``). Returns metadata recorded in the audit log and
-        run status (e.g. ``{"deployed": True, "safety_result": {...}}``).
+        retrieved ``context``). Returns metadata that is durably persisted by
+        the supervisor. Any requested mutation must be represented in that
+        output and later materialized through a durable outbox.
         """
         return {}
 
@@ -195,13 +200,21 @@ class BaseAgent(ABC):
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": prompt},
                 ],
+                context=ctx.llm_request(
+                    purpose=f"agent.{self.name}.reason",
+                    data_classification="confidential",
+                ),
             )
             output = self.parse(response)
 
         working[self.produces] = output
         action = await self.act(ctx, state, working, output)
-        await self.persist(ctx, state, working, output, action)
-        return AgentResult(output=self.finalize(output, action), metadata=action)
+        entries = tuple(self.memory_entries(ctx, state, working, output, action))
+        return AgentResult(
+            output=self.finalize(output, action),
+            metadata=action,
+            memory_entries=entries,
+        )
 
     # --- framework-provided helpers -----------------------------------------
 
@@ -220,16 +233,14 @@ class BaseAgent(ABC):
             logger.warning("[%s] context retrieval failed: %s", self.name, exc)
             return ""
 
-    async def persist(
+    async def after_result_persisted(
         self,
         ctx: AgentContext,
         state: dict[str, Any],
-        working: dict[str, Any],
-        output: Any,
-        action: dict[str, Any],
+        result: AgentResult,
     ) -> None:
-        """Store any memory entries the agent produced."""
-        for entry in self.memory_entries(ctx, state, working, output, action):
+        """Run non-authoritative bookkeeping after the durable result exists."""
+        for entry in result.memory_entries:
             try:
                 await ctx.vector_store.store(
                     project_id=ctx.project_id,

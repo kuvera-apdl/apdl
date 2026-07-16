@@ -152,7 +152,10 @@ async def test_openai_forced_text_keeps_tools_and_disables_new_calls():
         async def create(self, **kwargs):
             self.kwargs = kwargs
             message = SimpleNamespace(content="final answer", tool_calls=[])
-            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
+            )
 
     completions = Completions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -169,6 +172,7 @@ async def test_openai_forced_text_keeps_tools_and_disables_new_calls():
     assert completions.kwargs is not None
     assert completions.kwargs["tools"][0]["function"]["name"] == "discover_events"
     assert completions.kwargs["tool_choice"] == "none"
+    assert (result.input_tokens, result.output_tokens) == (12, 3)
 
 
 @pytest.mark.asyncio
@@ -179,7 +183,13 @@ async def test_anthropic_forced_text_keeps_tools_for_historical_tool_blocks():
         async def create(self, **kwargs):
             self.kwargs = kwargs
             return SimpleNamespace(
-                content=[SimpleNamespace(type="text", text="final answer")]
+                content=[SimpleNamespace(type="text", text="final answer")],
+                usage=SimpleNamespace(
+                    input_tokens=14,
+                    cache_creation_input_tokens=2,
+                    cache_read_input_tokens=3,
+                    output_tokens=4,
+                ),
             )
 
     messages_api = Messages()
@@ -197,6 +207,7 @@ async def test_anthropic_forced_text_keeps_tools_for_historical_tool_blocks():
     assert messages_api.kwargs is not None
     assert messages_api.kwargs["tools"][0]["name"] == "discover_events"
     assert messages_api.kwargs["tool_choice"] == {"type": "none"}
+    assert (result.input_tokens, result.output_tokens) == (19, 4)
 
 
 @pytest.mark.asyncio
@@ -206,7 +217,15 @@ async def test_google_forced_text_keeps_tools_and_disables_new_calls():
 
         async def generate_content(self, *, model, contents, config):
             self.config = config
-            return SimpleNamespace(candidates=[])
+            return SimpleNamespace(
+                candidates=[],
+                usage_metadata=SimpleNamespace(
+                    prompt_token_count=16,
+                    tool_use_prompt_token_count=2,
+                    candidates_token_count=5,
+                    thoughts_token_count=3,
+                ),
+            )
 
     models = Models()
     client = SimpleNamespace(aio=SimpleNamespace(models=models))
@@ -219,7 +238,7 @@ async def test_google_forced_text_keeps_tools_and_disables_new_calls():
         force_text=True,
     )
 
-    assert result == router.ToolCompletion()
+    assert result == router.ToolCompletion(input_tokens=18, output_tokens=8)
     assert models.config.tools is not None
     assert (
         models.config.tool_config.function_calling_config.mode

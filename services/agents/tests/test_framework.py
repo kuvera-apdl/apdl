@@ -47,7 +47,7 @@ def make_ctx(vector_store: FakeVectorStore | None = None, **overrides: Any) -> A
         vector_store=vector_store or FakeVectorStore(),
         audit=None,  # unused by BaseAgent.run
         run_id=overrides.get("run_id", "run-1"),
-        project_id=overrides.get("project_id", "proj-1"),
+        project_id=overrides.get("project_id", "proj1"),
         autonomy_level=overrides.get("autonomy_level", 2),
         time_range_days=overrides.get("time_range_days", 7),
     )
@@ -159,6 +159,7 @@ async def test_lifecycle_runs_all_phases(monkeypatch):
         calls["tier"] = model_tier
         calls["system"] = messages[0]["content"]
         calls["user"] = messages[1]["content"]
+        calls["context"] = kwargs["context"]
         return '[{"title": "found"}]'
 
     monkeypatch.setattr("app.framework.base.chat_completion", fake_completion)
@@ -186,14 +187,20 @@ async def test_lifecycle_runs_all_phases(monkeypatch):
     store = FakeVectorStore(memories=[{"content": "ctx0"}])
     ctx = make_ctx(store)
 
-    result = await SampleAgent().run(ctx, {})
+    agent = SampleAgent()
+    result = await agent.run(ctx, {})
 
     assert result.output == [{"title": "found"}]
     assert result.metadata == {"deployed": True, "count": 1}
     assert calls["tier"] == "fast"
     assert calls["system"] == "SYS"
     assert "ctx0!" in calls["user"]              # context retrieved + gathered
-    assert store.stored == [("proj-1", "remember", {"type": "sample"})]
+    assert calls["context"].project_id == "proj1"
+    assert calls["context"].purpose == "agent.sample_test_agent.reason"
+    assert calls["context"].data_classification == "confidential"
+    assert store.stored == []
+    await agent.after_result_persisted(ctx, {}, result)
+    assert store.stored == [("proj1", "remember", {"type": "sample"})]
 
 
 @pytest.mark.asyncio

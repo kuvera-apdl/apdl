@@ -49,9 +49,12 @@ async def test_staging_uses_single_config_owned_draft_path(monkeypatch):
         },
     }
 
-    drafted = await experiment_design.stage_experiment_draft("apdl", experiment)
+    drafted = await experiment_design.stage_experiment_draft(
+        "apdl", experiment, idempotency_key="command:effect"
+    )
 
-    assert drafted is True
+    assert drafted is None
+    assert captured["experiment"]["idempotency_key"] == "command:effect"
     # Exactly one creation path, carrying the canonical link + variants.
     assert captured["experiment"]["experiment_id"] == "exp_checkout"
     assert captured["experiment"]["flag_key"] == "exp_checkout"

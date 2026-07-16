@@ -11,6 +11,7 @@ VALID_STATISTICAL_PLAN = {
     "required_sample_size_per_arm": 20,
     "data_settlement_seconds": 300,
 }
+IDEMPOTENCY_KEY = "command:effect"
 
 
 @pytest.mark.asyncio
@@ -109,7 +110,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
-            pass
+            captured["headers"] = kwargs["headers"]
 
         async def __aenter__(self):
             return self
@@ -127,6 +128,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
 
     result = await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_checkout",
         hypothesis="Checkout changes should improve conversion.",
         variants=[
@@ -142,6 +144,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
     assert result == {"created": True, "key": "exp_checkout"}
     assert captured["path"] == "/v1/admin/experiments"
     assert captured["params"] == {"project_id": "apdl"}
+    assert captured["headers"]["Idempotency-Key"] == IDEMPOTENCY_KEY
     payload = captured["json"]
     assert payload == {
         "key": "exp_checkout",
@@ -202,6 +205,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
     with pytest.raises(ValueError, match="requires exactly"):
         await experiments.create_experiment_draft(
             project_id="apdl",
+            idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
             hypothesis="h",
             variants=[
@@ -226,6 +230,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
     with pytest.raises(ValueError, match="unsupported targeting operator"):
         await experiments.create_experiment_draft(
             project_id="apdl",
+            idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
             hypothesis="h",
             variants=[
@@ -249,6 +254,7 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
 
     await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_x",
         hypothesis="h",
         variants=[{"key": "control", "weight": 50}, {"key": "treatment", "weight": 50}],
@@ -279,6 +285,7 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
 
     await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_y",
         hypothesis="h",
         variants=[{"key": "control", "weight": 1}, {"key": "treatment", "weight": 1}],
@@ -296,6 +303,7 @@ async def test_experiment_draft_requires_primary_metric(monkeypatch):
     _capture_post(monkeypatch)
     common = {
         "project_id": "apdl",
+        "idempotency_key": IDEMPOTENCY_KEY,
         "experiment_id": "exp_y",
         "hypothesis": "h",
         "variants": [

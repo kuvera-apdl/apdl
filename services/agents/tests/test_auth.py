@@ -54,6 +54,7 @@ def credential_row(**overrides):
         "roles": ["query:read", "events:write"],
         "active": True,
         "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        "actor_user_id": None,
         "self_registered_project": False,
     }
     row.update(overrides)
@@ -70,6 +71,7 @@ async def test_authentication_derives_authority_from_stored_record():
     assert principal.credential_id == "credential-1"
     assert principal.roles == frozenset({"query:read", "events:write"})
     assert principal.self_registered_project is False
+    assert principal.actor_user_id is None
     query, args = pool.connection.calls[0]
     assert "JOIN admin_projects AS project" in query
     assert "project.created_by IS NOT NULL" in query
@@ -87,6 +89,17 @@ async def test_authentication_marks_self_registered_project_from_project_row():
     assert principal.self_registered_project is True
     with pytest.raises(FrozenInstanceError):
         principal.self_registered_project = False
+
+
+@pytest.mark.asyncio
+async def test_authentication_preserves_ephemeral_human_actor_identity():
+    actor_user_id = "20000000-0000-4000-8000-000000000002"
+    principal = await PostgresAuthenticator(
+        FakePool(credential_row(actor_user_id=actor_user_id))
+    ).authenticate(API_KEY)
+
+    assert principal is not None
+    assert principal.actor_user_id == actor_user_id
 
 
 def _request_for(principal: Principal):

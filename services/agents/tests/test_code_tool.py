@@ -23,6 +23,7 @@ async def test_open_changeset_posts_task(monkeypatch):
         project_id="demo",
         title="Add dark mode",
         spec="Implement a dark-mode toggle.",
+        idempotency_key="agent-effect:command-1:changeset-1",
         run_id="run-1",
         constraints=["keeps tests green"],
     )
@@ -31,9 +32,50 @@ async def test_open_changeset_posts_task(monkeypatch):
     assert captured["project_id"] == "demo"
     assert captured["path"] == "/v1/changesets"
     assert captured["payload"]["project_id"] == "demo"
+    assert (
+        captured["payload"]["idempotency_key"]
+        == "agent-effect:command-1:changeset-1"
+    )
     assert captured["payload"]["run_id"] == "run-1"
     assert captured["payload"]["task"]["title"] == "Add dark mode"
     assert captured["payload"]["task"]["constraints"] == ["keeps tests green"]
+
+
+@pytest.mark.parametrize(
+    "idempotency_key",
+    ["", "contains whitespace", "-starts-with-punctuation", "x" * 201],
+)
+@pytest.mark.asyncio
+async def test_open_changeset_rejects_noncanonical_idempotency_key(
+    monkeypatch, idempotency_key
+):
+    async def unexpected_post(*_args, **_kwargs):
+        raise AssertionError("invalid identity must be rejected before egress")
+
+    monkeypatch.setattr(code, "_post", unexpected_post)
+
+    with pytest.raises(ValueError, match="idempotency_key"):
+        await code.open_changeset(
+            project_id="demo",
+            title="Add dark mode",
+            spec="Implement a dark-mode toggle.",
+            idempotency_key=idempotency_key,
+        )
+
+
+def test_derived_changeset_key_is_stable_and_bounded():
+    first = code.derive_changeset_idempotency_key(
+        "experiment-treatment", "run-1", "experiment with arbitrary identity"
+    )
+    second = code.derive_changeset_idempotency_key(
+        "experiment-treatment", "run-1", "experiment with arbitrary identity"
+    )
+
+    assert first == second
+    assert len(first) <= 200
+    assert first != code.derive_changeset_idempotency_key(
+        "experiment-treatment", "run-2", "experiment with arbitrary identity"
+    )
 
 
 @pytest.mark.asyncio

@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from app.framework import AgentContext
+from app.framework import AgentContext, AgentResult
 from app.graphs import experiment_design
 from app.graphs.experiment_design import ExperimentDesignAgent
-from app.routers.approvals import _experiment_stageable
+from app.store.approval_effects import _experiment_stageable
 from app.store.experiments import insight_key
 
 
@@ -139,7 +139,7 @@ async def test_act_mixed_outcomes_halted_design_never_deploys(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_act_records_gate_outcome_in_ledger(monkeypatch):
+async def test_post_persist_hook_records_gate_outcome_in_ledger(monkeypatch):
     agent = ExperimentDesignAgent()
     recorded: list[tuple[str, str]] = []
 
@@ -152,8 +152,15 @@ async def test_act_records_gate_outcome_in_ledger(monkeypatch):
     monkeypatch.setattr(agent, "_safety_check", fake_safety)
     monkeypatch.setattr(experiment_design, "record_designed_experiment", fake_record)
     output = [_design("exp_wait"), _design("exp_halt")]
-    await agent.act(make_ctx(autonomy_level=2, pool=object()), {}, {}, output)
+    ctx = make_ctx(autonomy_level=2, pool=object())
+    metadata = await agent.act(ctx, {}, {}, output)
 
+    assert recorded == []
+    await agent.after_result_persisted(
+        ctx,
+        {},
+        AgentResult(output=output, metadata=metadata),
+    )
     assert recorded == [("exp_wait", "awaiting_approval"), ("exp_halt", "halted")]
 
 
@@ -162,14 +169,19 @@ async def test_act_records_gate_outcome_in_ledger(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_experiment_stageable_legacy_item_without_decision():
-    assert _experiment_stageable({"experiment_id": "exp_old"}) is True
+def test_experiment_stageable_rejects_legacy_item_without_gate_evidence():
+    assert _experiment_stageable({"experiment_id": "exp_old"}) is False
 
 
 def test_experiment_stageable_rejects_halted_and_nonapproval_items():
     assert _experiment_stageable({"decision": "halt"}) is False
     assert _experiment_stageable({"decision": "deploy"}) is False
-    assert _experiment_stageable({"decision": "approve"}) is True
+    assert _experiment_stageable({"decision": "approve"}) is False
+
+
+def test_experiment_stageable_requires_approval_and_passed_safety():
+    item = {"decision": "approve", "safety_result": {"passed": True}}
+    assert _experiment_stageable(item) is True
 
 
 def test_experiment_stageable_rejects_failed_safety():

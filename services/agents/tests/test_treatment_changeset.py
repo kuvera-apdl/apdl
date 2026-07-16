@@ -100,10 +100,17 @@ async def test_open_returns_changeset_id_and_links_ledger(monkeypatch):
     monkeypatch.setattr(experiment_design, "open_changeset", fake_open_changeset)
     monkeypatch.setattr(experiment_design, "link_changeset", fake_link)
 
-    changeset_id = await open_treatment_changeset(object(), "apdl", "run-1", _design())
+    changeset_id = await open_treatment_changeset(
+        object(),
+        "apdl",
+        "run-1",
+        _design(),
+        idempotency_key="command:effect",
+    )
 
     assert changeset_id == "cs-1"
     assert captured["project_id"] == "apdl" and captured["run_id"] == "run-1"
+    assert captured["idempotency_key"] == "command:effect"
     assert captured["context"] == {
         "experiment_id": "exp_cta",
         "flag_key": "exp_cta",
@@ -118,7 +125,16 @@ async def test_open_skips_config_only_design(monkeypatch):
         raise AssertionError("must not open a changeset for a config-only design")
 
     monkeypatch.setattr(experiment_design, "open_changeset", fail_open)
-    assert await open_treatment_changeset(None, "apdl", "run-1", _design(treatment_spec="")) == ""
+    assert (
+        await open_treatment_changeset(
+            None,
+            "apdl",
+            "run-1",
+            _design(treatment_spec=""),
+            idempotency_key="command:effect",
+        )
+        == ""
+    )
 
 
 # ---------------------------------------------------------------------------

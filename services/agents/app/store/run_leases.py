@@ -1,13 +1,14 @@
-"""Replica-safe ownership and recovery for in-process agent runs.
+"""Replica-safe ownership and requeueing for durable agent runs.
 
-Supervisors execute as FastAPI background tasks, so a process crash abandons
-the task. A lease makes that abandonment observable without treating every run
-owned by another healthy replica as dead when this replica starts.
+Every replica dispatches ownerless PostgreSQL queue rows. A lease makes a
+process crash observable without treating work owned by another healthy
+replica as dead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -35,10 +36,25 @@ class RunLeaseLostError(RuntimeError):
     """Raised when a supervisor no longer owns its run."""
 
 
+class RunCancellationNotFoundError(LookupError):
+    """Raised when the requested tenant-scoped run does not exist."""
+
+
+class RunCancellationConflictError(RuntimeError):
+    """Raised when a completed run cannot truthfully become cancelled."""
+
+
 @dataclass(frozen=True)
 class RecoveryResult:
-    abandoned_run_ids: tuple[str, ...]
+    requeued_run_ids: tuple[str, ...]
     reopened_proposal_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RunCancellationResult:
+    run_id: str
+    previous_status: str
+    status: str = "cancelled"
 
 
 def new_lease_owner_id() -> str:
@@ -143,6 +159,138 @@ async def handoff_run_to_queue(
             lease_seconds,
         )
     return queued is not None
+
+
+async def cancel_run(
+    pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    project_id: str,
+    actor_credential_id: str,
+    actor_user_id: str | None = None,
+) -> RunCancellationResult:
+    """Atomically cancel live work, its queued effects, and its proposal claims.
+
+    Provider requests already past the egress boundary cannot be recalled, so
+    processing approval effects are recorded as manual-intervention outcomes.
+    Clearing the run lease immediately fences every later governed LLM egress;
+    the supervisor's lease monitor then cancels its local task.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT status, phase
+                FROM agent_runs
+                WHERE run_id = $1 AND project_id = $2
+                FOR UPDATE
+                """,
+                run_id,
+                project_id,
+            )
+            if row is None:
+                raise RunCancellationNotFoundError(f"Run {run_id} not found")
+
+            previous_status = str(row["status"])
+            if previous_status == "cancelled":
+                return RunCancellationResult(run_id, previous_status)
+            phase = str(row["phase"] or "")
+            cancellable = previous_status in {
+                "started",
+                "running",
+                "waiting_approval",
+                "approval_queued",
+            } or (phase == "resuming" and previous_status in {"approved", "rejected"})
+            if not cancellable:
+                raise RunCancellationConflictError(
+                    f"Run {run_id} is already terminal with status {previous_status}"
+                )
+
+            await conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = 'cancelled', phase = 'cancelled',
+                    lease_owner_id = NULL, lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE run_id = $1 AND project_id = $2
+                """,
+                run_id,
+                project_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_approval_effects AS effect
+                SET status = 'manual_intervention',
+                    last_error = 'Owning run was cancelled; external outcome may be unknown',
+                    lease_owner_id = NULL, lease_expires_at = NULL,
+                    completed_at = now(), updated_at = now()
+                FROM agent_approval_commands AS command
+                WHERE effect.command_id = command.command_id
+                  AND command.run_id = $1 AND command.project_id = $2
+                  AND effect.status IN (
+                      'queued', 'processing', 'retryable_failed'
+                  )
+                """,
+                run_id,
+                project_id,
+            )
+            await conn.execute(
+                """
+                UPDATE agent_approval_commands
+                SET status = 'manual_intervention',
+                    last_error = 'Owning run was cancelled',
+                    completed_at = now(), updated_at = now()
+                WHERE run_id = $1 AND project_id = $2
+                  AND status IN ('queued', 'processing')
+                """,
+                run_id,
+                project_id,
+            )
+            await conn.execute(
+                """
+                UPDATE feature_proposals
+                SET status = 'approved', claim_run_id = NULL,
+                    error = NULL, updated_at = now()
+                WHERE project_id = $2 AND claim_run_id = $1
+                  AND status = 'implementing'
+                """,
+                run_id,
+                project_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO agent_audit_log (
+                    run_id, action_type, config, safety_result, approval_status,
+                    idempotency_key
+                )
+                VALUES (
+                    $1, 'run_cancelled', $2::jsonb, $3::jsonb, 'cancelled', $4
+                )
+                ON CONFLICT (run_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL
+                DO NOTHING
+                """,
+                run_id,
+                json.dumps(
+                    {
+                        "actor_credential_id": actor_credential_id,
+                        "actor_user_id": actor_user_id,
+                        "previous_status": previous_status,
+                        "previous_phase": phase,
+                    },
+                    sort_keys=True,
+                ),
+                json.dumps(
+                    {
+                        "passed": True,
+                        "checks": ["operator_requested_cancellation"],
+                    },
+                    sort_keys=True,
+                ),
+                f"run-cancelled:{run_id}",
+            )
+
+    return RunCancellationResult(run_id, previous_status)
 
 
 async def maintain_run_lease(
@@ -273,34 +421,33 @@ async def run_while_lease_owned(
         await asyncio.gather(work_task, lost_task, return_exceptions=True)
 
 
-async def recover_abandoned_runs(
+async def requeue_expired_runs(
     pool: asyncpg.Pool,
     *,
     legacy_stale_seconds: int = LEGACY_RUN_STALE_SECONDS,
     recovery_grace_seconds: int = RUN_RECOVERY_GRACE_SECONDS,
     legacy_proposal_stale_seconds: int = LEGACY_PROPOSAL_STALE_SECONDS,
 ) -> RecoveryResult:
-    """Fail only expired active runs and reopen only their claimed proposals.
+    """Clear expired ownership while preserving resumable run state.
 
-    Rows created by lease-aware builds explicitly carry ``lease_expires_at``
-    even before their task claims them, so a process that dies between INSERT
-    and task start is recovered after the normal lease window plus grace. The
-    column deliberately has no database default: an older replica running
-    during a rolling upgrade must continue to insert NULL, which selects the
-    conservative 24-hour legacy path instead of pretending it can heartbeat.
+    Status, phase, and persisted results remain unchanged for active runs. An
+    ownerless row is immediately visible to every replica's dispatcher, whose
+    supervisor resumes completed phases from ``agent_run_results``. Claims
+    owned by terminal runs are reopened; live and approval-gated claims remain
+    untouched. Legacy owners without an expiry use the conservative 24-hour
+    cutoff.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
                 """
                 UPDATE agent_runs
-                SET status = 'failed',
-                    phase = 'orphaned',
-                    lease_owner_id = NULL,
+                SET lease_owner_id = NULL,
                     lease_expires_at = NULL,
                     updated_at = now()
                 WHERE (status IN ('started', 'running')
                        OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
+                  AND lease_owner_id IS NOT NULL
                   AND (
                       (lease_expires_at IS NOT NULL
                        AND lease_expires_at <= now() - ($2 * interval '1 second'))
@@ -314,24 +461,36 @@ async def recover_abandoned_runs(
                 legacy_stale_seconds,
                 recovery_grace_seconds,
             )
-            abandoned = tuple(str(row["run_id"]) for row in rows)
+            requeued = tuple(str(row["run_id"]) for row in rows)
 
             reopened_ids: list[str] = []
-            if abandoned:
-                proposal_rows = await conn.fetch(
-                    """
-                    UPDATE feature_proposals
-                    SET status = 'approved',
-                        claim_run_id = NULL,
-                        error = NULL,
-                        updated_at = now()
-                    WHERE status = 'implementing'
-                      AND claim_run_id = ANY($1::text[])
-                    RETURNING proposal_id
-                    """,
-                    list(abandoned),
-                )
-                reopened_ids.extend(str(row["proposal_id"]) for row in proposal_rows)
+
+            # A run can terminate after claiming a proposal but before the
+            # proposal reaches its own terminal state.  Such a claim has no
+            # live supervisor left to resume it, so return only those exact
+            # run-owned rows to the approved queue.  Do not infer abandonment
+            # from age: waiting-approval and live runs may legitimately retain
+            # a claim indefinitely.
+            terminal_claim_rows = await conn.fetch(
+                """
+                UPDATE feature_proposals AS proposal
+                SET status = 'approved',
+                    claim_run_id = NULL,
+                    error = NULL,
+                    updated_at = now()
+                FROM agent_runs AS claim_run
+                WHERE proposal.status = 'implementing'
+                  AND proposal.claim_run_id = claim_run.run_id
+                  AND proposal.project_id = claim_run.project_id
+                  AND claim_run.status IN (
+                      'completed', 'completed_with_errors', 'failed', 'cancelled'
+                  )
+                RETURNING proposal.proposal_id
+                """
+            )
+            reopened_ids.extend(
+                str(row["proposal_id"]) for row in terminal_claim_rows
+            )
 
             # Rolling upgrades can leave pre-claim_run_id rows permanently in
             # implementing. Reopen only old NULL claims, and only when the
@@ -368,16 +527,16 @@ async def recover_abandoned_runs(
 
             reopened = tuple(dict.fromkeys(reopened_ids))
 
-    return RecoveryResult(abandoned, reopened)
+    return RecoveryResult(requeued, reopened)
 
 
-async def reap_abandoned_runs_forever(
+async def requeue_expired_runs_forever(
     pool: asyncpg.Pool,
     stop: asyncio.Event,
     *,
     interval_seconds: int = RUN_REAPER_SECONDS,
 ) -> None:
-    """Periodically reconcile expired leases; safe to run on every replica."""
+    """Periodically requeue expired leases; safe on every replica."""
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
@@ -386,12 +545,12 @@ async def reap_abandoned_runs_forever(
             pass
 
         try:
-            result = await recover_abandoned_runs(pool)
-            if result.abandoned_run_ids or result.reopened_proposal_ids:
+            result = await requeue_expired_runs(pool)
+            if result.requeued_run_ids or result.reopened_proposal_ids:
                 logger.warning(
-                    "Lease recovery marked %d abandoned run(s) failed and reopened %d proposal(s)",
-                    len(result.abandoned_run_ids),
+                    "Lease recovery requeued %d run(s) and reopened %d proposal claim(s)",
+                    len(result.requeued_run_ids),
                     len(result.reopened_proposal_ids),
                 )
         except Exception:
-            logger.exception("Agent run lease recovery failed")
+            logger.exception("Agent run lease requeue failed")

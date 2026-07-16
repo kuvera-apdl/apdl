@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from app.graphs import supervisor
+from app.graphs.experiment_design import ExperimentDesignAgent
 
 
 class _FakeConn:
@@ -57,6 +58,11 @@ class _GatingAgent:
         )
 
 
+class _InvalidExperimentAgent(_GatingAgent):
+    async def run(self, ctx: Any, state: dict) -> Any:
+        ExperimentDesignAgent().parse('[{"experiment_id":"exp_x","unknown":true}]')
+
+
 @pytest.mark.asyncio
 async def test_supervisor_halts_at_approval_gate(monkeypatch) -> None:
     agent = _GatingAgent()
@@ -79,3 +85,25 @@ async def test_supervisor_halts_at_approval_gate(monkeypatch) -> None:
     # Once gated, the run must not be completed by the supervisor.
     assert "completed" not in statuses
     assert "completed_with_errors" not in statuses
+
+
+@pytest.mark.asyncio
+async def test_invalid_experiment_output_uses_supervisor_error_path(monkeypatch) -> None:
+    agent = _InvalidExperimentAgent()
+    monkeypatch.setattr(supervisor, "is_registered", lambda name: True)
+    monkeypatch.setattr(supervisor, "get_agent", lambda name: agent)
+
+    pool = _FakePool()
+    await supervisor.run_supervisor(
+        pool=pool,
+        vector_store=object(),
+        run_id="run-1",
+        project_id="demo",
+        analysis_types=["experiment_design"],
+        time_range_days=7,
+        autonomy_level=4,
+    )
+
+    statuses = [args[1] for (query, args) in pool.conn.executed if "UPDATE agent_runs" in query]
+    assert "completed_with_errors" in statuses
+    assert "waiting_approval" not in statuses

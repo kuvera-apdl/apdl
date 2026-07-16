@@ -24,7 +24,7 @@ def _make_ctx(level: int = 3) -> AgentContext:
     )
 
 
-def _patch(monkeypatch, proposals, *, open_result=None):
+def _patch(monkeypatch, proposals):
     calls: dict[str, list] = {"opened": [], "implemented": [], "failed": [], "claimed": []}
 
     async def fake_claim(pool, project_id, run_id, limit=5, proposal_id=None):
@@ -35,21 +35,10 @@ def _patch(monkeypatch, proposals, *, open_result=None):
             return [p for p in proposals if p.get("proposal_id") == proposal_id]
         return list(proposals)
 
-    async def fake_open(**kwargs):
-        calls["opened"].append(kwargs)
-        return open_result or {"changeset_id": "cs_1", "status": "queued"}
-
-    async def fake_implemented(pool, project_id, proposal_id, changeset_id, run_id):
-        calls["implemented"].append(
-            (project_id, proposal_id, changeset_id, run_id)
-        )
-
     async def fake_failed(pool, project_id, proposal_id, error, run_id):
         calls["failed"].append((project_id, proposal_id, error, run_id))
 
     monkeypatch.setattr(code_implementation, "claim_proposals", fake_claim)
-    monkeypatch.setattr(code_implementation, "open_changeset", fake_open)
-    monkeypatch.setattr(code_implementation, "mark_implemented", fake_implemented)
     monkeypatch.setattr(code_implementation, "mark_failed", fake_failed)
     return calls
 
@@ -96,11 +85,15 @@ async def test_bad_spec_fails_safety_and_marks_failed(monkeypatch):
         monkeypatch, [{"proposal_id": "p2", "title": "x", "spec": "short"}]
     )
 
-    result = await CodeImplementationAgent().run(_make_ctx(3), {})
+    ctx = _make_ctx(3)
+    agent = CodeImplementationAgent()
+    result = await agent.run(ctx, {})
 
     assert result.output[0]["decision"] == "halt"
     assert result.output[0]["safety_result"]["passed"] is False
     assert calls["opened"] == []
+    assert calls["failed"] == []
+    await agent.after_result_persisted(ctx, {}, result)
     assert calls["failed"][0][:2] == ("apdl", "p2")
 
 
@@ -108,16 +101,12 @@ async def test_bad_spec_fails_safety_and_marks_failed(monkeypatch):
 async def test_l4_does_not_call_codegen_before_human_approval(monkeypatch):
     calls = _patch(monkeypatch, [_PROPOSAL])
 
-    async def boom(**kwargs):
-        raise RuntimeError("codegen down")
-
-    monkeypatch.setattr(code_implementation, "open_changeset", boom)
-
     result = await CodeImplementationAgent().run(_make_ctx(4), {})
 
     assert result.output[0]["decision"] == "approve"
     assert "error" not in result.output[0]
     assert calls["failed"] == []
+    assert not hasattr(code_implementation, "open_changeset")
 
 
 @pytest.mark.asyncio

@@ -243,10 +243,19 @@ async def run_tool_loop(
     ]
     trace: list[ToolTraceEntry] = []
     allowed_tools = frozenset(schema["name"] for schema in tool_schemas)
+    purpose_scope = (
+        "custom_agent_test" if ctx.execution_kind == "custom_agent_test" else "agent"
+    )
 
     for round_index in range(max_steps):
         completion = await chat_completion_with_tools(
-            model_tier=model_tier, messages=messages, tools=tool_schemas
+            model_tier=model_tier,
+            messages=messages,
+            tools=tool_schemas,
+            context=ctx.llm_request(
+                purpose=f"{purpose_scope}.{agent_name}.tool_round",
+                data_classification="confidential",
+            ),
         )
         if not completion.tool_calls:
             return ToolLoopResult(text=completion.text, trace=trace, rounds=round_index)
@@ -337,6 +346,10 @@ async def run_tool_loop(
         model_tier=model_tier,
         messages=messages,
         tools=tool_schemas,
+        context=ctx.llm_request(
+            purpose=f"{purpose_scope}.{agent_name}.tool_finalize",
+            data_classification="confidential",
+        ),
         force_text=True,
     )
     logger.info(

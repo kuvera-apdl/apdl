@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.framework import (
     AgentContext,
+    AgentResult,
     BaseAgent,
     GateDecision,
     gate_action,
@@ -131,7 +132,12 @@ def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
 
 
 async def open_treatment_changeset(
-    pool: Any, project_id: str, run_id: str, design: dict[str, Any]
+    pool: Any,
+    project_id: str,
+    run_id: str,
+    design: dict[str, Any],
+    *,
+    idempotency_key: str,
 ) -> str:
     """Open the codegen changeset that implements a drafted design's treatment.
 
@@ -146,6 +152,7 @@ async def open_treatment_changeset(
         project_id=project_id,
         title=title,
         spec=spec,
+        idempotency_key=idempotency_key,
         run_id=run_id,
         context={
             "experiment_id": str(design.get("experiment_id") or ""),
@@ -171,39 +178,40 @@ async def open_treatment_changeset(
     return changeset_id
 
 
-async def stage_experiment_draft(project_id: str, experiment: dict[str, Any]) -> bool:
+async def stage_experiment_draft(
+    project_id: str,
+    experiment: dict[str, Any],
+    *,
+    idempotency_key: str,
+) -> None:
     """Create an inert experiment draft and its disabled backing flag.
 
     Config owns experiment→flag initialization, so this single call also creates
     the backing flag keyed by ``flag_key``. Only the approval endpoint calls
     this function; experiment-design agents never apply their own proposals.
     """
-    try:
-        flag_config = experiment.get("flag_config", {})
-        if not isinstance(flag_config, dict):
-            flag_config = {}
-        experiment_id = experiment.get("experiment_id", "")
-        flag_key = flag_config.get("key") or experiment_id
-        variants = experiment.get("variants") or flag_config.get("variants", [])
-        description = experiment.get("description") or experiment.get("hypothesis", "")
+    flag_config = experiment.get("flag_config", {})
+    if not isinstance(flag_config, dict):
+        flag_config = {}
+    experiment_id = experiment.get("experiment_id", "")
+    flag_key = flag_config.get("key") or experiment_id
+    variants = experiment.get("variants") or flag_config.get("variants", [])
+    description = experiment.get("description") or experiment.get("hypothesis", "")
 
-        await create_config_experiment_draft(
-            project_id=project_id,
-            experiment_id=experiment_id or flag_key,
-            hypothesis=description,
-            variants=variants,
-            default_variant=flag_config.get("default_variant"),
-            primary_metric=experiment.get("primary_metric", {}),
-            statistical_plan=experiment.get("statistical_plan"),
-            targeting=experiment.get("targeting"),
-            flag_key=flag_key,
-            traffic_percentage=_designed_traffic_percentage(flag_config),
-        )
-        logger.info("Experiment %s drafted successfully", experiment_id)
-        return True
-    except Exception as exc:
-        logger.error("Failed to create experiment draft: %s", exc)
-        return False
+    await create_config_experiment_draft(
+        project_id=project_id,
+        idempotency_key=idempotency_key,
+        experiment_id=experiment_id or flag_key,
+        hypothesis=description,
+        variants=variants,
+        default_variant=flag_config.get("default_variant"),
+        primary_metric=experiment.get("primary_metric", {}),
+        statistical_plan=experiment.get("statistical_plan"),
+        targeting=experiment.get("targeting"),
+        flag_key=flag_key,
+        traffic_percentage=_designed_traffic_percentage(flag_config),
+    )
+    logger.info("Experiment %s drafted successfully", experiment_id)
 
 
 _LIVE_EXPERIMENT_STATUSES = {"scheduled", "running"}
@@ -531,7 +539,6 @@ class ExperimentDesignAgent(BaseAgent):
             design["decision"] = decision.value
             design["safety_result"] = safety
             design["deployed"] = False
-            await self._record(ctx, design, decision)
 
         ids = [d.get("experiment_id", "") for d in output]
         return {
@@ -541,6 +548,25 @@ class ExperimentDesignAgent(BaseAgent):
             "deployed_count": 0,
             "needs_approval": any(d.get("decision") == GateDecision.approve.value for d in output),
         }
+
+    async def after_result_persisted(
+        self,
+        ctx: AgentContext,
+        state: dict[str, Any],
+        result: AgentResult,
+    ) -> None:
+        """Update the dedup ledger only after the canonical run result exists."""
+        await super().after_result_persisted(ctx, state, result)
+        if not isinstance(result.output, list):
+            return
+        for design in result.output:
+            if not isinstance(design, dict):
+                continue
+            try:
+                decision = GateDecision(str(design.get("decision")))
+            except ValueError:
+                continue
+            await self._record(ctx, design, decision)
 
     # ------------------------------------------------------------------
     # Internal steps
@@ -574,7 +600,7 @@ class ExperimentDesignAgent(BaseAgent):
     async def _record(
         self, ctx: AgentContext, design: dict[str, Any], decision: GateDecision
     ) -> None:
-        """Best-effort ledger write; a failure must not fail the run."""
+        """Best-effort post-result ledger write; a failure must not fail the run."""
         if ctx.pool is None:
             return
         if decision is GateDecision.approve:
@@ -646,6 +672,10 @@ class ExperimentDesignAgent(BaseAgent):
                     {"role": "system", "content": "You are a safety reviewer for A/B experiments."},
                     {"role": "user", "content": review_prompt},
                 ],
+                context=ctx.llm_request(
+                    purpose="agent.experiment_design.safety_review",
+                    data_classification="confidential",
+                ),
             )
             parsed = ExperimentSafetyReview.model_validate(parse_llm_json(review))
             if not parsed.approved:

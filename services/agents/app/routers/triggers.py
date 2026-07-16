@@ -8,14 +8,12 @@ import uuid
 from enum import Enum
 
 import asyncpg
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import require_project
 from app.framework.registry import is_registered, registered_agents
-from app.graphs.supervisor import run_supervisor
 from app.store.custom_agents import fetch_active_by_slugs
-from app.store.run_leases import RUN_LEASE_SECONDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -60,13 +58,8 @@ class TriggerResponse(BaseModel):
 async def trigger_agent_run(
     body: TriggerRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
 ) -> TriggerResponse:
-    """Start a new agent run.
-
-    Creates a run record in PostgreSQL and launches the supervisor graph
-    as a background task.
-    """
+    """Durably enqueue a new run; replica dispatchers execute it."""
     require_project(request, body.project_id, "agents:run")
     pool: asyncpg.Pool = request.app.state.pg_pool
 
@@ -141,15 +134,14 @@ async def trigger_agent_run(
                 """
                 INSERT INTO agent_runs
                     (run_id, project_id, trigger_type, autonomy_level, status, phase,
-                     lease_expires_at, config)
-                VALUES ($1, $2, $3, $4, 'started', 'initializing',
-                        now() + ($5 * interval '1 second'), $6::jsonb)
+                     lease_owner_id, lease_expires_at, config)
+                VALUES ($1, $2, $3, $4, 'started', 'initializing', NULL, NULL,
+                        $5::jsonb)
                 """,
                 run_id,
                 body.project_id,
                 body.trigger_type.value,
                 body.autonomy_level,
-                RUN_LEASE_SECONDS,
                 json.dumps(
                     {
                         "analysis_types": body.analysis_types,
@@ -158,18 +150,6 @@ async def trigger_agent_run(
                 ),
             )
 
-    logger.info("Agent run %s created for project %s", run_id, body.project_id)
-
-    # Launch supervisor in background
-    background_tasks.add_task(
-        run_supervisor,
-        pool=pool,
-        vector_store=request.app.state.vector_store,
-        run_id=run_id,
-        project_id=body.project_id,
-        analysis_types=body.analysis_types,
-        time_range_days=body.time_range_days,
-        autonomy_level=body.autonomy_level,
-    )
+    logger.info("Agent run %s durably queued for project %s", run_id, body.project_id)
 
     return TriggerResponse(run_id=run_id, status="started")

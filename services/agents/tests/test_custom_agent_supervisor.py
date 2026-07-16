@@ -242,13 +242,15 @@ async def test_resume_skips_completed_custom_agent(monkeypatch):
     prior = [
         {
             "agent_name": "behavior_analysis",
-            "produces": "insights",
-            "output": json.dumps([{"finding": "drop"}]),
+                "produces": "insights",
+                "output": json.dumps([{"finding": "drop"}]),
+                "metadata": {},
         },
         {
             "agent_name": "churn_watch",
-            "produces": "churn_signals",
-            "output": json.dumps([{"signal": "x"}]),
+                "produces": "churn_signals",
+                "output": json.dumps([{"signal": "x"}]),
+                "metadata": {},
         },
     ]
     pool = _FakePool(prior)

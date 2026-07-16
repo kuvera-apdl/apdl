@@ -31,12 +31,21 @@ class _Pool:
         yield _ReadyConnection()
 
 
+class _RunningTask:
+    def done(self) -> bool:
+        return False
+
+
 @pytest.fixture
 def runtime_state():
     original = dict(app.state._state)
     app.state.pg_pool = _Pool()
     app.state.authenticator = object()
     app.state.vector_store = object()
+    app.state.run_dispatcher_task = _RunningTask()
+    app.state.run_reaper_task = _RunningTask()
+    app.state.approval_effect_task = _RunningTask()
+    app.state.llm_reconciliation_task = _RunningTask()
     yield
     app.state._state.clear()
     app.state._state.update(original)

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import traceback
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
@@ -32,6 +33,16 @@ from app.store.run_leases import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class RunResultPersistenceError(RuntimeError):
+    """A phase result could not be durably recorded for safe resume."""
+
+
+@dataclass(frozen=True)
+class PriorResults:
+    completed_agents: frozenset[str]
+    pending_gate_agent: str | None = None
 
 
 async def _update_run(
@@ -73,13 +84,19 @@ async def _persist_results(
     agent_name: str,
     produces: str,
     output: Any,
+    metadata: dict[str, Any],
     lease_owner_id: str,
 ) -> None:
-    """Persist an agent's output only while its supervisor still owns the run.
-
-    Ordinary persistence failures remain best-effort. A lost lease is a fence:
-    the stale worker must stop before any later audit or external effect.
-    """
+    """Persist output and gate metadata before any later state transition."""
+    durable_metadata = dict(metadata)
+    if durable_metadata.get("needs_approval"):
+        durable_metadata["approval_gate"] = {
+            "gate_id": f"{run_id}:{agent_name}",
+            "agent_name": agent_name,
+            "produces": produces,
+            "phase": f"{agent_name}_approval",
+            "state": "pending",
+        }
     try:
         async with pool.acquire() as conn:
             inserted = await conn.execute(
@@ -88,20 +105,25 @@ async def _persist_results(
                     SELECT run_id
                     FROM agent_runs
                     WHERE run_id = $1
-                      AND lease_owner_id = $5
+                      AND lease_owner_id = $6
                       AND lease_expires_at > now()
                     FOR UPDATE
                 )
-                INSERT INTO agent_run_results (run_id, agent_name, produces, output)
-                SELECT $1, $2, $3, $4::jsonb
+                INSERT INTO agent_run_results
+                    (run_id, agent_name, produces, output, metadata)
+                SELECT $1, $2, $3, $4::jsonb, $5::jsonb
                 FROM owned_run
                 ON CONFLICT (run_id, agent_name)
-                DO UPDATE SET output = EXCLUDED.output, created_at = now()
+                DO UPDATE SET produces = EXCLUDED.produces,
+                              output = EXCLUDED.output,
+                              metadata = EXCLUDED.metadata,
+                              created_at = now()
                 """,
                 run_id,
                 agent_name,
                 produces,
                 json.dumps(output if isinstance(output, list) else [output], default=str),
+                json.dumps(durable_metadata, default=str),
                 lease_owner_id,
             )
         if isinstance(inserted, str) and inserted.endswith(" 0"):
@@ -110,41 +132,73 @@ async def _persist_results(
             )
     except RunLeaseLostError:
         raise
-    except Exception:
-        logger.exception("[%s] Failed to persist %s results", run_id, agent_name)
+    except Exception as exc:
+        raise RunResultPersistenceError(
+            f"Could not persist {agent_name} result for run {run_id}"
+        ) from exc
 
 
 async def _load_prior_results(
     pool: asyncpg.Pool, run_id: str, state: dict[str, Any]
-) -> set[str]:
+) -> PriorResults:
     """Reload a run's persisted agent outputs into ``state`` for a resume.
 
     Returns the set of agent names that already completed, so the supervisor can
     skip them and continue with the not-yet-run agents after an approval.
     """
     completed: set[str] = set()
+    pending_gates: list[str] = []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT agent_name, produces, output FROM agent_run_results WHERE run_id = $1",
+            """
+            SELECT agent_name, produces, output, metadata
+            FROM agent_run_results
+            WHERE run_id = $1
+            ORDER BY created_at, agent_name
+            """,
             run_id,
         )
     for row in rows:
-        completed.add(row["agent_name"])
+        agent_name = str(row["agent_name"])
+        completed.add(agent_name)
         output = row["output"]
         if isinstance(output, str):
-            # A malformed row must not kill the resume — the run would wedge
-            # at 'resuming' with no way to re-kick it (same defense as the
-            # approval gate's _load_gate_items).
             try:
                 output = json.loads(output)
-            except (json.JSONDecodeError, ValueError):
-                logger.error(
-                    "[%s] Skipping malformed persisted output for %s", run_id, row["agent_name"]
-                )
-                state.setdefault(row["produces"], [])
-                continue
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise RunResultPersistenceError(
+                    f"Persisted output for {run_id}/{agent_name} is malformed"
+                ) from exc
+        if not isinstance(output, list):
+            raise RunResultPersistenceError(
+                f"Persisted output for {run_id}/{agent_name} must be an array"
+            )
         state[row["produces"]] = output if output is not None else []
-    return completed
+
+        metadata = row["metadata"]
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise RunResultPersistenceError(
+                    f"Persisted metadata for {run_id}/{agent_name} is malformed"
+                ) from exc
+        if not isinstance(metadata, dict):
+            raise RunResultPersistenceError(
+                f"Persisted metadata for {run_id}/{agent_name} must be an object"
+            )
+        gate = metadata.get("approval_gate")
+        if isinstance(gate, dict) and gate.get("state") == "pending":
+            pending_gates.append(agent_name)
+
+    if len(pending_gates) > 1:
+        raise RunResultPersistenceError(
+            f"Run {run_id} has multiple pending approval gates: {pending_gates}"
+        )
+    return PriorResults(
+        completed_agents=frozenset(completed),
+        pending_gate_agent=pending_gates[0] if pending_gates else None,
+    )
 
 
 async def _resolve_agents(
@@ -205,6 +259,7 @@ async def run_supervisor(
     time_range_days: int,
     autonomy_level: int,
     resume: bool = False,
+    resume_after_approval: bool = False,
     target_proposal_id: str | None = None,
 ) -> None:
     """Acquire exclusive run ownership and execute the supervisor graph."""
@@ -244,6 +299,7 @@ async def run_supervisor(
             lease_owner_id=lease_owner_id,
             lease_lost=lease_lost,
             resume=resume,
+            resume_after_approval=resume_after_approval,
             target_proposal_id=target_proposal_id,
         )
     finally:
@@ -266,6 +322,7 @@ async def _run_owned_supervisor(
     lease_owner_id: str,
     lease_lost: asyncio.Event,
     resume: bool = False,
+    resume_after_approval: bool = False,
     target_proposal_id: str | None = None,
 ) -> None:
     """Execute one supervisor graph while holding an unexpired lease.
@@ -286,6 +343,7 @@ async def _run_owned_supervisor(
         audit=audit,
         run_id=run_id,
         project_id=project_id,
+        lease_owner_id=lease_owner_id,
         autonomy_level=autonomy_level,
         time_range_days=time_range_days,
         target_proposal_id=target_proposal_id,
@@ -315,11 +373,32 @@ async def _run_owned_supervisor(
 
         completed: set[str] = set()
         if resume:
-            completed = await _load_prior_results(pool, run_id, state)
+            prior = await _load_prior_results(pool, run_id, state)
+            completed = set(prior.completed_agents)
             await audit.log(run_id, "supervisor_resume", {
                 "analysis_types": analysis_types,
                 "completed": sorted(completed),
             })
+            if prior.pending_gate_agent and not resume_after_approval:
+                await _update_run(
+                    pool,
+                    run_id,
+                    "waiting_approval",
+                    f"{prior.pending_gate_agent}_approval",
+                    lease_owner_id,
+                    **_counts(),
+                )
+                await audit.log(
+                    run_id,
+                    "approval_gate_restored",
+                    {"agent": prior.pending_gate_agent},
+                )
+                logger.info(
+                    "[%s] Restored pending approval gate for %s",
+                    run_id,
+                    prior.pending_gate_agent,
+                )
+                return
         else:
             await audit.log(run_id, "supervisor_start", {
                 "analysis_types": analysis_types,
@@ -373,8 +452,19 @@ async def _run_owned_supervisor(
                     agent.name,
                     agent.produces,
                     result.output,
+                    result.metadata,
                     lease_owner_id,
                 )
+                if lease_lost.is_set():
+                    raise RunLeaseLostError(f"Run {run_id} lease expired")
+
+                post_persist = getattr(agent, "after_result_persisted", None)
+                if post_persist is not None:
+                    await run_while_lease_owned(
+                        post_persist(ctx, state, result),
+                        lease_lost,
+                        run_id=run_id,
+                    )
                 if lease_lost.is_set():
                     raise RunLeaseLostError(f"Run {run_id} lease expired")
 
@@ -404,7 +494,7 @@ async def _run_owned_supervisor(
                     # Without this return the loop would fall through to the
                     # unconditional "completed" below and the gate would be lost.
                     return
-            except RunLeaseLostError:
+            except (RunLeaseLostError, RunResultPersistenceError):
                 raise
             except Exception as exc:
                 error_msg = f"{agent.name} failed: {exc}"
@@ -444,6 +534,10 @@ async def _run_owned_supervisor(
         # Another worker/reaper now owns the state transition. This stale task
         # must not overwrite it or emit an audit entry claiming failure.
         logger.warning("[%s] Supervisor stopped after losing its lease", run_id)
+    except RunResultPersistenceError:
+        # Keep the active lease in place. Its expiry will requeue the same run,
+        # and completed phases are reconstructed from durable results.
+        logger.exception("[%s] Supervisor stopped on durable result failure", run_id)
     except Exception as exc:
         logger.error("[%s] Supervisor failed: %s\n%s", run_id, exc, traceback.format_exc())
         # The failure path itself must be crash-proof (the original error is

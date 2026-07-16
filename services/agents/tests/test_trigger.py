@@ -1,4 +1,4 @@
-"""The trigger endpoint starts a run and stores config as JSONB."""
+"""The trigger endpoint durably queues a run and stores canonical JSONB config."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ async def test_trigger_requires_agents_run_role():
 
 
 @pytest.mark.asyncio
-async def test_self_registered_overprivileged_project_cannot_start_run(monkeypatch):
+async def test_self_registered_overprivileged_project_cannot_start_run():
     async def authenticate_self_registered(request: Request):
         principal = Principal(
             credential_id="self-registered",
@@ -127,13 +127,7 @@ async def test_self_registered_overprivileged_project_cannot_start_run(monkeypat
         request.state.principal = principal
         return principal
 
-    supervisor_calls: list[dict[str, Any]] = []
-
-    async def forbidden_supervisor(**kwargs: Any):
-        supervisor_calls.append(kwargs)
-
     app.dependency_overrides[authenticate_request] = authenticate_self_registered
-    monkeypatch.setattr(triggers, "run_supervisor", forbidden_supervisor)
     pool = _FakePool()
 
     async with _client(pool) as client:
@@ -147,17 +141,10 @@ async def test_self_registered_overprivileged_project_cannot_start_run(monkeypat
         "Agents execution is unavailable for self-registered projects"
     )
     assert pool.conn.executed == []
-    assert supervisor_calls == []
 
 
 @pytest.mark.asyncio
-async def test_trigger_starts_run_and_serializes_config(monkeypatch):
-    kicked: list = []
-
-    async def fake_supervisor(**kwargs):
-        kicked.append(kwargs)
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+async def test_trigger_starts_run_and_serializes_config():
     pool = _FakePool()
 
     async with _client(pool) as client:
@@ -195,10 +182,9 @@ async def test_trigger_starts_run_and_serializes_config(monkeypatch):
     )
     assert advisory_index < insert_index
     assert pool.conn.transaction_entries == pool.conn.transaction_exits == 1
-    assert "lease_expires_at" in query
-    assert "now() + ($5 * interval '1 second')" in query
-    assert "$6::jsonb" in query
-    assert args[-2] == triggers.RUN_LEASE_SECONDS
+    assert "lease_owner_id, lease_expires_at" in query
+    assert "NULL, NULL" in query
+    assert "$5::jsonb" in query
     config_arg = args[-1]
     assert isinstance(config_arg, str)
     assert json.loads(config_arg) == {
@@ -206,12 +192,8 @@ async def test_trigger_starts_run_and_serializes_config(monkeypatch):
         "time_range_days": 7,
     }
 
-    # Supervisor is launched as a background task for the same run.
-    assert kicked and kicked[0]["analysis_types"] == [
-        "behavior_analysis",
-        "experiment_design",
-    ]
-    assert kicked[0]["run_id"] == body["run_id"]
+    # The request only commits a queue row. Replica dispatchers execute it.
+    assert "run_supervisor" not in triggers.__dict__
 
 
 class _ConcurrentRunState:
@@ -283,11 +265,7 @@ class _ConcurrentPool:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_trigger_requests_create_only_one_active_run(monkeypatch):
-    async def fake_supervisor(**kwargs):
-        return None
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+async def test_concurrent_trigger_requests_create_only_one_active_run():
     pool = _ConcurrentPool()
 
     async with _client(pool) as client:
@@ -308,11 +286,7 @@ async def test_concurrent_trigger_requests_create_only_one_active_run(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_trigger_defaults_apply(monkeypatch):
-    async def fake_supervisor(**kwargs):
-        return None
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+async def test_trigger_defaults_apply():
     pool = _FakePool()
 
     async with _client(pool) as client:
@@ -354,13 +328,7 @@ def _custom_row(slug: str, project_id: str = "demo") -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_trigger_accepts_active_custom_agent_slug(monkeypatch):
-    kicked: list = []
-
-    async def fake_supervisor(**kwargs):
-        kicked.append(kwargs)
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+async def test_trigger_accepts_active_custom_agent_slug():
     pool = _FakePool()
     pool.conn.custom_rows = [_custom_row("churn_watch")]
 
@@ -375,15 +343,17 @@ async def test_trigger_accepts_active_custom_agent_slug(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert kicked[0]["analysis_types"] == ["behavior_analysis", "churn_watch"]
+    _, args = next(
+        (q, a) for q, a in pool.conn.executed if "INSERT INTO agent_runs" in q
+    )
+    assert json.loads(args[-1])["analysis_types"] == [
+        "behavior_analysis",
+        "churn_watch",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_trigger_rejects_slug_not_active_in_project(monkeypatch):
-    async def fake_supervisor(**kwargs):
-        raise AssertionError("supervisor must not start for an unknown agent")
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
+async def test_trigger_rejects_slug_not_active_in_project():
     pool = _FakePool()  # custom_rows empty: the slug resolves to nothing
 
     async with _client(pool) as client:
@@ -402,13 +372,9 @@ async def test_trigger_rejects_slug_not_active_in_project(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("disabled", ["personalization", "experiment_evaluation"])
-async def test_trigger_rejects_disabled_builtin(monkeypatch, disabled):
+async def test_trigger_rejects_disabled_builtin(disabled):
     """Disabled built-ins are rejected before a run or job is created."""
 
-    async def fake_supervisor(**kwargs):
-        raise AssertionError("supervisor must not start for a disabled agent")
-
-    monkeypatch.setattr(triggers, "run_supervisor", fake_supervisor)
     pool = _FakePool()
 
     async with _client(pool) as client:

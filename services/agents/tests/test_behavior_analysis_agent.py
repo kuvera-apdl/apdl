@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.framework import tool_catalog, tool_loop
+from app.framework.context import AgentContext
 from app.framework.tool_catalog import TOOL_CATALOG
 from app.framework.tool_loop import ToolLoopResult, ToolTraceEntry
 from app.graphs.behavior_analysis import BehaviorAnalysisAgent
@@ -29,7 +29,8 @@ class _NullVectorStore:
 
 
 def _ctx() -> Any:
-    return SimpleNamespace(
+    return AgentContext(
+        pool=None,
         project_id="demo",
         time_range_days=7,
         run_id="run-1",

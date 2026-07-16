@@ -20,7 +20,7 @@ from app.store.run_leases import (
     acquire_run_lease,
     handoff_run_to_queue,
     maintain_run_lease,
-    recover_abandoned_runs,
+    requeue_expired_runs,
     renew_run_lease,
 )
 
@@ -122,24 +122,26 @@ class _Conn:
         raise AssertionError(f"Unexpected fetchval query: {query}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
-        if "SET status = 'failed'" in query:
+        if "UPDATE agent_runs" in query and "SET lease_owner_id = NULL" in query:
             legacy_cutoff = self.now - timedelta(seconds=int(args[0]))
             recovery_cutoff = self.now - timedelta(seconds=int(args[1]))
-            abandoned: list[dict[str, Any]] = []
+            requeued: list[dict[str, Any]] = []
             for run_id, run in self.runs.items():
                 expiry = run.get("lease_expires_at")
                 expired = expiry is not None and expiry <= recovery_cutoff
                 legacy_stale = expiry is None and run["updated_at"] <= legacy_cutoff
-                if _is_active(run) and (expired or legacy_stale):
+                if (
+                    _is_active(run)
+                    and run.get("lease_owner_id") is not None
+                    and (expired or legacy_stale)
+                ):
                     run.update(
-                        status="failed",
-                        phase="orphaned",
                         lease_owner_id=None,
                         lease_expires_at=None,
                         updated_at=self.now,
                     )
-                    abandoned.append({"run_id": run_id})
-            return abandoned
+                    requeued.append({"run_id": run_id})
+            return requeued
 
         if "proposal.claim_run_id IS NULL" in query:
             stale_cutoff = self.now - timedelta(seconds=int(args[0]))
@@ -165,13 +167,17 @@ class _Conn:
                     reopened.append({"proposal_id": proposal_id})
             return reopened
 
-        if "claim_run_id = ANY" in query:
-            abandoned = set(args[0])
+        if "FROM agent_runs AS claim_run" in query:
             reopened: list[dict[str, Any]] = []
             for proposal_id, proposal in self.proposals.items():
+                claim_run_id = proposal.get("claim_run_id")
+                claim_run = self.runs.get(str(claim_run_id))
                 if (
                     proposal["status"] == "implementing"
-                    and proposal.get("claim_run_id") in abandoned
+                    and claim_run is not None
+                    and proposal["project_id"] == claim_run["project_id"]
+                    and claim_run["status"]
+                    in {"completed", "completed_with_errors", "failed"}
                 ):
                     proposal.update(
                         status="approved",
@@ -344,9 +350,9 @@ async def test_new_replica_cannot_claim_or_recover_another_live_worker() -> None
     assert not await acquire_run_lease(pool, "run-live", "worker-b")
     assert await renew_run_lease(pool, "run-live", "worker-a")
 
-    recovered = await recover_abandoned_runs(pool)
+    recovered = await requeue_expired_runs(pool)
 
-    assert recovered.abandoned_run_ids == ()
+    assert recovered.requeued_run_ids == ()
     assert recovered.reopened_proposal_ids == ()
     assert runs["run-live"]["status"] == "running"
     assert runs["run-live"]["lease_owner_id"] == "worker-a"
@@ -374,8 +380,26 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
     async def fake_schema_ready(conn: _Conn) -> None:
         return None
 
+    async def idle_worker(*args: Any, **kwargs: Any) -> None:
+        stop = next(arg for arg in args if isinstance(arg, asyncio.Event))
+        await stop.wait()
+
+    async def no_orphaned_llm_attempts(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(prepared_blocked=0, in_flight_cancelled=0)
+
     monkeypatch.setattr(agents_main.asyncpg, "create_pool", fake_create_pool)
     monkeypatch.setattr(agents_main, "assert_schema_ready", fake_schema_ready)
+    monkeypatch.setattr(agents_main, "requeue_expired_runs_forever", idle_worker)
+    monkeypatch.setattr(agents_main, "dispatch_runs_forever", idle_worker)
+    monkeypatch.setattr(
+        agents_main, "run_approval_effect_worker_forever", idle_worker
+    )
+    monkeypatch.setattr(
+        agents_main, "reconcile_orphaned_llm_attempts", no_orphaned_llm_attempts
+    )
+    monkeypatch.setattr(
+        agents_main, "reconcile_orphaned_llm_attempts_forever", idle_worker
+    )
 
     for _ in range(2):
         application = SimpleNamespace(state=SimpleNamespace())
@@ -417,19 +441,70 @@ async def test_expiry_recovers_only_the_abandoned_run_and_its_claim() -> None:
     }
     pool = _Pool(now, runs, proposals)
 
-    recovered = await recover_abandoned_runs(pool)
+    recovered = await requeue_expired_runs(pool)
 
-    assert recovered.abandoned_run_ids == ("run-dead",)
-    assert recovered.reopened_proposal_ids == ("proposal-dead",)
-    assert runs["run-dead"]["status"] == "failed"
+    assert recovered.requeued_run_ids == ("run-dead",)
+    assert recovered.reopened_proposal_ids == ()
+    assert runs["run-dead"]["status"] == "running"
+    assert runs["run-dead"]["lease_owner_id"] is None
     assert runs["run-live"]["status"] == "running"
     assert runs["run-gated"]["status"] == "waiting_approval"
-    assert proposals["proposal-dead"]["status"] == "approved"
+    assert proposals["proposal-dead"]["status"] == "implementing"
     assert proposals["proposal-live"]["status"] == "implementing"
     assert proposals["proposal-gated"]["status"] == "implementing"
     assert proposals["proposal-unowned"]["status"] == "implementing"
 
-    assert (await recover_abandoned_runs(pool)).abandoned_run_ids == ()
+    assert (await requeue_expired_runs(pool)).requeued_run_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_terminal_runs_reopen_only_their_implementing_proposal_claims() -> None:
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    runs = {
+        "run-completed": _run(now, status="completed", phase="done"),
+        "run-errors": _run(now, status="completed_with_errors", phase="done"),
+        "run-failed": _run(now, status="failed", phase="invalid_config"),
+        "run-live": _run(
+            now,
+            owner="worker-live",
+            expires=now + timedelta(seconds=60),
+        ),
+        "run-gated": _run(
+            now,
+            status="waiting_approval",
+            phase="code_implementation_approval",
+        ),
+    }
+    proposals = {
+        "proposal-completed": _proposal("implementing", "run-completed"),
+        "proposal-errors": _proposal("implementing", "run-errors"),
+        "proposal-failed": _proposal("implementing", "run-failed"),
+        "proposal-live": _proposal("implementing", "run-live"),
+        "proposal-gated": _proposal("implementing", "run-gated"),
+        "proposal-terminal": _proposal("implemented", "run-completed"),
+        "proposal-other-project": _proposal(
+            "implementing",
+            "run-completed",
+            project_id="other",
+        ),
+    }
+    pool = _Pool(now, runs, proposals)
+
+    recovered = await requeue_expired_runs(pool)
+
+    assert recovered.requeued_run_ids == ()
+    assert recovered.reopened_proposal_ids == (
+        "proposal-completed",
+        "proposal-errors",
+        "proposal-failed",
+    )
+    for proposal_id in recovered.reopened_proposal_ids:
+        assert proposals[proposal_id]["status"] == "approved"
+        assert proposals[proposal_id]["claim_run_id"] is None
+    assert proposals["proposal-live"]["status"] == "implementing"
+    assert proposals["proposal-gated"]["status"] == "implementing"
+    assert proposals["proposal-terminal"]["status"] == "implemented"
+    assert proposals["proposal-other-project"]["status"] == "implementing"
 
 
 @pytest.mark.asyncio
@@ -447,9 +522,9 @@ async def test_legacy_unleased_runs_use_a_conservative_expiry() -> None:
     pool = _Pool(now, runs)
 
     assert not await acquire_run_lease(pool, "legacy-owned-dead", "worker-new")
-    recovered = await recover_abandoned_runs(pool)
+    recovered = await requeue_expired_runs(pool)
 
-    assert recovered.abandoned_run_ids == ("legacy-dead", "legacy-owned-dead")
+    assert recovered.requeued_run_ids == ("legacy-owned-dead",)
     assert runs["legacy-live"]["status"] == "running"
 
 
@@ -510,7 +585,7 @@ async def test_expired_owner_observes_grace_but_queued_handoff_is_immediate() ->
     pool = _Pool(now, runs)
 
     assert not await acquire_run_lease(pool, "run-owned", "worker-new")
-    assert (await recover_abandoned_runs(pool)).abandoned_run_ids == ()
+    assert (await requeue_expired_runs(pool)).requeued_run_ids == ()
 
     assert await handoff_run_to_queue(pool, "run-queued", "approval-worker")
     assert runs["run-queued"]["lease_owner_id"] is None
@@ -684,7 +759,7 @@ async def test_stale_legacy_null_claim_recovers_only_without_active_project() ->
     }
     pool = _Pool(now, runs, proposals)
 
-    recovered = await recover_abandoned_runs(
+    recovered = await requeue_expired_runs(
         pool,
         legacy_proposal_stale_seconds=60 * 60,
     )
