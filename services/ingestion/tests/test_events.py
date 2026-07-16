@@ -14,6 +14,11 @@ from httpx import ASGITransport, AsyncClient
 
 from app.auth import Principal, authenticate_request
 from app.main import app
+from app.middleware.rate_limit import _TOKEN_BUCKET_LUA
+from app.streaming.redis_producer import (
+    EVENT_STREAM_MAX_ENTRIES,
+    _BOUNDED_XADD_LUA,
+)
 
 API_KEY = "proj_testproj_abcdefghijklmnop"
 HEADERS = {"X-API-Key": API_KEY}
@@ -37,19 +42,38 @@ def canonical_event(
     return value
 
 
+def publisher_calls():
+    return [
+        call
+        for call in app.state.redis.eval.await_args_list
+        if call.args[0] == _BOUNDED_XADD_LUA
+    ]
+
+
+def published_events() -> list[dict]:
+    calls = publisher_calls()
+    assert len(calls) == 1
+    return [json.loads(value) for value in calls[0].args[5:]]
+
+
 @pytest.fixture(autouse=True)
 def _setup_mock_redis():
     """Inject a mock Redis into app.state before each test."""
     mock_redis = AsyncMock()
     mock_redis.ping = AsyncMock(return_value=True)
-    mock_redis.eval = AsyncMock(return_value=[1, 999, 0])
+
+    async def evaluate(script, _numkeys, *args):
+        if script == _BOUNDED_XADD_LUA:
+            count = int(args[1])
+            return [
+                1,
+                count,
+                *(f"1234567890-{index}".encode() for index in range(count)),
+            ]
+        return [1, 999, 0]
+
+    mock_redis.eval = AsyncMock(side_effect=evaluate)
     pipeline = MagicMock()
-    pipeline.xadd.return_value = pipeline
-
-    async def execute(**_kwargs):
-        return [b"1234567890-0"] * pipeline.xadd.call_count
-
-    pipeline.execute = AsyncMock(side_effect=execute)
     mock_redis.pipeline = MagicMock(return_value=pipeline)
     app.state.redis = mock_redis
     app.state.trusted_proxy_networks = ()
@@ -104,18 +128,15 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
 
     assert resp.status_code == 202
     assert resp.json()["accepted"] == 1
-    app.state.redis.pipeline.assert_called_once_with(transaction=True)
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.xadd.assert_called_once()
-    pipeline.execute.assert_awaited_once_with(raise_on_error=True)
+    calls = publisher_calls()
+    assert len(calls) == 1
+    args = calls[0].args
+    assert args[2] == "events:raw:testproj"
+    assert args[3] == 1
+    assert args[4] == EVENT_STREAM_MAX_ENTRIES
+    assert "MAXLEN" not in args[0]
 
-    args, kwargs = pipeline.xadd.call_args
-    stream_key, fields = args
-    assert stream_key == "events:raw:testproj"
-    assert kwargs["maxlen"] == 1000000
-    assert kwargs["approximate"] is True
-
-    published = json.loads(fields["event_json"])
+    published = published_events()[0]
     assert published["event"] == "sdk_aligned_probe"
     assert published["type"] == "track"
     assert published["anonymous_id"] == "anon-sdk-1"
@@ -145,8 +166,7 @@ async def test_untrusted_forwarding_headers_do_not_reach_persisted_identity(clie
     )
 
     assert resp.status_code == 202
-    pipeline = app.state.redis.pipeline.return_value
-    published = json.loads(pipeline.xadd.call_args.args[1]["event_json"])
+    published = published_events()[0]
     assert published["ip"] == "127.0.0.1"
 
 
@@ -241,13 +261,8 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
 
     assert resp.status_code == 202
     assert resp.json() == {"accepted": 4}
-    pipeline = app.state.redis.pipeline.return_value
-    assert pipeline.xadd.call_count == 4
-
-    published = [
-        json.loads(call.args[1]["event_json"])
-        for call in pipeline.xadd.call_args_list
-    ]
+    published = published_events()
+    assert len(published) == 4
     assert published[0]["properties"] == {"tag": "input", "x": 12, "y": 34}
     assert published[0]["context"] == {
         "browser": {"name": "Firefox", "version": "128"}
@@ -265,9 +280,7 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
         "text": "ordinary event text",
         "source": "test",
     }
-    serialized = "".join(
-        call.args[1]["event_json"] for call in pipeline.xadd.call_args_list
-    )
+    serialized = json.dumps(published)
     assert legacy_sentinel not in serialized
     assert over_limit_sentinel not in serialized
     for sentinel in (
@@ -314,12 +327,7 @@ async def test_feature_flag_exposure_payload_is_published(client):
 
     assert resp.status_code == 202
     assert resp.json()["accepted"] == 1
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.xadd.assert_called_once()
-
-    args, _ = pipeline.xadd.call_args
-    _, fields = args
-    published = json.loads(fields["event_json"])
+    published = published_events()[0]
     assert published["event"] == "$feature_flag_exposure"
     assert published["type"] == "track"
     assert published["properties"] == payload["events"][0]["properties"]
@@ -597,14 +605,23 @@ async def test_rate_limit_is_shared_and_charged_by_event_bytes(client):
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 202
 
-    args = app.state.redis.eval.await_args.args
+    rate_call = next(
+        call
+        for call in app.state.redis.eval.await_args_list
+        if call.args[0] == _TOKEN_BUCKET_LUA
+    )
+    args = rate_call.args
     assert args[2] == "apdl:rate:project:testproj"
     assert args[5] > len(payload["events"])
 
 
 @pytest.mark.asyncio
 async def test_rate_limit_rejection_does_not_start_redis_transaction(client):
-    app.state.redis.eval = AsyncMock(return_value=[0, 0, 3])
+    async def reject_rate(script, _numkeys, *_args):
+        assert script == _TOKEN_BUCKET_LUA
+        return [0, 0, 3]
+
+    app.state.redis.eval = AsyncMock(side_effect=reject_rate)
     resp = await client.post(
         URL,
         json={"events": [canonical_event("quota-test")]},
@@ -752,8 +769,12 @@ async def test_events_require_write_role(client):
 @pytest.mark.asyncio
 async def test_redis_failure_returns_503(client):
     """When Redis publish fails, endpoint returns 503."""
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(side_effect=ConnectionError("Redis down"))
+    async def fail_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            raise ConnectionError("Redis down")
+        return [1, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=fail_publish)
     payload = {"events": [canonical_event("test", user_id="u1")]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 503
@@ -763,9 +784,13 @@ async def test_redis_failure_returns_503(client):
 
 @pytest.mark.asyncio
 async def test_ambiguous_redis_failure_never_reports_partial_acceptance(client):
-    """An EXEC failure returns one retryable batch failure, never partial 202."""
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(side_effect=ConnectionError("Redis blip"))
+    """A script failure returns one retryable batch failure, never partial 202."""
+    async def fail_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            raise ConnectionError("Redis blip")
+        return [1, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=fail_publish)
     payload = {
         "events": [
             canonical_event("e1", user_id="u1", message_id="message-1"),
@@ -778,13 +803,19 @@ async def test_ambiguous_redis_failure_never_reports_partial_acceptance(client):
     body = resp.json()
     assert body["error"] == "service_unavailable"
     assert "accepted" not in body and "failed" not in body
-    assert pipeline.xadd.call_count == 3
+    calls = publisher_calls()
+    assert len(calls) == 1
+    assert calls[0].args[3] == 3
 
 
 @pytest.mark.asyncio
 async def test_incomplete_redis_transaction_result_returns_503(client):
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(return_value=[])
+    async def incomplete_publish(script, _numkeys, *args):
+        if script == _BOUNDED_XADD_LUA:
+            return [1, int(args[1])]
+        return [1, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=incomplete_publish)
 
     resp = await client.post(
         URL,
@@ -794,3 +825,28 @@ async def test_incomplete_redis_transaction_result_returns_503(client):
 
     assert resp.status_code == 503
     assert resp.json()["error"] == "service_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_rejection_is_retryable_and_never_partial(client):
+    async def overloaded_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            return [0, EVENT_STREAM_MAX_ENTRIES]
+        return [1, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=overloaded_publish)
+    payload = {
+        "events": [
+            canonical_event("one", message_id="message-one"),
+            canonical_event("two", message_id="message-two"),
+        ]
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "5"
+    assert resp.json() == {
+        "error": "service_overloaded",
+        "message": "Event persistence backlog is at capacity",
+    }

@@ -1,9 +1,14 @@
 streams:
   events:raw:
     # Partitioned by project: events:raw:{project_id}
-    maxlen: 1000000
+    # Producers never trim. Admission rejects atomically above this outstanding
+    # depth, and the writer ACKs+deletes only ClickHouse/DLQ-durable entries.
+    max_outstanding_entries: 1000000
+    alert_outstanding_entries: 750000
     consumer_group: clickhouse-writer
+    required_consumer_groups: 1
     consumers_per_group: 4
+    upgrade_requires_legacy_producer_quiescence: true
 
   config:updates:
     maxlen: 10000

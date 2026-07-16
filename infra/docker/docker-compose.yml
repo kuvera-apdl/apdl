@@ -6,7 +6,7 @@ services:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory ${APDL_REDIS_MAXMEMORY:-1gb} --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

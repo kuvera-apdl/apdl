@@ -13,7 +13,11 @@ from app.auth import require_role
 from app.client_ip import client_ip
 from app.middleware.rate_limit import check_rate_limit, request_cost
 from app.privacy import sanitize_auto_capture_events
-from app.streaming.redis_producer import publish_batch
+from app.streaming.redis_producer import (
+    EVENT_STREAM_RETRY_AFTER_SECONDS,
+    StreamOverloaded,
+    publish_batch,
+)
 from app.validation.json_contract import (
     MAX_REQUEST_BYTES,
     CanonicalJSONError,
@@ -113,6 +117,13 @@ async def ingest_events(request: Request):
 
     try:
         await publish_batch(redis, stream_key, events)
+    except StreamOverloaded:
+        return _error_response(
+            503,
+            "service_overloaded",
+            "Event persistence backlog is at capacity",
+            headers={"Retry-After": str(EVENT_STREAM_RETRY_AFTER_SECONDS)},
+        )
     except Exception:
         logger.warning(
             "Atomic Redis publish failed for stream %s; client must retry stable IDs",
@@ -136,9 +147,16 @@ async def ingest_events(request: Request):
     )
 
 
-def _error_response(status_code: int, error: str, message: str) -> Response:
+def _error_response(
+    status_code: int,
+    error: str,
+    message: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> Response:
     return Response(
         content=json.dumps({"error": error, "message": message}),
         status_code=status_code,
         media_type="application/json",
+        headers=headers,
     )

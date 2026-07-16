@@ -1,11 +1,17 @@
 """Durable Config outbox delivery and retry tests."""
 
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app import outbox
+
+
+@pytest.fixture(autouse=True)
+def clear_alert_log_state():
+    outbox._last_alert_log.clear()
 
 
 class _Context:
@@ -64,8 +70,8 @@ async def test_redis_failure_is_recorded_then_same_outbox_row_retries(
     monkeypatch.setattr(outbox, "mark_processed", processed)
 
     redis = AsyncMock()
-    redis.xadd = AsyncMock(
-        side_effect=[RuntimeError("redis down"), b"1234567890-0"]
+    redis.eval = AsyncMock(
+        side_effect=[RuntimeError("redis down"), [1, 1, b"1234567890-0"]]
     )
     pool = object()
     broadcaster = AsyncMock()
@@ -76,7 +82,90 @@ async def test_redis_failure_is_recorded_then_same_outbox_row_retries(
 
     assert await outbox.drain_once(pool, redis, broadcaster) is True
     processed.assert_awaited_once_with(pool, 41)
-    assert redis.xadd.await_count == 2
+    assert redis.eval.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_exposure_uses_atomic_bounded_stream_admission():
+    redis = AsyncMock()
+    redis.eval.return_value = [1, 42, b"1234567890-0"]
+    row = exposure_row(attempts=1)
+
+    await outbox.deliver(row, redis, AsyncMock())
+
+    event_json = json.dumps(
+        row["payload"]["event"],
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    redis.eval.assert_awaited_once_with(
+        outbox._BOUNDED_XADD_LUA,
+        1,
+        "events:raw:apdl",
+        1,
+        outbox.EVENT_STREAM_MAX_ENTRIES,
+        event_json,
+    )
+    redis.xadd.assert_not_awaited()
+    assert "XLEN" in outbox._BOUNDED_XADD_LUA
+    assert "MAXLEN" not in outbox._BOUNDED_XADD_LUA
+
+
+@pytest.mark.asyncio
+async def test_stream_overload_keeps_outbox_row_pending_for_retry(
+    monkeypatch,
+    caplog,
+):
+    claim = AsyncMock(return_value=exposure_row(attempts=3))
+    failed = AsyncMock()
+    processed = AsyncMock()
+    monkeypatch.setattr(outbox, "claim_next", claim)
+    monkeypatch.setattr(outbox, "mark_failed", failed)
+    monkeypatch.setattr(outbox, "mark_processed", processed)
+    redis = AsyncMock()
+    redis.eval.return_value = [0, outbox.EVENT_STREAM_MAX_ENTRIES]
+
+    with caplog.at_level(logging.ERROR, logger=outbox.__name__):
+        assert await outbox.drain_once(object(), redis, AsyncMock()) is True
+
+    processed.assert_not_awaited()
+    failed.assert_awaited_once()
+    pool, row_id, attempts, error = failed.await_args.args
+    assert row_id == 41
+    assert attempts == 3
+    assert "durability capacity" in error
+    overload = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "event_stream_overloaded"
+    )
+    assert overload.stream_key == "events:raw:apdl"
+    assert overload.outstanding_entries == outbox.EVENT_STREAM_MAX_ENTRIES
+    assert overload.max_entries == outbox.EVENT_STREAM_MAX_ENTRIES
+
+
+@pytest.mark.asyncio
+async def test_stream_pressure_emits_structured_alert(caplog):
+    redis = AsyncMock()
+    redis.eval.return_value = [
+        1,
+        outbox.EVENT_STREAM_ALERT_ENTRIES,
+        b"1234567890-0",
+    ]
+
+    with caplog.at_level(logging.WARNING, logger=outbox.__name__):
+        await outbox.deliver(exposure_row(attempts=1), redis, AsyncMock())
+
+    pressure = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "event_stream_pressure"
+    )
+    assert pressure.outstanding_entries == outbox.EVENT_STREAM_ALERT_ENTRIES
+    assert pressure.alert_entries == outbox.EVENT_STREAM_ALERT_ENTRIES
+    assert pressure.project_id == "apdl"
+    assert pressure.outbox_id == 41
 
 
 @pytest.mark.asyncio

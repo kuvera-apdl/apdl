@@ -39,13 +39,17 @@ Each `POST /v1/events` request goes through four stages:
    `400 {"error": "validation_failed",
    "errors": [{"field", "message"}, ...]}` with every error collected, not
    just the first.
-4. **Atomic XADD** — each event is enriched with `server_timestamp`, client `ip`
+4. **Bounded durable admission** — each event is enriched with `server_timestamp`, client `ip`
    (the socket peer, or one canonical `X-Forwarded-For` address from a
-   configured trusted proxy), and `project_id`, then published as
-   compact JSON to the Redis Stream `events:raw:{project_id}` in one Redis
-   transaction with approximate `MAXLEN ~ 1000000` trimming. Success →
-   `202 {"accepted": N}` only after the complete transaction. Any known or
-   ambiguous transaction failure returns `503`; clients retry the same stable
+   configured trusted proxy), and `project_id`, then published as compact JSON
+   to the Redis Stream `events:raw:{project_id}`. One Lua operation checks the
+   exact outstanding depth and appends the complete batch without trimming.
+   The 1,000,000-entry capacity is accepted only because the writer deletes
+   entries after ClickHouse or DLQ durability; a batch that would cross it gets
+   retryable `503 service_overloaded` with `Retry-After`. Pressure warnings begin
+   at 750,000 outstanding entries. Success →
+   `202 {"accepted": N}` only after the complete atomic operation. Any known or
+   ambiguous operation failure returns `503`; clients retry the same stable
    `message_id` values and ClickHouse deduplicates them.
 
 ## API
@@ -100,9 +104,20 @@ curl -X POST http://localhost:8080/v1/events \
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
 | `INGESTION_TRUSTED_PROXY_CIDRS` | empty | Comma-separated canonical CIDRs allowed to supply the single-hop `X-Forwarded-For` contract |
 
-JSON, rate-limit, and stream-trim settings are compile-time constants under
+JSON, rate-limit, and stream-admission settings are compile-time constants under
 `app/validation/json_contract.py`, `app/middleware/rate_limit.py`, and
 `app/streaming/redis_producer.py`.
+
+The Redis durability contract requires AOF or equivalent managed persistence,
+an explicit aggregate memory ceiling with `maxmemory-policy noeviction`, and
+memory/disk alerting. Route
+`event_stream_pressure`, `event_stream_overloaded`, and
+`redis_memory_pressure`, and `lost_or_deleted_pending` log events to an
+operational alerting system. The
+checked-in Compose stack uses AOF with `appendfsync everysec`; that policy can
+lose roughly the latest second during a host-level failure, so deployments
+requiring power-loss durability must use `appendfsync always` or a managed
+durable log.
 
 ## Running locally
 
