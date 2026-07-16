@@ -1,0 +1,7 @@
+--- a/handler.go
++++ b/handler.go
+@@ -3,3 +3,3 @@
+ func Complete(job Job, metrics Metrics) {
+-	metrics.RecordCompleted(job.ID)
++	_ = metrics
+ }

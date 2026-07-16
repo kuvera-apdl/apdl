@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 from app.editor.base import EditRequest, EditResult
+from app.requirements import compile_requirement_ledger, map_implementation_evidence
+
+
+def _ledger(request: EditRequest, result: EditResult):
+    if result.requirement_ledger is not None:
+        return result.requirement_ledger
+    compiled = compile_requirement_ledger(
+        title=request.title,
+        spec=request.spec,
+        constraints=request.constraints,
+        risk=request.risk_level,
+        verification_command=request.test_cmd,
+    )
+    return map_implementation_evidence(
+        compiled, result.changed_paths or ["generated-change"]
+    )
 
 
 class FakeEditor:
@@ -26,5 +42,15 @@ class FakeEditor:
                 changed_paths=result.changed_paths,
                 diff_text=result.diff_text,
                 prompts=result.prompts,
+                head_sha=result.head_sha or "fake-head-sha",
+                contract_bundle=result.contract_bundle,
+                requirement_ledger=_ledger(request, result),
+                inspection_snapshot=result.inspection_snapshot,
+                dependency_slice=result.dependency_slice,
+                verification_plan=result.verification_plan,
+                verification_coverage=result.verification_coverage,
+                runtime_acceptance_plan=result.runtime_acceptance_plan,
+                generated_runtime_workflow=result.generated_runtime_workflow,
+                review_verdict=result.review_verdict,
             )
         return result

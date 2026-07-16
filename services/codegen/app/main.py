@@ -1,8 +1,8 @@
 """APDL Codegen Service — FastAPI application entry point.
 
 The codegen service is the platform's "hands": it connects to customer
-repositories, produces changesets (branch + commits + pull request), and —
-under policy — merges them. It is the only component that holds the GitHub App
+repositories and produces changesets (branch + commits + pull request). GitHub
+owns CI verification and merge. This service holds the GitHub App
 credentials and runs untrusted code in a sandbox, isolated from the rest of the
 platform. Orchestration, autonomy gating, and approvals stay in the agents
 service, which calls this one over the internal API.
@@ -15,6 +15,7 @@ import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncpg
 from fastapi import FastAPI
@@ -25,6 +26,10 @@ from app.config import (
     codegen_ci_poll_interval,
     codegen_cors_origins,
     codegen_job_budget,
+    codegen_model,
+    codegen_revision,
+    codegen_rollout_authorization_path,
+    codegen_rollout_stage,
     codegen_stale_sweep_interval,
     postgres_url,
 )
@@ -32,12 +37,18 @@ from app.db import ALL_DDL
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
+from app.evaluations.models import RolloutStage
+from app.evaluations.publication import load_publication_authorizer
 from app.github.app_auth import mint_token_for_repo
-from app.github.checks import get_ci_status
-from app.github.pulls import mark_ready_for_review, open_pull_request
-from app.jobs.ci_poller import run_ci_poller
+from app.github.checks import get_ci_evidence
+from app.github.pulls import get_pull_request, open_pull_request
+from app.jobs.ci_poller import run_github_poller
+from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
+from app.models.observations import CIVerificationObservation
+from app.publication import ConfiguredPublicationGate
 from app.routers import changesets, connections, github, webhooks
+from app.runtime.collector import collect_runtime_evidence
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -71,9 +82,41 @@ def _make_editor() -> Editor:
     return AiderEditor()
 
 
+def _make_publication_gate() -> ConfiguredPublicationGate:
+    """Load the operator artifact once and bind it to this deployed candidate."""
+    stage = codegen_rollout_stage()
+    model = codegen_model()
+    revision = codegen_revision()
+    provider = None
+    if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
+        raw_path = codegen_rollout_authorization_path()
+        if not raw_path:
+            raise RuntimeError(
+                "CODEGEN_ROLLOUT_AUTHORIZATION_PATH is required for PR rollout stages"
+            )
+        artifact_path = Path(raw_path)
+        if not artifact_path.is_absolute():
+            raise RuntimeError(
+                "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
+            )
+        provider = load_publication_authorizer(
+            artifact_path,
+            expected_model=model,
+            expected_codegen_revision=revision,
+        )
+    return ConfiguredPublicationGate(
+        stage=stage,
+        model=model,
+        codegen_revision=revision,
+        provider=provider,
+    )
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
+    publication_gate = _make_publication_gate()
+    application.state.codegen_rollout_stage = publication_gate.stage
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
     application.state.pg_pool = pool
 
@@ -98,10 +141,40 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
+    editor = _make_editor()
+    repair_jobs: set[asyncio.Task] = set()
+
+    def _repair_finished(task: asyncio.Task) -> None:
+        repair_jobs.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "CI remediation background task failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _schedule_ci_repair(observation: CIVerificationObservation) -> None:
+        """Start a deduplicated repair without blocking CI observation sweeps."""
+        task = asyncio.create_task(
+            repair_failed_ci(
+                pool,
+                observation,
+                editor=editor,
+                mint_token=_mint_token,
+                publication_gate=publication_gate,
+            )
+        )
+        repair_jobs.add(task)
+        task.add_done_callback(_repair_finished)
+
+    application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
-        "editor": _make_editor(),
+        "editor": editor,
         "mint_token": _mint_token,
         "open_pr": open_pull_request,
+        "publication_gate": publication_gate,
     }
 
     # Re-enqueue work a restart orphaned before it began: a queued row produced
@@ -121,12 +194,13 @@ async def lifespan(application: FastAPI):
             len(queued_ids),
             ", ".join(queued_ids),
         )
-    # Dependencies for CI-status sync, shared by the poller and the (optional)
-    # GitHub webhook receiver.
-    application.state.ci_deps = {
-        "get_status": get_ci_status,
+    # Live GitHub recovery dependencies shared by polling and webhooks.
+    application.state.github_sync_deps = {
+        "get_pull_request": get_pull_request,
+        "get_ci_evidence": get_ci_evidence,
         "mint_token": _mint_token,
-        "mark_ready": mark_ready_for_review,
+        "repair_failure": _schedule_ci_repair,
+        "collect_runtime": collect_runtime_evidence,
     }
 
     # CI poller: the zero-config trigger that keeps open changesets advancing
@@ -136,7 +210,11 @@ async def lifespan(application: FastAPI):
     poll_interval = codegen_ci_poll_interval()
     if poll_interval > 0:
         poller_task = asyncio.create_task(
-            run_ci_poller(pool, interval_seconds=poll_interval, **application.state.ci_deps)
+            run_github_poller(
+                pool,
+                interval_seconds=poll_interval,
+                **application.state.github_sync_deps,
+            )
         )
     else:
         logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
@@ -166,6 +244,10 @@ async def lifespan(application: FastAPI):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+    for task in tuple(repair_jobs):
+        task.cancel()
+    if repair_jobs:
+        await asyncio.gather(*repair_jobs, return_exceptions=True)
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -177,7 +259,7 @@ app = FastAPI(
 )
 
 # The admin console calls these endpoints directly from the browser, so CORS
-# must be permitted — but this service opens/merges PRs on customer repos, so it
+# must be permitted — but this service opens PRs on customer repos, so it
 # uses an explicit origin allow-list rather than wildcard-with-credentials (which
 # would let any site issue credentialed cross-origin requests). Configure prod
 # origins via CODEGEN_CORS_ORIGINS; defaults to the local admin-console origins.

@@ -1,176 +1,202 @@
-"""Sync a changeset's CI status from the repo's own checks (webhook or poll).
-
-Moves ``pr_open → ci_running → ci_passed | ci_failed`` as the customer repo's CI
-reports in, and promotes the draft PR to ready-for-review once green (decision
-D5). Dependencies are injected so the path is testable without GitHub.
-
-Two guards keep the CI gate *bounded* instead of trusting GitHub's signals
-blindly (see ``github.checks`` for the evidence model):
-
-- a grace window before acting on ``none`` (CI may exist but not have reported
-  its first status yet);
-- a deadline on *inferred* ``pending`` (evidence said CI should report, but
-  nothing was ever observed on the ref — e.g. phantom app check-suites, or a
-  workflow that never triggers on PR branches). Past the deadline the gate is
-  released as ``ci_status="no_report"`` rather than held forever.
-
-Both are anchored on ``ci_awaiting_since`` (set once when the PR opens), not on
-``updated_at`` — status transitions refresh ``updated_at``, which would let the
-sync reset its own clock.
-"""
+"""Recover GitHub PR and exact-head CI observations without owning either."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Any
 
 import asyncpg
 
-from app.config import codegen_ci_none_grace_seconds, codegen_ci_pending_timeout
-from app.models.changeset import CI_SYNCABLE_STATUSES, ChangesetStatus
-from app.store import changesets as store
+from app.github.checks import GitHubCIEvidence
+from app.github.observations import (
+    build_ci_verification_observation,
+    build_pull_request_observation,
+)
+from app.models.changeset import ChangesetStatus
+from app.models.observations import CIVerificationObservation, GitHubPRStatus
+from app.runtime.collector import RuntimeEvidenceCollection
+from app.runtime.evidence import build_runtime_evidence_observation
+from app.runtime.models import RuntimeAcceptancePlan
+from app.store import changesets as changeset_store
 from app.store import connections as connections_store
+from app.store.observations import (
+    apply_ci_verification_observation,
+    apply_pull_request_observation,
+)
+from app.store.runtime_evidence import (
+    apply_runtime_evidence_observation,
+    claim_runtime_evidence_collection,
+    release_runtime_evidence_collection,
+)
 
 logger = logging.getLogger(__name__)
 
-CIStatusReader = Callable[[str, str, str], Awaitable[str]]  # (repo, ref, token) -> status
+PullRequestReader = Callable[[str, int, str], Awaitable[dict[str, Any]]]
+CIEvidenceReader = Callable[[str, str, str], Awaitable[GitHubCIEvidence]]
 TokenMinter = Callable[[int, str], Awaitable[str]]
-ReadyMarker = Callable[..., Awaitable[None]]
+CIFailureHandler = Callable[[CIVerificationObservation], Awaitable[None]]
+RuntimeEvidenceCollector = Callable[
+    [str, str, str, RuntimeAcceptancePlan], Awaitable[RuntimeEvidenceCollection]
+]
+_runtime_collection_semaphore: asyncio.Semaphore | None = None
 
 
-def _seconds_awaiting(awaiting_since: datetime | None) -> float | None:
-    """Seconds since the changeset started awaiting CI (``None`` if unknown).
-
-    Naive timestamps are read as UTC.
-    """
-    if awaiting_since is None:
-        return None
-    if awaiting_since.tzinfo is None:
-        awaiting_since = awaiting_since.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - awaiting_since).total_seconds()
+def _runtime_collection_slot() -> asyncio.Semaphore:
+    global _runtime_collection_semaphore
+    if _runtime_collection_semaphore is None:
+        _runtime_collection_semaphore = asyncio.Semaphore(2)
+    return _runtime_collection_semaphore
 
 
-def _within_none_grace(awaiting_since: datetime | None) -> bool:
-    """True if a ``none`` result should still be held as pending."""
-    grace = codegen_ci_none_grace_seconds()
-    elapsed = _seconds_awaiting(awaiting_since)
-    if grace <= 0 or elapsed is None:
-        return False
-    return elapsed < grace
-
-
-def _pending_wait_expired(awaiting_since: datetime | None) -> bool:
-    """True when an inferred ``pending`` has exhausted its deadline."""
-    timeout = codegen_ci_pending_timeout()
-    elapsed = _seconds_awaiting(awaiting_since)
-    if timeout <= 0 or elapsed is None:
-        return False
-    return elapsed >= timeout
-
-
-async def sync_ci_status(
+async def sync_github_state(
     pool: asyncpg.Pool,
     changeset_id: str,
     *,
-    get_status: CIStatusReader,
+    get_pull_request: PullRequestReader,
+    get_ci_evidence: CIEvidenceReader,
     mint_token: TokenMinter,
-    mark_ready: ReadyMarker | None = None,
-) -> str | None:
-    """Pull the latest CI status for a changeset's branch and advance its state.
+    repair_failure: CIFailureHandler | None = None,
+    collect_runtime: RuntimeEvidenceCollector | None = None,
+    pr_action: str = "polled",
+    delivery_id: str | None = None,
+) -> CIVerificationObservation | None:
+    """Observe the live PR, then journal CI only for its exact current head.
 
-    Returns the resolved CI status (``passed`` / ``failed`` / ``pending`` /
-    ``none`` / ``no_report``), or ``None`` if the changeset is not in a state
-    where CI applies. ``none`` means the repo has no CI configured and
-    ``no_report`` means CI evidence existed but nothing ever reported within the
-    deadline: in both cases there is nothing (left) to wait on, so the changeset
-    advances to ``ci_passed`` (with the distinction preserved in ``ci_status``)
-    and the Merge button is unblocked — a human still makes the merge decision.
+    CI projection never changes ``changeset_status``. A zero-signal GitHub
+    response becomes ``unverified_external_ci`` immediately and may be replaced
+    by a later exact-head observation if CI subsequently appears.
     """
-    changeset = await store.get_changeset(pool, changeset_id)
-    if changeset is None or changeset.branch is None:
+    changeset = await changeset_store.get_changeset(pool, changeset_id)
+    if changeset is None or changeset.pr_number is None:
         return None
-    if changeset.status not in CI_SYNCABLE_STATUSES:
-        return None
-
     connection = await connections_store.get_connection(pool, changeset.project_id)
     if connection is None:
         return None
 
     token = await mint_token(connection.installation_id, connection.repo)
-    status = await get_status(connection.repo, changeset.branch, token)
-    # Evidence level (see github.checks.CIStatus). Plain strings — older
-    # readers, test fakes — default to observed: the conservative reading,
-    # since only inferred verdicts may be timed out.
-    observed = bool(getattr(status, "observed", True))
-    awaiting_since = changeset.ci_awaiting_since or changeset.updated_at
-
-    # Still-failed fast path: CI already reported failed and still says failed.
-    # Re-recording it would bounce ci_failed → ci_running → ci_failed, refreshing
-    # updated_at on every poll — churn that defeats the poller's age cap
-    # (CODEGEN_CI_SYNC_MAX_AGE_SECONDS) so a long-dead PR is re-polled forever.
-    if status == "failed" and changeset.status is ChangesetStatus.ci_failed:
-        return "failed"
-
-    # A "none" result inside the grace window is most likely "CI hasn't reported
-    # yet" rather than "repo has no CI" — commit-status-only CI registers no
-    # check-suite/workflow until its first post (see config docstring). Hold it as
-    # pending and leave the changeset in ci_running so a late status can still
-    # demote it; only let "none" clear the gate once we've waited long enough.
-    if status == "none" and _within_none_grace(awaiting_since):
-        if changeset.status in (ChangesetStatus.pr_open, ChangesetStatus.ci_failed):
-            await store.set_ci_status(
-                pool, changeset_id, target=ChangesetStatus.ci_running, ci_status="pending"
-            )
+    live_pr = await get_pull_request(connection.repo, changeset.pr_number, token)
+    now = datetime.now(timezone.utc)
+    try:
+        pr_observation = build_pull_request_observation(
+            changeset_id=changeset_id,
+            repository=connection.repo,
+            action=pr_action,
+            pull_request=live_pr,
+            observed_at=now,
+            delivery_id=delivery_id,
+        )
+    except ValueError:
+        if pr_action == "polled":
+            raise
+        # A delayed webhook can describe an earlier action after GitHub has
+        # already moved the PR again. The live fetch remains authoritative, so
+        # journal that current state as a poll while retaining the delivery ID.
         logger.info(
-            "CI reports 'none' for changeset %s but it is within the no-CI grace "
-            "window; holding as pending pending a possible late status.",
+            "GitHub PR action %s no longer matches live state for changeset %s; "
+            "recording the live state as polled.",
+            pr_action,
             changeset_id,
         )
-        return "pending"
+        pr_observation = build_pull_request_observation(
+            changeset_id=changeset_id,
+            repository=connection.repo,
+            action="polled",
+            pull_request=live_pr,
+            observed_at=now,
+            delivery_id=delivery_id,
+        )
+    await apply_pull_request_observation(pool, pr_observation)
 
-    # Inferred-pending deadline: evidence said CI should report (live suites /
-    # active workflows) but nothing was ever OBSERVED on the ref. Past the
-    # deadline that inference is judged wrong — phantom suite, workflow that
-    # never triggers on PR branches — and the gate is released as "no_report".
-    # An observed pending (real CI executing) never times out, and a changeset
-    # that once observed a failure (ci_failed) is never released this way.
-    resolved = str(status)
+    projected = await changeset_store.get_changeset(pool, changeset_id)
     if (
-        status == "pending"
-        and not observed
-        and changeset.status is not ChangesetStatus.ci_failed
-        and _pending_wait_expired(awaiting_since)
+        projected is None
+        or projected.status is not ChangesetStatus.pr_open
+        or projected.github_pr_status
+        not in {GitHubPRStatus.open, GitHubPRStatus.draft}
+        or not projected.head_sha
     ):
-        resolved = "no_report"
-        logger.warning(
-            "Changeset %s has awaited CI beyond the pending deadline with nothing "
-            "observed on the ref; releasing the CI gate as 'no_report'.",
-            changeset_id,
-        )
+        return None
 
-    # Ensure we are in ci_running before recording a terminal CI result (also
-    # handles a re-run after a previous ci_failed).
-    if changeset.status in (ChangesetStatus.pr_open, ChangesetStatus.ci_failed):
-        await store.set_ci_status(
-            pool, changeset_id, target=ChangesetStatus.ci_running, ci_status="pending"
-        )
-
-    # "passed" (CI green), "none" (repo has no CI to wait on), and "no_report"
-    # (CI never reported within the deadline) all clear the CI gate; the
-    # ci_status column preserves which one it was for the audit/UI.
-    if resolved in ("passed", "none", "no_report"):
-        await store.set_ci_status(
-            pool, changeset_id, target=ChangesetStatus.ci_passed, ci_status=resolved
-        )
-        if mark_ready is not None and changeset.pr_node_id:
-            try:
-                await mark_ready(node_id=changeset.pr_node_id, token=token)
-            except Exception:
-                logger.warning("Could not mark PR ready for changeset %s", changeset_id)
-    elif resolved == "failed":
-        await store.set_ci_status(
-            pool, changeset_id, target=ChangesetStatus.ci_failed, ci_status="failed"
-        )
-
-    return resolved
+    evidence = await get_ci_evidence(
+        connection.repo,
+        projected.head_sha,
+        token,
+    )
+    observation = build_ci_verification_observation(
+        changeset_id=changeset_id,
+        repository=connection.repo,
+        pr_number=projected.pr_number,
+        head_sha=projected.head_sha,
+        combined_status=evidence.combined_status,
+        check_runs=evidence.check_runs,
+        observed_at=datetime.now(timezone.utc),
+        ledger=projected.requirement_ledger,
+    )
+    await apply_ci_verification_observation(pool, observation)
+    runtime_claimed = False
+    if (
+        collect_runtime is not None
+        and projected.runtime_acceptance_plan is not None
+        and projected.runtime_acceptance_plan.checks
+    ):
+        try:
+            runtime_claimed = await claim_runtime_evidence_collection(
+                pool,
+                changeset_id=changeset_id,
+                head_sha=projected.head_sha,
+                ci_observation_id=observation.observation_id,
+            )
+            if runtime_claimed:
+                async with _runtime_collection_slot():
+                    collection = await collect_runtime(
+                        connection.repo,
+                        projected.head_sha,
+                        token,
+                        projected.runtime_acceptance_plan,
+                    )
+                    runtime_observation = build_runtime_evidence_observation(
+                        changeset_id=changeset_id,
+                        repository=connection.repo,
+                        pr_number=projected.pr_number,
+                        head_sha=projected.head_sha,
+                        ci_observation=observation,
+                        plan=projected.runtime_acceptance_plan,
+                        collection=collection,
+                        observed_at=datetime.now(timezone.utc),
+                    )
+                    await apply_runtime_evidence_observation(
+                        pool, runtime_observation
+                    )
+        except Exception:
+            # External Actions/artifact availability cannot prevent CI projection
+            # or wedge the repair loop. Known 403/missing cases are returned as
+            # explicit collector diagnostics; this is a last-resort isolation.
+            logger.warning(
+                "Runtime evidence collection failed for changeset %s head %s",
+                changeset_id,
+                projected.head_sha,
+                exc_info=True,
+            )
+            if runtime_claimed:
+                try:
+                    await release_runtime_evidence_collection(
+                        pool,
+                        changeset_id=changeset_id,
+                        head_sha=projected.head_sha,
+                        ci_observation_id=observation.observation_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Could not release runtime collection lease for %s",
+                        observation.observation_id,
+                        exc_info=True,
+                    )
+    if (
+        observation.status.value == "failed"
+        and repair_failure is not None
+    ):
+        await repair_failure(observation)
+    return observation

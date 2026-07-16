@@ -7,7 +7,11 @@ well as from a file, so these cover inline (incl. escaped newlines), base64, the
 
 import base64
 
+import pytest
+
 from app import config
+from app.evaluations.models import RolloutStage
+from app.main import _make_publication_gate
 
 _PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVQIBADAN\n-----END RSA PRIVATE KEY-----\n"
 
@@ -96,26 +100,32 @@ def test_cors_origins_parsed_from_env(monkeypatch):
     ]
 
 
-def test_ci_sync_max_age_defaults_to_seven_days(monkeypatch):
-    monkeypatch.delenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", raising=False)
-    assert config.codegen_ci_sync_max_age_seconds() == 7 * 24 * 3600
+def test_ci_poll_interval_default_and_disable(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CI_POLL_INTERVAL", raising=False)
+    assert config.codegen_ci_poll_interval() == 60
+    monkeypatch.setenv("CODEGEN_CI_POLL_INTERVAL", "0")
+    assert config.codegen_ci_poll_interval() == 0
 
 
-def test_ci_sync_max_age_env_override_and_floor(monkeypatch):
-    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "3600")
-    assert config.codegen_ci_sync_max_age_seconds() == 3600
-    monkeypatch.setenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", "-5")
-    assert config.codegen_ci_sync_max_age_seconds() == 0
+def test_ci_repair_limits_default_and_floor(monkeypatch):
+    monkeypatch.delenv("CODEGEN_CI_REPAIR_RETRIES", raising=False)
+    monkeypatch.delenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", raising=False)
+    assert config.codegen_ci_repair_retries() == 2
+    assert config.codegen_ci_repair_budget_seconds() == 3600
+
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "-1")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "-1")
+    assert config.codegen_ci_repair_retries() == 0
+    assert config.codegen_ci_repair_budget_seconds() == 0
 
 
 def test_job_budget_derives_from_the_inner_timeouts(monkeypatch):
     monkeypatch.delenv("CODEGEN_JOB_BUDGET", raising=False)
     monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
-    monkeypatch.setenv("CODEGEN_TEST_TIMEOUT", "600")
     monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
-    # (1 + retries) × (agent + verify) + clone/push slack
-    assert config.codegen_job_budget() == 2 * (1800 + 600) + 2 * 300
+    # (1 + retries) × agent + clone/push slack
+    assert config.codegen_job_budget() == 2 * 1800 + 2 * 300
 
 
 def test_job_budget_env_override_wins(monkeypatch):
@@ -128,3 +138,39 @@ def test_stale_sweep_interval_default_and_disable(monkeypatch):
     assert config.codegen_stale_sweep_interval() == 300
     monkeypatch.setenv("CODEGEN_STALE_SWEEP_INTERVAL", "0")
     assert config.codegen_stale_sweep_interval() == 0
+
+
+def test_rollout_config_defaults_fail_closed_and_binds_revision(monkeypatch):
+    monkeypatch.delenv("CODEGEN_ROLLOUT_STAGE", raising=False)
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    monkeypatch.delenv("CODEGEN_REVISION", raising=False)
+    monkeypatch.delenv("GIT_COMMIT_SHA", raising=False)
+
+    assert config.codegen_rollout_stage() is RolloutStage.offline
+    assert config.codegen_rollout_authorization_path() == ""
+    assert config.codegen_revision() == "development-unversioned"
+
+    monkeypatch.setenv("CODEGEN_REVISION", "image@sha256:abc")
+    assert config.codegen_revision() == "image@sha256:abc"
+
+
+def test_rollout_stage_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "automatic_merge")
+    with pytest.raises(ValueError, match="CODEGEN_ROLLOUT_STAGE"):
+        config.codegen_rollout_stage()
+
+
+def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="AUTHORIZATION_PATH"):
+        _make_publication_gate()
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "relative.json")
+    with pytest.raises(RuntimeError, match="absolute path"):
+        _make_publication_gate()
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "offline")
+    gate = _make_publication_gate()
+    assert gate.stage is RolloutStage.offline
+    assert gate.provider is None

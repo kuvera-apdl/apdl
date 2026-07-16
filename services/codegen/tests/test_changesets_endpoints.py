@@ -1,9 +1,17 @@
 """Endpoint tests for the changeset lifecycle."""
 
+from datetime import UTC, datetime
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.evaluations.models import RolloutStage
+from app.models.observations import CIVerificationObservation, ExternalCIStatus
+from app.runtime.collector import RuntimeEvidenceCollection
+from app.runtime.evidence import build_runtime_evidence_observation
+from app.runtime.models import RuntimeAcceptancePlan
+from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 
 
@@ -20,6 +28,28 @@ async def test_create_changeset_requires_connection():
             json={"project_id": "demo", "task": {"title": "x", "spec": "do the thing"}},
         )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_evaluation_only_stage_rejects_changeset_before_queueing():
+    pool = FakePool()
+    pool.add_connection("demo")
+    app.state.codegen_rollout_stage = RolloutStage.shadow
+    try:
+        async with _client(pool) as client:
+            response = await client.post(
+                "/v1/changesets",
+                json={
+                    "project_id": "demo",
+                    "task": {"title": "x", "spec": "do the thing"},
+                },
+            )
+    finally:
+        del app.state.codegen_rollout_stage
+
+    assert response.status_code == 409
+    assert "publication are disabled" in response.json()["detail"]
+    assert pool.store["changesets"] == {}
 
 
 @pytest.mark.asyncio
@@ -56,6 +86,58 @@ async def test_get_unknown_changeset_404():
     async with _client(FakePool()) as client:
         resp = await client.get("/v1/changesets/cs_nope")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_runtime_observations_endpoint_returns_exact_head_journal():
+    pool = FakePool()
+    pool.add_connection("demo", repo="acme/widgets")
+    pool.add_changeset(
+        "cs-runtime",
+        "demo",
+        status="pr_open",
+        pr_number=7,
+        branch="apdl/x",
+        head_sha="head-a",
+        github_pr_status="open",
+        external_ci_status="unverified_external_ci",
+    )
+    plan = RuntimeAcceptancePlan(
+        source_ledger_sha256="a" * 64,
+        repo_profile_sha256="b" * 64,
+        verification_plan_sha256="c" * 64,
+        repo="acme/widgets",
+        branch="apdl/x",
+    )
+    observation = build_runtime_evidence_observation(
+        changeset_id="cs-runtime",
+        repository="acme/widgets",
+        pr_number=7,
+        head_sha="head-a",
+        ci_observation=CIVerificationObservation(
+            observation_id="ciobs_" + "d" * 32,
+            changeset_id="cs-runtime",
+            repository="acme/widgets",
+            pr_number=7,
+            head_sha="head-a",
+            status=ExternalCIStatus.unverified_external_ci,
+            observed_at=datetime(2026, 7, 11, tzinfo=UTC),
+        ),
+        plan=plan,
+        collection=RuntimeEvidenceCollection(head_sha="head-a"),
+        observed_at=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+    await apply_runtime_evidence_observation(pool, observation)
+
+    async with _client(pool) as client:
+        response = await client.get(
+            "/v1/changesets/cs-runtime/runtime-observations"
+        )
+
+    assert response.status_code == 200
+    assert [item["observation_id"] for item in response.json()] == [
+        observation.observation_id
+    ]
 
 
 @pytest.mark.asyncio
@@ -137,12 +219,11 @@ async def test_revert_unknown_changeset_404():
     assert resp.status_code == 404
 
 
-@pytest.mark.parametrize("status", ["tests_failed", "ci_failed", "error", "abandoned"])
 @pytest.mark.asyncio
-async def test_retry_failed_changeset_enqueues_same_task(status):
+async def test_retry_pre_pr_error_enqueues_same_task():
     pool = FakePool()
     pool.add_connection("demo")
-    pool.add_changeset("cs_bad", "demo", status=status, base_branch="develop")
+    pool.add_changeset("cs_bad", "demo", status="error", base_branch="develop")
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_bad/retry")
     assert resp.status_code == 202
@@ -157,7 +238,9 @@ async def test_retry_failed_changeset_enqueues_same_task(status):
     assert body["task"]["context"]["retry_of"] == "cs_bad"
 
 
-@pytest.mark.parametrize("status", ["merged", "queued", "pr_open", "ci_passed"])
+@pytest.mark.parametrize(
+    "status", ["merged", "queued", "editing", "pushing", "pr_open", "abandoned"]
+)
 @pytest.mark.asyncio
 async def test_retry_non_failed_changeset_409(status):
     pool = FakePool()
@@ -175,53 +258,23 @@ async def test_retry_unknown_changeset_404():
 
 
 @pytest.mark.asyncio
-async def test_abandon_open_pr_closes_it_on_github(monkeypatch):
-    """Abandoning a changeset with an open PR closes that PR on GitHub."""
-    import types
-
-    from app.routers import changesets as router_mod
-
-    closed: dict = {}
-
-    async def fake_mint(installation_id, repo):
-        return types.SimpleNamespace(token="tok")
-
-    async def fake_close(*, repo, number, token):
-        closed.update(repo=repo, number=number, token=token)
-
-    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
-    monkeypatch.setattr(router_mod, "close_pull_request", fake_close)
-
+async def test_abandon_open_pr_is_rejected_and_github_remains_authoritative():
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets", installation_id=42)
     pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_open/abandon")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "abandoned"
-    assert closed == {"repo": "acme/widgets", "number": 7, "token": "tok"}
+    assert resp.status_code == 409
+    assert "managed on GitHub" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_abandon_survives_github_close_failure(monkeypatch):
-    """A GitHub failure while closing the PR is best-effort: abandon still wins."""
-    import types
-
-    from app.routers import changesets as router_mod
-
-    async def fake_mint(installation_id, repo):
-        return types.SimpleNamespace(token="tok")
-
-    async def boom(*, repo, number, token):
-        raise RuntimeError("github down")
-
-    monkeypatch.setattr(router_mod, "mint_token_for_repo", fake_mint)
-    monkeypatch.setattr(router_mod, "close_pull_request", boom)
-
+async def test_retry_closed_pr_cannot_create_replacement_pr():
     pool = FakePool()
     pool.add_connection("demo")
-    pool.add_changeset("cs_open", "demo", status="pr_open", pr_number=7, branch="apdl/x")
+    pool.add_changeset(
+        "cs_closed", "demo", status="abandoned", pr_number=7, branch="apdl/x"
+    )
     async with _client(pool) as client:
-        resp = await client.post("/v1/changesets/cs_open/abandon")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "abandoned"
+        resp = await client.post("/v1/changesets/cs_closed/retry")
+    assert resp.status_code == 409

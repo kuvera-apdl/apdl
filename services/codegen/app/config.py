@@ -11,6 +11,8 @@ import base64
 import os
 import tempfile
 
+from app.evaluations.models import RolloutStage
+
 _DEFAULT_MODEL = "claude-opus-4-8"
 
 
@@ -26,7 +28,7 @@ _DEFAULT_CORS_ORIGINS = ("http://localhost:5174", "http://localhost:5173")
 def codegen_cors_origins() -> list[str]:
     """Explicit allow-list of browser origins permitted to call this service.
 
-    This service opens/merges/abandons PRs on customer repos, so it must NOT use
+    This service opens/abandons PRs on customer repos, so it must NOT use
     wildcard CORS with credentials: Starlette would reflect any Origin and set
     Access-Control-Allow-Credentials, letting any site a victim visits issue
     credentialed cross-origin requests. Read a comma-separated CODEGEN_CORS_ORIGINS
@@ -105,6 +107,37 @@ def codegen_model() -> str:
     return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
 
 
+def codegen_revision() -> str:
+    """Immutable codegen candidate revision bound to rollout evidence.
+
+    Production deployments should set ``CODEGEN_REVISION`` to the image or Git
+    digest. The development fallback is intentionally conspicuous and can only
+    publish if an operator explicitly authorizes that exact value.
+    """
+    return (
+        os.getenv("CODEGEN_REVISION", "").strip()
+        or os.getenv("GIT_COMMIT_SHA", "").strip()
+        or "development-unversioned"
+    )
+
+
+def codegen_rollout_stage() -> RolloutStage:
+    """Configured deployment stage; offline is the fail-closed default."""
+    raw = os.getenv("CODEGEN_ROLLOUT_STAGE", RolloutStage.offline.value).strip()
+    try:
+        return RolloutStage(raw)
+    except ValueError as exc:
+        allowed = ", ".join(stage.value for stage in RolloutStage)
+        raise ValueError(
+            f"CODEGEN_ROLLOUT_STAGE must be one of: {allowed}"
+        ) from exc
+
+
+def codegen_rollout_authorization_path() -> str:
+    """Operator-mounted rollout authorization artifact used for PR stages."""
+    return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
+
+
 def codegen_aider_bin() -> str:
     """Path/name of the aider executable."""
     return os.getenv("CODEGEN_AIDER_BIN", "aider")
@@ -114,8 +147,7 @@ def codegen_cache_prompts() -> bool:
     """Enable Aider prompt caching (default on).
 
     Aider's `--cache-prompts` marks the static prefix (system prompt + repo map +
-    read-only files) as cacheable, so the `--auto-test` retry loop re-reads it at
-    ~0.1x instead of full input price on each iteration — a large saving on a
+    read-only files) as cacheable across editing/review rounds — a large saving on a
     context-heavy editor like this. Harmless on models without cache support
     (Aider only applies it where the provider allows). Set to "false" to disable.
     """
@@ -128,14 +160,13 @@ def codegen_conventions_enabled() -> bool:
     Loads ``app/editor/conventions.py`` as an Aider ``--read`` file so the edit
     bar is "wired in and exercised" rather than "builds green" (reachability,
     reuse the repo's SDK/primitives, test the new behavior). It joins the
-    cacheable static prefix, so with ``--cache-prompts`` it costs ~0.1x on each
-    auto-test retry. Set to "false" to disable.
+    cacheable static prefix. Set to "false" to disable.
     """
     return os.getenv("CODEGEN_CONVENTIONS", "true").lower() != "false"
 
 
 def codegen_sdk_reference_enabled() -> bool:
-    """Attach the APDL SDK integration reference for the repo's SDK (default on).
+    """Return false until SDK guidance is generated for an exact lockfile version.
 
     Loads ``app/editor/sdk_reference.py`` as an Aider ``--read`` file, but only
     the reference for an SDK the repo actually depends on (``@apdl-oss/sdk`` for
@@ -143,9 +174,32 @@ def codegen_sdk_reference_enabled() -> bool:
     which is outside Aider's repo map, so without this the agent cannot see the
     real ``track``/``identify`` call path and guesses (e.g. a ``window.apdl``
     global the SDK never reads). It joins the cacheable static prefix like the
-    conventions. Set to "false" to disable.
+    conventions. Static cross-version guidance is unsafe; an environment toggle
+    cannot prove provenance, so Phase 0 disables this path unconditionally.
     """
-    return os.getenv("CODEGEN_SDK_REFERENCE", "true").lower() != "false"
+    return False
+
+
+def codegen_contracts_enabled() -> bool:
+    """Resolve exact installed dependency contracts before editing (default on)."""
+    return os.getenv("CODEGEN_CONTRACTS", "true").lower() != "false"
+
+
+def codegen_contract_cache_dir() -> str:
+    """Project-scoped content-addressed contract cache directory."""
+    return os.getenv("CODEGEN_CONTRACT_CACHE_DIR") or os.path.join(
+        tempfile.gettempdir(), "apdl-contract-cache"
+    )
+
+
+def codegen_contract_install_timeout() -> int:
+    """Wall-clock limit for one frozen dependency installation."""
+    return max(1, int(os.getenv("CODEGEN_CONTRACT_INSTALL_TIMEOUT", "600")))
+
+
+def codegen_isolated_worker() -> bool:
+    """Whether this process is the credential-minimal per-change worker."""
+    return os.getenv("APDL_CODEGEN_ISOLATED_WORKER") == "true"
 
 
 def codegen_helper_model() -> str:
@@ -222,16 +276,11 @@ def codegen_agent_timeout() -> int:
     return int(os.getenv("CODEGEN_TIMEOUT", "1800"))
 
 
-def codegen_test_timeout() -> int:
-    """Repo test-command timeout, seconds."""
-    return int(os.getenv("CODEGEN_TEST_TIMEOUT", "600"))
-
-
 def codegen_job_budget() -> int:
     """Wall-clock budget for one FULL changeset pipeline, seconds.
 
     The agent timeout (``CODEGEN_TIMEOUT``) bounds a *single* aider invocation;
-    a whole job is clone + (1 + retries) × (aider + verify) + push. This derived
+    a whole job is clone + (1 + retries) × aider + push. This derived
     budget is what must bound anything wrapping the pipeline as a unit: the
     sandbox container's ``docker run`` (killing it at the bare agent timeout
     truncates legitimate retry rounds) and the stale-changeset sweep deadline.
@@ -242,7 +291,7 @@ def codegen_job_budget() -> int:
     if override.strip():
         return max(1, int(override))
     rounds = 1 + codegen_edit_retries()
-    return rounds * (codegen_agent_timeout() + codegen_test_timeout()) + 2 * codegen_git_timeout()
+    return rounds * codegen_agent_timeout() + 2 * codegen_git_timeout()
 
 
 def codegen_stale_sweep_interval() -> int:
@@ -256,16 +305,12 @@ def codegen_stale_sweep_interval() -> int:
 
 
 def codegen_require_verify() -> bool:
-    """Refuse to open a PR that could not be verified locally (default on).
+    """Deprecated local-verification switch retained for config compatibility.
 
-    When on (the default), a changeset for which no verification command could be
-    established — no test/build/typecheck gate for the repo — fails as
-    ``tests_failed`` instead of opening an unverified PR. This is the fail-closed
-    posture: an unverifiable change is worse than no change, and a green-looking
-    draft with a broken build erodes trust in the loop. Set to "false" only for
-    exotic repos with no detectable gate, where a human reviews every PR.
+    APDL no longer executes repository tests as authoritative evidence; GitHub
+    CI owns build, lint, test, and runtime verification.
     """
-    return os.getenv("CODEGEN_REQUIRE_VERIFY", "true").lower() != "false"
+    return False
 
 
 def codegen_max_concurrent_jobs() -> int:
@@ -288,46 +333,11 @@ def codegen_ci_poll_interval() -> int:
     return max(0, int(os.getenv("CODEGEN_CI_POLL_INTERVAL", "60")))
 
 
-def codegen_ci_sync_max_age_seconds() -> int:
-    """Age cap (default 7 days) for what the CI poller re-sweeps.
-
-    list_syncable_changeset_ids includes ci_failed, which is never abandoned
-    automatically — so without a cap the poller re-mints a token and re-queries
-    CI every interval for every changeset that ever failed, a set that only
-    grows. Skip changesets whose updated_at is older than this; a long-dead PR is
-    not going to flip green. Set ``0`` to disable the cap (sweep everything).
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_SYNC_MAX_AGE_SECONDS", str(7 * 24 * 3600))))
+def codegen_ci_repair_retries() -> int:
+    """Maximum same-PR repair commits after actionable GitHub CI failures."""
+    return max(0, int(os.getenv("CODEGEN_CI_REPAIR_RETRIES", "2")))
 
 
-def codegen_ci_pending_timeout() -> int:
-    """Deadline (default 1800s) for CI that never actually reports. ``0`` disables.
-
-    An *inferred* ``pending`` — no commit status or check run has ever appeared
-    on the ref; the "CI is coming" verdict rests only on circumstantial evidence
-    (live check-suites, the repo having active workflows) — can be wrong forever:
-    an active deploy-on-main workflow never runs on PR branches, and an installed
-    app's phantom suite never completes. Without a deadline such a changeset sits
-    in ``ci_running`` permanently and the merge gate never clears. Once a
-    changeset has awaited CI this long with nothing *observed*, the sync resolves
-    it to ``ci_passed`` with ``ci_status="no_report"`` — honestly recorded, so
-    the console/audit shows the gate cleared because CI never reported, not
-    because it passed. An observed ``pending`` (real CI executing) is NEVER
-    timed out by this.
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_PENDING_TIMEOUT", "1800")))
-
-
-def codegen_ci_none_grace_seconds() -> int:
-    """Grace window (default 300s) before a ``none`` CI result clears the gate.
-
-    ``get_ci_status`` returns ``none`` for "repo has no CI", but commit-status-only
-    CI (classic Travis/CircleCI) reports neither a check-suite nor an Actions
-    workflow until its first status post — so right after a PR opens it can look
-    identical to a no-CI repo. Acting on ``none`` immediately would advance the
-    changeset to ``ci_passed`` (a state never re-synced) and permanently clear the
-    merge gate before that CI ever reports. Holding ``none`` as pending until the
-    changeset has been awaiting CI this long lets a late-arriving status demote it
-    first. Set ``0`` to act on ``none`` immediately (no grace).
-    """
-    return max(0, int(os.getenv("CODEGEN_CI_NONE_GRACE_SECONDS", "300")))
+def codegen_ci_repair_budget_seconds() -> int:
+    """Maximum age of a failed head eligible for automated remediation."""
+    return max(0, int(os.getenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")))

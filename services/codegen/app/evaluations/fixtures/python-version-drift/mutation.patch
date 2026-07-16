@@ -1,0 +1,6 @@
+--- a/app.py
++++ b/app.py
+@@ -1,2 +1,2 @@
+ def send_signup(client):
+-    client.capture("signup")
++    client.emit_event("signup")

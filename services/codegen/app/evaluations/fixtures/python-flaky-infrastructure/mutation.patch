@@ -1,0 +1,8 @@
+--- a/classifier.py
++++ b/classifier.py
+@@ -1,4 +1,4 @@
+ def disposition(failure):
+     if failure == "runner_timeout":
+-        return "infrastructure_rerun"
++        return "product_code_repair"
+     return "product_code_repair"

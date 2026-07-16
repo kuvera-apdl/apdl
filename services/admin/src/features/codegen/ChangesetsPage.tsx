@@ -1,6 +1,5 @@
 // Codegen changesets: the autonomous PRs the loop opens on connected repos.
-// Lists changesets for the active workspace's project and exposes the gated
-// actions (merge on green CI, abandon un-merged, revert a merged change).
+// Lists changesets for the active workspace and observes GitHub-owned CI/merge.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -9,12 +8,10 @@ import { toast } from 'sonner'
 import {
   abandonChangeset,
   listChangesets,
-  mergeChangeset,
   retryChangeset,
   revertChangeset,
 } from '@/api/codegen'
 import { ApiError } from '@/api/http'
-import { RETRYABLE_CHANGESET_STATUSES } from '@/api/schemas/codegen'
 import type { Changeset } from '@/api/types/codegen'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
@@ -25,11 +22,14 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
 import { serviceConnection, useWorkspace, type Workspace } from '@/core/workspace'
-import { ChangesetStatusPill } from '@/features/codegen/ChangesetStatusPill'
+import {
+  ChangesetStatusPill,
+  ExternalCIStatusPill,
+  GitHubPRStatusPill,
+} from '@/features/codegen/ChangesetStatusPill'
 import { GitHubConnectionCard } from '@/features/codegen/GitHubConnectionCard'
 
 const REFETCH_MS = 5000
-const TERMINAL = new Set(['merged', 'abandoned', 'tests_failed', 'error'])
 
 export function ChangesetsPage() {
   const { active } = useWorkspace()
@@ -52,15 +52,6 @@ export function ChangesetsPage() {
   const onError = (fallback: string) => (error: Error) =>
     toast.error(error instanceof ApiError ? error.message : fallback)
 
-  const merge = useMutation({
-    mutationFn: (id: string) =>
-      mergeChangeset(serviceConnection(ws, 'codegen'), id),
-    onSuccess: () => {
-      toast.success('Merge requested')
-      invalidate()
-    },
-    onError: onError('Merge failed'),
-  })
   const abandon = useMutation({
     mutationFn: (id: string) =>
       abandonChangeset(serviceConnection(ws, 'codegen'), id),
@@ -88,13 +79,13 @@ export function ChangesetsPage() {
     },
     onError: onError('Retry failed'),
   })
-  const busy = merge.isPending || abandon.isPending || revert.isPending || retry.isPending
+  const busy = abandon.isPending || revert.isPending || retry.isPending
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Code changes"
-        description="Autonomous changesets — branches, draft PRs, and merges on connected repos. Polled every 5s."
+        description="Autonomous PRs with GitHub-owned CI, review, and merge status. Polled every 5s."
       />
       <GitHubConnectionCard />
       {query.isPending ? (
@@ -113,9 +104,9 @@ export function ChangesetsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Task</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>CI</TableHead>
-                  <TableHead>PR</TableHead>
+                  <TableHead>Lifecycle</TableHead>
+                  <TableHead>GitHub PR</TableHead>
+                  <TableHead>External CI</TableHead>
                   <TableHead>Updated</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -126,7 +117,6 @@ export function ChangesetsPage() {
                     key={cs.changeset_id}
                     cs={cs}
                     busy={busy}
-                    onMerge={() => merge.mutate(cs.changeset_id)}
                     onAbandon={() => abandon.mutate(cs.changeset_id)}
                     onRevert={() => revert.mutate(cs.changeset_id)}
                     onRetry={() => retry.mutate(cs.changeset_id)}
@@ -144,21 +134,13 @@ export function ChangesetsPage() {
 interface RowProps {
   cs: Changeset
   busy: boolean
-  onMerge: () => void
   onAbandon: () => void
   onRevert: () => void
   onRetry: () => void
 }
 
-function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowProps) {
-  // 'passed' = CI green; 'none' = the repo has no CI configured; 'no_report' =
-  // CI never reported within the backend's pending deadline. In each case there
-  // is no CI verdict left to wait on and merge is allowed. Anything else
-  // (pending/failed) blocks — mirrors the merge endpoint's gate.
-  const mergeable =
-    (cs.status === 'ci_passed' || cs.status === 'waiting_approval') &&
-    (cs.ci_status === 'passed' || cs.ci_status === 'none' || cs.ci_status === 'no_report')
-  const retryable = RETRYABLE_CHANGESET_STATUSES.has(cs.status)
+function ChangesetRow({ cs, busy, onAbandon, onRevert, onRetry }: RowProps) {
+  const hasPullRequest = cs.pr_number !== null || cs.pr_url !== null
 
   return (
     <TableRow>
@@ -170,24 +152,39 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowPr
       <TableCell>
         <ChangesetStatusPill status={cs.status} />
       </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {cs.ci_status === 'none'
-          ? 'no CI'
-          : cs.ci_status === 'no_report'
-            ? 'CI never reported'
-            : (cs.ci_status ?? '—')}
-      </TableCell>
       <TableCell>
-        {cs.pr_url ? (
-          <a
-            href={cs.pr_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-sm underline"
-          >
-            #{cs.pr_number}
-            <ExternalLink className="h-3 w-3" />
-          </a>
+        <div className="flex flex-wrap items-center gap-2">
+          {cs.github_pr_status ? <GitHubPRStatusPill status={cs.github_pr_status} /> : null}
+          {cs.pr_url ? (
+            <a
+              href={cs.pr_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm underline"
+            >
+              #{cs.pr_number}
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : cs.pr_number !== null ? (
+            <span className="text-sm">#{cs.pr_number}</span>
+          ) : (
+            '—'
+          )}
+          {cs.head_sha ? (
+            <code className="font-mono text-xs text-muted-foreground">
+              {cs.head_sha.slice(0, 12)}
+            </code>
+          ) : null}
+        </div>
+      </TableCell>
+      <TableCell className="text-sm text-muted-foreground">
+        {cs.external_ci_status ? (
+          <div className="space-y-1">
+            <ExternalCIStatusPill status={cs.external_ci_status} />
+            {cs.external_ci_status === 'unverified_external_ci' ? (
+              <p className="text-xs text-amber-700 dark:text-amber-400">no CI configured</p>
+            ) : null}
+          </div>
         ) : (
           '—'
         )}
@@ -200,27 +197,21 @@ function ChangesetRow({ cs, busy, onMerge, onAbandon, onRevert, onRetry }: RowPr
           <Button size="sm" variant="outline" disabled={busy} onClick={onRevert}>
             Revert
           </Button>
-        ) : (
-          <>
-            {retryable ? (
-              <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
-                Retry
-              </Button>
-            ) : (
-              <Button size="sm" disabled={busy || !mergeable} onClick={onMerge}>
-                Merge
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy || TERMINAL.has(cs.status)}
-              onClick={onAbandon}
-            >
-              Abandon
+        ) : hasPullRequest ? (
+          cs.pr_url ? (
+            <Button size="sm" asChild>
+              <a href={cs.pr_url} target="_blank" rel="noreferrer">Open PR on GitHub</a>
             </Button>
-          </>
-        )}
+          ) : null
+        ) : cs.status === 'error' ? (
+          <Button size="sm" variant="outline" disabled={busy} onClick={onRetry}>
+            Retry
+          </Button>
+        ) : cs.status === 'queued' ? (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onAbandon}>
+            Abandon
+          </Button>
+        ) : null}
       </TableCell>
     </TableRow>
   )

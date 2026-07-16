@@ -1,0 +1,118 @@
+{
+  "schema_version": "evaluation_corpus@2",
+  "corpus_id": "generalized-codegen-v2",
+  "cases": [
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "node-async-readiness",
+      "ecosystem": "node",
+      "fixture_repo": "fixtures/node-async-readiness",
+      "fixture_sha256": "99e343b0daceb1fd06f050cbc09ab220d0efd5998b86a8e2fee36d65918793f8",
+      "mutation": "asynchronous_readiness",
+      "task": {
+        "title": "Wait for the client before tracking",
+        "spec": "Initialize the installed analytics client and emit the event only after it becomes ready.",
+        "constraints": ["The event is emitted once after readiness and the client is cleaned up."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "python-version-drift",
+      "ecosystem": "python",
+      "fixture_repo": "fixtures/python-version-drift",
+      "fixture_sha256": "53dd2d9d5114c4c7fa723d723fd6642399a7aa1847c353dbd336a2826c5406dd",
+      "mutation": "dependency_version_drift",
+      "task": {
+        "title": "Use the installed client API",
+        "spec": "Integrate the installed package without relying on APIs introduced in a newer release.",
+        "constraints": ["Every package symbol is supported by the locked version."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "node-dropped-props",
+      "ecosystem": "node",
+      "fixture_repo": "fixtures/node-dropped-props",
+      "fixture_sha256": "38dc3e5e910c8900bd8311b734f157e45e0cb8a0b3744ba819850871dc994f14",
+      "mutation": "dropped_props",
+      "task": {
+        "title": "Preserve button behavior",
+        "spec": "Wrap the existing button without dropping its click and accessibility properties.",
+        "constraints": ["Click and aria-label props reach the rendered button."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "go-absent-metrics",
+      "ecosystem": "go",
+      "fixture_repo": "fixtures/go-absent-metrics",
+      "fixture_sha256": "66cec70fb0adddf1dd62721bf892d3611a2a736f48380d22f8c73935ba0b8208",
+      "mutation": "absent_metrics",
+      "task": {
+        "title": "Record successful jobs",
+        "spec": "Emit the canonical completion metric through the repository's real metrics sink.",
+        "constraints": ["One completion metric is emitted with the job identity."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "rust-missing-route",
+      "ecosystem": "rust",
+      "fixture_repo": "fixtures/rust-missing-route",
+      "fixture_sha256": "d90effa3aa5aec4ffa081af219dd6928c15195a6d04894d455e6ae47e0077414",
+      "mutation": "missing_route",
+      "task": {
+        "title": "Expose the health handler",
+        "spec": "Add and register the requested health route in the existing router.",
+        "constraints": ["GET /health/codegen returns the strict response schema."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "jvm-spatial-placement",
+      "ecosystem": "jvm",
+      "fixture_repo": "fixtures/jvm-spatial-placement",
+      "fixture_sha256": "d365fa7ef911e20f82804953b097ec3c4f59998bd16d934dc0cf5469638a988e",
+      "mutation": "spatial_placement",
+      "task": {
+        "title": "Place the action in the toolbar",
+        "spec": "Render the action inside the existing primary toolbar at the requested position.",
+        "constraints": ["The action is visually inside the toolbar after the title."],
+        "risk": "medium"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "dotnet-missing-ci",
+      "ecosystem": "dotnet",
+      "fixture_repo": "fixtures/dotnet-missing-ci",
+      "fixture_sha256": "4d3fcfc16383aaac7372de48b745dcbe456d30befefbb4b25720b4f606a92f66",
+      "mutation": "missing_ci",
+      "task": {
+        "title": "Preserve external CI uncertainty",
+        "spec": "Represent a repository with no external checks as unverified rather than passed.",
+        "constraints": ["No checks settles as unverified_external_ci and never as passed."],
+        "risk": "high"
+      }
+    },
+    {
+      "schema_version": "evaluation_case@2",
+      "case_id": "python-flaky-infrastructure",
+      "ecosystem": "python",
+      "fixture_repo": "fixtures/python-flaky-infrastructure",
+      "fixture_sha256": "be89f674d94412575649af9aeaaf97dd912eafd20bad6f1fceea52c31903babb",
+      "mutation": "flaky_infrastructure",
+      "task": {
+        "title": "Classify an infrastructure timeout",
+        "spec": "Observe a CI timeout caused by unavailable infrastructure without changing product code.",
+        "constraints": ["The failure is classified for a GitHub-native rerun."],
+        "risk": "low"
+      }
+    }
+  ]
+}

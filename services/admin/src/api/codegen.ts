@@ -4,13 +4,15 @@ import { ApiError, request, type ServiceConnection } from './http'
 import {
   changesetListSchema,
   changesetSchema,
-  mergeRequestSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
+import { changesetObservationHistorySchema } from './schemas/codegen-observations'
+import { runtimeEvidenceObservationListSchema } from './schemas/codegen-runtime'
 import type {
   Changeset,
-  MergeRequest,
+  ChangesetObservationHistory,
   RepoConnection,
+  RuntimeEvidenceObservation,
 } from './types/codegen'
 
 export interface ListChangesetsParams {
@@ -41,16 +43,35 @@ export function getChangeset(
   })
 }
 
-export function mergeChangeset(
+export function getChangesetObservations(
   conn: ServiceConnection,
   changesetId: string,
-  body: MergeRequest = { merge_method: 'squash' },
-): Promise<Changeset> {
-  return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/merge`, {
-    method: 'POST',
-    body: mergeRequestSchema.parse(body),
-    schema: changesetSchema,
-  })
+  options: { signal?: AbortSignal } = {},
+): Promise<ChangesetObservationHistory> {
+  return request(
+    conn,
+    `/v1/changesets/${encodeURIComponent(changesetId)}/observations`,
+    {
+      schema: changesetObservationHistorySchema,
+      signal: options.signal,
+    },
+  )
+}
+
+export function getRuntimeEvidenceObservations(
+  conn: ServiceConnection,
+  changesetId: string,
+  options: { signal?: AbortSignal; limit?: number } = {},
+): Promise<RuntimeEvidenceObservation[]> {
+  return request(
+    conn,
+    `/v1/changesets/${encodeURIComponent(changesetId)}/runtime-observations`,
+    {
+      query: { limit: options.limit ?? 50 },
+      schema: runtimeEvidenceObservationListSchema,
+      signal: options.signal,
+    },
+  )
 }
 
 export function abandonChangeset(

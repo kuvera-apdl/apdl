@@ -1,0 +1,13 @@
+{
+  "schema_version": "evaluation_fixture@1",
+  "fixture_id": "rust-missing-route",
+  "baseline_path": "repository",
+  "mutation_patch": "mutation.patch",
+  "assertions": [
+    {
+      "assertion_id": "health-route-registered",
+      "path": "src/main.rs",
+      "contains": ".route(\"/health/codegen\", get(health))"
+    }
+  ]
+}

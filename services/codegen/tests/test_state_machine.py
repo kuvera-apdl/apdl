@@ -17,11 +17,8 @@ def test_happy_path_is_reachable():
         ChangesetStatus.queued,
         ChangesetStatus.cloning,
         ChangesetStatus.editing,
-        ChangesetStatus.testing,
         ChangesetStatus.pushing,
         ChangesetStatus.pr_open,
-        ChangesetStatus.ci_running,
-        ChangesetStatus.ci_passed,
         ChangesetStatus.merged,
     ]
     for frm, to in zip(path, path[1:]):
@@ -31,9 +28,7 @@ def test_happy_path_is_reachable():
 def test_terminal_states_have_no_exits():
     assert TERMINAL_STATUSES == frozenset(
         {
-            ChangesetStatus.tests_failed,
             ChangesetStatus.merged,
-            ChangesetStatus.abandoned,
             ChangesetStatus.error,
         }
     )
@@ -56,10 +51,25 @@ def test_abandon_allowed_from_open_states():
     for frm in (
         ChangesetStatus.queued,
         ChangesetStatus.pr_open,
-        ChangesetStatus.ci_failed,
-        ChangesetStatus.ci_passed,
     ):
         assert can_transition(frm, ChangesetStatus.abandoned)
+
+
+def test_github_reopen_restores_an_abandoned_pr():
+    assert can_transition(ChangesetStatus.abandoned, ChangesetStatus.pr_open)
+
+
+def test_lifecycle_statuses_do_not_encode_external_ci():
+    assert {status.value for status in ChangesetStatus} == {
+        "queued",
+        "cloning",
+        "editing",
+        "pushing",
+        "pr_open",
+        "merged",
+        "abandoned",
+        "error",
+    }
 
 
 def test_every_status_has_a_transition_entry():

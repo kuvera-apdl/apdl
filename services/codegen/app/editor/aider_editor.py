@@ -4,7 +4,7 @@ Replaces the Claude Managed Agents editor. We now run the edit loop ourselves
 with `Aider <https://github.com/Aider-AI/aider>`_, a git-native, model-agnostic
 coding agent: it reaches any LiteLLM-supported model (OpenAI, Anthropic, Google,
 local, …) chosen via ``CODEGEN_MODEL``, edits inside a clone, and iterates on test
-failures with ``--auto-test``. The model is now a config choice, not a vendor
+failures reported by GitHub CI. The model is now a config choice, not a vendor
 lock-in.
 
 Execution model (v1): a subprocess in a constrained, throwaway workdir on the
@@ -29,16 +29,29 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
+import hashlib
 import logging
 import os
+import platform
+import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app import config
+from app.contracts.cache import FilesystemContractCache
+from app.contracts.installer import (
+    SandboxedCheckRunner,
+    SandboxedInstallRunner,
+    detect_contract_input_drift,
+)
+from app.contracts.models import ContractBundle, ContractRequest, RuntimeFingerprint
+from app.contracts.render import render_contract_bundle
+from app.contracts.resolver import resolve_contracts
+from app.contracts.selection import select_contract_requests
 from app.editor.base import EditRequest, EditResult
 from app.editor.brief import (
     BRIEF_SYSTEM,
@@ -48,14 +61,51 @@ from app.editor.brief import (
 )
 from app.editor.conventions import CONVENTIONS_MD
 from app.editor.llm import CompleteFn, resolve_completer
-from app.editor.review import (
-    REVIEW_SYSTEM,
-    ReviewVerdict,
-    build_review_user,
-    review_change,
+from app.inspection import (
+    DependencySlice,
+    InspectionSnapshot,
+    RepositoryInspector,
+    build_dependency_slice,
+    render_dependency_slice,
+    render_inspection_snapshot,
 )
-from app.editor.sdk_reference import detect_sdk_references
+from app.profiling import profile_repository
+from app.profiling.models import CommandKind, RepoProfile
+from app.requirements import (
+    bind_contract_evidence,
+    compile_requirement_ledger,
+    map_implementation_evidence,
+    render_requirement_ledger,
+)
+from app.requirements.models import ImplementationStatus, RequirementLedger
+from app.runtime.github_actions import render_github_actions_workflow
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
+from app.runtime.planner import build_runtime_acceptance_plan
+from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
+from app.semantic_review import (
+    ModelResponseStatus,
+    ReviewDecision,
+    ReviewVerdict,
+    SEMANTIC_REVIEW_SYSTEM,
+    UncertaintyCode,
+    assemble_review_verdict,
+    build_deterministic_findings,
+    build_deterministic_uncertainties,
+    render_semantic_review_prompt,
+)
+from app.verification import (
+    CoverageDisposition,
+    VerificationCoverage,
+    VerificationPlan,
+    build_verification_plan,
+    evaluate_verification_coverage,
+    render_verification_coverage,
+    render_verification_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +115,28 @@ _ERR_TAIL = 800  # how much subprocess output to surface on a generic failure
 # reads to fix the change, so they get a much larger budget: a build/test log's
 # real error (failing file, import, assertion, stack) needs room to survive.
 _VERIFY_ERR_TAIL = 6000
+
+_PROFILE_INPUT_NAMES = {
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "uv.lock",
+    "go.mod",
+    "Cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
+    "pom.xml",
+    "global.json",
+}
+
+
+def _profile_inputs_changed(paths: list[str]) -> bool:
+    return any(
+        path.startswith(".github/workflows/")
+        or path.rsplit("/", 1)[-1] in _PROFILE_INPUT_NAMES
+        or path.endswith((".csproj", ".fsproj", ".sln"))
+        for path in paths
+    )
 
 
 def _tail(text: str, limit: int = _ERR_TAIL) -> str:
@@ -88,40 +160,38 @@ def _tail(text: str, limit: int = _ERR_TAIL) -> str:
     dropped = len(text) - len(clipped)
     return f"[…truncated {dropped} leading chars of {len(text)}…]\n{clipped}"
 
+
 # Env vars forwarded to the agent + test subprocesses. LLM access only: the
 # GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
 # APDL_INTERNAL_TOKEN, POSTGRES_URL, …) are deliberately NOT in this allowlist.
 _ENV_PASSTHROUGH: tuple[str, ...] = (
-    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR",
-    "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_BASE_URL",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-    "GOOGLE_API_KEY", "GEMINI_API_KEY", "VERTEXAI_PROJECT", "VERTEXAI_LOCATION",
-    "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
-    "COHERE_API_KEY", "TOGETHERAI_API_KEY", "FIREWORKS_API_KEY", "XAI_API_KEY",
-    "OLLAMA_API_BASE", "AZURE_API_KEY", "AZURE_API_BASE", "AZURE_API_VERSION",
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "OPENAI_API_KEY",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "VERTEXAI_PROJECT",
+    "VERTEXAI_LOCATION",
+    "OPENROUTER_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "COHERE_API_KEY",
+    "TOGETHERAI_API_KEY",
+    "FIREWORKS_API_KEY",
+    "XAI_API_KEY",
+    "OLLAMA_API_BASE",
+    "AZURE_API_KEY",
+    "AZURE_API_BASE",
+    "AZURE_API_VERSION",
 )
-
-#: Best-effort test-command detection when the connection policy doesn't set one.
-#: package.json is handled separately (see ``_npm_test_cmd``) because it needs a
-#: dependency install and a scripts lookup, not a fixed command.
-_TEST_DETECTORS: tuple[tuple[str, str], ...] = (
-    ("pyproject.toml", "python -m pytest -q"),
-    ("pytest.ini", "python -m pytest -q"),
-    ("tox.ini", "python -m pytest -q"),
-    ("go.mod", "go test ./..."),
-    ("Cargo.toml", "cargo test"),
-)
-
-#: npm needs deps before any script runs; a fresh clone has no node_modules.
-_NPM_INSTALL = "npm install --no-audit --no-fund --silent"
-
-#: JS/TS test runners that count as "the repo has a test framework" even when no
-#: ``test`` script is wired up. Used only to shape the agent's guidance (whether
-#: it may add tests), never to run anything.
-_JS_TEST_RUNNERS: tuple[str, ...] = (
-    "vitest", "jest", "mocha", "ava", "@playwright/test", "cypress", "node:test",
-)
-
 
 def _basic_auth_header(token: str) -> str:
     """GitHub App token → a one-shot Basic auth header value (never persisted)."""
@@ -135,20 +205,6 @@ def _agent_env() -> dict[str, str]:
     env.setdefault("PATH", os.defpath)
     env["AIDER_ANALYTICS"] = "false"  # headless: no phone-home / update prompts
     env["AIDER_CHECK_UPDATE"] = "false"
-    return env
-
-
-#: Env vars for the repo's own build/test subprocess. NO provider keys: the test
-#: command executes untrusted repo code (npm postinstall scripts, test files),
-#: which must never see the LLM API keys. Aider necessarily runs its test loop
-#: with its own env, but the independent verify run has no reason to.
-_TEST_ENV_PASSTHROUGH: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR")
-
-
-def _test_env() -> dict[str, str]:
-    """Stripped environment for running the repo's verification command."""
-    env = {k: os.environ[k] for k in _TEST_ENV_PASSTHROUGH if k in os.environ}
-    env.setdefault("PATH", os.defpath)
     return env
 
 
@@ -179,110 +235,6 @@ def _parse_numstat(numstat: str) -> dict[str, int]:
     return {"files": files, "additions": additions, "deletions": deletions}
 
 
-def _npm_scripts(package_json: Path) -> dict:
-    """Return a repo's ``package.json`` ``scripts`` map (empty on any error)."""
-    try:
-        scripts = json.loads(
-            package_json.read_text(encoding="utf-8", errors="ignore")
-        ).get("scripts", {})
-    except (OSError, ValueError):
-        scripts = {}
-    return scripts if isinstance(scripts, dict) else {}
-
-
-def _npm_verify_cmd(package_json: Path) -> str | None:
-    """Compose an npm verification command: install, then a type/build gate, then tests.
-
-    A freshly cloned repo has no ``node_modules``, so we install first. We ALWAYS
-    run a type/build gate for a JS/TS repo — a ``test`` script alone does not
-    type-check the whole project, and ``next build`` / ``tsc --noEmit`` reject an
-    unresolved import (e.g. a test file importing a runner the repo never
-    installed) that ``eslint`` and unit tests happily ignore. That gap is exactly
-    how a build-breaking PR ships past a "tests passed" check. Tests run last when
-    a ``test`` script exists. Returns ``None`` only when there is genuinely nothing
-    to verify (no build, no tsconfig, no tests) — the caller decides whether that
-    blocks the PR (see ``codegen_require_verify``).
-    """
-    scripts = _npm_scripts(package_json)
-    steps = [_NPM_INSTALL]
-
-    # Type/build gate: prefer the repo's own build; else a bare tsc --noEmit when
-    # the repo is TypeScript. A JS-only repo with no build has no type gate.
-    if scripts.get("build"):
-        steps.append("npm run build")
-    elif (package_json.parent / "tsconfig.json").is_file():
-        steps.append("npx --no-install tsc --noEmit")
-
-    if scripts.get("test"):
-        steps.append("npm test --silent")
-
-    if len(steps) == 1:  # install only → nothing meaningful to verify
-        logger.warning(
-            "package.json in %s has no build/tsconfig/test to verify against.",
-            package_json.parent,
-        )
-        return None
-    return " && ".join(steps)
-
-
-def _makefile_has_test(repo_dir: Path) -> bool:
-    """True when the repo's ``Makefile`` declares a ``test:`` target."""
-    makefile = repo_dir / "Makefile"
-    if not makefile.is_file():
-        return False
-    try:
-        text = makefile.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return False
-    return any(line.startswith("test:") for line in text.splitlines())
-
-
-def _detect_test_cmd(repo_dir: Path) -> str | None:
-    """Best-effort repo verification command when the connection policy sets none.
-
-    For a JS/TS repo this is a chained install + type/build gate + tests (see
-    ``_npm_verify_cmd``); for other ecosystems it is the native test command.
-    """
-    if _makefile_has_test(repo_dir):
-        return "make test"
-    package_json = repo_dir / "package.json"
-    if package_json.is_file():
-        return _npm_verify_cmd(package_json)
-    for filename, cmd in _TEST_DETECTORS:
-        if (repo_dir / filename).is_file():
-            return cmd
-    return None
-
-
-def _repo_has_test_runner(repo_dir: Path) -> bool:
-    """Whether the repo already has a test framework the agent may write tests in.
-
-    Shapes the agent's guidance only (never runs anything). For JS/TS: a ``test``
-    script or a known runner in the manifest. For other ecosystems: presence of a
-    pytest/go/cargo config or a Makefile ``test`` target — those detectors are
-    real test commands, so a runner exists.
-    """
-    package_json = repo_dir / "package.json"
-    if package_json.is_file():
-        if _npm_scripts(package_json).get("test"):
-            return True
-        try:
-            data = json.loads(
-                package_json.read_text(encoding="utf-8", errors="ignore")
-            )
-        except (OSError, ValueError):
-            return False
-        deps: dict = {}
-        for key in ("dependencies", "devDependencies"):
-            section = data.get(key)
-            if isinstance(section, dict):
-                deps.update(section)
-        return any(runner in deps for runner in _JS_TEST_RUNNERS)
-    if _makefile_has_test(repo_dir):
-        return True
-    return any((repo_dir / filename).is_file() for filename, _ in _TEST_DETECTORS)
-
-
 def _capability_preamble(has_test_runner: bool, verify_cmd: str | None) -> str:
     """The per-repo 'testing reality' block prepended to the agent's message.
 
@@ -294,8 +246,8 @@ def _capability_preamble(has_test_runner: bool, verify_cmd: str | None) -> str:
     if verify_cmd:
         lines.append(
             f"Your change is gated on this command passing: `{verify_cmd}`. It "
-            "runs a type/build check and any tests; a change that fails it is "
-            "rejected, not merged. Make sure everything you add passes it."
+            "runs in GitHub CI as the authoritative type/build/test evidence. "
+            "Make sure everything you add passes it."
         )
     else:
         lines.append(
@@ -328,6 +280,21 @@ class _RepoProbe:
     preamble: str
     #: ``(filename, markdown)`` SDK references the repo's manifests call for.
     sdk_references: tuple[tuple[str, str], ...] = ()
+    profile: RepoProfile | None = None
+
+
+def _profile_verify_cmd(profile: RepoProfile) -> str | None:
+    """Select one package's canonical GitHub-CI command chain as guidance."""
+    for cwd in [".", *sorted({command.cwd for command in profile.commands})]:
+        commands = [
+            command.command
+            for kind in (CommandKind.typecheck, CommandKind.build, CommandKind.test)
+            for command in profile.commands
+            if command.cwd == cwd and command.kind is kind
+        ]
+        if commands:
+            return " && ".join(dict.fromkeys(commands))
+    return None
 
 
 def _probe_repo(repo_dir: Path, override_cmd: str | None) -> _RepoProbe:
@@ -337,13 +304,21 @@ def _probe_repo(repo_dir: Path, override_cmd: str | None) -> _RepoProbe:
     set; the runner-presence signal still comes from the repo so the agent's
     guidance stays accurate.
     """
-    verify_cmd = override_cmd or _detect_test_cmd(repo_dir)
-    has_runner = _repo_has_test_runner(repo_dir)
+    profile = profile_repository(repo_dir)
+    verify_cmd = override_cmd or _profile_verify_cmd(profile)
+    has_runner = bool(profile.test_facilities) or any(
+        command.kind is CommandKind.test for command in profile.commands
+    )
+    preamble = _capability_preamble(has_runner, verify_cmd)
+    if profile.uncertainties:
+        preamble += "\nRepository profiler uncertainties: " + ", ".join(
+            sorted({uncertainty.code.value for uncertainty in profile.uncertainties})
+        )
     return _RepoProbe(
         verify_cmd=verify_cmd,
         has_test_runner=has_runner,
-        preamble=_capability_preamble(has_runner, verify_cmd),
-        sdk_references=tuple(detect_sdk_references(repo_dir)),
+        preamble=preamble,
+        profile=profile,
     )
 
 
@@ -390,14 +365,26 @@ def _verify_retry_message(test_cmd: str, output: str) -> str:
 
 
 def _review_retry_message(verdict: ReviewVerdict) -> str:
-    """Follow-up agent feedback after the pre-push quality review rejected the diff."""
-    problems = "\n".join(f"- {p}" for p in verdict.problems)
-    instructions = verdict.fix_instructions.strip() or "Address every problem above."
+    """Turn the strict evidence-backed verdict into actionable edit feedback."""
+    problems = "\n".join(
+        f"- {finding.message}" for finding in verdict.deterministic_findings
+    )
+    instructions = "\n".join(
+        f"- {instruction}" for instruction in verdict.actionable_instructions
+    )
     return (
-        "An automated reviewer compared your committed change against the task "
+        "An independent reviewer compared your committed change against the task "
         "spec and REJECTED it.\n\n"
         f"Problems found:\n{problems or '- (see instructions below)'}\n\n"
-        f"Do this now:\n{instructions}"
+        f"Do this now:\n{instructions or '- Address every evidence-backed gap.'}"
+    )
+
+
+def _sole_external_ci_uncertainty(verdict: ReviewVerdict) -> bool:
+    """Missing external CI may produce a draft, but no other uncertainty may hide."""
+    return bool(verdict.uncertainties) and all(
+        item.code is UncertaintyCode.verification_unverified
+        for item in verdict.uncertainties
     )
 
 
@@ -409,6 +396,130 @@ def _model_settings_yaml(model: str) -> str:
     a no-op edit. Disabling it is safe (the model uses its own default).
     """
     return f'- name: "{model}"\n  use_temperature: false\n'
+
+
+def _contract_runtime() -> RuntimeFingerprint:
+    versions = [f"python={platform.python_version()}"]
+    for executable in ("node", "npm", "uv"):
+        try:
+            result = subprocess.run(
+                [executable, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env={"PATH": os.environ.get("PATH", os.defpath)},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            versions.append(f"{executable}={result.stdout.strip()}")
+    return RuntimeFingerprint(
+        runtime_name="apdl-codegen-worker-toolchains",
+        runtime_version=";".join(versions),
+        operating_system=platform.system().lower() or "unknown",
+        architecture=platform.machine().lower() or "unknown",
+    )
+
+
+def _contract_requests_for_ledger(
+    profile: RepoProfile, ledger: RequirementLedger
+) -> list[ContractRequest]:
+    """Select exact package names per stable requirement, merging duplicates."""
+    selected: dict[tuple[str, str, str, str | None], ContractRequest] = {}
+    for requirement in ledger.requirements:
+        if requirement.implementation_status in {
+            ImplementationStatus.blocked,
+            ImplementationStatus.descoped,
+        }:
+            continue
+        text = "\n".join(
+            [
+                requirement.original_source_text,
+                requirement.observable_behavior,
+                requirement.implementable_scope,
+            ]
+        )
+        for request in select_contract_requests(
+            profile, text, requirement_ids=[requirement.requirement_id]
+        ):
+            key = (
+                request.ecosystem,
+                request.package_path,
+                request.package_name,
+                request.exact_version,
+            )
+            previous = selected.get(key)
+            if previous is None:
+                selected[key] = request
+                continue
+            payload = previous.model_dump(mode="json")
+            payload["requirement_ids"] = sorted(
+                {*previous.requirement_ids, *request.requirement_ids}
+            )
+            selected[key] = ContractRequest.model_validate(payload)
+    return [selected[key] for key in sorted(selected)]
+
+
+_INSPECTION_STOPWORDS = frozenset(
+    {
+        "acceptance",
+        "change",
+        "existing",
+        "implement",
+        "requirement",
+        "should",
+        "tests",
+        "that",
+        "this",
+        "with",
+    }
+)
+
+
+def _inspection_for_ledger(
+    repo_dir: Path, ledger: RequirementLedger
+) -> InspectionSnapshot:
+    """Build a safe inventory enriched with bounded task-focused searches."""
+    inspector = RepositoryInspector(repo_dir)
+    snapshot = inspector.snapshot()
+    candidates: list[str] = []
+    for requirement in ledger.requirements:
+        for token in re.findall(
+            r"[A-Za-z_][A-Za-z0-9_.:/-]{3,}", requirement.observable_behavior
+        ):
+            normalized = token.strip(".,:;()[]{}")
+            if normalized.casefold() not in _INSPECTION_STOPWORDS:
+                candidates.append(normalized)
+    evidence = list(snapshot.evidence)
+    for token in list(dict.fromkeys(candidates))[:12]:
+        evidence.extend(
+            inspector.search(
+                token,
+                case_sensitive=False,
+                max_results=8,
+            )
+        )
+    evidence = sorted(
+        {item.evidence_id: item for item in evidence}.values(),
+        key=lambda item: (item.path, item.start_line or 0, item.evidence_id),
+    )
+    return InspectionSnapshot(
+        evidence=evidence,
+        skipped_paths=snapshot.skipped_paths,
+        bytes_inspected=snapshot.bytes_inspected,
+        truncated=snapshot.truncated,
+    )
+
+
+def _coverage_retry_message(coverage: VerificationCoverage) -> str:
+    return (
+        "The deterministic risk policy rejected the current diff because required "
+        "verification coverage is missing. Add tests using the repository's "
+        "existing test framework for every medium/high-risk requirement. Do not "
+        "skip or weaken existing checks. GitHub CI will execute the tests.\n\n"
+        + render_verification_coverage(coverage)
+    )
 
 
 class AiderEditor:
@@ -433,11 +544,10 @@ class AiderEditor:
         self._cache_prompts = config.codegen_cache_prompts()
         self._conventions = config.codegen_conventions_enabled()
         self._sdk_reference = config.codegen_sdk_reference_enabled()
+        self._contracts_enabled = config.codegen_contracts_enabled()
         self._workdir_base = workdir_base or config.codegen_workdir()
         self._git_timeout = config.codegen_git_timeout()
         self._agent_timeout = config.codegen_agent_timeout()
-        self._test_timeout = config.codegen_test_timeout()
-        self._require_verify = config.codegen_require_verify()
         # Auxiliary LLM passes around the edit (brief compile + diff review).
         # ``complete`` is the injection seam for tests; production resolves a
         # LiteLLM-backed completer per run (None → the passes are skipped).
@@ -462,26 +572,116 @@ class AiderEditor:
         # Prompt transcript for the operator UI (see EditResult.prompts). Every
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
+        contract_bundle: ContractBundle | None = None
+        requirement_ledger: RequirementLedger | None = request.requirement_ledger
+        inspection_snapshot: InspectionSnapshot | None = request.inspection_snapshot
+        dependency_slice: DependencySlice | None = request.dependency_slice
+        verification_plan: VerificationPlan | None = request.verification_plan
+        verification_coverage: VerificationCoverage | None = (
+            request.verification_coverage
+        )
+        runtime_acceptance_plan: RuntimeAcceptancePlan | None = (
+            request.runtime_acceptance_plan
+        )
+        generated_runtime_workflow: GeneratedRuntimeWorkflowAttestation | None = None
+        review_verdict: ReviewVerdict | None = None
+        gates_policy = dict(request.gates_policy or {})
 
         def fail(error: str) -> EditResult:
             return EditResult(
-                success=False, branch=request.branch, error=error, prompts=prompts
+                success=False,
+                branch=request.branch,
+                error=error,
+                prompts=prompts,
+                contract_bundle=contract_bundle,
+                requirement_ledger=requirement_ledger,
+                inspection_snapshot=inspection_snapshot,
+                dependency_slice=dependency_slice,
+                verification_plan=verification_plan,
+                verification_coverage=verification_coverage,
+                runtime_acceptance_plan=runtime_acceptance_plan,
+                generated_runtime_workflow=generated_runtime_workflow,
+                review_verdict=review_verdict,
             )
 
+        async def synchronize_runtime_workflow(
+            profile: RepoProfile,
+            plan: RuntimeAcceptancePlan,
+        ) -> tuple[bool, str | None]:
+            """Write only the policy-authorized generated workflow when needed."""
+            if (
+                not request.runtime_acceptance_policy.workflow_changes_authorized
+                or not plan.checks
+            ):
+                return False, None
+            workflow_relative = (
+                request.runtime_acceptance_policy.generated_workflow_path
+            )
+            workflow_path = repo_dir / workflow_relative
+            desired = render_github_actions_workflow(
+                plan,
+                profile,
+                policy=request.runtime_acceptance_policy,
+            )
+            if workflow_path.exists() and workflow_path.read_text(
+                encoding="utf-8"
+            ) == desired:
+                return False, None
+            workflow_path.parent.mkdir(parents=True, exist_ok=True)
+            workflow_path.write_text(desired, encoding="utf-8")
+            rc, out = await self._git(repo_dir, ["add", "--", workflow_relative])
+            if rc != 0:
+                return (
+                    False,
+                    "could not stage the authorized runtime workflow: "
+                    + _tail(out),
+                )
+            rc, out = await self._git(
+                repo_dir,
+                ["commit", "-m", "chore(ci): add runtime acceptance evidence"],
+            )
+            if rc != 0:
+                return (
+                    False,
+                    "could not commit the authorized runtime workflow: "
+                    + _tail(out),
+                )
+            return True, None
+
         try:
-            # 1. Clone the base branch with a one-shot auth header (the token is
-            #    NOT persisted to .git/config), then cut the work branch.
+            # 1. Clone with one-shot auth. Repairs clone the existing PR branch;
+            #    initial runs clone base and cut a new branch.
+            clone_branch = (
+                request.branch if request.existing_branch else request.base_branch
+            )
             rc, out = await self._git(
                 None,
-                ["clone", "--depth", "1",
-                 "--branch", request.base_branch, clone_url, str(repo_dir)],
+                [
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    clone_branch,
+                    clone_url,
+                    str(repo_dir),
+                ],
                 auth_header=header,
             )
             if rc != 0:
                 return fail(f"clone failed: {_tail(out)}")
-            rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
+            rc, baseline = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
-                return fail(f"branch failed: {_tail(out)}")
+                return fail(f"could not resolve branch head: {_tail(baseline)}")
+            baseline = baseline.strip()
+            if request.expected_head_sha and baseline != request.expected_head_sha:
+                return fail(
+                    "Repair refused because the PR head changed from "
+                    f"{request.expected_head_sha} to {baseline}."
+                )
+            if not request.existing_branch:
+                rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
+                if rc != 0:
+                    return fail(f"branch failed: {_tail(out)}")
             # Local commit identity so Aider's commits succeed without a global config.
             await self._git(repo_dir, ["config", "user.email", "codegen@apdl.dev"])
             await self._git(repo_dir, ["config", "user.name", "APDL Codegen"])
@@ -489,7 +689,109 @@ class AiderEditor:
             # 2. Probe the repo: resolve the verification command (connection
             #    policy first, then detect) and the agent-facing testing reality.
             probe = _probe_repo(repo_dir, request.test_cmd)
-            test_cmd = probe.verify_cmd
+            repo_profile = (probe.profile or profile_repository(repo_dir)).model_copy(
+                update={"repo": request.repo, "branch": request.branch}
+            )
+
+            # 2b. Compile one strict, stable ledger before any model call. A
+            # same-PR repair reuses the original ledger and IDs verbatim.
+            if requirement_ledger is None:
+                requirement_ledger = compile_requirement_ledger(
+                    title=request.title,
+                    spec=request.spec,
+                    constraints=request.constraints,
+                    risk=request.risk_level,
+                    verification_command=probe.verify_cmd,
+                )
+            active_requirements = [
+                item
+                for item in requirement_ledger.requirements
+                if item.implementation_status
+                not in {ImplementationStatus.blocked, ImplementationStatus.descoped}
+            ]
+            if not active_requirements:
+                return fail(
+                    "Every requirement is explicitly blocked or descoped; no pull "
+                    "request can be created."
+                )
+
+            inspection_snapshot = _inspection_for_ledger(
+                repo_dir, requirement_ledger
+            )
+            verification_plan = build_verification_plan(
+                requirement_ledger, repo_profile
+            )
+            runtime_acceptance_plan = build_runtime_acceptance_plan(
+                repo_profile,
+                verification_plan,
+                policy=request.runtime_acceptance_policy,
+            )
+            workflow_changed, workflow_error = await synchronize_runtime_workflow(
+                repo_profile, runtime_acceptance_plan
+            )
+            if workflow_error:
+                return fail(workflow_error)
+            if workflow_changed:
+                # The generated file is now a repository fact. Rebind both plans
+                # to the profile that GitHub will actually receive.
+                repo_profile = profile_repository(repo_dir).model_copy(
+                    update={"repo": request.repo, "branch": request.branch}
+                )
+                verification_plan = build_verification_plan(
+                    requirement_ledger, repo_profile
+                )
+                runtime_acceptance_plan = build_runtime_acceptance_plan(
+                    repo_profile,
+                    verification_plan,
+                    policy=request.runtime_acceptance_policy,
+                )
+
+            # 2c. Resolve every explicitly named direct dependency from an
+            # isolated frozen install before the model sees an API claim. The
+            # in-process API editor deliberately has no install authority, so
+            # such work blocks unless it runs in the credential-minimal worker.
+            if self._contracts_enabled:
+                contract_requests = _contract_requests_for_ledger(
+                    repo_profile, requirement_ledger
+                )
+                contract_bundle = await asyncio.to_thread(
+                    resolve_contracts,
+                    repo_dir,
+                    project_scope=request.project_scope or request.repo,
+                    repository=request.repo,
+                    requests=contract_requests,
+                    runtime=_contract_runtime(),
+                    install_runner=SandboxedInstallRunner(
+                        sandboxed=config.codegen_isolated_worker(),
+                        timeout_seconds=config.codegen_contract_install_timeout(),
+                        workdir_base=work,
+                    ),
+                    check_runner=SandboxedCheckRunner(
+                        sandboxed=config.codegen_isolated_worker(),
+                        workdir_base=work,
+                    ),
+                    cache=FilesystemContractCache(
+                        Path(config.codegen_contract_cache_dir())
+                    ),
+                )
+                blocked = [
+                    resolution
+                    for resolution in contract_bundle.resolutions
+                    if resolution.disposition == "blocked"
+                ]
+                if blocked:
+                    details = "; ".join(
+                        f"{resolution.request.package_name}: "
+                        + ", ".join(item.message for item in resolution.blockers)
+                        for resolution in blocked
+                    )
+                    return fail(
+                        "Exact dependency contract resolution blocked the change: "
+                        + details
+                    )
+                requirement_ledger = bind_contract_evidence(
+                    requirement_ledger, contract_bundle
+                )
 
             # 3. Compile the spec into a repo-grounded engineering brief
             #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
@@ -499,13 +801,25 @@ class AiderEditor:
             #    deterministic revert needs no brief — the change is mechanical.
             need_brief = self._brief_enabled and request.revert_sha is None
             need_review = self._review_enabled and request.revert_sha is None
+            fail_closed_auxiliary = request.risk_level in {"medium", "high"}
             complete = self._complete
             if complete is None and (need_brief or need_review):
                 complete = resolve_completer()
+            if (
+                complete is None
+                and fail_closed_auxiliary
+                and (need_brief or need_review)
+            ):
+                return fail(
+                    f"{request.risk_level}-risk change requires available brief/review "
+                    "model gates; no completer is configured."
+                )
             task_text = request.spec
             brief_used = False
             if need_brief and complete is not None:
-                repo_digest = build_repo_digest(repo_dir)
+                repo_digest = build_repo_digest(repo_dir, probe.profile)
+                if contract_bundle and contract_bundle.resolutions:
+                    repo_digest += "\n\n" + render_contract_bundle(contract_bundle)
                 brief_prompt = {
                     "stage": "brief",
                     "label": "Brief compilation (spec → engineering brief)",
@@ -534,22 +848,74 @@ class AiderEditor:
                         "Compilation produced no usable brief; the raw spec was "
                         "handed to the editing agent instead."
                     )
+                    if fail_closed_auxiliary:
+                        return fail(
+                            f"{request.risk_level}-risk change requires a parseable "
+                            "repository-grounded brief."
+                        )
+
+            # The optional prose brief may refine implementation detail, but it
+            # cannot replace or weaken the canonical requirement contract.
+            task_text = (
+                f"{task_text.rstrip()}\n\n"
+                f"{render_requirement_ledger(requirement_ledger)}\n\n"
+                f"{render_verification_plan(verification_plan)}\n\n"
+                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.workflow_changes_authorized)}"
+            )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
             #    The settings file lives outside repo_dir so it never enters the diff.
             settings_file = work / "aider.model.settings.yml"
-            settings_file.write_text(_model_settings_yaml(self._model), encoding="utf-8")
-            argv = [self._aider_bin, "--model", self._model,
-                    "--model-settings-file", str(settings_file),
-                    "--yes-always", "--no-stream", "--no-pretty"]
+            settings_file.write_text(
+                _model_settings_yaml(self._model), encoding="utf-8"
+            )
+            argv = [
+                self._aider_bin,
+                "--model",
+                self._model,
+                "--model-settings-file",
+                str(settings_file),
+                "--yes-always",
+                "--no-stream",
+                "--no-pretty",
+            ]
             if self._conventions:
                 # Standing house rules as a read-only context file (kept outside
                 # repo_dir so it never enters the diff). It joins the cacheable
-                # static prefix, so --cache-prompts re-reads it at ~0.1x on each
-                # auto-test retry instead of bloating the per-task message.
+                # static prefix across editing rounds.
                 conventions_file = work / "CONVENTIONS.md"
                 conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
                 argv += ["--read", str(conventions_file)]
+            if inspection_snapshot is not None:
+                inspection_file = work / "INSPECTION.md"
+                inspection_file.write_text(
+                    render_inspection_snapshot(inspection_snapshot), encoding="utf-8"
+                )
+                argv += ["--read", str(inspection_file)]
+            if verification_plan is not None:
+                verification_file = work / "VERIFICATION_PLAN.md"
+                verification_file.write_text(
+                    render_verification_plan(verification_plan), encoding="utf-8"
+                )
+                argv += ["--read", str(verification_file)]
+            if runtime_acceptance_plan is not None:
+                runtime_file = work / "RUNTIME_ACCEPTANCE_PLAN.md"
+                runtime_file.write_text(
+                    render_runtime_acceptance_plan(
+                        runtime_acceptance_plan,
+                        workflow_changes_authorized=(
+                            request.runtime_acceptance_policy.workflow_changes_authorized
+                        ),
+                    ),
+                    encoding="utf-8",
+                )
+                argv += ["--read", str(runtime_file)]
+            if contract_bundle and contract_bundle.resolutions:
+                contracts_file = work / "CONTRACTS.md"
+                contracts_file.write_text(
+                    render_contract_bundle(contract_bundle), encoding="utf-8"
+                )
+                argv += ["--read", str(contracts_file)]
             if self._sdk_reference:
                 # Language-scoped SDK call-path reference(s) for whichever APDL
                 # SDK the repo depends on. Written outside repo_dir so they never
@@ -561,17 +927,13 @@ class AiderEditor:
                     ref_file.write_text(ref_body, encoding="utf-8")
                     argv += ["--read", str(ref_file)]
             if self._cache_prompts:
-                # Cache the static prefix (system + repo map) so the auto-test
-                # retry loop re-reads it at ~0.1x instead of full input price.
+                # Cache the static prefix (system + repo map) across edit rounds.
                 argv.append("--cache-prompts")
-            if test_cmd:
-                argv += ["--auto-test", "--test-cmd", test_cmd]
 
             # 4b. A revert changeset is applied deterministically with
             #     ``git revert`` — the agent cannot see the merged commits (the
             #     clone is shallow) and must not reconstruct the revert from
-            #     prose. The agent only steps in afterwards, if verification
-            #     fails on the reverted tree.
+            #     prose.
             agent_pending = True
             if request.revert_sha:
                 revert_error = await self._revert_commit(
@@ -581,11 +943,10 @@ class AiderEditor:
                     return fail(revert_error)
                 agent_pending = False
 
-            # 5. The edit loop: aider → verify → review, with a bounded number of
-            #    feedback rounds. A verification or review failure re-invokes the
-            #    agent with the failure in hand (its commits are already in the
-            #    clone) instead of terminally failing the changeset — most
-            #    first-round failures are fixable with the error visible. The
+            # 5. The edit loop: aider → semantic review. Repository build/lint/
+            #    tests execute in GitHub CI; APDL only supplies the discovered
+            #    command as generation guidance. A review failure re-invokes the
+            #    agent with feedback. The
             #    brief already embeds the verification context, so it is only
             #    prepended when the raw spec runs.
             initial_message = _build_message(
@@ -593,8 +954,9 @@ class AiderEditor:
             )
             # What the agent reads besides the message, for the transcript: its
             # own built-in system prompt plus any --read context files above.
-            context_files = [Path(argv[i + 1]).name
-                             for i, a in enumerate(argv) if a == "--read"]
+            context_files = [
+                Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--read"
+            ]
             edit_notes = (
                 "The system prompt for this step is Aider's built-in editing "
                 "prompt (not authored by APDL)."
@@ -602,66 +964,38 @@ class AiderEditor:
             if context_files:
                 edit_notes += (
                     " Read-only context files attached: "
-                    + ", ".join(context_files) + "."
+                    + ", ".join(context_files)
+                    + "."
                 )
             message = initial_message
             retries_left = self._edit_retries
-            base = request.base_branch
+            base = baseline
             out = ""
             edit_attempt = 0
             review_round = 0
             while True:
                 if agent_pending:
                     edit_attempt += 1
-                    prompts.append({
-                        "stage": "edit",
-                        "label": f"Edit instruction (attempt {edit_attempt})",
-                        "system": None,
-                        "user": message,
-                        "notes": edit_notes,
-                    })
+                    prompts.append(
+                        {
+                            "stage": "edit",
+                            "label": f"Edit instruction (attempt {edit_attempt})",
+                            "system": None,
+                            "user": message,
+                            "notes": edit_notes,
+                        }
+                    )
                     rc, out = await self._exec(
                         [*argv, "--message", message],
-                        cwd=repo_dir, env=_agent_env(), timeout=self._agent_timeout,
+                        cwd=repo_dir,
+                        env=_agent_env(),
+                        timeout=self._agent_timeout,
                     )
                     if rc != 0:
-                        return fail(f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}")
-                agent_pending = True
-
-                # Verify the change is actually green, outside the agent's
-                # control. Fail closed: a change we could not verify does not get
-                # a PR unless an operator has explicitly opted out
-                # (CODEGEN_REQUIRE_VERIFY=false).
-                if test_cmd:
-                    ok, tout = await self._run_tests(repo_dir, test_cmd)
-                    if not ok:
-                        if retries_left > 0:
-                            retries_left -= 1
-                            message = _with_feedback(
-                                initial_message, _verify_retry_message(test_cmd, tout)
-                            )
-                            logger.info(
-                                "Verification failed for %s; retrying the edit "
-                                "with the failure output.",
-                                request.repo,
-                            )
-                            continue
                         return fail(
-                            f"verification failed (`{test_cmd}`):\n"
-                            f"{_tail(tout, _VERIFY_ERR_TAIL)}"
+                            f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}"
                         )
-                elif self._require_verify:
-                    return fail(
-                        "no verification command could be established for this repo; "
-                        "refusing to open an unverified PR "
-                        "(set CODEGEN_REQUIRE_VERIFY=false to override)"
-                    )
-                else:
-                    logger.warning(
-                        "No verify command for %s; opening PR unverified "
-                        "(CODEGEN_REQUIRE_VERIFY=false).",
-                        request.repo,
-                    )
+                agent_pending = True
 
                 # Compute the diff for the review + pre-push gates. No diff → no PR.
                 rc, names = await self._git(
@@ -675,49 +1009,291 @@ class AiderEditor:
                         f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}"
                     )
                 _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
-
-                # Review the diff against the ORIGINAL spec before pushing: green
-                # builds happily ship a token diff that implements none of the
-                # task. Fail-open on infrastructure, fail-closed on judgment
-                # (see app.editor.review). A deterministic revert's diff is
-                # mechanically derived, so it is not judged.
-                if need_review and complete is not None:
-                    review_round += 1
-                    prompts.append({
-                        "stage": "review",
-                        "label": f"Diff review (round {review_round})",
-                        "system": REVIEW_SYSTEM,
-                        "user": build_review_user(
-                            spec=request.spec,
-                            diff_text=diff_text,
-                            changed_paths=changed_paths,
-                        ),
-                        "notes": None,
-                    })
-                    verdict = await review_change(
-                        spec=request.spec,
-                        diff_text=diff_text,
-                        changed_paths=changed_paths,
-                        complete=complete,
+                dependency_slice = build_dependency_slice(repo_dir, changed_paths)
+                if _profile_inputs_changed(changed_paths):
+                    repo_profile = profile_repository(repo_dir).model_copy(
+                        update={"repo": request.repo, "branch": request.branch}
                     )
-                    if not verdict.approved:
+                    verification_plan = build_verification_plan(
+                        requirement_ledger, repo_profile
+                    )
+                    runtime_acceptance_plan = build_runtime_acceptance_plan(
+                        repo_profile,
+                        verification_plan,
+                        policy=request.runtime_acceptance_policy,
+                    )
+                    workflow_changed, workflow_error = (
+                        await synchronize_runtime_workflow(
+                            repo_profile, runtime_acceptance_plan
+                        )
+                    )
+                    if workflow_error:
+                        return fail(workflow_error)
+                    if workflow_changed:
+                        # A manifest/workflow edit can change the exact runtime
+                        # command or artifact plan. Commit the regenerated file,
+                        # then recompute every diff-derived evidence artifact.
+                        repo_profile = profile_repository(repo_dir).model_copy(
+                            update={"repo": request.repo, "branch": request.branch}
+                        )
+                        verification_plan = build_verification_plan(
+                            requirement_ledger, repo_profile
+                        )
+                        runtime_acceptance_plan = build_runtime_acceptance_plan(
+                            repo_profile,
+                            verification_plan,
+                            policy=request.runtime_acceptance_policy,
+                        )
+                        rc, names = await self._git(
+                            repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                        )
+                        if rc != 0:
+                            return fail("could not inspect regenerated workflow diff")
+                        changed_paths = [
+                            path for path in names.splitlines() if path.strip()
+                        ]
+                        _, diff_text = await self._git(
+                            repo_dir, ["diff", f"{base}..HEAD"]
+                        )
+                        dependency_slice = build_dependency_slice(
+                            repo_dir, changed_paths
+                        )
+                verification_coverage = evaluate_verification_coverage(
+                    verification_plan,
+                    changed_paths=changed_paths,
+                    policy_authorized_workflow_paths=(
+                        [request.runtime_acceptance_policy.generated_workflow_path]
+                        if request.runtime_acceptance_policy.workflow_changes_authorized
+                        and request.runtime_acceptance_policy.generated_workflow_path
+                        in changed_paths
+                        else []
+                    ),
+                )
+                evidence_context = (
+                    render_dependency_slice(dependency_slice)
+                    + "\n\n"
+                    + render_verification_coverage(verification_coverage)
+                )
+                if verification_coverage.disposition in {
+                    CoverageDisposition.rejected_workflow_gate_relaxation,
+                    CoverageDisposition.requires_protected_workflow_review,
+                }:
+                    return fail(verification_coverage.disposition_reason)
+                if (
+                    verification_coverage.disposition
+                    is CoverageDisposition.missing_required_coverage
+                ):
+                    if retries_left > 0:
+                        retries_left -= 1
+                        message = _with_feedback(
+                            initial_message,
+                            _coverage_retry_message(verification_coverage),
+                        )
+                        logger.info(
+                            "Risk policy requires additional tests for %s; retrying.",
+                            request.repo,
+                        )
+                        continue
+                    return fail(verification_coverage.disposition_reason)
+
+                # Run deterministic semantic checks on every material diff, even
+                # when the optional independent model call is disabled. The model
+                # can add judgment but cannot override a deterministic error.
+                # A mechanical revert remains outside this judgment boundary.
+                if request.revert_sha is None:
+                    contracts_for_review = contract_bundle or ContractBundle()
+                    findings = build_deterministic_findings(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
+                        diff_text=diff_text,
+                    )
+                    uncertainties = build_deterministic_uncertainties(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
+                        diff_text=diff_text,
+                    )
+                    model_response: str | None = None
+                    if need_review and complete is not None:
+                        review_round += 1
+                        review_prompt = render_semantic_review_prompt(
+                            ledger=requirement_ledger,
+                            contracts=contracts_for_review,
+                            dependency_slice=dependency_slice,
+                            verification_plan=verification_plan,
+                            verification_coverage=verification_coverage,
+                            deterministic_findings=findings,
+                            deterministic_uncertainties=uncertainties,
+                            diff_text=diff_text,
+                        )
+                        prompts.append(
+                            {
+                                "stage": "review",
+                                "label": f"Semantic review (round {review_round})",
+                                "system": SEMANTIC_REVIEW_SYSTEM,
+                                "user": review_prompt,
+                                "notes": (
+                                    "Independent evidence context; GitHub CI has "
+                                    "not reported at this stage."
+                                ),
+                            }
+                        )
+                        model_response = await complete(
+                            SEMANTIC_REVIEW_SYSTEM, review_prompt
+                        )
+                    review_verdict = assemble_review_verdict(
+                        ledger=requirement_ledger,
+                        contracts=contracts_for_review,
+                        dependency_slice=dependency_slice,
+                        verification_plan=verification_plan,
+                        verification_coverage=verification_coverage,
+                        diff_text=diff_text,
+                        model_response_text=model_response,
+                    )
+
+                    if review_verdict.overall_decision is ReviewDecision.rejected:
                         if retries_left > 0:
                             retries_left -= 1
                             message = _with_feedback(
-                                initial_message, _review_retry_message(verdict)
+                                initial_message + "\n\n" + evidence_context,
+                                _review_retry_message(review_verdict),
                             )
                             logger.info(
-                                "Quality review rejected the change for %s; "
-                                "retrying the edit with the reviewer's instructions.",
+                                "Semantic review rejected the change for %s; "
+                                "retrying with evidence-backed instructions.",
                                 request.repo,
                             )
                             continue
-                        problems = "; ".join(verdict.problems) or verdict.fix_instructions
-                        return fail(f"quality review rejected the change: {problems}")
+                        return fail(
+                            "semantic review rejected the change: "
+                            + "; ".join(review_verdict.actionable_instructions)
+                        )
+
+                    if review_verdict.overall_decision is ReviewDecision.unverified:
+                        external_ci_only = (
+                            verification_coverage.disposition
+                            is CoverageDisposition.unverified_external_ci
+                            and review_verdict.model_response_status
+                            is ModelResponseStatus.parsed
+                            and _sole_external_ci_uncertainty(review_verdict)
+                        )
+                        model_failed = review_verdict.model_response_status in {
+                            ModelResponseStatus.unavailable,
+                            ModelResponseStatus.invalid,
+                        }
+                        if external_ci_only:
+                            logger.info(
+                                "Semantic review for %s remains explicitly "
+                                "unverified only because GitHub CI is unavailable.",
+                                request.repo,
+                            )
+                        elif model_failed:
+                            if fail_closed_auxiliary:
+                                return fail(
+                                    f"{request.risk_level}-risk change requires a "
+                                    "valid independent semantic-review verdict."
+                                )
+                        elif retries_left > 0:
+                            retries_left -= 1
+                            message = _with_feedback(
+                                initial_message + "\n\n" + evidence_context,
+                                _review_retry_message(review_verdict),
+                            )
+                            continue
+                        elif fail_closed_auxiliary:
+                            return fail(
+                                "semantic review could not verify the change: "
+                                + "; ".join(review_verdict.actionable_instructions)
+                            )
                 break
 
-            _, numstat = await self._git(repo_dir, ["diff", "--numstat", f"{base}..HEAD"])
+            generated_path = (
+                request.runtime_acceptance_policy.generated_workflow_path
+                if request.runtime_acceptance_policy.workflow_changes_authorized
+                else None
+            )
+            material_changed_paths = [
+                path for path in changed_paths if path != generated_path
+            ]
+            if request.revert_sha is None and not material_changed_paths:
+                return fail(
+                    "The agent produced no material implementation change; the "
+                    "generated runtime workflow alone cannot satisfy the task."
+                )
+            requirement_ledger = map_implementation_evidence(
+                requirement_ledger, material_changed_paths or changed_paths
+            )
+            if not requirement_ledger.ready_for_pull_request():
+                return fail(
+                    "Requirement ledger is incomplete; every active criterion must "
+                    "map to changed or confirmed-existing code before PR creation."
+                )
+
+            _, numstat = await self._git(
+                repo_dir, ["diff", "--numstat", f"{base}..HEAD"]
+            )
             diff_stat = _parse_numstat(numstat)
+
+            # Contract evidence is valid only for the exact manifest/lockfile
+            # hashes it was compiled from. A dependency edit must be resolved in
+            # a fresh attempt; stale API evidence is never pushed.
+            if contract_bundle is not None:
+                drift = [
+                    item
+                    for resolution in contract_bundle.resolutions
+                    if (item := detect_contract_input_drift(repo_dir, resolution))
+                    is not None
+                ]
+                if drift:
+                    rendered = "; ".join(
+                        f"{item.package_name}: {', '.join(item.changed_paths)}"
+                        for item in drift
+                    )
+                    return fail(
+                        "Dependency manifest/lockfile changed after contract "
+                        f"resolution; evidence invalidated: {rendered}"
+                    )
+
+            if (
+                request.runtime_acceptance_policy.workflow_changes_authorized
+                and runtime_acceptance_plan is not None
+                and runtime_acceptance_plan.checks
+            ):
+                workflow_path = (
+                    repo_dir
+                    / request.runtime_acceptance_policy.generated_workflow_path
+                )
+                expected_workflow = render_github_actions_workflow(
+                    runtime_acceptance_plan,
+                    repo_profile,
+                    policy=request.runtime_acceptance_policy,
+                )
+                if (
+                    not workflow_path.is_file()
+                    or workflow_path.read_text(encoding="utf-8")
+                    != expected_workflow
+                ):
+                    return fail(
+                        "The policy-authorized runtime workflow does not match "
+                        "the deterministic renderer; branch NOT pushed."
+                    )
+                generated_runtime_workflow = GeneratedRuntimeWorkflowAttestation(
+                    path=request.runtime_acceptance_policy.generated_workflow_path,
+                    content_sha256=hashlib.sha256(
+                        expected_workflow.encode("utf-8")
+                    ).hexdigest(),
+                    runtime_acceptance_plan_sha256=(
+                        runtime_acceptance_plan.evidence_hash()
+                    ),
+                )
+                allowed = set(gates_policy.get("allowed_protected_paths") or [])
+                allowed.add(generated_runtime_workflow.path)
+                gates_policy["allowed_protected_paths"] = sorted(allowed)
 
             # Deterministic pre-push gates on the FULL diff, before anything
             # reaches the remote: a secret-bearing or protected-path change must
@@ -727,7 +1303,7 @@ class AiderEditor:
                 diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text,
-                policy=request.gates_policy,
+                policy=gates_policy,
             )
             if not gate.passed:
                 return fail(
@@ -736,13 +1312,23 @@ class AiderEditor:
                 )
 
             # 6. Push the branch from the orchestrator (token via one-shot header).
+            push_args = ["push"]
+            if request.expected_head_sha:
+                push_args.append(
+                    "--force-with-lease="
+                    f"refs/heads/{request.branch}:{request.expected_head_sha}"
+                )
+            push_args += ["origin", f"{request.branch}:{request.branch}"]
             rc, out = await self._git(
                 repo_dir,
-                ["push", "origin", f"{request.branch}:{request.branch}"],
+                push_args,
                 auth_header=header,
             )
             if rc != 0:
                 return fail(f"push failed: {_tail(out)}")
+            rc, head_sha = await self._git(repo_dir, ["rev-parse", "HEAD"])
+            if rc != 0:
+                return fail(f"could not resolve pushed head: {_tail(head_sha)}")
 
             return EditResult(
                 success=True,
@@ -751,6 +1337,16 @@ class AiderEditor:
                 changed_paths=changed_paths,
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
                 prompts=prompts,
+                head_sha=head_sha.strip(),
+                contract_bundle=contract_bundle,
+                requirement_ledger=requirement_ledger,
+                inspection_snapshot=inspection_snapshot,
+                dependency_slice=dependency_slice,
+                verification_plan=verification_plan,
+                verification_coverage=verification_coverage,
+                runtime_acceptance_plan=runtime_acceptance_plan,
+                generated_runtime_workflow=generated_runtime_workflow,
+                review_verdict=review_verdict,
             )
         finally:
             if not keep:
@@ -807,24 +1403,6 @@ class AiderEditor:
                 f"branch; revert it manually. {_tail(out)}"
             )
         return None
-
-    async def _run_tests(self, repo_dir: Path, test_cmd: str) -> tuple[bool, str]:
-        proc = await asyncio.create_subprocess_shell(
-            test_cmd,
-            cwd=str(repo_dir),
-            env=_test_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(), timeout=self._test_timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return False, f"tests timed out after {self._test_timeout}s"
-        return proc.returncode == 0, (stdout or b"").decode("utf-8", "replace")
 
     async def _exec(
         self, argv: list[str], *, cwd: Path | None, env: dict[str, str], timeout: int

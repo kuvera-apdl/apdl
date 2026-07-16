@@ -3,8 +3,7 @@
 These are *standing* instructions — stable across every changeset — so they are
 loaded via Aider's ``--read`` rather than appended to the per-task ``--message``.
 ``--read`` files join the cacheable static prefix (system prompt + repo map +
-read-only files), so with ``--cache-prompts`` the rules are re-read at ~0.1x on
-each ``--auto-test`` retry instead of full input price. Per-task specifics belong
+read-only files), so repeated editing rounds reuse the stable prefix. Per-task specifics belong
 in the spec/constraints; only repo-agnostic rules belong here.
 
 The rules encode the failure modes observed in early codegen PRs: code that
@@ -60,9 +59,10 @@ Two different rules — do not conflate them.
   dependency is genuinely required, add it to the manifest AND the lockfile in
   THIS change and confirm the install succeeds; otherwise use what is present.
 
-### Analytics / instrumentation (APDL SDK)
-- If this repo depends on an APDL SDK, a read-only `APDL_SDK_*.md` reference with
-  the exact call path is provided alongside these rules — follow it.
+### Analytics / instrumentation
+- Verify the exact installed SDK version and its exported API from the
+  repository's manifest, lockfile, types, and existing usage. Never rely on
+  static cross-version SDK guidance.
 - Emit events through the SDK's own `track`/`capture` API so they carry the app's
   resolved identity and reach the backend. Never emit through a bespoke
   `fetch`/`sendBeacon` or an assumed `window.*` / `dataLayer` global — events that

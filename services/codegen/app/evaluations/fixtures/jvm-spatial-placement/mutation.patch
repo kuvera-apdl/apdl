@@ -1,0 +1,9 @@
+--- a/src/main/java/example/Toolbar.java
++++ b/src/main/java/example/Toolbar.java
+@@ -3,5 +3,5 @@
+ public final class Toolbar {
+     public String render() {
+-        return "TOOLBAR[TITLE,ACTION]";
++        return "TOOLBAR[TITLE]+PAGE[ACTION]";
+     }
+ }

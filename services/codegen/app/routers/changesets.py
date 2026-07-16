@@ -1,9 +1,7 @@
 """Changeset lifecycle endpoints.
 
-Phase 1 scope: create (enqueue), read, list, and abandon. The sandboxed job
-that drives ``queued → … → merged`` is wired in later phases; the seam is
-:func:`_enqueue_job`. Merge (``POST /{id}/merge``) arrives with CI gating in a
-later phase and is intentionally absent here rather than stubbed to lie.
+APDL creates and manages changeset work, but GitHub owns CI verification and
+merge. There is intentionally no merge endpoint.
 """
 
 from __future__ import annotations
@@ -16,8 +14,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from app.auth import require_internal_token
-from app.github.app_auth import mint_token_for_repo
-from app.github.pulls import close_pull_request, merge_pull_request
+from app.evaluations.models import RolloutStage
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
     RETRYABLE_STATUSES,
@@ -25,10 +22,13 @@ from app.models.changeset import (
     ChangesetCreate,
     ChangesetStatus,
     InvalidTransition,
-    MergeRequest,
 )
+from app.models.observations import ChangesetObservationHistory
+from app.runtime.models import RuntimeEvidenceObservation
 from app.store import changesets as store
 from app.store import connections as connections_store
+from app.store import observations as observation_store
+from app.store import runtime_evidence as runtime_evidence_store
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,19 @@ router = APIRouter(
     tags=["changesets"],
     dependencies=[Depends(require_internal_token)],
 )
+
+
+def _require_publication_stage(app: Any) -> None:
+    """Reject production work while this deployment is evaluation-only."""
+    stage = getattr(app.state, "codegen_rollout_stage", None)
+    if stage in {RolloutStage.offline, RolloutStage.shadow}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Codegen is configured for the '{stage.value}' evaluation stage; "
+                "GitHub branch and pull-request publication are disabled."
+            ),
+        )
 
 
 def _maybe_enqueue(app: Any, background_tasks: BackgroundTasks, changeset_id: str) -> None:
@@ -59,6 +72,7 @@ async def create_changeset(
 ) -> Changeset:
     """Enqueue a changeset for a connected project."""
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
 
     connection = await connections_store.get_connection(pool, body.project_id)
     if connection is None:
@@ -102,51 +116,18 @@ async def get_changeset(changeset_id: str, request: Request) -> Changeset:
     return changeset
 
 
-async def _close_pr_best_effort(pool: asyncpg.Pool, changeset: Changeset) -> None:
-    """Close an abandoned changeset's PR; swallow GitHub failures (logged).
-
-    The DB transition is the source of truth — abandon must never be blocked on
-    GitHub being reachable, so any failure here is logged and the PR is left open
-    rather than raised. The head branch is intentionally not deleted.
-    """
-    try:
-        connection = await connections_store.get_connection(pool, changeset.project_id)
-        if connection is None:
-            logger.warning(
-                "Abandoned changeset %s has no repo connection; PR #%s left open.",
-                changeset.changeset_id,
-                changeset.pr_number,
-            )
-            return
-        token = (
-            await mint_token_for_repo(connection.installation_id, connection.repo)
-        ).token
-        await close_pull_request(
-            repo=connection.repo, number=changeset.pr_number, token=token
-        )
-        logger.info(
-            "Closed PR #%s for abandoned changeset %s.",
-            changeset.pr_number,
-            changeset.changeset_id,
-        )
-    except Exception:
-        logger.warning(
-            "Could not close PR #%s for abandoned changeset %s; left open on GitHub.",
-            changeset.pr_number,
-            changeset.changeset_id,
-            exc_info=True,
-        )
-
-
 @router.post("/{changeset_id}/abandon", response_model=Changeset)
 async def abandon_changeset(changeset_id: str, request: Request) -> Changeset:
-    """Abandon a changeset and close its open PR (best-effort).
-
-    Rollback for an un-merged change: the DB status moves to ``abandoned`` and,
-    if a PR was opened, it is closed on GitHub. Closing is best-effort (a GitHub
-    failure is logged, not raised) and the head branch is left in place.
-    """
+    """Abandon only queued pre-PR work; open PRs are controlled on GitHub."""
     pool: asyncpg.Pool = request.app.state.pg_pool
+    current = await store.get_changeset(pool, changeset_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    if current.pr_number is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Open or closed pull requests must be managed on GitHub.",
+        )
     try:
         changeset = await store.transition_changeset(
             pool, changeset_id, ChangesetStatus.abandoned
@@ -155,92 +136,51 @@ async def abandon_changeset(changeset_id: str, request: Request) -> Changeset:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if changeset is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
-    if changeset.pr_number is not None:
-        await _close_pr_best_effort(pool, changeset)
     return changeset
 
 
-@router.post("/{changeset_id}/merge", response_model=Changeset)
-async def merge_changeset(
-    changeset_id: str, body: MergeRequest, request: Request
-) -> Changeset:
-    """Merge a changeset's PR. Green CI is mandatory; APDL gates the decision."""
+@router.get(
+    "/{changeset_id}/observations",
+    response_model=ChangesetObservationHistory,
+)
+async def get_changeset_observations(
+    changeset_id: str, request: Request
+) -> ChangesetObservationHistory:
+    """Return immutable PR, exact-head CI, and remediation journals."""
     pool: asyncpg.Pool = request.app.state.pg_pool
     changeset = await store.get_changeset(pool, changeset_id)
     if changeset is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
-    if changeset.status not in (ChangesetStatus.ci_passed, ChangesetStatus.waiting_approval):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Changeset is '{changeset.status.value}', not mergeable.",
-        )
-    # "passed" = CI green; "none" = the repo has no CI configured; "no_report" =
-    # CI evidence existed but nothing ever reported within the pending deadline
-    # (sync_ci_status records all three). In each case there is no CI verdict
-    # left to wait on. Any other value (pending / failed / unset) still blocks
-    # the merge.
-    if changeset.ci_status not in ("passed", "none", "no_report"):
-        raise HTTPException(status_code=409, detail="Merge requires green CI.")
-    if changeset.pr_number is None:
-        raise HTTPException(status_code=409, detail="Changeset has no open pull request.")
-
-    connection = await connections_store.get_connection(pool, changeset.project_id)
-    if connection is None:
-        raise HTTPException(status_code=404, detail="Repository connection is missing.")
-
-    token = (
-        await mint_token_for_repo(connection.installation_id, connection.repo)
-    ).token
-
-    # The stored ci_status was recorded when CI last reported and is never
-    # re-synced out of ci_passed — a push to the PR branch since then would not
-    # have demoted it. Re-check live before the irreversible action; fail open
-    # only on a transport fault (GitHub being down blocks the merge call anyway).
-    ci_deps = getattr(request.app.state, "ci_deps", None)
-    if ci_deps and changeset.branch:
-        try:
-            live = await ci_deps["get_status"](connection.repo, changeset.branch, token)
-        except Exception:
-            logger.warning(
-                "Live CI re-check failed for changeset %s; merging on the stored "
-                "ci_status.",
-                changeset_id,
-                exc_info=True,
-            )
-            live = None
-        # Block on a live failure, or on a live pending that is OBSERVED (real
-        # runs/statuses executing on the ref right now). An *inferred* pending —
-        # no actual reports, just phantom suites / dormant workflows (see
-        # github.checks.CIStatus) — must not re-block a gate the sync already
-        # resolved as none/no_report, or the merge wedges on CI that will never
-        # report. Plain-string readers default to observed (conservative).
-        live_observed = bool(getattr(live, "observed", True))
-        if live == "failed" or (live == "pending" and live_observed):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Live CI status for branch '{changeset.branch}' is '{live}'; "
-                    "the stored result is stale. Merge requires green CI."
-                ),
-            )
-
-    merge = await merge_pull_request(
-        repo=connection.repo,
-        number=changeset.pr_number,
-        token=token,
-        merge_method=body.merge_method,
+    return ChangesetObservationHistory(
+        pull_requests=await observation_store.list_pull_request_observations(
+            pool, changeset_id, limit=200
+        ),
+        ci_verifications=await observation_store.list_ci_verification_observations(
+            pool, changeset_id, limit=200
+        ),
+        remediation_attempts=await observation_store.list_ci_remediation_attempts(
+            pool, changeset_id, limit=200
+        ),
     )
-    if not merge.merged:
-        # Not-mergeable (conflict / unmet checks / head moved) is a client-state
-        # 409, not a 502 — merge_pull_request already maps GitHub's 405/409/422
-        # refusals to this clean result instead of letting them surface as a 500.
-        raise HTTPException(
-            status_code=409,
-            detail=merge.reason or "GitHub declined the merge (the PR is not mergeable).",
-        )
 
-    # Record the merge commit SHA: it is the deterministic /revert target.
-    return await store.mark_merged(pool, changeset_id, merge_sha=merge.sha)
+
+@router.get(
+    "/{changeset_id}/runtime-observations",
+    response_model=list[RuntimeEvidenceObservation],
+)
+async def get_runtime_observations(
+    changeset_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+) -> list[RuntimeEvidenceObservation]:
+    """Return append-only GitHub Actions runtime evidence for every PR head."""
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    changeset = await store.get_changeset(pool, changeset_id)
+    if changeset is None:
+        raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
+    return await runtime_evidence_store.list_runtime_evidence_observations(
+        pool, changeset_id, limit=limit
+    )
 
 
 @router.post("/{changeset_id}/revert", response_model=Changeset, status_code=202)
@@ -253,6 +193,7 @@ async def revert_changeset(
     revert the original PR. (Un-merged changes roll back via /abandon instead.)
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
     original = await store.get_changeset(pool, changeset_id)
     if original is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
@@ -308,13 +249,11 @@ async def retry_changeset(
 ) -> Changeset:
     """Re-run a FAILED changeset as a fresh changeset with the same task.
 
-    A run that ended in ``tests_failed`` / ``ci_failed`` / ``error`` /
-    ``abandoned`` never landed a change, and the lifecycle cannot move a
-    terminal row backwards — so a retry enqueues a NEW changeset carrying the
-    identical task (a new branch + PR). Merged changesets roll back with
-    /revert, not /retry; in-flight changesets are still running.
+    Only pre-PR generation errors may create a new changeset. CI failures repair
+    the same GitHub PR branch, and closed PRs may only be reopened on GitHub.
     """
     pool: asyncpg.Pool = request.app.state.pg_pool
+    _require_publication_stage(request.app)
     original = await store.get_changeset(pool, changeset_id)
     if original is None:
         raise HTTPException(status_code=404, detail=f"Changeset '{changeset_id}' not found.")
@@ -326,6 +265,11 @@ async def retry_changeset(
                 f"Only failed changesets can be retried (this one is "
                 f"'{original.status.value}'; retryable: {retryable})."
             ),
+        )
+    if original.pr_number is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A changeset with a GitHub PR cannot be retried as a replacement PR.",
         )
 
     new_id = f"cs_{uuid.uuid4().hex[:24]}"

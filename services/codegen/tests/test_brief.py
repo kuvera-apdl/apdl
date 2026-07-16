@@ -53,13 +53,14 @@ def test_digest_includes_scripts_dependencies_and_readme(tmp_path):
 
     digest = build_repo_digest(tmp_path)
 
-    assert "next build" in digest
-    assert "next, typescript" in digest
+    assert "npm run build" in digest
+    assert '"name": "next"' in digest
+    assert '"name": "typescript"' in digest
     assert "A fake fintech site." in digest
 
 
 def test_digest_marks_truncation(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.editor.brief._DIGEST_MAX_PATHS", 2)
+    monkeypatch.setattr("app.profiling.profiler._MAX_PATHS", 2)
     for name in ("a.ts", "b.ts", "c.ts"):
         (tmp_path / name).write_text("x")
 

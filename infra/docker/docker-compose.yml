@@ -129,9 +129,8 @@ services:
       redis:
         condition: service_healthy
 
-  # Codegen — autonomous code-implementation "hands". Holds the GitHub App
-  # credentials and (in later phases) runs sandboxed clone/build/test jobs. The
-  # agents service calls it over the internal API to open and merge PRs.
+  # Codegen — autonomous code-implementation "hands". It creates and repairs
+  # PR branches; GitHub alone owns CI verification, review policy, and merge.
   codegen:
     build:
       context: ../../services/codegen
@@ -151,6 +150,11 @@ services:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
       CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
+      # Fail-closed rollout gate. Production PR stages require a read-only
+      # operator evidence bundle bound to this exact model + revision.
+      CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
+      CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-offline}
+      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ${CODEGEN_ROLLOUT_AUTHORIZATION_PATH:-}
       # Aider prompt caching (default on): caches the static prefix (system + repo
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
       # "false" to disable.
@@ -181,17 +185,16 @@ services:
       # open changesets without an inbound webhook. Default 60; set 0 to disable
       # (e.g. once a low-latency GitHub webhook is wired as the sole driver).
       CODEGEN_CI_POLL_INTERVAL: ${CODEGEN_CI_POLL_INTERVAL:-60}
-      # Deadline (seconds) for CI that never actually reports on the PR branch
-      # (phantom app check-suites, workflows that never trigger on PRs). Past it
-      # the gate is released as ci_status="no_report" instead of holding
-      # ci_running forever; observed CI is never timed out. 0 = wait forever.
-      CODEGEN_CI_PENDING_TIMEOUT: ${CODEGEN_CI_PENDING_TIMEOUT:-1800}
+      CODEGEN_CI_REPAIR_RETRIES: ${CODEGEN_CI_REPAIR_RETRIES:-2}
+      CODEGEN_CI_REPAIR_BUDGET_SECONDS: ${CODEGEN_CI_REPAIR_BUDGET_SECONDS:-3600}
     # Optional bind mounts — uncomment `volumes:` and the line(s) you need:
     #  * Private key via GITHUB_APP_PRIVATE_KEY_PATH: mounts your .pem read-only
     #    at the SAME path inside the container, so set that path in .env (use an
     #    ABSOLUTE path — `~` is not expanded for a mount). base64 avoids this.
     #  * Docker socket: lets codegen launch the sandbox container (Option B,
     #    CODEGEN_SANDBOX=docker). SECURITY: grants host-root-equivalent access.
+    #  * Rollout bundle: mount CODEGEN_ROLLOUT_AUTHORIZATION_PATH read-only for
+    #    reviewed_pr or low_risk_canary; offline/shadow need no bundle.
     # volumes:
     #   - ${GITHUB_APP_PRIVATE_KEY_PATH}:${GITHUB_APP_PRIVATE_KEY_PATH}:ro
     #   - /var/run/docker.sock:/var/run/docker.sock

@@ -35,7 +35,16 @@ import logging
 import os
 
 from app.config import codegen_job_budget
+from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
+from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.requirements.models import RequirementLedger
+from app.runtime.models import (
+    GeneratedRuntimeWorkflowAttestation,
+    RuntimeAcceptancePlan,
+)
+from app.semantic_review.models import ReviewVerdict
+from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +77,9 @@ _CONFIG_ENV_FORWARD: tuple[str, ...] = (
     "CODEGEN_REQUIRE_VERIFY",
     "CODEGEN_CACHE_PROMPTS",
     "CODEGEN_CONVENTIONS",
-    "CODEGEN_SDK_REFERENCE",
+    "CODEGEN_CONTRACTS",
+    "CODEGEN_CONTRACT_INSTALL_TIMEOUT",
     "CODEGEN_TIMEOUT",
-    "CODEGEN_TEST_TIMEOUT",
     "CODEGEN_GIT_TIMEOUT",
     "CODEGEN_LLM_TIMEOUT",
 )
@@ -135,10 +144,12 @@ class ContainerAiderEditor:
         # Non-secret task inputs — safe to pass as values.
         argv += [
             "-e", f"CS_REPO={request.repo}",
+            "-e", f"CS_PROJECT_SCOPE={request.project_scope or request.repo}",
             "-e", f"CS_BASE={request.base_branch}",
             "-e", f"CS_BRANCH={request.branch}",
             "-e", f"CS_TITLE={request.title}",
             "-e", f"CS_SPEC={request.spec}",
+            "-e", f"CS_RISK_LEVEL={request.risk_level}",
             "-e", f"CS_CONSTRAINTS={json.dumps(request.constraints)}",
             "-e", f"CODEGEN_MODEL={self._model}",
         ]
@@ -148,6 +159,27 @@ class ContainerAiderEditor:
             argv += ["-e", f"CS_GATES_POLICY={json.dumps(request.gates_policy)}"]
         if request.revert_sha:
             argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
+        if request.existing_branch:
+            argv += ["-e", "CS_EXISTING_BRANCH=true"]
+        if request.expected_head_sha:
+            argv += ["-e", f"CS_EXPECTED_HEAD_SHA={request.expected_head_sha}"]
+        if request.requirement_ledger is not None:
+            argv += [
+                "-e",
+                "CS_REQUIREMENT_LEDGER="
+                + json.dumps(request.requirement_ledger.model_dump(mode="json")),
+            ]
+        if request.runtime_acceptance_plan is not None:
+            argv += [
+                "-e",
+                "CS_RUNTIME_ACCEPTANCE_PLAN="
+                + json.dumps(request.runtime_acceptance_plan.model_dump(mode="json")),
+            ]
+        argv += [
+            "-e",
+            "CS_RUNTIME_ACCEPTANCE_POLICY="
+            + json.dumps(request.runtime_acceptance_policy.model_dump(mode="json")),
+        ]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
@@ -182,6 +214,65 @@ class ContainerAiderEditor:
                 diff_text=data.get("diff_text") or "",
                 error=data.get("error"),
                 logs_uri=data.get("logs_uri"),
+                head_sha=data.get("head_sha"),
+                prompts=data.get("prompts") or [],
+                contract_bundle=(
+                    ContractBundle.model_validate(data["contract_bundle"])
+                    if data.get("contract_bundle") is not None
+                    else None
+                ),
+                requirement_ledger=(
+                    RequirementLedger.model_validate_json(
+                        json.dumps(data["requirement_ledger"])
+                    )
+                    if data.get("requirement_ledger") is not None
+                    else None
+                ),
+                inspection_snapshot=(
+                    InspectionSnapshot.model_validate(data["inspection_snapshot"])
+                    if data.get("inspection_snapshot") is not None
+                    else None
+                ),
+                dependency_slice=(
+                    DependencySlice.model_validate(data["dependency_slice"])
+                    if data.get("dependency_slice") is not None
+                    else None
+                ),
+                verification_plan=(
+                    VerificationPlan.model_validate_json(
+                        json.dumps(data["verification_plan"])
+                    )
+                    if data.get("verification_plan") is not None
+                    else None
+                ),
+                verification_coverage=(
+                    VerificationCoverage.model_validate_json(
+                        json.dumps(data["verification_coverage"])
+                    )
+                    if data.get("verification_coverage") is not None
+                    else None
+                ),
+                runtime_acceptance_plan=(
+                    RuntimeAcceptancePlan.model_validate_json(
+                        json.dumps(data["runtime_acceptance_plan"])
+                    )
+                    if data.get("runtime_acceptance_plan") is not None
+                    else None
+                ),
+                generated_runtime_workflow=(
+                    GeneratedRuntimeWorkflowAttestation.model_validate_json(
+                        json.dumps(data["generated_runtime_workflow"])
+                    )
+                    if data.get("generated_runtime_workflow") is not None
+                    else None
+                ),
+                review_verdict=(
+                    ReviewVerdict.model_validate_json(
+                        json.dumps(data["review_verdict"])
+                    )
+                    if data.get("review_verdict") is not None
+                    else None
+                ),
             )
         tail = (stderr or stdout or "").strip()[-_ERR_TAIL:]
         return EditResult(

@@ -12,10 +12,10 @@ from app.store import changesets as store
 from tests.fakes import FakePool
 
 #: Active (post-claim) states a dead job leaves behind — these get swept.
-_ACTIVE = ("cloning", "editing", "testing", "pushing")
+_ACTIVE = ("cloning", "editing", "pushing")
 #: Everything the sweep must never touch: queued (re-enqueued instead, since it
 #: has produced nothing) and settled/terminal states.
-_UNSWEPT = ("queued", "pr_open", "ci_running", "ci_passed", "merged", "tests_failed", "abandoned")
+_UNSWEPT = ("queued", "pr_open", "merged", "abandoned", "error")
 
 _ERROR = "orphaned by a restart"
 
