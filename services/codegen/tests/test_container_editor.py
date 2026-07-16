@@ -150,6 +150,38 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_network(monkeypat
     ]
 
 
+def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch):
+    revision = "local-development"
+    image = "apdl-codegen-sandbox:local-development"
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-development")
+    calls: list[list[str]] = []
+    responses = iter(["27.5.1", revision, "[]"])
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, next(responses), "")
+
+    monkeypatch.setattr("app.editor.container_editor.subprocess.run", fake_run)
+
+    ContainerAiderEditor(image=image).assert_runtime_ready(
+        expected_revision=revision,
+        require_immutable_image=False,
+    )
+
+    assert calls == [
+        ["docker", "version", "--format", "{{.Server.Version}}"],
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            '{{ index .Config.Labels "dev.apdl.codegen.revision" }}',
+            image,
+        ],
+        ["docker", "network", "inspect", "codegen-development"],
+    ]
+
+
 @pytest.mark.parametrize("network", ["", "bridge", "default", "host", "none"])
 def test_pr_runtime_preflight_rejects_builtin_networks(monkeypatch, network):
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)

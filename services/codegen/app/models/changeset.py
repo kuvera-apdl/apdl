@@ -14,13 +14,13 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.models import ContractBundle
-from app.evaluations.publication import PublicationAuthorization
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.observations import (
     CIRemediationStatus,
     ExternalCIStatus,
     GitHubPRStatus,
 )
+from app.publication import PublicationAuthorizationRecord
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
 from app.safety.policy import TenantCodegenConnectionPolicy
@@ -165,7 +165,7 @@ class Changeset(BaseModel):
     runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
     runtime_evidence_assessment: RuntimeEvidenceAssessment | None = None
     review_verdict: ReviewVerdict | None = None
-    publication_authorization: PublicationAuthorization | None = None
+    publication_authorization: PublicationAuthorizationRecord | None = None
     #: Immutable tenant preference snapshot captured when this changeset was
     #: queued. Platform safety floors are deliberately not stored here: every
     #: execution reapplies the currently loaded operator policy so emergency

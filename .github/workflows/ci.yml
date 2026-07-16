@@ -1,26 +1,37 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  sdk:
-    name: SDK Tests
+  javascript-sdk:
+    name: JavaScript SDK
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+          cache: npm
+          cache-dependency-path: sdk/javascript/package-lock.json
+      - run: npm ci
         working-directory: sdk/javascript
-      - run: npm test -- --coverage
+      - run: npm audit --audit-level=high
+        working-directory: sdk/javascript
+      - run: npm run lint
+        working-directory: sdk/javascript
+      - run: npm run test:coverage
         working-directory: sdk/javascript
       - run: npm run build
+        working-directory: sdk/javascript
+      - run: npm run lint:package
         working-directory: sdk/javascript
 
   admin-console:
@@ -31,7 +42,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+          cache: npm
+          cache-dependency-path: services/admin/package-lock.json
+      - run: npm ci
+        working-directory: services/admin
+      - run: npm audit --audit-level=high
         working-directory: services/admin
       - run: npm run lint
         working-directory: services/admin
@@ -48,11 +63,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/admin-api
-      - run: ruff check app/ scripts/ tests/
+      - run: .venv/bin/ruff check app/ scripts/ tests/
         working-directory: services/admin-api
-      - run: python -m pytest -q
+      - run: .venv/bin/python -m pytest -q
         working-directory: services/admin-api
 
   python-sdk:
@@ -63,95 +79,93 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: sdk/python
-      - run: ruff check apdl/ tests/
+      - run: .venv/bin/ruff check apdl/ tests/
         working-directory: sdk/python
-      - run: python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88
+      - run: .venv/bin/python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88
         working-directory: sdk/python
-
-  query-service:
-    name: Query Service Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-        working-directory: services/query
-      - run: ruff check app/
-        working-directory: services/query
-
-  agents-service:
-    name: Agents Service Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -e ".[dev]"
-        working-directory: services/agents
-      - run: ruff check app/
-        working-directory: services/agents
 
   ingestion-service:
-    name: Ingestion Service Lint
+    name: Ingestion Service
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/ingestion
-      - run: ruff check app/
+      - run: .venv/bin/ruff check app/
+        working-directory: services/ingestion
+      - run: .venv/bin/python -m pytest -q
         working-directory: services/ingestion
 
   config-service:
-    name: Config Service Lint
+    name: Config Service
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/config
-      - run: ruff check app/
+      - run: .venv/bin/ruff check app/
+        working-directory: services/config
+      - run: .venv/bin/python -m pytest -q
         working-directory: services/config
 
-  codegen-service:
-    name: Codegen Service and Candidate Image
+  query-service:
+    name: Query Service
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+        working-directory: services/query
+      - run: .venv/bin/ruff check app/
+        working-directory: services/query
+      - run: .venv/bin/python -m pytest -q
+        working-directory: services/query
+
+  agents-service:
+    name: Agents Service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+        working-directory: services/agents
+      - run: .venv/bin/ruff check app/
+        working-directory: services/agents
+      - run: .venv/bin/python -m pytest -q
+        working-directory: services/agents
+
+  codegen-service:
+    name: Codegen Service (source-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/codegen
-      - run: ruff check app/ tests/
+      - run: .venv/bin/ruff check app/ tests/
         working-directory: services/codegen
-      - run: python -m pytest -q
+      - run: .venv/bin/python -m pytest -q
         working-directory: services/codegen
-      - run: docker build -t apdl-codegen-controller:ci services/codegen
-      - run: >-
-          docker build
-          --build-arg CODEGEN_REVISION=${{ github.sha }}
-          -f services/codegen/Dockerfile.worker
-          -t apdl-codegen-candidate:ci
-          services/codegen
-      - name: Verify candidate packaging boundary
-        run: |
-          docker run --rm --entrypoint sh apdl-codegen-candidate:ci -ec '
-            command -v apdl-codegen-evaluate-candidate >/dev/null
-            root="$(python -c "from pathlib import Path; import app.evaluations; print(Path(app.evaluations.__file__).parent)")"
-            test ! -e "$root/oracles_v1.json"
-            test ! -e "$root/corpus_v2.json"
-            test ! -e "$root/fixtures"
-          '
 
   clickhouse-writer:
     name: ClickHouse Writer
@@ -161,24 +175,129 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-dev.txt
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -r requirements-dev.txt --python .venv/bin/python
         working-directory: pipeline/redis
-      - run: ruff check clickhouse_writer.py tests/
+      - run: .venv/bin/ruff check clickhouse_writer.py tests/
         working-directory: pipeline/redis
-      - run: python -m pytest -q
+      - run: .venv/bin/python -m pytest -q
         working-directory: pipeline/redis
 
   etl-framework:
-    name: ETL Framework
+    name: ETL Framework (experimental)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+        working-directory: pipeline/etl
+      - run: .venv/bin/ruff check etl/ scripts/ tests/
+        working-directory: pipeline/etl
+      - run: .venv/bin/python -m pytest -q
+        working-directory: pipeline/etl
+
+  python-dependency-audit:
+    name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
-        working-directory: pipeline/etl
-      - run: ruff check etl/ scripts/ tests/
-        working-directory: pipeline/etl
-      - run: python -m pytest -v
-        working-directory: pipeline/etl
+      - uses: astral-sh/setup-uv@v6
+      - name: Audit reproducible core runtime locks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for lock in \
+            services/ingestion/requirements.lock \
+            services/config/requirements.lock \
+            services/query/requirements.lock \
+            services/admin-api/requirements.lock \
+            pipeline/redis/requirements.lock
+          do
+            uvx pip-audit --strict --require-hashes -r "$lock"
+          done
+      - name: Audit resolved published and preview Python runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          # services/codegen means the offline API dependency set only. The
+          # unsupported Aider editor/worker `agent` extra is not installed by
+          # the 0.3.0 stack and is explicitly excluded by SUPPORT.md.
+          for project in sdk/python services/agents services/codegen
+          do
+            slug="${project//\//-}"
+            requirements="$RUNNER_TEMP/$slug-audit.txt"
+            uv pip compile "$project/pyproject.toml" \
+              --python-version 3.12 \
+              --output-file "$requirements" \
+              --quiet
+            uvx pip-audit --strict -r "$requirements"
+          done
+
+  package-contracts:
+    name: Release Package Contracts
+    runs-on: ubuntu-latest
+    env:
+      NODE: node
+      NPM: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/javascript/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: npm ci
+        working-directory: sdk/javascript
+      - name: Install packed-contract validator
+        run: >-
+          uv venv --python 3.12 services/ingestion/.venv &&
+          uv pip install -e services/ingestion
+          --python services/ingestion/.venv/bin/python
+      - run: make verify-release
+      - run: make test-script-contracts
+      - run: make test-packed-sdk-contract
+      - run: make test-packed-python-sdk
+
+  fresh-core-smoke:
+    name: Fresh Install Core Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: make smoke-fresh
+
+  fresh-experiment-smoke:
+    name: Fresh Install Experiment Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: make smoke-experiment-fresh
+
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4

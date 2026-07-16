@@ -1,0 +1,28 @@
+services:
+  # Local full-stack publication overlay. This is an explicit developer-mode
+  # capability: it keeps draft-PR generation usable without representing the
+  # local worker as an evaluated rollout candidate. Reviewed deployments use
+  # docker-compose.codegen-rollout.yml instead.
+  codegen:
+    user: "${CODEGEN_DEVELOPMENT_DOCKER_UID:?make dev-all must set the host Docker UID}:${CODEGEN_DEVELOPMENT_DOCKER_GID:?make dev-all must set the host Docker GID}"
+    group_add:
+      - "${CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID:?make dev-all must set the Docker socket GID}"
+    environment:
+      CODEGEN_DEVELOPMENT_MODE: "true"
+      CODEGEN_REVISION: local-development
+      CODEGEN_ROLLOUT_STAGE: development_pr
+      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ""
+      CODEGEN_SANDBOX: docker
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_DEVELOPMENT_SANDBOX_IMAGE:-apdl-codegen-sandbox:local-development}
+      CODEGEN_SANDBOX_NETWORK: ${CODEGEN_DEVELOPMENT_SANDBOX_NETWORK:-apdl-codegen-development}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - type: bind
+        source: ${CODEGEN_DEVELOPMENT_DOCKER_SOCKET:?make dev-all must resolve a local Docker unix socket}
+        target: /var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8084/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s

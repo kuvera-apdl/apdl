@@ -4,7 +4,9 @@ import { resolve } from 'node:path';
 import { SDK_VERSION } from '../src/core/constants';
 
 interface PackageJson {
+  name?: string;
   version?: string;
+  license?: string;
   files?: string[];
   scripts?: Record<string, string>;
 }
@@ -18,10 +20,11 @@ describe('package workflow scripts', () => {
     expect(packageJson.scripts).toMatchObject({
       setup: 'npm ci',
       clean: 'rm -rf dist',
-      build: 'rollup -c rollup.config.ts --configPlugin typescript',
+      build: 'npm run clean && rollup -c rollup.config.ts --configPlugin typescript && node scripts/normalize-declarations.mjs',
       test: 'vitest run',
       typecheck: 'tsc --noEmit',
       lint: 'npm run typecheck && tsc -p __tests__/tsconfig.json --noEmit',
+      'lint:package': 'publint',
       'pack:dry-run': 'npm pack --dry-run',
       prepack: 'npm run build',
     });
@@ -29,7 +32,7 @@ describe('package workflow scripts', () => {
 
   it('runs lint, tests, build, and package dry-run during release validation', () => {
     expect(packageJson.scripts?.['release:check'])
-      .toBe('npm run lint && npm test && npm run build && npm run pack:dry-run');
+      .toBe('npm run lint && npm test && npm run build && npm run lint:package && npm run pack:dry-run');
   });
 
   it('packages the built dist artifacts only', () => {
@@ -38,5 +41,13 @@ describe('package workflow scripts', () => {
 
   it('keeps the SDK version constant in sync with package.json', () => {
     expect(SDK_VERSION).toBe(packageJson.version);
+  });
+
+  it('publishes the canonical release package metadata', () => {
+    expect(packageJson).toMatchObject({
+      name: '@apdl-oss/sdk',
+      version: '0.3.0',
+      license: 'MIT',
+    });
   });
 });

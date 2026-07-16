@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._version import __version__
 from .client import APDLClient
 from .config import APDLConfig
 from .queue import DeliveryReport
@@ -51,9 +52,6 @@ from .flags import (
 )
 from .types import SDK_VERSION, IngestionEvent
 
-__version__ = SDK_VERSION
-
-
 class APDL:
     """Namespace entry point mirroring the JS SDK's ``APDL.init``."""
 
@@ -65,7 +63,7 @@ class APDL:
         endpoint: str | None = None,
         **kwargs: Any,
     ) -> APDLClient:
-        """Create a client from one config or explicit key and endpoint options."""
+        """Create a client from ``APDLConfig`` or explicit key and gateway origin."""
         return APDLClient(config, api_key=api_key, endpoint=endpoint, **kwargs)
 
 

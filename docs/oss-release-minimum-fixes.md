@@ -4,6 +4,29 @@
 
 **Release posture:** single-node/self-hosted developer preview. Do not claim production readiness, lossless analytics, multi-replica operation, or autonomous code publication.
 
+## Implementation status
+
+All eight minimum changes are implemented on `recent-critical-fixes`. Each
+functional fix was committed independently; the final release-contract change
+collects only the gates, package metadata, exact artifact declaration, and
+documentation that must agree as one unit.
+
+| Item | Status | Evidence |
+|---|---|---|
+| 1. Canonical event/exposure contract | Complete | `2d228f0`; shared strict fixtures and packed SDK-to-Ingestion validation |
+| 2. Loss, duplication, and queue poisoning | Complete | `c07ad92`; atomic acceptance, bounded invalid-event handling, and storage idempotency |
+| 3. SDK lifecycle, consent, and credentials | Complete | `2973e08`; drain reporting, consent fencing, project-scoped state, and browser roles |
+| 4. Atomic mutations and evaluator parity | Complete | `af0f9ee`; transactional ownership, durable outbox, and shared evaluator fixtures |
+| 5. Authoritative experiment analytics | Complete | `f05cc3d`; Config-owned variants, canonical actors, typed finite results, and budgets |
+| 6. Public-registration spend boundary | Complete | `35d70ee`; Agents execution/approval disabled for self-registered projects |
+| 7. Reproducible installation smoke | Complete | `7b81360`; isolated fresh core path with exact event, flag, query, and cleanup assertions |
+| 8. Exact release artifact gate | Complete | `release-manifest.json`, reusable CI, authoritative experiment smoke, npm/PyPI packed consumers, dependency audits, and release/support metadata |
+
+The release remains conditional on the required GitHub CI jobs passing for the
+exact tagged revision and both registries accepting the declared 0.3.0
+artifacts. This status is a developer-preview release gate, not a production
+readiness claim.
+
 ## Required scope exclusions
 
 The minimal release is possible only if all unsupported surfaces are disabled and clearly excluded:

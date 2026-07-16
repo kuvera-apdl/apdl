@@ -1,0 +1,15 @@
+# Default review authority for the APDL repository.
+* @Sukhikhk
+
+# Release, security, governance, and dependency policy require maintainer review.
+/.github/ @Sukhikhk
+/SECURITY.md @Sukhikhk
+/SUPPORT.md @Sukhikhk
+/GOVERNANCE.md @Sukhikhk
+/CODE_OF_CONDUCT.md @Sukhikhk
+/docs/dependency-policy.md @Sukhikhk
+
+# Public artifact contracts.
+/sdk/javascript/ @Sukhikhk
+/sdk/python/ @Sukhikhk
+/pipeline/*/migrations/** @Sukhikhk

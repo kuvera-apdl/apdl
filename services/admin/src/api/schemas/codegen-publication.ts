@@ -6,6 +6,7 @@ export const codegenRiskLevelSchema = z.enum(['low', 'medium', 'high'])
 export const rolloutStageSchema = z.enum([
   'offline',
   'shadow',
+  'development_pr',
   'reviewed_pr',
   'low_risk_canary',
 ])
@@ -63,6 +64,13 @@ export const rolloutDecisionSchema = z
     const publishing =
       decision.publish_branch || decision.create_pull_request || decision.ready_for_review
 
+    if (decision.requested_stage === 'development_pr') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'evaluated rollout decisions cannot target the development stage',
+      })
+    }
+
     if (!decision.allowed && publishing) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -118,7 +126,7 @@ export const rolloutDecisionSchema = z
     }
   })
 
-export const publicationAuthorizationSchema = z
+const evaluatedPublicationAuthorizationSchema = z
   .object({
     schema_version: z.literal('publication_authorization@2'),
     request: publicationRequestSchema,
@@ -173,3 +181,51 @@ export const publicationAuthorizationSchema = z
       })
     }
   })
+
+export const developmentPublicationRequestSchema = z
+  .object({
+    schema_version: z.literal('development_publication_request@1'),
+    requested_stage: z.literal('development_pr'),
+    risk: codegenRiskLevelSchema,
+    model: z.string().min(1),
+    codegen_revision: z.literal('local-development'),
+  })
+  .strict()
+
+export const developmentPublicationDecisionSchema = z
+  .object({
+    schema_version: z.literal('development_publication_decision@1'),
+    requested_stage: z.literal('development_pr'),
+    risk: codegenRiskLevelSchema,
+    allowed: z.literal(true),
+    publish_branch: z.literal(true),
+    create_pull_request: z.literal(true),
+    ready_for_review: z.literal(false),
+    reasons: z.tuple([]),
+    decision_sha256: sha256Schema,
+  })
+  .strict()
+
+export const developmentPublicationAuthorizationSchema = z
+  .object({
+    schema_version: z.literal('development_publication_authorization@1'),
+    authority: z.literal('local_development'),
+    request: developmentPublicationRequestSchema,
+    decision: developmentPublicationDecisionSchema,
+    draft_only: z.literal(true),
+    authorization_sha256: sha256Schema,
+  })
+  .strict()
+  .superRefine((authorization, ctx) => {
+    if (authorization.request.risk !== authorization.decision.risk) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'development publication decision risk does not match its request',
+      })
+    }
+  })
+
+export const publicationAuthorizationSchema = z.union([
+  evaluatedPublicationAuthorizationSchema,
+  developmentPublicationAuthorizationSchema,
+])

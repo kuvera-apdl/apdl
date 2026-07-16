@@ -166,6 +166,7 @@ async def authenticate_request(request: Request) -> Principal:
     request.state.principal = principal
     return principal
 
+
 def require_role(request: Request, role: str) -> Principal:
     principal: Principal = request.state.principal
     if role not in principal.roles:

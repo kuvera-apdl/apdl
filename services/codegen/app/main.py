@@ -26,6 +26,7 @@ from app.config import (
     codegen_ci_poll_interval,
     codegen_controller_image_id,
     codegen_cors_origins,
+    codegen_development_mode,
     codegen_job_budget,
     codegen_model,
     codegen_revision,
@@ -75,25 +76,37 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
     resolved_stage = stage or codegen_rollout_stage()
     mode = codegen_sandbox_mode()
     publication_stage = resolved_stage in {
+        RolloutStage.development_pr,
         RolloutStage.reviewed_pr,
         RolloutStage.low_risk_canary,
     }
     if mode == "docker":
         network = codegen_sandbox_network()
-        if publication_stage and network in {
+        invalid_network = network in {
             "",
             "bridge",
             "default",
             "host",
             "none",
-        }:
+        }
+        if resolved_stage is RolloutStage.development_pr and invalid_network:
+            raise RuntimeError(
+                "development_pr requires CODEGEN_SANDBOX_NETWORK to name a "
+                "dedicated local sandbox network"
+            )
+        if publication_stage and invalid_network:
             raise RuntimeError(
                 "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
                 "operator-managed egress-filtered network"
             )
         logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
         editor = ContainerAiderEditor()
-        if publication_stage:
+        if resolved_stage is RolloutStage.development_pr:
+            editor.assert_runtime_ready(
+                expected_revision=codegen_revision(),
+                require_immutable_image=False,
+            )
+        elif publication_stage:
             editor.assert_runtime_ready(expected_revision=codegen_revision())
         return editor
     if publication_stage:
@@ -108,10 +121,11 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
 
 
 def _make_publication_gate() -> ConfiguredPublicationGate:
-    """Load the operator artifact once and bind it to this deployed candidate."""
+    """Build the explicit development gate or load evaluated rollout evidence."""
     stage = codegen_rollout_stage()
     model = codegen_model()
     revision = codegen_revision()
+    development_mode = codegen_development_mode()
     provider = None
     candidate_identity = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
@@ -139,6 +153,19 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             expected_codegen_revision=revision,
             expected_candidate_identity_sha256=candidate_identity.identity_sha256,
         )
+    elif stage is RolloutStage.development_pr:
+        if not development_mode:
+            raise RuntimeError(
+                "development_pr requires CODEGEN_DEVELOPMENT_MODE=true"
+            )
+        if codegen_rollout_authorization_path():
+            raise RuntimeError(
+                "development_pr must not receive an evaluated rollout bundle"
+            )
+    elif development_mode:
+        raise RuntimeError(
+            "CODEGEN_DEVELOPMENT_MODE=true is valid only with development_pr"
+        )
     return ConfiguredPublicationGate(
         stage=stage,
         model=model,
@@ -149,6 +176,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             else None
         ),
         provider=provider,
+        development_mode=development_mode,
     )
 
 

@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-runtime evaluate-codegen codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-runtime evaluate-codegen codegen-development-prepare codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -12,6 +12,7 @@ POSTGRES_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 # repo-root `.env` is otherwise ignored — load it explicitly when it exists.
 COMPOSE_FILE ?= infra/docker/docker-compose.yml
 COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_FILE)
+SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file ../../.env,)
 
 # One immutable identity binds the evaluation controller, production candidate,
 # evidence bundle, and reviewed-PR deployment. Environment values may override
@@ -30,6 +31,20 @@ CODEGEN_DOCKER_SOCKET ?= $(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME
 CODEGEN_DOCKER_UID ?= $(shell id -u)
 CODEGEN_DOCKER_GID ?= $(shell id -g)
 CODEGEN_DOCKER_SOCKET_GID ?= $(shell stat -c '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || stat -f '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || echo 0)
+
+# Explicit Codegen development-publication tooling is separate from the normal
+# core and dev-all paths. The supported stacks never mount the Docker socket or
+# enable development_pr; reviewed publication uses its own evaluated overlay.
+CODEGEN_DEVELOPMENT_REVISION := local-development
+CODEGEN_DEVELOPMENT_SANDBOX_IMAGE := apdl-codegen-sandbox:$(CODEGEN_DEVELOPMENT_REVISION)
+CODEGEN_DEVELOPMENT_SANDBOX_NETWORK := apdl-codegen-development
+CODEGEN_DEVELOPMENT_COMPOSE_FILE := infra/docker/docker-compose.codegen-development.yml
+CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT := $(or $(strip $(DOCKER_HOST)),$(shell docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null))
+CODEGEN_DEVELOPMENT_CONTEXT_SOCKET := $(patsubst unix://%,%,$(filter unix://%,$(CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT)))
+CODEGEN_DEVELOPMENT_DOCKER_SOCKET ?= $(if $(CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT),$(CODEGEN_DEVELOPMENT_CONTEXT_SOCKET),$(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME)/.docker/run/docker.sock,/var/run/docker.sock))
+CODEGEN_DEVELOPMENT_DOCKER_UID := $(shell id -u)
+CODEGEN_DEVELOPMENT_DOCKER_GID := $(shell id -g)
+CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID = $(shell stat -c '%g' "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" 2>/dev/null || stat -f '%g' "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" 2>/dev/null)
 
 setup:
 	@bash scripts/setup.sh
@@ -70,7 +85,7 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-etl test-admin-api test-admin
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-etl test-admin-api test-admin
 
 lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer lint-etl lint-admin-api lint-admin
 
@@ -79,6 +94,12 @@ clean: clean-sdk clean-admin
 # Parallel local CI mirror: lint + test every package at once.
 check:
 	@bash scripts/check.sh
+
+audit-dependencies:
+	@bash scripts/audit_dependencies.sh
+
+test-script-contracts:
+	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
 # Auto-format all packages (ruff format + autofix; JS formatter if present).
 fmt:
@@ -107,6 +128,12 @@ lint-sdk:
 release-sdk:
 	cd sdk/javascript && npm run release:check
 
+verify-release:
+	./scripts/verify_release.py
+
+test-packed-python-sdk:
+	./scripts/test-packed-python-sdk.sh
+
 # ─── Admin Console (TypeScript) ──────────────────────────────
 
 run-admin:
@@ -127,7 +154,7 @@ clean-admin:
 # ─── Admin API (Python) ─────────────────────────────────────
 
 run-admin-api:
-	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/uvicorn app.main:app --reload --port 8085 --env-file ../../.env
+	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/python -m uvicorn app.main:app --reload --port 8085 $(SERVICE_ENV_FILE)
 
 test-admin-api:
 	cd services/admin-api && .venv/bin/python -m pytest -v
@@ -158,7 +185,7 @@ lint-ingestion:
 	cd services/ingestion && .venv/bin/ruff check app/
 
 run-ingestion:
-	cd services/ingestion && .venv/bin/uvicorn app.main:app --reload --port 8080
+	cd services/ingestion && .venv/bin/python -m uvicorn app.main:app --reload --port 8080 $(SERVICE_ENV_FILE)
 
 # ─── Config Service (Python) ────────────────────────────────
 
@@ -169,7 +196,7 @@ lint-config:
 	cd services/config && .venv/bin/ruff check app/
 
 run-config:
-	cd services/config && .venv/bin/uvicorn app.main:app --reload --port 8081
+	cd services/config && .venv/bin/python -m uvicorn app.main:app --reload --port 8081 $(SERVICE_ENV_FILE)
 
 # ─── Query Service (Python) ──────────────────────────────────
 
@@ -180,7 +207,7 @@ lint-query:
 	cd services/query && .venv/bin/ruff check app/
 
 run-query:
-	cd services/query && .venv/bin/uvicorn app.main:app --reload --port 8082
+	cd services/query && .venv/bin/python -m uvicorn app.main:app --reload --port 8082 $(SERVICE_ENV_FILE)
 
 # ─── Agents Service (Python) ─────────────────────────────────
 
@@ -191,7 +218,7 @@ lint-agents:
 	cd services/agents && .venv/bin/ruff check app/
 
 run-agents:
-	cd services/agents && .venv/bin/uvicorn app.main:app --reload --port 8083
+	cd services/agents && .venv/bin/python -m uvicorn app.main:app --reload --port 8083 $(SERVICE_ENV_FILE)
 
 # ─── Codegen Service (Python) ────────────────────────────────
 
@@ -202,7 +229,7 @@ lint-codegen:
 	cd services/codegen && .venv/bin/ruff check app/
 
 run-codegen:
-	cd services/codegen && .venv/bin/uvicorn app.main:app --reload --port 8084
+	cd services/codegen && .venv/bin/python -m uvicorn app.main:app --reload --port 8084 $(SERVICE_ENV_FILE)
 
 build-codegen-controller:
 	docker build \
@@ -221,6 +248,32 @@ build-codegen-sandbox:
 		services/codegen
 
 build-codegen-runtime: build-codegen-controller build-codegen-sandbox
+
+codegen-development-prepare:
+	@test -n "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "The active Docker context is not a local unix socket; codegen-development-prepare requires local Docker." >&2; exit 1)
+	@case "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" in /*) ;; *) echo "Docker unix socket path must be absolute: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1;; esac
+	@test -S "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "Docker unix socket not found: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1)
+	@test -n "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" || (echo "Could not determine Docker socket group: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1)
+	@if docker network inspect "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null 2>&1; then \
+		scope="$$(docker network inspect --format '{{ index .Labels "dev.apdl.codegen.scope" }}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		driver="$$(docker network inspect --format '{{.Driver}}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		internal="$$(docker network inspect --format '{{.Internal}}' "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)")"; \
+		test "$$scope" = "local-development" || (echo "Docker network $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) exists but is not APDL's development sandbox network." >&2; exit 1); \
+		test "$$driver" = "bridge" -a "$$internal" = "false" || (echo "Docker network $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) must be a non-internal bridge for local GitHub/model access." >&2; exit 1); \
+	else \
+		docker network create --driver bridge --label dev.apdl.codegen.scope=local-development "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null; \
+	fi
+	@echo "==> Codegen sandbox network: $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) (development-only; not egress-filtered)"
+	@$(MAKE) --no-print-directory build-codegen-sandbox \
+		CODEGEN_REVISION="$(CODEGEN_DEVELOPMENT_REVISION)" \
+		CODEGEN_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)"
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" \
+	CODEGEN_DEVELOPMENT_DOCKER_UID="$(CODEGEN_DEVELOPMENT_DOCKER_UID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_GID="$(CODEGEN_DEVELOPMENT_DOCKER_GID)" \
+	CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)" \
+	CODEGEN_DEVELOPMENT_SANDBOX_NETWORK="$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" \
+	$(COMPOSE) -f $(CODEGEN_DEVELOPMENT_COMPOSE_FILE) config --quiet
 
 evaluate-codegen:
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
@@ -283,7 +336,7 @@ revoke-codegen-repository:
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:
-	cd pipeline/redis && .venv/bin/python clickhouse_writer.py
+	cd pipeline/redis && $(if $(SERVICE_ENV_FILE),uv run --no-project $(SERVICE_ENV_FILE) -- .venv/bin/python,.venv/bin/python) clickhouse_writer.py
 
 test-writer:
 	cd pipeline/redis && .venv/bin/python -m pytest -q
@@ -315,15 +368,32 @@ dev:
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
-dev-all:
+dev-core:
+	$(COMPOSE) --profile agents --profile codegen rm -f -s agents codegen
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
 	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
-	$(COMPOSE) up --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
+	$(COMPOSE) up -d --build --wait --wait-timeout 120 \
+		ingestion config query clickhouse-writer admin-api admin gateway
+	@echo "==> Core development stack is ready"
+	@echo "    Agents and Codegen are stopped; run make dev-all to opt into their offline services."
+
+dev-all: dev-core
+	$(COMPOSE) --profile agents --profile codegen up -d --build --wait --wait-timeout 120 \
+		agents codegen
+	@echo "==> Full development stack is ready"
+	@echo "    Agents is enabled; Codegen publication remains offline (no Docker socket mounted)."
 
 dev-down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile agents --profile codegen down
 	docker compose -f infra/docker/docker-compose.deps.yml down
+	@docker network rm "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null 2>&1 || true
+
+smoke-fresh:
+	@bash scripts/smoke_fresh_install.sh core
+
+smoke-experiment-fresh:
+	@bash scripts/smoke_fresh_install.sh experiment
 
 # Container status + service health endpoints.
 status:
@@ -335,4 +405,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer test-writer lint-etl test-etl lint-admin-api test-admin-api lint-admin test-admin
+ci: check build verify-release test-packed-sdk-contract test-packed-python-sdk audit-dependencies

@@ -18,10 +18,14 @@ export interface ServiceHealthTarget {
   baseUrl: string
 }
 
-export const SERVICE_DESCRIPTORS: ServiceDescriptor[] = [
+export const CORE_SERVICE_DESCRIPTORS: ServiceDescriptor[] = [
   { service: 'ingestion', label: 'Ingestion', hasReady: false },
   { service: 'config', label: 'Config', hasReady: false },
   { service: 'query', label: 'Query', hasReady: true },
+]
+
+export const SERVICE_DESCRIPTORS: ServiceDescriptor[] = [
+  ...CORE_SERVICE_DESCRIPTORS,
   { service: 'agents', label: 'Agents', hasReady: true },
 ]
 

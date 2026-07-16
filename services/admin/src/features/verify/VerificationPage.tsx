@@ -134,7 +134,7 @@ export function VerificationPage() {
       <p className="text-xs text-muted-foreground">
         The test event is named <code className="font-mono">apdl_console_verification</code> so it
         can be filtered out of real analytics. The pipeline step covers the writer's 5s flush and
-        first consumer-group creation, re-sending once at attempt 5 exactly like{' '}
+        requires the one accepted event to appear exactly once, matching{' '}
         <code className="font-mono">dev.sh smoke</code>.
       </p>
     </div>

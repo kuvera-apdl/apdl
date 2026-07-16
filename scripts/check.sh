@@ -30,15 +30,18 @@ info() { echo -e "${BLUE}==>${NC} $*"; }
 # Each entry: "name|dir|lint command|test command"
 # An empty command field means that step is skipped for the package.
 PACKAGES=(
-  "js-sdk|sdk/javascript|npm run lint|npm test -- --run"
-  "admin|services/admin|npm run lint|npm test -- --run"
+  "script-contracts|.||python3 -m unittest discover -s scripts/tests -p 'test_*.py'"
+  "js-sdk|sdk/javascript|npm run lint|npm run test:coverage"
+  "admin|services/admin|npm run lint|npm test"
   "admin-api|services/admin-api|.venv/bin/ruff check app/ scripts/ tests/|.venv/bin/python -m pytest -q"
-  "python-sdk|sdk/python|.venv/bin/ruff check apdl/ tests/|.venv/bin/python -m pytest -q"
+  "python-sdk|sdk/python|.venv/bin/ruff check apdl/ tests/|.venv/bin/python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88"
   "ingestion|services/ingestion|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "config|services/config|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "query|services/query|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "agents|services/agents|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
-  "etl|pipeline/etl|.venv/bin/ruff check etl/ scripts/ tests/|.venv/bin/python -m pytest -q"
+  "codegen|services/codegen|.venv/bin/ruff check app/ tests/|.venv/bin/python -m pytest -q"
+  "writer|pipeline/redis|.venv/bin/ruff check clickhouse_writer.py tests/|.venv/bin/python -m pytest -q"
+  "etl-experimental|pipeline/etl|.venv/bin/ruff check etl/ scripts/ tests/|.venv/bin/python -m pytest -q"
 )
 
 LOG_DIR="$(mktemp -d)"

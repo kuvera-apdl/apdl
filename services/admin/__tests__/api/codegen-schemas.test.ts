@@ -8,6 +8,7 @@ import {
 } from '@/api/schemas/codegen'
 import {
   makeReviewVerdict,
+  makeDevelopmentPublicationAuthorization,
   makePublicationAuthorization,
   makeRuntimeAcceptancePlan,
   makeRuntimeEvidenceAssessment,
@@ -234,6 +235,47 @@ describe('codegen schemas', () => {
 
     expect(parsed.publication_authorization?.request.requested_stage).toBe('reviewed_pr')
     expect(parsed.publication_authorization?.decision.allowed).toBe(false)
+  })
+
+  it('parses a separate draft-only local development authorization', () => {
+    const parsed = changesetSchema.parse({
+      ...sample,
+      publication_authorization: makeDevelopmentPublicationAuthorization(),
+    })
+
+    expect(parsed.publication_authorization?.schema_version).toBe(
+      'development_publication_authorization@1',
+    )
+    expect(parsed.publication_authorization?.request.requested_stage).toBe('development_pr')
+    expect(parsed.publication_authorization?.decision.ready_for_review).toBe(false)
+  })
+
+  it('rejects a development authorization that is not strictly draft-only', () => {
+    const authorization = makeDevelopmentPublicationAuthorization()
+    const reviewReady = {
+      ...authorization,
+      decision: { ...authorization.decision, ready_for_review: true },
+    }
+    const mismatchedRisk = {
+      ...authorization,
+      decision: { ...authorization.decision, risk: 'high' },
+    }
+    const mismatchedRevision = {
+      ...authorization,
+      request: { ...authorization.request, codegen_revision: 'production-revision' },
+    }
+    const withEvidenceAlias = { ...authorization, report_sha256: 'a'.repeat(64) }
+
+    for (const publication_authorization of [
+      reviewReady,
+      mismatchedRisk,
+      mismatchedRevision,
+      withEvidenceAlias,
+    ]) {
+      expect(changesetSchema.safeParse({ ...sample, publication_authorization }).success).toBe(
+        false,
+      )
+    }
   })
 
   it('rejects publication authorization for a different stage, policy, or candidate', () => {

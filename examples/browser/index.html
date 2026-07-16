@@ -17,7 +17,7 @@
   <p>
     Auto-capture is on: clicks, page views, scroll depth, and web vitals are
     tracked automatically. Prerequisites are in <code>examples/README.md</code>
-    (stack running via <code>make dev-all</code>, SDK built via
+    (stack running via <code>make dev-core</code>, SDK built via
     <code>make build-sdk</code>, <code>new-checkout</code> flag created).
   </p>
 
@@ -33,14 +33,14 @@
   <div id="log"></div>
 
   <!-- IIFE bundle exposes a global `APDL` -->
-  <script src="../../sdk/javascript/dist/apdl.iife.js"></script>
+  <script src="./apdl.iife.js"></script>
   <script>
     const logEl = document.getElementById('log');
     const log = (msg) => { logEl.textContent += msg + '\n'; };
 
     const apdl = APDL.init({
       endpoint: 'http://localhost:8000',
-      auth: { clientKey: 'client_apdl_0123456789abcdef0123456789abcdef' },
+      auth: { clientKey: 'client_demo_0123456789abcdef0123456789abcdef' },
       autoCapture: true,
       debug: true,
     });

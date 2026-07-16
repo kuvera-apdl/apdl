@@ -6,10 +6,10 @@ need to get a change from idea to merged PR.
 ## Getting set up
 
 Prerequisites: [uv](https://docs.astral.sh/uv/), Docker & Docker Compose,
-Node.js 20+, Python 3.12+.
+Node.js 20.19+, Python 3.12+.
 
 ```bash
-git clone https://github.com/JahaanRawat/apdl.git
+git clone https://github.com/kuvera-apdl/apdl.git
 cd apdl
 make setup
 ```
@@ -25,8 +25,12 @@ make check    # lint + test every package in parallel
 ```
 
 `scripts/dev.sh` is the master entry point for everything local —
-`scripts/dev.sh help` lists setup, stack lifecycle (`up`, `up-full`, `down`,
-`reset`), `status`, and an end-to-end `smoke` test.
+`scripts/dev.sh help` lists setup, stack lifecycle (`up`, `up-core`, `up-full`,
+`down`, `reset`), `status`, and an end-to-end `smoke` test. The 0.3.0
+developer-preview support boundary is defined in [SUPPORT.md](SUPPORT.md):
+core changes must work in the fresh, single-node source-built Compose stack;
+Agents is opt-in, Codegen cannot publish, and future pipeline/deployment
+scaffolds are not supported runtime surfaces.
 
 ## Repository layout
 
@@ -37,7 +41,7 @@ make check    # lint + test every package in parallel
 | `services/ingestion/` | Event ingestion API (FastAPI → Redis Streams) |
 | `services/config/` | Feature flags & experiments API (FastAPI, PostgreSQL, SSE) |
 | `services/query/` | Analytics query engine (FastAPI, ClickHouse) |
-| `services/agents/` | Autonomous LLM agents (FastAPI, pgvector) |
+| `services/agents/` | Opt-in operator-preview LLM agents (FastAPI, pgvector) |
 | `pipeline/` | Redis Streams → ClickHouse writer; ClickHouse schemas |
 | `infra/docker/` | Docker Compose for local dev |
 
@@ -63,6 +67,12 @@ make check    # lint + test every package in parallel
    ```
 
 5. **Run the full suite before pushing:** `make test && make lint`.
+
+Dependency changes must also follow
+[docs/dependency-policy.md](docs/dependency-policy.md). Do not auto-merge a
+dependency update: review its changelog and license, refresh the package's
+canonical lock or build metadata, and run the gates for every affected
+artifact.
 
 ### Hot-reload service development
 
@@ -100,14 +110,18 @@ make run-pipeline   # ClickHouse writer
 
 ## Reporting bugs & proposing features
 
-Open a [GitHub issue](https://github.com/JahaanRawat/apdl/issues) with:
+Open a [GitHub issue](https://github.com/kuvera-apdl/apdl/issues) with:
 
 - What you expected vs. what happened
-- Steps to reproduce (ideally against `make dev-all`)
+- Steps to reproduce (ideally against the supported `make dev-core` stack)
 - Relevant logs, versions, and platform details
 
 For security vulnerabilities, **do not open a public issue** — see
 [SECURITY.md](SECURITY.md).
+
+By participating, you agree to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Project roles and decision-making are
+described in [GOVERNANCE.md](GOVERNANCE.md).
 
 ## License
 

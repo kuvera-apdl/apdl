@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 10
-MIGRATION_NAME = "010_codegen_publication_identity.sql"
+MIGRATION_VERSION = 11
+MIGRATION_NAME = "011_codegen_development_publication.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),

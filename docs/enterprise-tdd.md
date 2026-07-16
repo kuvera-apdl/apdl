@@ -1,6 +1,15 @@
 # APDL Enterprise — Technical Design Document
 
-Status: Draft v5 (3-layer ETL + Agent, event-driven on SQS / Lambda / ECS Fargate)
+> **Design document only — not part of APDL 0.3.0 support.** This file records
+> an unimplemented enterprise/cloud proposal. It is not installation guidance,
+> a roadmap commitment, or evidence that any described AWS, Terraform,
+> Kubernetes, SaaS, multi-tenant, multi-region, backup/restore, compliance, SLO,
+> or production capability exists. APDL 0.3.0 supports only the fresh,
+> single-node, source-built OSS Compose core described in
+> [Support](../SUPPORT.md). ETL v2, Kafka, Flink, Kubernetes, Terraform,
+> multi-replica operation, upgrades, backup, and restore are unsupported.
+
+Status: Historical draft v5 (unimplemented; 3-layer ETL + Agent design on SQS / Lambda / ECS Fargate)
 Owner: Platform Architecture
 Last updated: 2026-05-29
 
@@ -8,7 +17,15 @@ Last updated: 2026-05-29
 
 ## 1. Executive summary
 
-APDL Enterprise is a multi-tenant SaaS on AWS organized as a **three-layer pipeline**: a data **Extract** layer that collects raw events from customer SDKs and connectors, an **event-driven Transform & Load** layer that standardizes and writes events into the analytics warehouse as they arrive, and an **Agent** layer that reads the standardized data to make and execute product decisions. Everything else (identity, audit, billing, control plane) supports those three. The five most consequential decisions are:
+This draft proposes that a future APDL Enterprise product would be a
+multi-tenant SaaS on AWS organized as a **three-layer pipeline**: a data
+**Extract** layer that collects raw events from customer SDKs and connectors,
+an **event-driven Transform & Load** layer that standardizes and writes events
+into the analytics warehouse as they arrive, and an **Agent** layer that reads
+the standardized data to make and execute product decisions. Everything else
+(identity, audit, billing, control plane) would support those three. None of
+these enterprise components or claims are implemented by this OSS release. The
+five most consequential design decisions are:
 
 1. **Three layers, each independently scalable, each chosen for its runtime shape.** Extract is ECS Fargate FastAPI (sync HTTP, predictable latency). Transform & Load is **AWS Lambda triggered by SQS** (event-driven, per-message, embarrassingly parallel — events become queryable within seconds, not minutes). Agent is ECS Fargate FastAPI (long-running graph state, streaming LLM responses). The seams are SQS queues and the ClickHouse warehouse — never direct HTTP between layers.
 2. **SQS Standard as the layer-to-layer transport, with a Kinesis Data Firehose tee to S3 for replay.** SQS deletes on consume, so the `event-validator` Lambda forks every validated event to Firehose → S3 Parquet for a 25-month rebuildable archive. If the warehouse is corrupted or the schema changes, we replay from S3 to a one-shot SQS replay queue consumed by `clickhouse-loader`.

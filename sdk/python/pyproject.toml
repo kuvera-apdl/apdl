@@ -1,20 +1,20 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "apdl-sdk"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Server-side Python client SDK for the Autonomous Product Development Loop platform"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "APDL" }]
 keywords = ["analytics", "feature-flags", "experimentation", "ab-testing", "apdl"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
@@ -33,14 +33,18 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/JahaanRawat/apdl"
-Repository = "https://github.com/JahaanRawat/apdl"
+Homepage = "https://github.com/kuvera-apdl/apdl/tree/main/sdk/python#readme"
+Repository = "https://github.com/kuvera-apdl/apdl"
+Issues = "https://github.com/kuvera-apdl/apdl/issues"
 
 [tool.setuptools.packages.find]
 include = ["apdl*"]
 
 [tool.setuptools.package-data]
 apdl = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "apdl._version.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

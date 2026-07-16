@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app import auth, projects, proxy
 from app.config import Settings
@@ -61,6 +62,42 @@ async def health() -> dict[str, str]:
 
 @app.get("/api/ready")
 async def ready(request: Request):
-    async with request.app.state.pg_pool.acquire() as conn:
-        await conn.fetchval("SELECT 1")
-    return {"status": "ready"}
+    checks = {
+        "postgres": "not_ready",
+        "ingestion": "not_ready",
+        "config": "not_ready",
+        "query": "not_ready",
+    }
+    try:
+        async with request.app.state.pg_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        checks["postgres"] = "ready"
+    except Exception:
+        pass
+
+    settings = request.app.state.settings
+    upstreams = (
+        ("ingestion", "/health", "ok"),
+        ("config", "/health", "ok"),
+        ("query", "/ready", "ready"),
+    )
+    for service, path, expected_status in upstreams:
+        try:
+            response = await request.app.state.http_client.get(
+                f"{settings.service_urls[service]}{path}"
+            )
+            body = response.json()
+            if (
+                response.status_code == 200
+                and isinstance(body, dict)
+                and body.get("status") == expected_status
+            ):
+                checks[service] = "ready"
+        except (httpx.HTTPError, ValueError, TypeError):
+            pass
+
+    payload = {"status": "ready", "checks": checks}
+    if any(value != "ready" for value in checks.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload

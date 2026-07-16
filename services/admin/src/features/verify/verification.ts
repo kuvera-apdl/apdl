@@ -1,8 +1,8 @@
 // Integration verification engine (plan §5.7): prove the pipeline end-to-end
 // — health → ingest a labeled test event → poll until ClickHouse answers →
 // flag bootstrap round-trip (X-Cache behavior) → live SSE. Mirrors
-// scripts/dev.sh smoke, including the one re-send at attempt 5.
-import { checkService, healthLevel, SERVICE_DESCRIPTORS } from '@/api/health'
+// scripts/dev.sh smoke, including its exact-one transport assertion.
+import { checkService, CORE_SERVICE_DESCRIPTORS, healthLevel } from '@/api/health'
 import { notifyUnauthorized, request } from '@/api/http'
 import { countEvents } from '@/api/query'
 import { flagCollectionSchema } from '@/api/schemas/flags'
@@ -26,7 +26,7 @@ export interface StepState {
 export type StepId = 'health' | 'ingest' | 'pipeline' | 'flags' | 'sse'
 
 export const VERIFY_STEP_DEFS: { id: StepId; label: string }[] = [
-  { id: 'health', label: 'All four services healthy' },
+  { id: 'health', label: 'All three core services healthy' },
   { id: 'ingest', label: 'Send a labeled test event' },
   { id: 'pipeline', label: 'Event arrives in ClickHouse (writer flush ≤ 5s)' },
   { id: 'flags', label: 'Flag bootstrap round-trip (X-Cache)' },
@@ -73,7 +73,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   update('health', { status: 'running', detail: 'Probing /health on all services…' })
   const { result: healthResults, durationMs: healthMs } = await timed(() =>
     Promise.all(
-      SERVICE_DESCRIPTORS.map(({ service }) =>
+      CORE_SERVICE_DESCRIPTORS.map(({ service }) =>
         checkService({
           service,
           baseUrl: serviceBaseUrl(workspace, service),
@@ -87,7 +87,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
       status: 'fail',
       durationMs: healthMs,
       detail: `Unhealthy: ${unhealthy.map((result) => result.service).join(', ')}`,
-      hint: 'Start the stack with scripts/dev.sh up-full, or check make status.',
+      hint: 'Start the stack with scripts/dev.sh up-core, or check make status.',
       data: healthResults,
     })
     return false
@@ -95,7 +95,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   update('health', {
     status: 'ok',
     durationMs: healthMs,
-    detail: '4/4 services healthy',
+    detail: '3/3 core services healthy',
     data: healthResults,
   })
 
@@ -108,6 +108,8 @@ export async function runVerification(options: VerificationOptions): Promise<boo
     user_id: 'apdl-console-verifier',
     timestamp: new Date().toISOString(),
     properties: { verification_id: verificationId },
+    context: { library: { name: 'apdl-admin', version: '1' } },
+    message_id: `admin_verification_${verificationId}`,
   }
   const sendEvent = () =>
     request<{ accepted: number; failed?: number }>(ingestionConn, '/v1/events', {
@@ -118,7 +120,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   update('ingest', { status: 'running', detail: 'POST /v1/events…' })
   try {
     const { result: ingestResult, durationMs } = await timed(sendEvent)
-    if (ingestResult.accepted < 1) {
+    if (ingestResult.accepted !== 1) {
       update('ingest', {
         status: 'fail',
         durationMs,
@@ -167,7 +169,34 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   for (let attempt = 1; attempt <= pollAttempts; attempt++) {
     try {
       const counts = await countEvents(queryConn, pollBody)
-      if (counts.total_events >= 1) {
+      if (counts.total_events > 1) {
+        update('pipeline', {
+          status: 'fail',
+          durationMs: performance.now() - pollStartedAt,
+          detail: `Expected exactly one event; Query returned ${counts.total_events}`,
+          data: counts,
+        })
+        return false
+      }
+      if (counts.total_events === 1) {
+        const result = counts.results[0]
+        const expectedSelector = `${VERIFICATION_EVENT_NAME}[verification_id eq ${verificationId}]`
+        if (
+          counts.total_users !== 1 ||
+          counts.results.length !== 1 ||
+          result?.selector !== expectedSelector ||
+          result?.event_name !== VERIFICATION_EVENT_NAME ||
+          result.event_count !== 1 ||
+          result.unique_users !== 1
+        ) {
+          update('pipeline', {
+            status: 'fail',
+            durationMs: performance.now() - pollStartedAt,
+            detail: 'Query returned a non-canonical exact-count projection',
+            data: counts,
+          })
+          return false
+        }
         update('pipeline', {
           status: 'ok',
           durationMs: performance.now() - pollStartedAt,
@@ -180,18 +209,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
     } catch {
       // transient query errors during polling are tolerated
     }
-    if (attempt === 5) {
-      // Mirror the smoke script: one re-send in case the first XADD raced
-      // consumer-group creation.
-      try {
-        await sendEvent()
-        update('pipeline', { detail: `Attempt ${attempt}: re-sent the test event once (smoke parity)…` })
-      } catch {
-        // keep polling regardless
-      }
-    } else {
-      update('pipeline', { detail: `Attempt ${attempt}/${pollAttempts}…` })
-    }
+    update('pipeline', { detail: `Attempt ${attempt}/${pollAttempts}…` })
     await sleep(pollIntervalMs)
   }
   if (!found) {

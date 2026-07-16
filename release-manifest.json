@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "version": "0.3.0",
+  "tag": "v0.3.0",
+  "repository": "https://github.com/kuvera-apdl/apdl",
+  "artifacts": {
+    "source": {
+      "provider": "github",
+      "repository": "kuvera-apdl/apdl"
+    },
+    "npm": {
+      "name": "@apdl-oss/sdk",
+      "path": "sdk/javascript"
+    },
+    "pypi": {
+      "name": "apdl-sdk",
+      "path": "sdk/python"
+    }
+  },
+  "docker_images": []
+}
