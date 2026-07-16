@@ -1,2 +1,2 @@
-redis>=5.0.0
+redis>=8.0.1
 clickhouse-driver>=0.2.9
