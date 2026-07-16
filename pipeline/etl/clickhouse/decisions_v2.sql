@@ -1,5 +1,6 @@
--- Migration 009: decisions_v2 — unified analytical store for all "decisions".
--- Target: ClickHouse
+-- Experimental ETL prototype: decisions_v2 analytical table.
+-- This file is intentionally outside pipeline/clickhouse/migrations and is not
+-- applied by make migrate-clickhouse or the supported Compose runtime.
 --
 -- A "decision" is anything produced by APDL itself rather than the user:
 --   * flag_eval@1     — Config service evaluated a flag for a user

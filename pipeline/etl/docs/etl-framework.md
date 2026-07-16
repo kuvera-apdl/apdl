@@ -1,18 +1,22 @@
 # Custom-events ETL Framework
 
-Every record entering the APDL warehouse — behavioral events, decisions,
-external partner feeds — is wrapped in the same **canonical envelope** keyed by
-a `_schema` discriminator, and lands in one of the v2 ClickHouse tables
-(`events_v2`, `decisions_v2`, `feeds_v2`). This framework (`etl/`) captures the
-transform-and-load lifecycle once as a **Template Method** base class, routes
-records to the right transform with a **registry** keyed on `_schema`, and
-scaffolds new custom event types with a **Jinja generator**.
+> **Unsupported prototype.** No APDL service imports this package, no supported
+> producer emits its envelope, and `make migrate-clickhouse` does not create its
+> v2 tables. The developer-preview event contract is the flat ingestion schema
+> persisted by the Redis writer to `events`. The SQL prototypes live under
+> `pipeline/etl/clickhouse/` so they cannot be mistaken for release migrations.
 
-It is a standalone package: it owns its own minimal envelope contract and does
-not import any APDL service code, so the same transforms run for live traffic,
-backfills, and replays. It also does not talk to ClickHouse — it produces rows
-and hands them to a `Loader`, which is the single seam a warehouse writer plugs
-into.
+This package explores a possible future envelope keyed by a `_schema`
+discriminator and possible v2 targets (`events_v2`, `decisions_v2`,
+`feeds_v2`). It captures the transform-and-load lifecycle once as a **Template
+Method** base class, routes records to the right transform with a **registry**
+keyed on `_schema`, and scaffolds new custom event types with a **Jinja
+generator**.
+
+It is a standalone design package: it owns a prototype envelope and does not
+import any APDL service code. It also does not talk to ClickHouse—it produces
+rows and hands them to a `Loader`. No production loader, replay command,
+reconciliation job, or cutover procedure is included.
 
 ## The lifecycle
 
@@ -55,8 +59,8 @@ Enrichment is a declarative, ordered chain. A transform lists the enrichers it
 wants by name; the framework resolves and runs them, merging each one's output
 (later wins) into a single `enrichment` dict that `build_row` consumes.
 Enrichers are pure functions of `(envelope, ctx)`, so the same chain runs
-identically on replays and live traffic, and a failing enricher is logged and
-skipped — enrichment never knocks a record into the DLQ on its own.
+identically in repeated prototype tests, and a failing enricher is logged and
+skipped—enrichment never knocks a record into the DLQ on its own.
 
 Two dependency-free built-ins ship (`etl/enrichment.py`):
 
@@ -91,9 +95,8 @@ ship:
 
 * **`CollectingLoader`** — accumulates rows in memory; for tests and dry runs.
 * **`BatchingLoader`** — buffers per target table and flushes through a `sink`
-  callable when a batch fills. A production ClickHouse writer implements that
-  `sink` (it receives `(target_table, rows)` and issues the INSERT) and stays
-  entirely outside this package.
+  callable when a batch fills. Tests supply in-memory sinks; the supported
+  ClickHouse writer does not use this interface.
 
 ## Built-in transforms
 

@@ -1,16 +1,14 @@
-"""Loaders — the seam between the framework and a warehouse.
+"""Loaders for the unsupported ETL design prototype.
 
 The framework produces rows; a :class:`Loader` decides what to do with them.
-This is intentionally the *only* place that would know about ClickHouse, and
-nothing here imports a driver — a real writer implements the ``Loader``
-protocol (or wraps :class:`BatchingLoader`'s sink) and stays entirely outside
-this package.
+Nothing here imports a driver. Package tests use collecting or fake sinks; the
+supported Redis writer does not implement this protocol.
 
 Two implementations ship:
 
 * :class:`CollectingLoader` — accumulates rows in memory, for tests and dry runs.
-* :class:`BatchingLoader` — buffers per target table and flushes through a sink
-  callable when a batch fills, which is how a production writer plugs in.
+* :class:`BatchingLoader` — buffers per prototype target and flushes through a
+  test-supplied sink callable when a batch fills.
 """
 
 from __future__ import annotations
@@ -46,10 +44,8 @@ class CollectingLoader:
 class BatchingLoader:
     """Buffers rows per target and flushes through ``sink`` when a batch fills.
 
-    ``sink`` is ``Callable[[str, list[Row]], None]`` — the integration point for
-    a real ClickHouse writer, which receives ``(target_table, rows)`` and issues
-    the INSERT. The framework never touches the driver; it just decides *when*
-    to hand rows over.
+    ``sink`` is ``Callable[[str, list[Row]], None]``. The framework never
+    touches a driver; it only decides *when* to hand prototype rows over.
     """
 
     def __init__(

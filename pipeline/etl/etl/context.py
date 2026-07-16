@@ -4,9 +4,8 @@ These are the small, dependency-free dataclasses every other module passes
 around: the server-side metadata bundle (:class:`EtlContext`), the result of a
 transform (:class:`TransformResult`), and a dead-letter record (:class:`DlqEntry`).
 
-A ``Row`` is just a ``dict`` of ClickHouse column name -> value. The framework
-never builds SQL itself; it produces rows and hands them to a loader, which is
-the seam a real warehouse writer plugs into.
+A ``Row`` is just a ``dict`` of prototype ClickHouse column name -> value. The
+framework never builds SQL itself; package tests hand rows to in-memory loaders.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ from typing import Any
 #: A single output row: ClickHouse column name -> value.
 Row = dict[str, Any]
 
-#: Canonical "no correlation id" sentinel, matching the ClickHouse default for
+#: Prototype "no correlation id" sentinel, matching the ClickHouse default for
 #: the non-nullable ``_correlation_id`` / ``run_id`` UUID columns.
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -27,9 +26,7 @@ ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 class EtlContext:
     """Server-side metadata stamped onto a record before it reaches the warehouse.
 
-    These fields are supplied by the ingestion / landing layer, never by the
-    client envelope — keeping them out of the envelope is what lets the same
-    transform run for replays, backfills, and live traffic unchanged.
+    These fields model what a future ingestion / landing layer could supply.
 
     ``extra`` is a free-form bag for adapters that need to thread additional
     context (e.g. a feed's ``source_uri`` + ``source_sha256``) without having to

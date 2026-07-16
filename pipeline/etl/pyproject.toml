@@ -11,7 +11,7 @@ include = ["etl*"]
 [project]
 name = "apdl-etl"
 version = "0.1.0"
-description = "Custom-events ETL framework: schema-routed transforms for the APDL canonical envelope."
+description = "Unsupported APDL ETL design prototype for schema-routed envelope transforms."
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.9.0",

@@ -2,8 +2,9 @@
 
 Returns the format: ``{"valid": bool, "errors": [{"field": str, "message": str}]}``.
 
-The Pydantic event model owns the canonical envelope and cross-field rules;
-this module adds batch limits and strict reserved-event property contracts.
+The Pydantic event model owns the canonical flat event shape and cross-field
+rules; this module adds batch limits and strict reserved-event property
+contracts.
 """
 
 import math

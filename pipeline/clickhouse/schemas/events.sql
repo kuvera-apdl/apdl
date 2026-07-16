@@ -1,4 +1,4 @@
--- Reference schema for the events table
+-- Reference schema for the canonical developer-preview events table
 -- Applied via migrations, this file is for documentation
 
 CREATE TABLE IF NOT EXISTS events (

@@ -2,7 +2,7 @@
 
 Feeds are the clearest "custom event" case: an adapter ingests something from
 *outside* APDL (an EDI X12 document, a partner CSV drop, a webhook), stores the
-raw bytes in object storage, and hands the framework a canonical envelope whose
+raw bytes in object storage, and hands the framework a prototype envelope whose
 ``payload`` is the parsed document plus a content-addressed pointer
 (``source_uri`` + ``source_sha256``) back to the original.
 

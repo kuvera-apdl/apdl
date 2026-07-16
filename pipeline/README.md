@@ -117,6 +117,25 @@ Migrations live in `clickhouse/migrations/` (applied by
 `make migrate-clickhouse`); `clickhouse/schemas/events.sql` is a documentation
 copy of the events table.
 
+### Canonical developer-preview event contract
+
+The release has one event contract and one analytical source of truth:
+
+1. SDKs send the strict flat event shape validated by
+   `services/ingestion/app/models/schemas.py`.
+2. Ingestion publishes that complete JSON record to
+   `events:raw:{project_id}`.
+3. The Redis writer validates the same field set and inserts into `events`.
+4. Query SQL and ClickHouse materialized views read `events` (using `FINAL`
+   where retry deduplication is required).
+
+There is no envelope alias, v2 dual-write, or fallback loader in the supported
+runtime. The unused service envelope models were removed, and the v2 SQL was
+moved to `etl/clickhouse/`, outside the migration runner. Existing local
+databases created from older scaffolding may still contain inert v2 tables;
+they are not read, reconciled, migrated, or supported. In-place upgrades are
+outside the 0.3.0 preview contract, so use a fresh stack for release checks.
+
 **Tables**
 
 - `events` (001, ReplacingMergeTree) — raw event stream, idempotent on
@@ -216,9 +235,10 @@ preserves runtime-evidence rows without an exact CI binding in
 
 ## ETL framework (unsupported in 0.3.0)
 
-`etl/` is a standalone, dependency-light experimental package (Pydantic only) that
-standardizes how custom records reach the warehouse: every record is wrapped
-in a canonical envelope keyed by a `_schema` discriminator, processed through
+`etl/` is a standalone, dependency-light experimental package (Pydantic only)
+that explores how custom records could reach a future warehouse path: each
+prototype record is wrapped in an envelope keyed by a `_schema` discriminator,
+processed through
 a `decode → validate → enrich → build_row` Template Method lifecycle with
 per-record DLQ isolation, routed by a schema registry, and handed to a
 pluggable `Loader`. No supported producer, consumer, loader process, Compose

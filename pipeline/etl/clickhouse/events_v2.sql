@@ -1,6 +1,6 @@
--- Migration 008: events_v2 — canonical envelope table for behavior events.
--- Target: ClickHouse
--- Apply with: clickhouse-client --multiquery < 008_events_v2.sql
+-- Experimental ETL prototype: events_v2 envelope table.
+-- This file is intentionally outside pipeline/clickhouse/migrations and is not
+-- applied by make migrate-clickhouse or the supported Compose runtime.
 --
 -- Notes:
 --   * Engine is ReplacingMergeTree keyed on (project_id, idempotency_key) so
@@ -10,8 +10,8 @@
 --   * The envelope columns are prefixed with `_` to mirror the on-the-wire
 --     JSON keys (_id, _schema, _idempotency_key, ...). Payload-derived columns
 --     have plain names.
---   * The legacy `events` table is left in place; the writer should dual-write
---     until parity is verified, then reads cut over and `events` is dropped.
+--   * No supported producer, writer, replay loader, or query consumer uses this
+--     table. It is retained only with the unsupported ETL design scaffold.
 
 CREATE TABLE IF NOT EXISTS events_v2 (
     -- ---------- envelope ----------

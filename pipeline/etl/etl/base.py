@@ -1,6 +1,6 @@
-"""BaseTransform — the Template Method every ETL transform follows.
+"""BaseTransform — the Template Method for the unsupported ETL prototype.
 
-Every record entering the warehouse runs the same lifecycle::
+Every prototype record runs the same lifecycle::
 
     decode  ->  validate  ->  enrich  ->  build_row    (-> load, done by the pipeline)
     (parse)     (reject)      (derive)    (map to rows)
@@ -81,7 +81,7 @@ class BaseTransform(ABC):
         """Parse the raw input into a validated envelope.
 
         Defaults to validating the raw dict against :attr:`envelope_model`.
-        Override for non-JSON sources (parse EDI/CSV into a canonical envelope
+        Override for non-JSON sources (parse EDI/CSV into the prototype envelope
         dict first, then defer to ``super().decode``).
         """
         if self.envelope_model is None:
@@ -135,7 +135,7 @@ class BaseTransform(ABC):
     # --- framework-provided helpers -----------------------------------------
 
     def envelope_columns(self, env: CanonicalEnvelope, ctx: EtlContext) -> Row:
-        """The common ``_``-prefixed envelope columns shared by every v2 table.
+        """The common ``_``-prefixed columns shared by the prototype v2 tables.
 
         Subclasses start their row from this and add payload-specific columns
         (and ``_ip`` for the events table, which is the only one that keeps it).

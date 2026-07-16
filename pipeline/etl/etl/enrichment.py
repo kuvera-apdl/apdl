@@ -7,8 +7,7 @@ A transform declares the enrichers it wants by name::
 and the framework resolves and runs them in order, merging each one's output
 into a single ``enrichment`` dict that ``build_row`` consumes. Later enrichers
 win on key conflicts. Enrichers are pure functions of ``(envelope, ctx)`` so
-they are trivially testable and the same chain runs identically on replays and
-live traffic.
+they are trivially testable and deterministic across repeated prototype runs.
 
 The built-ins here are intentionally dependency-free: ``device`` is a
 User-Agent heuristic and ``geo`` normalises whatever location signal already

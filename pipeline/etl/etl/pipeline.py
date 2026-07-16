@@ -1,16 +1,15 @@
 """EtlPipeline — dispatches records to transforms and routes their output.
 
-This is the public entry point a warehouse writer calls. For each record it:
+This is the prototype entry point used by the package tests. For each record it:
 
 1. reads the ``_schema`` discriminator,
 2. resolves the registered transform (unrouted schemas go straight to the DLQ),
 3. runs the transform's lifecycle, and
 4. routes the resulting rows to the loader, or the failure to the DLQ loader.
 
-The pipeline owns no warehouse knowledge — it talks to the registry and a
-:class:`~etl.loader.Loader`. A real writer constructs one with a ClickHouse-backed
-loader and feeds it records off the stream; the framework stays testable with an
-in-memory :class:`~etl.loader.CollectingLoader`.
+The pipeline owns no warehouse knowledge—it talks to the registry and a
+:class:`~etl.loader.Loader`. The supported Redis writer does not construct this
+pipeline; tests use an in-memory :class:`~etl.loader.CollectingLoader`.
 """
 
 from __future__ import annotations

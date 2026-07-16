@@ -54,9 +54,9 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
   stream depth remains the admission backlog. Stable client message IDs
   and `ReplacingMergeTree` keys make supported `FINAL` reads idempotent after
   an insert-before-ACK replay.
-- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) and its
-  v2 tables are experimental and are not part of the live developer-preview
-  event path.
+- The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) is an
+  unsupported design prototype. Its v2 SQL lives outside the migration path;
+  supported setup does not create those tables.
 
 ### 2. Flags & experiments (config path)
 
@@ -132,14 +132,15 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
 |---|---|
 | Redis 7 | Event streams (`events:raw:*`), flag-config cache (60 s TTL), rate-limit counters |
 | PostgreSQL 16 + pgvector | Flags, experiments, audit log, agent runs & memory |
-| ClickHouse | Core event/session/exposure/health tables and materialized views; disconnected v2 envelope tables remain unsupported ETL scaffolding |
+| ClickHouse | Core `events`/session/exposure/health/identity tables and materialized views; supported setup does not create v2 envelope tables |
 
 ## Deployment boundary
 
-Redis Streams is the only 0.3.0 event bus. The checked-in Kafka/Flink and ETL
-v2 files are future design/scaffolding and are not connected to the live
-runtime, release artifacts, or support contract. The repository contains no
-supported Kubernetes or Terraform deployment.
+Redis Streams is the only 0.3.0 event bus. The checked-in Kafka/Flink files and
+the ETL package are future design/scaffolding and are not connected to the live
+runtime, release artifacts, or support contract. Prototype v2 SQL is quarantined
+under `pipeline/etl/clickhouse/` and is not applied by supported setup. The
+repository contains no supported Kubernetes or Terraform deployment.
 
 Compose runs a single instance of each service and uses a local-development
 nginx Gateway. Cross-replica cache/SSE behavior, hardened public ingress,

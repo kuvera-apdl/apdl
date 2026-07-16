@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scaffold a new ETL transform from the Jinja template.
+"""Scaffold a transform for the unsupported ETL design package.
 
 Generates ``etl/transforms/<module>.py`` for a custom ``_schema`` and registers
 it by appending an import to ``etl/transforms/__init__.py`` (so importing

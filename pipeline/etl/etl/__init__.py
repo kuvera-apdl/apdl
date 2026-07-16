@@ -1,10 +1,10 @@
-"""APDL Custom-events ETL framework.
+"""Unsupported APDL custom-events ETL design prototype.
 
-A schema-routed ETL framework for the canonical envelope. Define a transform by
-subclassing :class:`~etl.base.BaseTransform`, declaring the ``_schema`` it
-handles and its target table, and implementing ``build_row``. Register it with
-``@register_transform`` and the :class:`~etl.pipeline.EtlPipeline` will route
-matching records to it automatically.
+This package is not imported by the supported runtime and its v2 SQL lives
+outside the ClickHouse migration path. It explores a schema-routed envelope:
+define a transform by subclassing :class:`~etl.base.BaseTransform`, declaring
+the ``_schema`` it handles and its prototype target table, and implementing
+``build_row``.
 
 Importing this package also imports :mod:`etl.transforms`, registering all
 built-in transforms (events / decisions / feeds) as a side effect.

@@ -1,9 +1,8 @@
-"""The canonical envelope every record shares.
+"""Prototype envelope for the unsupported ETL design package.
 
-APDL wraps everything entering the warehouse — behavioral events, decisions,
-external partner feeds — in one outer envelope keyed by a ``_schema``
-discriminator. The v2 ClickHouse tables (``events_v2``, ``decisions_v2``,
-``feeds_v2``) are all built around it.
+The live APDL developer-preview runtime does not emit or consume this shape.
+The experimental v2 ClickHouse definitions under ``pipeline/etl/clickhouse``
+are built around it for design and transform tests only.
 
 This model is deliberately decoupled from the ingestion service's Pydantic
 models: the ETL package owns a *minimal* envelope contract so it stands alone

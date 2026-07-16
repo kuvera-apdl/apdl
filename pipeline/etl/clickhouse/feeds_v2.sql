@@ -1,9 +1,10 @@
--- Migration 010: feeds_v2 — canonical envelope for external partner feeds.
--- Target: ClickHouse
+-- Experimental ETL prototype: feeds_v2 external-feed table.
+-- This file is intentionally outside pipeline/clickhouse/migrations and is not
+-- applied by make migrate-clickhouse or the supported Compose runtime.
 --
 -- This is the landing table for anything ingested from outside APDL: real EDI
 -- documents (X12, EDIFACT), partner JSON APIs, CSV drops, webhook payloads.
--- All converted by source-specific adapters into the canonical envelope.
+-- A future adapter would convert them into the prototype envelope.
 --
 -- The raw original document is NOT stored here — it lives in object storage
 -- (S3 / MinIO), addressed by content-hash (SHA-256). This table stores the
