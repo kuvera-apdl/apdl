@@ -8,12 +8,13 @@ import os
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.pgvector_store import PgVectorStore
+from app.readiness import capability_report
 from app.routers import approvals, custom_agents, runs, status, triggers
 from app.schema import assert_schema_ready
 from app.store.run_leases import (
@@ -103,15 +104,33 @@ async def health_check():
 
 
 @app.get("/ready")
-async def readiness_check():
-    """Readiness probe — verifies PostgreSQL connectivity."""
+async def readiness_check(request: Request):
+    """Core readiness: local runtime initialization and PostgreSQL only."""
+    checks = {"runtime": "not_ready", "postgres": "not_ready"}
+    state = request.app.state
+
+    if all(
+        getattr(state, attribute, None) is not None
+        for attribute in ("pg_pool", "authenticator", "vector_store")
+    ):
+        checks["runtime"] = "ready"
+
     try:
-        pool: asyncpg.Pool = app.state.pg_pool
+        pool: asyncpg.Pool = state.pg_pool
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        return {"status": "ready"}
+        checks["postgres"] = "ready"
     except Exception as exc:
-        # 503 so LB/K8s probes (which key on the status code) stop routing
-        # here; the raw exception stays in the logs — it can carry DSN details.
-        logger.error("Readiness check failed: %s", exc)
-        return JSONResponse(status_code=503, content={"status": "not_ready"})
+        logger.error("Core readiness PostgreSQL check failed: %s", type(exc).__name__)
+
+    payload = {"status": "ready", "service": "apdl-agents", "checks": checks}
+    if any(value != "ready" for value in checks.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
+@app.get("/ready/capabilities")
+async def capability_readiness_check():
+    """Report optional LLM and service capabilities without gating traffic."""
+    return await capability_report()

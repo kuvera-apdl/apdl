@@ -38,3 +38,16 @@ def test_agents_lock_is_a_committed_dependency_audit_input() -> None:
 
     assert "for project in sdk/python services/codegen" in audit_script
     assert "for project in sdk/python services/codegen" in workflow
+
+
+def test_compose_healthcheck_uses_core_readiness_only() -> None:
+    compose = (REPO_ROOT / "infra" / "docker" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    agents_service = compose.split("\n  agents:\n", 1)[1].split(
+        "\n  # Codegen", 1
+    )[0]
+
+    assert "http://localhost:8083/ready" in agents_service
+    assert "['status'] == 'ready'" in agents_service
+    assert "/ready/capabilities" not in agents_service

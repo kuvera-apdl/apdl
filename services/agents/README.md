@@ -1,18 +1,21 @@
 # Agents Service
 
-LLM-powered autonomous agents for the **Autonomous Product Development Loop** —
-FastAPI service on port **8083**.
+LLM-powered analysis and proposal workflows for the **Autonomous Product
+Development Loop** — an opt-in operator preview on port **8083**.
 
 ## What it does
 
-Closes the product loop autonomously: agents **read analytics** from the Query
-Service (funnels, retention, event counts), **reason** over them with an LLM to
-produce insights, and **act** through bounded experiment-design workflows.
-Every action passes a safety validator and an autonomy gate before deployment
-and is written to an audit log. Experiment results are read-only in the OSS
-developer preview: autonomous evaluation, stopping, shipping, feature-proposal
-generation, and rollback are disabled. Insights are persisted to pgvector
-memory so later runs build on earlier findings.
+Agents **read analytics** from the Query Service (funnels, retention, event
+counts) and **reason** over them with an LLM to produce insights and experiment
+designs. The 0.3.0 workflow deliberately remains open: every experiment design
+requires human approval, an approval creates an inert Config draft with a
+disabled backing flag, treatment work follows a separate changeset lifecycle,
+and activation remains a separate operator action. Insights are persisted to
+pgvector memory so later runs can build on earlier findings.
+
+Experiment results are read-only in the OSS developer preview. Autonomous
+evaluation, treatment deployment, activation, stopping, shipping,
+feature-proposal generation, personalization, and rollback are disabled.
 
 The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
@@ -43,7 +46,8 @@ operator-provisioned projects (`admin_projects.created_by IS NULL`).
 | `GET` | `/v1/agents/{run_id}/status` | Run status, phase, insight/experiment counts |
 | `POST` | `/v1/agents/{run_id}/approve` | Approve or reject a run waiting at an approval gate |
 | `GET` | `/health` | Liveness probe |
-| `GET` | `/ready` | Readiness probe (checks PostgreSQL connectivity) |
+| `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
+| `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
 
 ```bash
 curl -X POST localhost:8083/v1/agents/trigger \
@@ -61,7 +65,7 @@ curl -X POST localhost:8083/v1/agents/trigger \
 
 `trigger_type` is `scheduled`, `manual`, or `threshold_alert`. To approve a
 waiting run: `POST /v1/agents/{run_id}/approve` with
-`{"approved": true, "comment": "..."}`.
+`{"decisions": [{"item_id": "exp_checkout", "approved": true}], "comment": "..."}`.
 
 ## Agent graphs
 
@@ -70,7 +74,7 @@ Agents self-register via `@register_agent` and run in `order`:
 | Name | Tier | Requires | Produces | What it does |
 |------|------|----------|----------|--------------|
 | `behavior_analysis` | reasoning | — | `insights` | Plans + runs analytics queries, synthesises insights |
-| `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment and deploys it through the safety gate |
+| `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment for mandatory human approval |
 | `experiment_evaluation` | reasoning | — | — | **Disabled**; experiment results require human interpretation |
 | `personalization` | fast | `insights` | `personalizations` | **Disabled**; no Config storage or delivery contract exists |
 | `feature_proposal` | reasoning | — | — | **Disabled**; statistical snapshots do not assess deployment readiness |
@@ -85,33 +89,39 @@ order, skipping providers whose API key is unset, and falls back to the next
 provider on failure. Defaults are overridable per slot
 (`LLM_FAST_PRIMARY`, `LLM_REASONING_FALLBACK`, `LOCAL_LLM_MODEL`, …).
 
-## Autonomy & safety
+## Approval and safety boundary
 
 These levels apply only to operator-provisioned projects. Self-created projects
 cannot start or resume an Agents execution at any autonomy level.
 
-Every acting agent funnels its safety result through `gate_action`
-(`app/framework/gating.py`):
+`gate_action` (`app/framework/gating.py`) is a generic policy primitive, not a
+claim that the enabled product flow is autonomous. Experiment design invokes it
+with mandatory approval: L1 performs no Config mutation, while L2 through L4
+all stop at the same human gate. No autonomy level enables a flag or starts an
+experiment in 0.3.0. Actions that fail static validation halt.
 
-| Level | Behavior |
-|-------|----------|
-| L1 | Suggest only — never mutates anything, even if safety passes |
-| L2 | Holds every safety-passing action for human approval |
-| L3 | Auto-deploys validated **low-risk** actions; medium/high risk goes to approval |
-| L4 | Full autonomy — deploys every enabled safety-passing action |
+- **Static safety validator** (`app/safety/validator.py`) — canonical-shape,
+  Config-conflict, and proposed blast-radius checks (including variant weights
+  and a control group). Experiments require one primary metric and a clear
+  hypothesis. These are pre-draft checks, not live guardrail monitoring or
+  evidence that a treatment is safe to activate.
+- **Audit log** (`app/safety/audit.py`) — records workflow steps, decisions,
+  validator results, and human approvals in PostgreSQL.
+- **Rollback surface** (`app/safety/rollback.py`) — explicitly unavailable and
+  fails closed. It neither decides nor executes an automatic rollback.
 
-Actions that fail safety validation always halt.
+### Experiment draft, treatment, and activation lifecycle
 
-- **Safety validator** (`app/safety/validator.py`) — per-action-type rate
-  limits, conflict detection, blast-radius checks (including variant weights ≤
-  100% and a control group ≥ 10%), and guardrail checks (experiments need
-  guardrail metrics, a primary metric, and a hypothesis; proposals need
-  documented risks and success criteria). Outputs a `low`/`medium`/`high` risk level.
-- **Audit log** (`app/safety/audit.py`) — every step, decision, safety result,
-  and approval is written to the `agent_audit_log` table in PostgreSQL.
-- **Rollback assessment** (`app/safety/rollback.py`) — fails closed with an
-  unavailable decision. Statistical snapshots are evidence only and do not
-  establish deployment or rollback readiness.
+1. The LLM produces a design and the validator checks the proposal.
+2. A human approves or rejects each design.
+3. Approval creates an inert experiment draft and disabled backing flag in
+   Config. No users are assigned treatment.
+4. If code is required, Agents may ask a separately provisioned Codegen worker
+   to open a treatment changeset. Creating the draft does not prove that code
+   exists, passes review, or has merged.
+5. After implementation and review, an operator must explicitly activate the
+   experiment through the Config/Admin lifecycle. Agents does not perform or
+   infer that activation.
 
 When upgrading an existing deployment to migration 014, stop the Agents
 service before applying PostgreSQL migrations. The migration fails existing
@@ -144,6 +154,8 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Runs, audit log, pgvector memory |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
+| `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
+| `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |
@@ -153,7 +165,10 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
 | `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 
-At least one of the four LLM credentials is required.
+At least one provider API key or `LOCAL_LLM_URL` is required to execute an
+LLM-backed run. `/ready/capabilities` reports provider and service
+availability, but its degraded state does not make the core `/ready` endpoint
+fail.
 
 ## Running locally
 
