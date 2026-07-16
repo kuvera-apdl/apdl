@@ -297,12 +297,23 @@ def _deduplicate_signals(signals: list[CISignal]) -> list[CISignal]:
     )
 
 
-def _aggregate(signals: list[CISignal]) -> ExternalCIStatus:
-    if not signals:
-        return ExternalCIStatus.unverified_external_ci
+def _aggregate(
+    signals: list[CISignal],
+    combined_state: Any,
+) -> ExternalCIStatus:
     conclusions = {signal.conclusion for signal in signals}
     if CISignalConclusion.failed in conclusions:
         return ExternalCIStatus.failed
+    rollup = str(combined_state or "").strip().lower()
+    if rollup in {"failure", "error", "pending"}:
+        # The combined state is a lower bound on the visible individual
+        # signals. Without a concrete failed signal the immutable observation
+        # cannot claim a diagnosable failure, but it must never claim a pass.
+        return ExternalCIStatus.pending
+    if rollup not in {"", "success"}:
+        return ExternalCIStatus.pending
+    if not signals:
+        return ExternalCIStatus.unverified_external_ci
     if CISignalConclusion.pending in conclusions:
         return ExternalCIStatus.pending
     if (
@@ -437,9 +448,9 @@ def build_ci_verification_observation(
 ) -> CIVerificationObservation:
     """Build one immutable observation for exactly ``head_sha``.
 
-    Missing evidence stays externally unverified. The combined rollup's own
-    ``state`` is deliberately ignored: individual observed statuses/check runs
-    are the auditable source for aggregation and requirement mapping.
+    Missing evidence stays externally unverified. Individual statuses/check
+    runs remain the auditable evidence, while GitHub's combined rollup acts as
+    a lower bound that can prevent a contradictory pass.
     """
     if not head_sha:
         raise ValueError("head_sha is required")
@@ -479,7 +490,7 @@ def build_ci_verification_observation(
             )
         )
     signals = _deduplicate_signals(signals)
-    external_status = _aggregate(signals)
+    external_status = _aggregate(signals, combined_status.get("state"))
     requirement_results = _requirement_results(ledger, signals, external_status)
     failure_key = failure_summary = None
     if external_status is ExternalCIStatus.failed:

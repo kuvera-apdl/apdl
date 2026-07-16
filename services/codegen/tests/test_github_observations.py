@@ -138,6 +138,29 @@ def test_no_signals_are_unverified_and_never_synthesized_as_passed():
     assert observation.observation_id.startswith("ciobs_")
 
 
+@pytest.mark.parametrize("combined_state", ["pending", "failure", "error"])
+def test_combined_rollup_prevents_a_contradictory_signal_pass(
+    combined_state: str,
+):
+    observation = _build(
+        combined_status={
+            "sha": "head-new",
+            "state": combined_state,
+            "statuses": [
+                {
+                    "sha": "head-new",
+                    "context": "lint",
+                    "state": "success",
+                }
+            ],
+        },
+        check_runs=[],
+    )
+
+    assert observation.status is ExternalCIStatus.pending
+    assert observation.signals[0].conclusion is CISignalConclusion.passed
+
+
 def test_only_observed_success_and_skipped_pass_with_exact_requirement_mapping():
     ledger = _mixed_ledger()
     statuses = [
