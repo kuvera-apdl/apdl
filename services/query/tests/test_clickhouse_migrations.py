@@ -18,6 +18,9 @@ FRONTEND_HEALTH_EVENTS_SQL = (
 LEGACY_EXPERIMENTS_SQL = (MIGRATIONS_DIR / "003_experiments.sql").read_text()
 MATERIALIZED_VIEWS_SQL = (MIGRATIONS_DIR / "004_materialized_views.sql").read_text()
 IDENTITY_ALIASES_SQL = (MIGRATIONS_DIR / "011_identity_aliases.sql").read_text()
+PROTOTYPE_RETIREMENT_SQL = (
+    MIGRATIONS_DIR / "012_retire_prototype_schemas.sql"
+).read_text()
 IDENTITY_ALIASES_BACKFILL_SQL = (
     BACKFILLS_DIR / "011_identity_aliases.sql"
 ).read_text()
@@ -138,6 +141,21 @@ def test_legacy_experiment_exposure_storage_is_retired():
         MATERIALIZED_VIEWS_SQL
     )
     assert "INNER JOIN experiment_exposures" not in MATERIALIZED_VIEWS_SQL
+
+
+def test_disconnected_prototype_schemas_are_removed_on_upgrade():
+    for view in (
+        "flag_evaluations_v",
+        "experiment_exposures_v",
+        "agent_actions_v",
+        "personalizations_v",
+    ):
+        assert f"DROP VIEW IF EXISTS {view}" in PROTOTYPE_RETIREMENT_SQL
+
+    for table in ("events_dlq_v2", "events_v2", "decisions_v2", "feeds_v2"):
+        assert f"DROP TABLE IF EXISTS {table}" in PROTOTYPE_RETIREMENT_SQL
+
+    assert "CREATE TABLE" not in PROTOTYPE_RETIREMENT_SQL
 
 
 def test_identity_alias_projection_uses_identify_with_both_ids_as_only_assertion():

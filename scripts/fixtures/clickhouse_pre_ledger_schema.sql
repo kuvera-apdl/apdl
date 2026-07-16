@@ -180,6 +180,42 @@ AS SELECT
 FROM events
 WHERE event_name IN ('$frontend_error', '$web_vital');
 
+-- Disconnected prototype objects were once shipped as migrations despite
+-- having no writer or reader. They are seeded here to verify upgrade cleanup.
+CREATE TABLE events_v2 (
+    project_id String,
+    idempotency_key String
+) ENGINE = MergeTree
+ORDER BY (project_id, idempotency_key);
+
+CREATE TABLE events_dlq_v2 (
+    project_id String,
+    raw_payload String
+) ENGINE = MergeTree
+ORDER BY project_id;
+
+CREATE TABLE decisions_v2 (
+    project_id String,
+    schema_name LowCardinality(String),
+    idempotency_key String
+) ENGINE = MergeTree
+ORDER BY (project_id, idempotency_key);
+
+CREATE VIEW flag_evaluations_v AS
+SELECT * FROM decisions_v2 WHERE schema_name = 'flag_eval@1';
+CREATE VIEW experiment_exposures_v AS
+SELECT * FROM decisions_v2 WHERE schema_name = 'exposure@1';
+CREATE VIEW agent_actions_v AS
+SELECT * FROM decisions_v2 WHERE schema_name = 'agent_action@1';
+CREATE VIEW personalizations_v AS
+SELECT * FROM decisions_v2 WHERE schema_name = 'personalization@1';
+
+CREATE TABLE feeds_v2 (
+    project_id String,
+    idempotency_key String
+) ENGINE = MergeTree
+ORDER BY (project_id, idempotency_key);
+
 INSERT INTO events (
     project_id,
     event_id,

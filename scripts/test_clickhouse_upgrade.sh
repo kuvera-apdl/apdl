@@ -65,7 +65,7 @@ echo "==> Upgrading seeded legacy schema"
 run_migrations
 
 assert_equal \
-    $'11\t11\t1\t11' \
+    $'12\t12\t1\t12' \
     "$(query "SELECT count(), uniqExact(version), min(version), max(version) FROM apdl_schema_migrations FINAL")" \
     "migration ledger is not the exact contiguous release sequence"
 assert_equal \
@@ -84,6 +84,10 @@ assert_equal \
     $'1\t1' \
     "$(query "SELECT (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL)")" \
     "derived projection backfill did not converge"
+assert_equal \
+    '0' \
+    "$(query "SELECT count() FROM system.tables WHERE database = 'apdl' AND name IN ('events_v2', 'events_dlq_v2', 'decisions_v2', 'feeds_v2', 'flag_evaluations_v', 'experiment_exposures_v', 'agent_actions_v', 'personalizations_v')")" \
+    "disconnected durable prototype objects survived the cutover"
 
 echo "==> Verifying exact-once rerun"
 rerun_output="$(run_migrations)"

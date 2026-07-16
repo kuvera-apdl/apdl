@@ -108,9 +108,9 @@ query parameters and replaces conflicting values embedded in the URL.
 
 ## ClickHouse schema
 
-Migrations live in `clickhouse/migrations/` (applied by
-`make migrate-clickhouse`); `clickhouse/schemas/events.sql` is a documentation
-copy of the events table.
+Migrations in `clickhouse/migrations/` are the only executable ClickHouse schema
+authority and are applied by `make migrate-clickhouse`. There is no second
+schema copy to update independently.
 
 The migrator validates one contiguous `001...N` filename sequence, records the
 exact SHA-256 and name of every applied file in
@@ -142,16 +142,16 @@ The release has one event contract and one analytical source of truth:
    where retry deduplication is required).
 
 There is no envelope alias, v2 dual-write, or fallback loader in the supported
-runtime. The unused service envelope models and prototype v2 SQL were removed.
-Existing local databases created from older scaffolding may still contain inert
-v2 tables; they are not read, reconciled, migrated, or supported. In-place
-upgrades from the documented pre-ledger event shape are covered by
-`make test-clickhouse-upgrade`; unknown third-party ClickHouse schemas remain
-outside the developer-preview contract.
+runtime. The unused service envelope models and prototype SQL were removed;
+migration 012 also drops their inert tables and views from older volumes. No
+reconciliation is performed because those objects never had a deployed writer
+or query path. In-place upgrades from the documented pre-ledger event shape are
+covered by `make test-clickhouse-upgrade`; unknown third-party ClickHouse
+schemas remain outside the developer-preview contract.
 
 **Tables**
 
-- `events` (001, ReplacingMergeTree) — raw event stream, idempotent on
+- `events` (001/005, ReplacingMergeTree) — raw event stream, idempotent on
   `(project_id, message_id)`; the writer's insert target
 - `sessions` (002, MergeTree) — session-level rollups
 - `feature_flag_exposures` (006, ReplacingMergeTree) — idempotent flag
