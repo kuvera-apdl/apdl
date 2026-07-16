@@ -29,7 +29,7 @@ from app.evaluations.segments import (
 
 
 class CompletedEvaluation(StrictModel):
-    schema_version: Literal["completed_evaluation@2"] = "completed_evaluation@2"
+    schema_version: Literal["completed_evaluation@4"] = "completed_evaluation@4"
     run: EvaluationRun
     report: EvaluationReport
     segmented_report: SegmentedEvaluationReport
@@ -90,7 +90,7 @@ async def execute_evaluation_run(
     report = build_evaluation_report(run)
     segmented_report = build_segmented_report(run, corpus)
     payload = {
-        "schema_version": "completed_evaluation@2",
+        "schema_version": "completed_evaluation@4",
         "run": run.model_dump(mode="json"),
         "report": report.model_dump(mode="json"),
         "segmented_report": segmented_report.model_dump(mode="json"),

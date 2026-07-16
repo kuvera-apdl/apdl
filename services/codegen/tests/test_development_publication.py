@@ -91,6 +91,7 @@ def test_evaluated_publication_contracts_reject_development_stage():
             model="test-model@1",
             codegen_revision="test-revision",
             candidate_identity_sha256="a" * 64,
+            egress_policy_sha256="b" * 64,
         )
 
     decision_payload = {

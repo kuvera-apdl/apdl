@@ -46,10 +46,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_private_task_controls_migration():
-    with pytest.raises(RuntimeError, match="025_codegen_private_task_controls.sql"):
+async def test_rejects_database_without_egress_publication_migration():
+    with pytest.raises(RuntimeError, match="026_codegen_egress_publication.sql"):
         await assert_schema_ready(
-            FakeConn(migration_name="024_codegen_segmented_publication.sql")
+            FakeConn(migration_name="025_codegen_private_task_controls.sql")
         )
 
 
@@ -109,6 +109,28 @@ def test_private_task_controls_migration_enforces_authority_boundary():
         "retry_of",
     ):
         assert key in migration
+
+
+def test_egress_publication_migration_retires_unattested_authority():
+    migration = (
+        Path(__file__).parents[3]
+        / "pipeline/postgres/migrations/026_codegen_egress_publication.sql"
+    ).read_text()
+
+    assert (
+        "ADD COLUMN IF NOT EXISTS\n"
+        "        publication_authorization_egress_unattested_legacy JSONB" in migration
+    )
+    assert "= 'publication_authorization@3'" in migration
+    assert "= 'publication_authorization@4'" in migration
+    assert "= 'publication_request@3'" in migration
+    assert "expected_egress_policy_sha256" in migration
+    assert (
+        "publication_authorization->'request'->>'egress_policy_sha256'\n"
+        "                = publication_authorization->>'expected_egress_policy_sha256'"
+        in migration
+    )
+    assert "= 'development_publication_authorization@1'" in migration
 
 
 def test_shutdown_awaits_requeued_jobs_before_closing_database():

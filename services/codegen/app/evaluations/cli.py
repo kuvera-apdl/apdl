@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 
 from app.editor.environment import codegen_behavior_configuration_sha256
+from app.egress import (
+    EGRESS_PROXY_URL,
+    attest_docker_egress_policy,
+)
 from app.evaluations.corpus import DEFAULT_CORPUS_PATH, load_corpus
 from app.evaluations.docker_executor import DockerEvaluationExecutor
 from app.evaluations.execution import execute_evaluation_run
@@ -63,6 +67,17 @@ async def _execute(args, corpus):
             environment=environment,
         )
     else:
+        await asyncio.to_thread(
+            attest_docker_egress_policy,
+            docker_bin=args.docker_bin,
+            probe_image=args.controller_image_id,
+            launch_id="evaluation-runtime-startup",
+            socket_volume=args.egress_socket_volume,
+            expected_policy_sha256=args.egress_policy_sha256,
+            expected_proxy_image_id=args.egress_proxy_image_id,
+            proxy_url=args.egress_proxy_url,
+            environment=environment,
+        )
         candidate_identity = CodegenCandidateIdentity.build(
             controller_image_id=args.controller_image_id,
             candidate_image_id=args.docker_image,
@@ -70,6 +85,9 @@ async def _execute(args, corpus):
             behavior_configuration_sha256=(
                 codegen_behavior_configuration_sha256(environment)
             ),
+            egress_policy_sha256=args.egress_policy_sha256,
+            egress_proxy_image_id=args.egress_proxy_image_id,
+            reviewed_max_concurrent_jobs=args.reviewed_max_concurrent_jobs,
         )
         executor = DockerEvaluationExecutor(
             image=args.docker_image,
@@ -77,7 +95,11 @@ async def _execute(args, corpus):
             timeout_seconds=args.timeout_seconds,
             max_output_bytes=args.max_output_bytes,
             environment=environment,
-            network=args.evaluation_network,
+            proxy_url=args.egress_proxy_url,
+            probe_image=args.controller_image_id,
+            egress_policy_sha256=args.egress_policy_sha256,
+            egress_proxy_image_id=args.egress_proxy_image_id,
+            egress_socket_volume=args.egress_socket_volume,
         )
     return await execute_evaluation_run(
         corpus,
@@ -114,9 +136,31 @@ def _parser() -> argparse.ArgumentParser:
         default=os.getenv("CODEGEN_DOCKER_BIN", "docker"),
     )
     parser.add_argument(
-        "--evaluation-network",
-        default=os.getenv("CODEGEN_EVALUATION_NETWORK", ""),
-        help="optional operator-managed network for model-provider egress",
+        "--egress-policy-sha256",
+        default=os.getenv("CODEGEN_EGRESS_POLICY_SHA256", ""),
+        help="canonical digest of the shipped Codegen egress policy sources",
+    )
+    parser.add_argument(
+        "--egress-proxy-image-id",
+        default=os.getenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", ""),
+        help="immutable image ID of the running attested egress proxy",
+    )
+    parser.add_argument(
+        "--egress-socket-volume",
+        default=os.getenv("CODEGEN_EGRESS_SOCKET_VOLUME", ""),
+        help="controller-owned Docker volume containing the attested proxy socket",
+    )
+    parser.add_argument(
+        "--egress-proxy-url",
+        default=os.getenv("CODEGEN_EGRESS_PROXY_URL", EGRESS_PROXY_URL),
+        help="canonical worker proxy URL",
+    )
+    parser.add_argument(
+        "--reviewed-max-concurrent-jobs",
+        type=int,
+        choices=[1],
+        default=1,
+        help="reviewed deployment concurrency bound into candidate identity",
     )
     parser.add_argument(
         "--stage",
@@ -188,6 +232,18 @@ def main() -> None:
         if not args.executor and not args.controller_image_id:
             parser.error(
                 "--controller-image-id is required for the default Docker evaluation"
+            )
+        if not args.executor and not args.egress_policy_sha256:
+            parser.error(
+                "--egress-policy-sha256 is required for the default Docker evaluation"
+            )
+        if not args.executor and not args.egress_proxy_image_id:
+            parser.error(
+                "--egress-proxy-image-id is required for the default Docker evaluation"
+            )
+        if not args.executor and not args.egress_socket_volume:
+            parser.error(
+                "--egress-socket-volume is required for the default Docker evaluation"
             )
         if args.executor_arg and not args.executor:
             parser.error("--executor-arg requires --executor")

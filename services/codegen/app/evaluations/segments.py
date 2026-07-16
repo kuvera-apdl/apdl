@@ -61,8 +61,8 @@ class EvaluationSegment(StrictModel):
 
 
 class SegmentedEvaluationReport(StrictModel):
-    schema_version: Literal["segmented_evaluation_report@1"] = (
-        "segmented_evaluation_report@1"
+    schema_version: Literal["segmented_evaluation_report@2"] = (
+        "segmented_evaluation_report@2"
     )
     run_id: str = Field(min_length=1)
     run_sha256: Sha256
@@ -251,7 +251,7 @@ def build_segmented_report(
         )
 
     payload = {
-        "schema_version": "segmented_evaluation_report@1",
+        "schema_version": "segmented_evaluation_report@2",
         "run_id": run.run_id,
         "run_sha256": run.evidence_sha256(),
         "corpus_id": corpus.corpus_id,

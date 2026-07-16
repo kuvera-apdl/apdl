@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 25
-MIGRATION_NAME = "025_codegen_private_task_controls.sql"
+MIGRATION_VERSION = 26
+MIGRATION_NAME = "026_codegen_egress_publication.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -57,6 +57,10 @@ REQUIRED_COLUMNS = frozenset(
         (
             "codegen_changesets",
             "publication_authorization_segmentless_legacy",
+        ),
+        (
+            "codegen_changesets",
+            "publication_authorization_egress_unattested_legacy",
         ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),

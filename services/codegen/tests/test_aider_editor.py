@@ -27,6 +27,7 @@ from app.editor.aider_editor import (
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
+from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling.models import (
     CIWorkflow,
     CommandKind,
@@ -589,6 +590,44 @@ class _Pipeline:
         monkeypatch.setattr(editor, "_git", fake_git)
         monkeypatch.setattr(editor, "_git_bytes", fake_git_bytes)
         monkeypatch.setattr(editor, "_exec", fake_exec)
+
+
+@pytest.mark.parametrize(
+    ("head_sha", "tree_sha", "message"),
+    [
+        ("d" * 40, "b" * 40, "moved after credential-free preflight"),
+        ("a" * 40, "d" * 40, "tree does not match credential-free preflight"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_preflight_mismatch_aborts_before_repository_reads_or_model(
+    monkeypatch,
+    tmp_path,
+    head_sha,
+    tree_sha,
+    message,
+):
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+    request = _request()
+    request.repository_preflight = RepositoryPreflightAttestation(
+        repository=request.repo,
+        source_branch=request.base_branch,
+        head_sha=head_sha,
+        tree_sha=tree_sha,
+        file_count=1,
+    )
+
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("repository profiling must not run on a mismatched tree")
+
+    monkeypatch.setattr(aider_editor, "_probe_repo", unexpected_probe)
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert message in (result.error or "")
+    assert pipeline.aider_messages == []
 
 
 def _strict_review_response(

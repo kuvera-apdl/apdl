@@ -21,6 +21,14 @@ policy_path="${CODEGEN_ROLLOUT_POLICY:-$ROOT_DIR/services/codegen/app/evaluation
 artifact_dir="${CODEGEN_EVALUATION_ARTIFACT_DIR:-$ROOT_DIR/local-files/codegen-rollouts/$revision}"
 controller_image="${CODEGEN_EVALUATION_CONTROLLER_IMAGE:-apdl-codegen-evaluation-controller:$revision}"
 candidate_image="${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:$revision}"
+egress_policy_sha256="$(python3 scripts/codegen-egress-policy-digest.py)"
+if [[ -n "${CODEGEN_EGRESS_POLICY_SHA256:-}" ]] \
+  && [[ "$CODEGEN_EGRESS_POLICY_SHA256" != "$egress_policy_sha256" ]]; then
+  echo "CODEGEN_EGRESS_POLICY_SHA256 does not match the checked-in egress policy sources." >&2
+  exit 2
+fi
+egress_proxy_image="${CODEGEN_EGRESS_PROXY_IMAGE:-apdl-codegen-egress-proxy:$egress_policy_sha256}"
+evaluation_socket_volume="${CODEGEN_EVALUATION_SOCKET_VOLUME:-apdl-codegen-evaluation-egress-${revision}-$$}"
 
 if [[ -z "$revision" || "$revision" == "development-unversioned" ]]; then
   echo "CODEGEN_REVISION must identify an immutable evaluated candidate; development-unversioned cannot authorize publication." >&2
@@ -54,6 +62,7 @@ fi
 rm -f \
   "$artifact_dir/controller-image-id.txt" \
   "$artifact_dir/candidate-image-id.txt" \
+  "$artifact_dir/egress-proxy-image-id.txt" \
   "$artifact_dir/evaluation-run.json" \
   "$artifact_dir/evaluation-report.json" \
   "$artifact_dir/evaluation-segments.json" \
@@ -72,6 +81,15 @@ if [[ ! -S "$socket_path" ]]; then
   exit 2
 fi
 socket_path="$(cd -- "$(dirname -- "$socket_path")" && pwd -P)/$(basename -- "$socket_path")"
+docker_server_version="$(docker version --format '{{.Server.Version}}')"
+if [[ -z "$docker_server_version" ]]; then
+  echo "Could not determine the Docker Engine version." >&2
+  exit 2
+fi
+if [[ ! "$evaluation_socket_volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+  echo "CODEGEN_EVALUATION_SOCKET_VOLUME is not a canonical Docker volume name." >&2
+  exit 2
+fi
 
 echo "==> Building evaluation controller: $controller_image"
 docker build \
@@ -117,6 +135,27 @@ fi
 printf '%s\n' "$candidate_image_id" >"$artifact_dir/candidate-image-id.txt"
 chmod 0600 "$artifact_dir/candidate-image-id.txt"
 
+echo "==> Building shipped egress proxy: $egress_proxy_image"
+docker build \
+  --build-arg "CODEGEN_EGRESS_POLICY_SHA256=$egress_policy_sha256" \
+  --tag "$egress_proxy_image" \
+  --file infra/docker/codegen-egress/Dockerfile \
+  infra/docker/codegen-egress
+
+proxy_policy="$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.policy-sha256" }}' "$egress_proxy_image")"
+proxy_role="$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.role" }}' "$egress_proxy_image")"
+if [[ "$proxy_policy" != "$egress_policy_sha256" || "$proxy_role" != "proxy" ]]; then
+  echo "Egress proxy image identity mismatch for policy $egress_policy_sha256." >&2
+  exit 1
+fi
+egress_proxy_image_id="$(docker image inspect --format '{{.Id}}' "$egress_proxy_image")"
+if [[ ! "$egress_proxy_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Egress proxy did not resolve to an immutable local image ID: $egress_proxy_image_id" >&2
+  exit 1
+fi
+printf '%s\n' "$egress_proxy_image_id" >"$artifact_dir/egress-proxy-image-id.txt"
+chmod 0600 "$artifact_dir/egress-proxy-image-id.txt"
+
 # Fail before spending model tokens if the image lacks the real entry point or
 # accidentally carries evaluator-only answer material.
 docker run --rm --network none --read-only --cap-drop ALL \
@@ -130,9 +169,29 @@ docker run --rm --network none --read-only --cap-drop ALL \
 
 temp_parent="${TMPDIR:-/tmp}"
 evaluation_root="$(mktemp -d "$temp_parent/apdl-codegen-eval.XXXXXX")"
-trap 'rm -rf -- "$evaluation_root"' EXIT
+egress_project="apdl-codegen-evaluation-$$"
+cleanup() {
+  CODEGEN_EGRESS_PROXY_IMAGE="$egress_proxy_image_id" \
+  CODEGEN_EGRESS_POLICY_SHA256="$egress_policy_sha256" \
+  CODEGEN_EGRESS_SOCKET_VOLUME="$evaluation_socket_volume" \
+    docker compose \
+      -p "$egress_project" \
+      -f infra/docker/docker-compose.codegen-egress.yml \
+      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  rm -rf -- "$evaluation_root"
+}
+trap cleanup EXIT
 mkdir -p "$evaluation_root/home" "$evaluation_root/tmp"
 chmod 0700 "$evaluation_root" "$evaluation_root/home" "$evaluation_root/tmp"
+
+echo "==> Starting attested Unix-socket egress proxy: $evaluation_socket_volume"
+CODEGEN_EGRESS_PROXY_IMAGE="$egress_proxy_image_id" \
+CODEGEN_EGRESS_POLICY_SHA256="$egress_policy_sha256" \
+CODEGEN_EGRESS_SOCKET_VOLUME="$evaluation_socket_volume" \
+  docker compose \
+    -p "$egress_project" \
+    -f infra/docker/docker-compose.codegen-egress.yml \
+    up -d --no-build --wait codegen-egress-proxy
 
 socket_gid=""
 if socket_gid="$(stat -c '%g' "$socket_path" 2>/dev/null)"; then
@@ -158,6 +217,10 @@ docker_args=(
   --env "DOCKER_HOST=unix:///var/run/docker.sock"
   --env "CODEGEN_MODEL=$model"
   --env "CODEGEN_REVISION=$revision"
+  --env "CODEGEN_EGRESS_POLICY_SHA256=$egress_policy_sha256"
+  --env "CODEGEN_EGRESS_PROXY_IMAGE_ID=$egress_proxy_image_id"
+  --env "CODEGEN_EGRESS_SOCKET_VOLUME=$evaluation_socket_volume"
+  --env "CODEGEN_EGRESS_PROXY_URL=http://127.0.0.1:3128"
 )
 
 # Explicit allowlist: never forward GitHub App material, installation tokens,
@@ -178,7 +241,6 @@ forward_env=(
   CODEGEN_JOB_BUDGET
   CODEGEN_GIT_TIMEOUT
   CODEGEN_LLM_TIMEOUT
-  CODEGEN_EVALUATION_NETWORK
   CODEGEN_EVALUATION_MEMORY
   CODEGEN_EVALUATION_CPUS
   CODEGEN_EVALUATION_PIDS
@@ -215,6 +277,11 @@ docker "${docker_args[@]}" "$controller_image_id" \
   python -m app.evaluations.cli \
   --controller-image-id "$controller_image_id" \
   --docker-image "$candidate_image_id" \
+  --egress-policy-sha256 "$egress_policy_sha256" \
+  --egress-proxy-image-id "$egress_proxy_image_id" \
+  --egress-socket-volume "$evaluation_socket_volume" \
+  --egress-proxy-url http://127.0.0.1:3128 \
+  --reviewed-max-concurrent-jobs 1 \
   --model "$model" \
   --codegen-revision "$revision" \
   --rollout-policy /artifacts/rollout-policy.json \

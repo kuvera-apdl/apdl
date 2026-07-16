@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping
 from typing import TypeAlias
 
+from app.egress import EGRESS_PROXY_ENV
 from app.editor.deadlines import resolve_codegen_deadline_plan
 
 
@@ -23,6 +24,7 @@ PROCESS_ENV: tuple[str, ...] = (
     "TZ",
     "SSL_CERT_FILE",
     "REQUESTS_CA_BUNDLE",
+    *EGRESS_PROXY_ENV,
 )
 
 MODEL_PROVIDER_ENV: tuple[str, ...] = (

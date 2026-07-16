@@ -278,7 +278,7 @@ describe('codegen schemas', () => {
     }
   })
 
-  it('rejects publication authorization for a different stage, policy, or candidate', () => {
+  it('rejects publication authorization for a different stage, policy, candidate, or egress policy', () => {
     const authorization = makePublicationAuthorization()
     const mismatchedStage = {
       ...authorization,
@@ -292,6 +292,10 @@ describe('codegen schemas', () => {
       ...authorization,
       expected_candidate_identity_sha256: '8'.repeat(64),
     }
+    const mismatchedEgressPolicy = {
+      ...authorization,
+      expected_egress_policy_sha256: 'd'.repeat(64),
+    }
 
     expect(changesetSchema.safeParse({
       ...sample,
@@ -304,6 +308,34 @@ describe('codegen schemas', () => {
     expect(changesetSchema.safeParse({
       ...sample,
       publication_authorization: mismatchedCandidate,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: mismatchedEgressPolicy,
+    }).success).toBe(false)
+  })
+
+  it('rejects legacy evaluated publication schema versions', () => {
+    const authorization = makePublicationAuthorization()
+    const legacyAuthorization = {
+      ...authorization,
+      schema_version: 'publication_authorization@3',
+    }
+    const legacyRequest = {
+      ...authorization,
+      request: {
+        ...authorization.request,
+        schema_version: 'publication_request@2',
+      },
+    }
+
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: legacyAuthorization,
+    }).success).toBe(false)
+    expect(changesetSchema.safeParse({
+      ...sample,
+      publication_authorization: legacyRequest,
     }).success).toBe(false)
   })
 

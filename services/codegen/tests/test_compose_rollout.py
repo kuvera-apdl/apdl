@@ -14,6 +14,7 @@ BASE_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.yml"
 DEVELOPMENT_COMPOSE = (
     REPO_ROOT / "infra/docker/docker-compose.codegen-development.yml"
 )
+EGRESS_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.codegen-egress.yml"
 ROLLOUT_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.codegen-rollout.yml"
 DOCKER = shutil.which("docker")
 MAKE = shutil.which("make")
@@ -52,6 +53,11 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
 
     assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "offline"
     assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == ""
+    assert codegen_environment["CODEGEN_EGRESS_POLICY_SHA256"] == ""
+    assert codegen_environment["CODEGEN_EGRESS_PROXY_IMAGE_ID"] == ""
+    assert codegen_environment["CODEGEN_EGRESS_PROXY_URL"] == (
+        "http://127.0.0.1:3128"
+    )
     assert "CODEGEN_DEVELOPMENT_MODE" not in codegen_environment
 
 
@@ -177,6 +183,8 @@ def test_dev_script_delegates_full_stack_lifecycle_to_make() -> None:
 def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
     controller_image = "sha256:" + "a" * 64
     candidate_image = "sha256:" + "b" * 64
+    proxy_image = "sha256:" + "c" * 64
+    egress_policy = "d" * 64
     environment = os.environ.copy()
     environment.pop("CODEGEN_ROLLOUT_STAGE", None)
     environment.update(
@@ -186,15 +194,18 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
             "CODEGEN_DOCKER_SOCKET": "/var/run/docker.sock",
             "CODEGEN_DOCKER_SOCKET_GID": "1000",
             "CODEGEN_DOCKER_UID": "1000",
+            "CODEGEN_EGRESS_POLICY_SHA256": egress_policy,
+            "CODEGEN_EGRESS_PROXY_IMAGE": proxy_image,
+            "CODEGEN_EGRESS_SOCKET_VOLUME": "codegen-egress-socket",
             "CODEGEN_REVISION": "evaluated-revision",
             "CODEGEN_ROLLOUT_BUNDLE_PATH": "/tmp/publication-bundle.json",
             "CODEGEN_SANDBOX_IMAGE": candidate_image,
-            "CODEGEN_SANDBOX_NETWORK": "codegen-egress-filtered",
         }
     )
 
     config = _compose_config(
         BASE_COMPOSE,
+        EGRESS_COMPOSE,
         ROLLOUT_COMPOSE,
         environment=environment,
     )
@@ -209,3 +220,41 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
     assert codegen_environment["CODEGEN_CONTROLLER_IMAGE_ID"] == controller_image
     assert codegen_environment["CODEGEN_SANDBOX_IMAGE"] == candidate_image
     assert codegen_environment["CODEGEN_REVISION"] == "evaluated-revision"
+    assert codegen_environment["CODEGEN_EGRESS_POLICY_SHA256"] == egress_policy
+    assert codegen_environment["CODEGEN_EGRESS_PROXY_IMAGE_ID"] == proxy_image
+    assert codegen_environment["CODEGEN_EGRESS_PROXY_URL"] == (
+        "http://127.0.0.1:3128"
+    )
+    assert codegen_environment["CODEGEN_EGRESS_SOCKET_VOLUME"] == (
+        "codegen-egress-socket"
+    )
+    assert codegen_environment["CODEGEN_SANDBOX_NETWORK"] == ""
+    assert codegen_environment["CODEGEN_MAX_CONCURRENT_JOBS"] == "1"
+    assert codegen["depends_on"]["codegen-egress-proxy"]["condition"] == (
+        "service_healthy"
+    )
+
+    proxy = config["services"]["codegen-egress-proxy"]
+    assert proxy["image"] == proxy_image
+    assert set(proxy["networks"]) == {"default"}
+    assert proxy["labels"]["dev.apdl.codegen.egress.policy-sha256"] == (
+        egress_policy
+    )
+    assert proxy["labels"]["dev.apdl.codegen.egress.socket-volume"] == (
+        "codegen-egress-socket"
+    )
+    assert proxy["volumes"] == [
+        {
+            "type": "volume",
+            "source": "codegen-egress-socket",
+            "target": "/run/apdl-codegen-egress",
+        }
+    ]
+    socket_volume = config["volumes"]["codegen-egress-socket"]
+    assert socket_volume["name"] == "codegen-egress-socket"
+    assert socket_volume["labels"]["dev.apdl.codegen.egress.role"] == "socket"
+    assert socket_volume["labels"][
+        "dev.apdl.codegen.egress.policy-sha256"
+    ] == (
+        egress_policy
+    )

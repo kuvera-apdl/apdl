@@ -35,13 +35,14 @@ MAX_ROLLOUT_POLICY_BYTES = 64 * 1024
 class PublicationEvidenceBundle(StrictModel):
     """Content-addressed report and policy selected by an operator."""
 
-    schema_version: Literal["publication_evidence_bundle@3"] = (
-        "publication_evidence_bundle@3"
+    schema_version: Literal["publication_evidence_bundle@5"] = (
+        "publication_evidence_bundle@5"
     )
     report: EvaluationReport
     segmented_report: SegmentedEvaluationReport
     policy: RolloutPolicy
     candidate_identity_sha256: Sha256
+    egress_policy_sha256: Sha256
     report_sha256: Sha256
     segmented_report_sha256: Sha256
     policy_sha256: Sha256
@@ -57,6 +58,10 @@ class PublicationEvidenceBundle(StrictModel):
         if self.candidate_identity_sha256 != candidate_identity.identity_sha256:
             raise ValueError(
                 "bundle candidate identity does not match its evaluation run"
+            )
+        if self.egress_policy_sha256 != candidate_identity.egress_policy_sha256:
+            raise ValueError(
+                "bundle egress policy does not match its candidate identity"
             )
         if self.report_sha256 != self.report.report_sha256:
             raise ValueError("bundle report_sha256 does not match its report")
@@ -81,12 +86,13 @@ class PublicationEvidenceBundle(StrictModel):
 class PublicationRequest(StrictModel):
     """Current generation identity and requested GitHub publication stage."""
 
-    schema_version: Literal["publication_request@2"] = "publication_request@2"
+    schema_version: Literal["publication_request@3"] = "publication_request@3"
     requested_stage: RolloutStage
     risk: RiskLevel
     model: str = Field(min_length=1)
     codegen_revision: str = Field(min_length=1)
     candidate_identity_sha256: Sha256
+    egress_policy_sha256: Sha256
     canary_identity: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
@@ -107,13 +113,14 @@ class PublicationRequest(StrictModel):
 class PublicationAuthorization(StrictModel):
     """Persistable proof that trusted evidence was evaluated for one request."""
 
-    schema_version: Literal["publication_authorization@3"] = (
-        "publication_authorization@3"
+    schema_version: Literal["publication_authorization@4"] = (
+        "publication_authorization@4"
     )
     request: PublicationRequest
     expected_model: str = Field(min_length=1)
     expected_codegen_revision: str = Field(min_length=1)
     expected_candidate_identity_sha256: Sha256
+    expected_egress_policy_sha256: Sha256
     report_sha256: Sha256
     segmented_report_sha256: Sha256
     bundle_sha256: Sha256
@@ -135,6 +142,13 @@ class PublicationAuthorization(StrictModel):
         ):
             raise ValueError(
                 "publication request candidate identity does not match expected identity"
+            )
+        if (
+            self.request.egress_policy_sha256
+            != self.expected_egress_policy_sha256
+        ):
+            raise ValueError(
+                "publication request egress policy does not match expected policy"
             )
         if self.decision.requested_stage is not self.request.requested_stage:
             raise ValueError("publication decision stage does not match its request")
@@ -206,11 +220,12 @@ def build_publication_bundle(
             "publication evidence requires the default trusted Docker candidate identity"
         )
     payload = {
-        "schema_version": "publication_evidence_bundle@3",
+        "schema_version": "publication_evidence_bundle@5",
         "report": validated_report.model_dump(mode="json"),
         "segmented_report": validated_segmented_report.model_dump(mode="json"),
         "policy": validated_policy.model_dump(mode="json"),
         "candidate_identity_sha256": candidate_identity.identity_sha256,
+        "egress_policy_sha256": candidate_identity.egress_policy_sha256,
         "report_sha256": validated_report.report_sha256,
         "segmented_report_sha256": (validated_segmented_report.segmented_report_sha256),
         "policy_sha256": canonical_sha256(validated_policy),
@@ -230,6 +245,7 @@ def load_publication_bundle(
     expected_model: str,
     expected_codegen_revision: str,
     expected_candidate_identity_sha256: str,
+    expected_egress_policy_sha256: str,
 ) -> PublicationEvidenceBundle:
     """Strictly load and bind an operator-selected bundle to the active generator."""
     payload = parse_strict_json_object(
@@ -253,6 +269,10 @@ def load_publication_bundle(
         raise ValueError(
             "evaluation candidate identity does not match the expected deployment"
         )
+    if bundle.egress_policy_sha256 != expected_egress_policy_sha256:
+        raise ValueError(
+            "evaluation egress policy does not match the expected deployment"
+        )
     return bundle
 
 
@@ -275,6 +295,7 @@ class TrustedPublicationAuthorizer:
         expected_model: str,
         expected_codegen_revision: str,
         expected_candidate_identity_sha256: str,
+        expected_egress_policy_sha256: str,
     ) -> None:
         validated = _revalidate_bundle(bundle)
         if validated.report.run.model != expected_model:
@@ -287,10 +308,15 @@ class TrustedPublicationAuthorizer:
             raise ValueError(
                 "evaluation candidate identity does not match expected identity"
             )
+        if validated.egress_policy_sha256 != expected_egress_policy_sha256:
+            raise ValueError(
+                "evaluation egress policy does not match expected policy"
+            )
         self._bundle_json = validated.model_dump_json()
         self._expected_model = expected_model
         self._expected_codegen_revision = expected_codegen_revision
         self._expected_candidate_identity_sha256 = expected_candidate_identity_sha256
+        self._expected_egress_policy_sha256 = expected_egress_policy_sha256
 
     @property
     def bundle_sha256(self) -> str:
@@ -320,6 +346,10 @@ class TrustedPublicationAuthorizer:
             raise ValueError(
                 "publication request candidate identity does not match expected identity"
             )
+        if request.egress_policy_sha256 != self._expected_egress_policy_sha256:
+            raise ValueError(
+                "publication request egress policy does not match expected policy"
+            )
         bundle = self._snapshot()
         decision = decide_rollout(
             requested_stage=request.requested_stage,
@@ -342,13 +372,14 @@ class TrustedPublicationAuthorizer:
                 "publication decision does not bind the bundled segmented report"
             )
         payload = {
-            "schema_version": "publication_authorization@3",
+            "schema_version": "publication_authorization@4",
             "request": request.model_dump(mode="json"),
             "expected_model": self._expected_model,
             "expected_codegen_revision": self._expected_codegen_revision,
             "expected_candidate_identity_sha256": (
                 self._expected_candidate_identity_sha256
             ),
+            "expected_egress_policy_sha256": self._expected_egress_policy_sha256,
             "report_sha256": bundle.report_sha256,
             "segmented_report_sha256": bundle.segmented_report_sha256,
             "bundle_sha256": bundle.bundle_sha256,
@@ -373,16 +404,19 @@ def load_publication_authorizer(
     expected_model: str,
     expected_codegen_revision: str,
     expected_candidate_identity_sha256: str,
+    expected_egress_policy_sha256: str,
 ) -> TrustedPublicationAuthorizer:
     bundle = load_publication_bundle(
         path,
         expected_model=expected_model,
         expected_codegen_revision=expected_codegen_revision,
         expected_candidate_identity_sha256=expected_candidate_identity_sha256,
+        expected_egress_policy_sha256=expected_egress_policy_sha256,
     )
     return TrustedPublicationAuthorizer(
         bundle,
         expected_model=expected_model,
         expected_codegen_revision=expected_codegen_revision,
         expected_candidate_identity_sha256=expected_candidate_identity_sha256,
+        expected_egress_policy_sha256=expected_egress_policy_sha256,
     )

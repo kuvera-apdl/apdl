@@ -14,7 +14,9 @@ import pytest
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
+from app.editor.environment import MODEL_PROVIDER_ENV
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling import RepoProfile
 from app.requirements import compile_requirement_ledger
 from app.runtime.models import (
@@ -36,6 +38,13 @@ def _req(**over) -> EditRequest:
         repo="acme/widgets", base_branch="main", branch="apdl/x",
         token="ghs_secrettoken", title="Add thing", spec="do the thing",
         constraints=["keep tests green"], test_cmd="python -m pytest -q",
+        repository_preflight=RepositoryPreflightAttestation(
+            repository="acme/widgets",
+            source_branch="main",
+            head_sha="a" * 40,
+            tree_sha="b" * 40,
+            file_count=3,
+        ),
     )
     base.update(over)
     return EditRequest(**base)
@@ -48,6 +57,7 @@ def test_docker_argv_has_hardening_and_image_last():
     assert "--cap-drop" in argv and "ALL" in argv
     assert "no-new-privileges" in argv
     assert "--read-only" in argv
+    assert argv[argv.index("--pid") + 1] == "private"
     assert argv.count("--tmpfs") == 2
     assert "--user" in argv and "1000:1000" in argv
     assert "--pids-limit" in argv and "--memory" in argv and "--cpus" in argv
@@ -106,7 +116,7 @@ def test_docker_argv_forwards_editor_config(monkeypatch):
 
 
 def test_container_timeout_covers_the_full_job_budget(monkeypatch):
-    # The container runs the whole pipeline, but its credential-bearing wall
+    # The container runs the whole worker pipeline, but its credential-bearing wall
     # time remains below GitHub's one-hour installation-token lifetime.
     monkeypatch.setenv("CODEGEN_TIMEOUT", "1800")
     monkeypatch.setenv("CODEGEN_GIT_TIMEOUT", "300")
@@ -115,12 +125,19 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
     assert ContainerAiderEditor()._timeout == 3000
 
 
-def test_pr_runtime_preflight_accepts_exact_image_revision_and_network(monkeypatch):
+def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(monkeypatch):
     revision = "evaluated-revision"
     image = "sha256:" + "a" * 64
-    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+    policy = "b" * 64
+    proxy_image = "sha256:" + "c" * 64
+    controller_image = "sha256:" + "d" * 64
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", policy)
+    monkeypatch.setenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", proxy_image)
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", controller_image)
     calls: list[list[str]] = []
-    responses = iter(["27.5.1", revision, "[]"])
+    responses = iter(["27.5.1", revision])
+    attestation: dict[str, object] = {}
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
@@ -131,6 +148,10 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_network(monkeypat
         return subprocess.CompletedProcess(argv, 0, next(responses), "")
 
     monkeypatch.setattr("app.editor.container_editor.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "app.editor.container_editor.attest_docker_egress_policy",
+        lambda **kwargs: attestation.update(kwargs) or object(),
+    )
 
     ContainerAiderEditor(image=image).assert_runtime_ready(
         expected_revision=revision
@@ -146,8 +167,12 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_network(monkeypat
             '{{ index .Config.Labels "dev.apdl.codegen.revision" }}',
             image,
         ],
-        ["docker", "network", "inspect", "codegen-egress"],
     ]
+    assert attestation["probe_image"] == controller_image
+    assert attestation["launch_id"] == "codegen-runtime-startup"
+    assert attestation["socket_volume"] == "codegen-egress-socket"
+    assert attestation["expected_policy_sha256"] == policy
+    assert attestation["expected_proxy_image_id"] == proxy_image
 
 
 def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch):
@@ -166,6 +191,7 @@ def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch)
     ContainerAiderEditor(image=image).assert_runtime_ready(
         expected_revision=revision,
         require_immutable_image=False,
+        require_egress_policy=False,
     )
 
     assert calls == [
@@ -182,17 +208,58 @@ def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch)
     ]
 
 
-@pytest.mark.parametrize("network", ["", "bridge", "default", "host", "none"])
-def test_pr_runtime_preflight_rejects_builtin_networks(monkeypatch, network):
-    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
-    editor = ContainerAiderEditor(image="sha256:" + "a" * 64)
+def test_attested_worker_uses_network_none_socket_configuration(monkeypatch):
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
+    monkeypatch.setenv(
+        "CODEGEN_EGRESS_PROXY_IMAGE_ID",
+        "sha256:" + "c" * 64,
+    )
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv(
+        "CODEGEN_CONTROLLER_IMAGE_ID",
+        "sha256:" + "d" * 64,
+    )
 
-    with pytest.raises(RuntimeError, match="non-built-in sandbox network"):
-        editor.assert_runtime_ready(expected_revision="evaluated-revision")
+    argv = ContainerAiderEditor()._docker_argv(_req())
+
+    assert argv[argv.index("--network") + 1] == "none"
+    socket_mount = argv[argv.index("--mount") + 1]
+    assert "src=codegen-egress-socket" in socket_mount
+    assert "readonly" in socket_mount
+    assert "relay-exec" in argv
+    assert "HTTP_PROXY=http://127.0.0.1:3128" in argv
+    assert "https_proxy=http://127.0.0.1:3128" in argv
+
+
+@pytest.mark.parametrize("network", ["bridge", "default", "host", "none", "custom"])
+def test_evaluated_runtime_rejects_any_configured_network(monkeypatch, network):
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
+    monkeypatch.setenv(
+        "CODEGEN_EGRESS_PROXY_IMAGE_ID",
+        "sha256:" + "c" * 64,
+    )
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv(
+        "CODEGEN_CONTROLLER_IMAGE_ID",
+        "sha256:" + "d" * 64,
+    )
+
+    with pytest.raises(ValueError, match="--network none"):
+        ContainerAiderEditor(image="sha256:" + "a" * 64)
 
 
 def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
-    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
+    monkeypatch.setenv(
+        "CODEGEN_EGRESS_PROXY_IMAGE_ID",
+        "sha256:" + "c" * 64,
+    )
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv(
+        "CODEGEN_CONTROLLER_IMAGE_ID",
+        "sha256:" + "d" * 64,
+    )
 
     with pytest.raises(RuntimeError, match="immutable sandbox image digest"):
         ContainerAiderEditor(image="apdl-codegen-sandbox:latest").assert_runtime_ready(
@@ -201,7 +268,16 @@ def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
 
 
 def test_pr_runtime_preflight_rejects_mismatched_image_revision(monkeypatch):
-    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress")
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
+    monkeypatch.setenv(
+        "CODEGEN_EGRESS_PROXY_IMAGE_ID",
+        "sha256:" + "c" * 64,
+    )
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv(
+        "CODEGEN_CONTROLLER_IMAGE_ID",
+        "sha256:" + "d" * 64,
+    )
     responses = iter(["27.5.1", "different-revision"])
 
     def fake_run(argv, **_kwargs):
@@ -221,8 +297,9 @@ def test_secrets_are_passed_by_name_not_value(monkeypatch):
     editor = ContainerAiderEditor()
     argv = editor._docker_argv(_req())
     joined = " ".join(argv)
-    # The token + key NAMES are forwarded...
-    assert "GH_TOKEN" in argv and "ANTHROPIC_API_KEY" in argv
+    # The provider key NAME is forwarded; repository authority is not.
+    assert "ANTHROPIC_API_KEY" in argv
+    assert "GH_TOKEN" not in argv
     # ...but their VALUES never touch the argv.
     assert "ghs_secrettoken" not in joined
     assert "sk-ant-secretvalue" not in joined
@@ -230,21 +307,74 @@ def test_secrets_are_passed_by_name_not_value(monkeypatch):
     assert "GITHUB_APP_PRIVATE_KEY" not in argv
 
 
-def test_docker_env_carries_secrets_but_not_internal(monkeypatch):
+def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
+    monkeypatch,
+):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secretvalue")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "pem")
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     env = ContainerAiderEditor()._docker_env(_req())
-    assert env["GH_TOKEN"] == "ghs_secrettoken"
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-secretvalue"
+    assert "GH_TOKEN" not in env
     assert "GITHUB_APP_PRIVATE_KEY" not in env
     assert "APDL_INTERNAL_TOKEN" not in env
+
+
+def test_preflight_launch_has_private_pid_namespace_and_no_provider_env(
+    monkeypatch,
+):
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.setenv(name, f"secret-{name}")
+    editor = ContainerAiderEditor(image="apdl-sandbox:test")
+
+    argv = editor._preflight_argv(
+        _req(),
+        container_name="apdl-codegen-inspect-test",
+    )
+    env = editor._docker_control_env()
+    joined = " ".join(argv)
+
+    assert argv[argv.index("--pid") + 1] == "private"
+    assert "dev.apdl.codegen.role=inspection" in argv
+    assert argv[-3:] == [
+        "apdl-sandbox:test",
+        "-m",
+        "app.inspection.preflight_cli",
+    ]
+    assert "CS_REPO=acme/widgets" in argv
+    assert "CS_SOURCE_BRANCH=main" in argv
+    assert "GH_TOKEN" not in joined
+    assert "ghs_secrettoken" not in joined
+    for name in MODEL_PROVIDER_ENV:
+        assert name not in argv
+        assert f"secret-{name}" not in joined
+        assert name not in env
 
 
 def test_last_json_finds_result_among_noise():
     blob = "cloning...\nrunning aider\n" + json.dumps({"success": True, "branch": "b"})
     assert _last_json(blob) == {"success": True, "branch": "b"}
     assert _last_json("no json here\n{bad json}") is None
+
+
+def test_parse_preflight_rejects_identity_substitution():
+    editor = ContainerAiderEditor()
+    payload = json.dumps(
+        {
+            "success": True,
+            "attestation": {
+                "schema_version": "repository_preflight@1",
+                "repository": "other/widgets",
+                "source_branch": "main",
+                "head_sha": "a" * 40,
+                "tree_sha": "b" * 40,
+                "file_count": 1,
+            },
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        editor._parse_preflight_result(0, payload, "", _req())
 
 
 def test_parse_result_maps_success_json():
@@ -275,6 +405,9 @@ def test_parse_result_maps_success_json():
         "success": True, "branch": "apdl/x",
         "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
         "changed_paths": ["a.py", "b.py"], "diff_text": "diff…", "error": None,
+        "base_sha": "a" * 40,
+        "candidate_tree_sha": "b" * 40,
+        "patch_base64": "cGF0Y2g=",
         "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
         "contract_bundle": ContractBundle().model_dump(mode="json"),
         "requirement_ledger": ledger.model_dump(mode="json"),
@@ -290,6 +423,9 @@ def test_parse_result_maps_success_json():
     assert res.success is True
     assert res.diff_stat["files"] == 2
     assert res.changed_paths == ["a.py", "b.py"]
+    assert res.base_sha == "a" * 40
+    assert res.candidate_tree_sha == "b" * 40
+    assert res.patch_base64 == "cGF0Y2g="
     assert res.prompts[0]["stage"] == "edit"
     assert res.contract_bundle == ContractBundle()
     assert res.requirement_ledger == ledger
@@ -341,6 +477,62 @@ async def test_implement_never_raises_on_docker_fault(monkeypatch):
     res = await editor.implement(_req())
     assert res.success is False
     assert "docker daemon unreachable" in (res.error or "")
+
+
+@pytest.mark.asyncio
+async def test_implement_reattests_egress_immediately_before_worker(monkeypatch):
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
+    monkeypatch.setenv(
+        "CODEGEN_EGRESS_PROXY_IMAGE_ID",
+        "sha256:" + "c" * 64,
+    )
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "codegen-egress-socket")
+    monkeypatch.setenv(
+        "CODEGEN_CONTROLLER_IMAGE_ID",
+        "sha256:" + "d" * 64,
+    )
+    editor = ContainerAiderEditor(image="sha256:" + "a" * 64)
+    events: list[str] = []
+
+    def attest(*, launch_id):
+        if "inspect" in launch_id:
+            events.append("attest-inspection")
+        else:
+            events.append("attest-editor")
+        return object()
+
+    async def run(_argv, _env, *, container_name, stdin_data):
+        assert container_name.startswith("apdl-codegen-")
+        assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
+        if "app.inspection.preflight_cli" in _argv:
+            events.append("preflight")
+            return (
+                0,
+                json.dumps(
+                    {
+                        "success": True,
+                        "attestation": _req().repository_preflight.model_dump(
+                            mode="json"
+                        ),
+                    }
+                ),
+                "",
+            )
+        events.append("editor")
+        return 0, json.dumps({"success": True, "branch": "apdl/x"}), ""
+
+    monkeypatch.setattr(editor, "_attest_egress_policy", attest)
+    monkeypatch.setattr(editor, "_run_docker", run)
+
+    result = await editor.implement(_req())
+
+    assert result.success is True
+    assert events == [
+        "attest-inspection",
+        "preflight",
+        "attest-editor",
+        "editor",
+    ]
 
 
 @pytest.mark.asyncio
@@ -412,6 +604,210 @@ async def test_outer_timeout_stops_named_credential_bearing_container(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "container_name",
+    [
+        "apdl-codegen-inspect-repeat-cancel",
+        "apdl-codegen-edit-repeat-cancel",
+    ],
+)
+async def test_repeated_cancellation_cannot_interrupt_container_cleanup(
+    monkeypatch,
+    container_name,
+):
+    editor = ContainerAiderEditor()
+    run_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    class HangingProcess:
+        returncode = None
+
+        async def communicate(self, _stdin=None):
+            run_started.set()
+            await asyncio.Event().wait()
+
+    process = HangingProcess()
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    async def cleanup(observed_name, observed_process):
+        assert observed_name == container_name
+        assert observed_process is process
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+
+    monkeypatch.setattr(
+        "app.editor.container_editor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(editor, "_stop_container_and_client", cleanup)
+
+    task = asyncio.create_task(
+        editor._run_docker(
+            ["docker", "run"],
+            {},
+            container_name=container_name,
+        )
+    )
+    await run_started.wait()
+    task.cancel()
+    await cleanup_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup_finished.is_set()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "container_name",
+    [
+        "apdl-codegen-inspect-spawn-cancel",
+        "apdl-codegen-edit-spawn-cancel",
+    ],
+)
+async def test_cancellation_during_spawn_still_removes_deterministic_container(
+    monkeypatch,
+    container_name,
+):
+    editor = ContainerAiderEditor()
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+    removed = asyncio.Event()
+
+    class SpawnedProcess:
+        def __init__(self):
+            self.returncode = None
+
+        def terminate(self):
+            self.returncode = -15
+
+        async def wait(self):
+            return self.returncode
+
+    process = SpawnedProcess()
+
+    async def spawn(*_args, **_kwargs):
+        spawn_started.set()
+        await release_spawn.wait()
+        return process
+
+    async def control(*args):
+        assert args == ("rm", "-f", container_name)
+        removed.set()
+        return 0, ""
+
+    monkeypatch.setattr(
+        "app.editor.container_editor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(editor, "_docker_control_command", control)
+
+    task = asyncio.create_task(
+        editor._run_docker(
+            ["docker", "run", "--name", container_name],
+            {},
+            container_name=container_name,
+        )
+    )
+    await spawn_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release_spawn.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert removed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returncode", [0, 125])
+async def test_completed_docker_client_always_removes_named_container(
+    monkeypatch,
+    returncode,
+):
+    editor = ContainerAiderEditor()
+    container_name = "apdl-codegen-completed-client"
+    removals: list[tuple[str, ...]] = []
+
+    class CompletedProcess:
+        def __init__(self):
+            self.returncode = returncode
+
+        async def communicate(self):
+            return b'{"success":true}', b"docker stream ended"
+
+    async def spawn(*_args, **_kwargs):
+        return CompletedProcess()
+
+    async def control(*args):
+        removals.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(
+        "app.editor.container_editor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(editor, "_docker_control_command", control)
+
+    result = await editor._run_docker(
+        ["docker", "run", "--name", container_name],
+        {},
+        container_name=container_name,
+    )
+
+    assert result == (
+        returncode,
+        '{"success":true}',
+        "docker stream ended",
+    )
+    assert removals == [("rm", "-f", container_name)]
+
+
+@pytest.mark.asyncio
+async def test_completed_docker_client_fails_closed_if_removal_is_unverified(
+    monkeypatch,
+):
+    editor = ContainerAiderEditor()
+
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"success":true}', b""
+
+    async def spawn(*_args, **_kwargs):
+        return CompletedProcess()
+
+    async def control(*args):
+        if args[0] == "inspect":
+            return 0, "container still exists"
+        return 1, "Docker daemon refused removal"
+
+    monkeypatch.setattr(
+        "app.editor.container_editor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(editor, "_docker_control_command", control)
+
+    with pytest.raises(RuntimeError, match="Could not verify removal"):
+        await editor._run_docker(
+            ["docker", "run", "--name", "apdl-codegen-stuck-client"],
+            {},
+            container_name="apdl-codegen-stuck-client",
+        )
+
+
+@pytest.mark.asyncio
 async def test_container_cleanup_treats_verified_absence_as_success(monkeypatch):
     editor = ContainerAiderEditor()
     responses = iter(
@@ -467,19 +863,67 @@ async def test_container_cleanup_raises_if_container_still_exists(monkeypatch, c
 @pytest.mark.asyncio
 async def test_implement_parses_a_successful_run(monkeypatch):
     editor = ContainerAiderEditor()
-    payload = json.dumps({"success": True, "branch": "apdl/x", "diff_stat": {"files": 1}})
+    preflight = json.dumps(
+        {
+            "success": True,
+            "attestation": _req().repository_preflight.model_dump(mode="json"),
+        }
+    )
+    payload = json.dumps(
+        {"success": True, "branch": "apdl/x", "diff_stat": {"files": 1}}
+    )
     container_names: list[str] = []
+    launches: list[tuple[list[str], dict[str, str], bytes]] = []
 
-    async def fake_run(_argv, _env, *, container_name):
+    async def fake_run(_argv, _env, *, container_name, stdin_data):
         container_names.append(container_name)
+        launches.append((_argv, _env, stdin_data))
         assert ["--name", container_name] == _argv[
             _argv.index("--name") : _argv.index("--name") + 2
         ]
+        if "app.inspection.preflight_cli" in _argv:
+            return 0, f"log line\n{preflight}\n", ""
         return 0, f"log line\n{payload}\n", "stderr noise"
 
     monkeypatch.setattr(editor, "_run_docker", fake_run)
     res = await editor.implement(_req())
     assert res.success is True
     assert res.diff_stat == {"files": 1}
-    assert len(container_names) == 1
-    assert container_names[0].startswith("apdl-codegen-")
+    assert len(container_names) == 2
+    assert container_names[0].startswith("apdl-codegen-inspect-")
+    assert container_names[1].startswith("apdl-codegen-edit-")
+    assert container_names[0] != container_names[1]
+    assert json.loads(launches[0][2]) == {"read_token": "ghs_secrettoken"}
+    assert json.loads(launches[1][2]) == {"read_token": "ghs_secrettoken"}
+    assert "GH_TOKEN" not in launches[0][1]
+    assert "GH_TOKEN" not in launches[1][1]
+
+
+@pytest.mark.asyncio
+async def test_failed_preflight_never_launches_provider_container(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret")
+    editor = ContainerAiderEditor()
+    launches: list[list[str]] = []
+
+    async def fake_run(argv, _env, *, container_name, stdin_data):
+        launches.append(argv)
+        return (
+            1,
+            json.dumps(
+                {
+                    "success": False,
+                    "error": "repository preflight refused: InspectionPathError",
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(editor, "_run_docker", fake_run)
+
+    result = await editor.implement(_req())
+
+    assert result.success is False
+    assert "repository preflight failed" in (result.error or "")
+    assert len(launches) == 1
+    assert "app.inspection.preflight_cli" in launches[0]
+    assert "ANTHROPIC_API_KEY" not in launches[0]

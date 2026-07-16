@@ -33,6 +33,7 @@ from app.contracts.models import (
     ContractInstallResult,
     ContractResolution,
 )
+from app.egress import inherited_proxy_environment
 
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -100,6 +101,7 @@ def sanitized_environment(
         "PIP_CONFIG_FILE": os.devnull,
         "PYTHONNOUSERSITE": "1",
     }
+    environment.update(inherited_proxy_environment())
     for name, value in (extra or {}).items():
         if _secret_name(name):
             raise ValueError(f"Refusing secret-like environment field: {name}")

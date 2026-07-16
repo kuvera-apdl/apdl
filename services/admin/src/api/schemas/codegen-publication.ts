@@ -13,12 +13,13 @@ export const rolloutStageSchema = z.enum([
 
 export const publicationRequestSchema = z
   .object({
-    schema_version: z.literal('publication_request@2'),
+    schema_version: z.literal('publication_request@3'),
     requested_stage: rolloutStageSchema,
     risk: codegenRiskLevelSchema,
     model: z.string().min(1),
     codegen_revision: z.string().min(1),
     candidate_identity_sha256: sha256Schema,
+    egress_policy_sha256: sha256Schema,
     canary_identity: z.string().min(1).max(500).nullable(),
   })
   .strict()
@@ -135,11 +136,12 @@ export const rolloutDecisionSchema = z
 
 const evaluatedPublicationAuthorizationSchema = z
   .object({
-    schema_version: z.literal('publication_authorization@3'),
+    schema_version: z.literal('publication_authorization@4'),
     request: publicationRequestSchema,
     expected_model: z.string().min(1),
     expected_codegen_revision: z.string().min(1),
     expected_candidate_identity_sha256: sha256Schema,
+    expected_egress_policy_sha256: sha256Schema,
     report_sha256: sha256Schema,
     segmented_report_sha256: sha256Schema,
     bundle_sha256: sha256Schema,
@@ -168,6 +170,15 @@ const evaluatedPublicationAuthorizationSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'publication request candidate identity does not match expected identity',
+      })
+    }
+    if (
+      authorization.request.egress_policy_sha256 !==
+      authorization.expected_egress_policy_sha256
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'publication request egress policy does not match expected policy',
       })
     }
     if (authorization.decision.requested_stage !== authorization.request.requested_stage) {

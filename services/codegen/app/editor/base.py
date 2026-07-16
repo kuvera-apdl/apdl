@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
@@ -58,6 +59,10 @@ class EditRequest:
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
     runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
+    #: Exact symlink-free source tree approved by the separate credential-free
+    #: inspection container. Production sandbox execution requires this before
+    #: any repository-derived text can reach a model.
+    repository_preflight: RepositoryPreflightAttestation | None = None
     runtime_acceptance_policy: RuntimeAcceptancePolicy = field(
         default_factory=RuntimeAcceptancePolicy
     )

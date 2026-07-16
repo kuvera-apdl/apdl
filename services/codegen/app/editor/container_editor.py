@@ -4,10 +4,11 @@ Where :class:`~app.editor.aider_editor.AiderEditor` runs Aider inside the
 codegen API process, ``ContainerAiderEditor``
 launches an ephemeral container from the hardened sandbox image
 (``Dockerfile.worker``) and runs clone → Aider → gate there —
-one container per changeset. The untrusted repo code therefore never executes in
+after a separate provider-free inspection container attests the exact source
+tree. The untrusted repo code therefore never executes in
 the API container that holds the GitHub App key, the Postgres DSN, and the
-internal token. The sandbox receives only a short-lived read installation token
-(kept out of the agent's reach by the reused ``AiderEditor`` token custody) and
+internal token. The read installation token is consumed from stdin rather than
+placed in either container's environment. Only the second container receives
 the model provider key. It returns a binary patch and Git object identities;
 the controller reconstructs and publishes the approved tree with a separate
 just-in-time write credential.
@@ -21,12 +22,13 @@ INTEGRATION-UNTESTED, like the editor it wraps: needs a built sandbox image, a
 Docker socket, a model key, and a live repo. The pure pieces (argv/env assembly,
 result parsing, the never-raise contract) are unit-tested.
 
-Hardening applied here via ``docker run`` flags: ``--rm``, a read-only root,
+Hardening applied here via ``docker run`` flags: ``--rm``, ``--network none``
+for evaluated work, a read-only root,
 writable no-exec tmpfs mounts, ``--cap-drop ALL``, ``--security-opt
-no-new-privileges``, and pids/memory/cpu caps; the image runs non-root. PR
-publication stages additionally require a named network instead of a Docker
-default network. Evaluated stages require the operator to enforce the egress
-policy; local development uses a separate development-only bridge.
+no-new-privileges``, and pids/memory/cpu caps; the image runs non-root.
+Evaluated stages mount only an attested proxy Unix-socket volume read-only and
+start a sealed loopback relay. Local development uses a separate
+development-only bridge.
 """
 
 from __future__ import annotations
@@ -39,13 +41,29 @@ import os
 import re
 import subprocess
 import uuid
+from dataclasses import replace
 
-from app.config import codegen_job_budget
+from app.config import (
+    codegen_controller_image_id,
+    codegen_egress_policy_sha256,
+    codegen_egress_proxy_image_id,
+    codegen_egress_proxy_url,
+    codegen_egress_socket_volume,
+    codegen_job_budget,
+)
 from app.contracts.models import ContractBundle
+from app.egress import (
+    EgressPolicyAttestation,
+    attest_docker_egress_policy,
+    proxy_environment,
+    relay_command,
+    worker_socket_mount,
+)
 from app.editor.base import EditRequest, EditResult
 from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
@@ -100,8 +118,38 @@ class ContainerAiderEditor:
         self._cpus = os.getenv("CODEGEN_SANDBOX_CPUS", "2")
         self._pids = os.getenv("CODEGEN_SANDBOX_PIDS", "512")
         self._network = os.getenv("CODEGEN_SANDBOX_NETWORK", "")  # "" → docker default
-        # The container runs the WHOLE pipeline (clone + retry rounds of
-        # aider + verify + push), so its wall-clock cap is the derived job
+        self._egress_policy_sha256 = codegen_egress_policy_sha256()
+        self._egress_proxy_image_id = codegen_egress_proxy_image_id()
+        self._egress_socket_volume = codegen_egress_socket_volume()
+        self._controller_image_id = codegen_controller_image_id()
+        self._egress_proxy_url = codegen_egress_proxy_url()
+        configured_egress = bool(
+            self._egress_policy_sha256
+            or self._egress_proxy_image_id
+            or self._egress_socket_volume
+            or self._controller_image_id
+        )
+        if configured_egress and not (
+            self._egress_policy_sha256
+            and self._egress_proxy_image_id
+            and self._egress_socket_volume
+            and self._controller_image_id
+        ):
+            raise ValueError(
+                "Codegen egress policy, proxy image, controller image, and socket "
+                "volume must be configured together"
+            )
+        if configured_egress and self._network:
+            raise ValueError(
+                "evaluated workers use Docker --network none; "
+                "CODEGEN_SANDBOX_NETWORK must be empty"
+            )
+        self._proxy_environment = (
+            proxy_environment(self._egress_proxy_url) if configured_egress else {}
+        )
+        self._egress_attestation: EgressPolicyAttestation | None = None
+        # The container runs the worker pipeline (clone + retry rounds of
+        # aider + verify + patch export), so its wall-clock cap is the derived job
         # budget — capping at the bare agent timeout kills legitimate retries.
         self._timeout = codegen_job_budget()
 
@@ -110,6 +158,7 @@ class ContainerAiderEditor:
         *,
         expected_revision: str,
         require_immutable_image: bool = True,
+        require_egress_policy: bool = True,
     ) -> None:
         """Fail PR-stage startup unless Docker, image, and network are real.
 
@@ -121,8 +170,6 @@ class ContainerAiderEditor:
         """
         if not expected_revision or expected_revision == "development-unversioned":
             raise RuntimeError("PR rollout requires an immutable CODEGEN_REVISION")
-        if self._network in {"", "bridge", "default", "host", "none"}:
-            raise RuntimeError("PR rollout requires a non-built-in sandbox network")
         if require_immutable_image and not re.search(
             r"(?:@|^)sha256:[0-9a-f]{64}$", self._image
         ):
@@ -156,17 +203,89 @@ class ContainerAiderEditor:
             raise RuntimeError(
                 "Codegen sandbox image revision does not match CODEGEN_REVISION"
             )
-        inspect("network", "inspect", self._network)
+        if require_egress_policy:
+            if not (
+                self._egress_policy_sha256
+                and self._egress_proxy_image_id
+                and self._egress_socket_volume
+                and self._controller_image_id
+            ):
+                raise RuntimeError(
+                    "evaluated PR rollout requires an attested Codegen egress policy"
+                )
+            self._egress_attestation = self._attest_egress_policy(
+                launch_id="codegen-runtime-startup"
+            )
+        else:
+            if self._network in {"", "bridge", "default", "host", "none"}:
+                raise RuntimeError(
+                    "development PR rollout requires a non-built-in sandbox network"
+                )
+            inspect("network", "inspect", self._network)
+
+    @property
+    def egress_attestation(self) -> EgressPolicyAttestation | None:
+        return self._egress_attestation
+
+    def _attest_egress_policy(self, *, launch_id: str) -> EgressPolicyAttestation:
+        if not (
+            self._egress_policy_sha256
+            and self._egress_proxy_image_id
+            and self._egress_socket_volume
+            and self._controller_image_id
+        ):
+            raise RuntimeError(
+                "evaluated worker launch requires an attested Codegen egress policy"
+            )
+        return attest_docker_egress_policy(
+            docker_bin=self._docker,
+            probe_image=self._controller_image_id,
+            launch_id=launch_id,
+            socket_volume=self._egress_socket_volume,
+            expected_policy_sha256=self._egress_policy_sha256,
+            expected_proxy_image_id=self._egress_proxy_image_id,
+            proxy_url=self._egress_proxy_url,
+            environment=self._docker_control_env(),
+        )
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
-            container_name = f"apdl-codegen-{uuid.uuid4().hex}"
+            run_id = uuid.uuid4().hex
+            inspection_name = f"apdl-codegen-inspect-{run_id}"
+            if self._proxy_environment:
+                # Re-check immediately before both workers. A relay attached or
+                # topology mutated after service startup must fail this job closed.
+                self._egress_attestation = await asyncio.to_thread(
+                    self._attest_egress_policy,
+                    launch_id=inspection_name,
+                )
             rc, out, err = await self._run_docker(
-                self._docker_argv(request, container_name=container_name),
-                self._docker_env(request),
-                container_name=container_name,
+                self._preflight_argv(request, container_name=inspection_name),
+                self._docker_control_env(),
+                container_name=inspection_name,
+                stdin_data=self._credential_envelope(request.token),
             )
-            return self._parse_result(rc, out, err, request)
+            attestation = self._parse_preflight_result(rc, out, err, request)
+            editor_request = replace(
+                request,
+                repository_preflight=attestation,
+            )
+            container_name = f"apdl-codegen-edit-{run_id}"
+            if self._proxy_environment:
+                # The inspection container may run long enough for the network
+                # to change. Re-attest after it exits and immediately before
+                # the model-bearing editor is launched.
+                self._egress_attestation = await asyncio.to_thread(
+                    self._attest_egress_policy,
+                    launch_id=container_name,
+                )
+            rc, out, err = await self._run_docker(
+                self._docker_argv(editor_request, container_name=container_name),
+                self._docker_env(editor_request),
+                container_name=container_name,
+                stdin_data=self._credential_envelope(request.token),
+            )
+            return self._parse_result(rc, out, err, editor_request)
         except Exception as exc:  # an attempt must never raise to the job runner
             logger.exception("Sandboxed edit failed for %s", request.repo)
             return EditResult(success=False, branch=request.branch, error=str(exc))
@@ -181,23 +300,10 @@ class ContainerAiderEditor:
         *,
         container_name: str | None = None,
     ) -> list[str]:
-        """Assemble the ``docker run`` command. Secrets are passed by name only."""
-        argv = [
-            self._docker, "run", "--rm",
-            "--read-only",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", str(self._pids),
-            "--memory", str(self._memory),
-            "--cpus", str(self._cpus),
-            "--tmpfs", "/workspace:rw,nosuid,nodev,noexec,size=4g,uid=1000,gid=1000",
-            "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
-            "--user", "1000:1000",
-        ]
-        if container_name is not None:
-            argv += ["--name", container_name]
-        if self._network:
-            argv += ["--network", self._network]
+        """Assemble the model-bearing editor command after source attestation."""
+        if request.repository_preflight is None:
+            raise ValueError("sandbox editor requires repository preflight evidence")
+        argv = self._sandbox_argv(container_name=container_name, role="editor")
         # Non-secret task inputs — safe to pass as values.
         argv += [
             "-e", f"CS_REPO={request.repo}",
@@ -211,7 +317,12 @@ class ContainerAiderEditor:
             "-e", f"CODEGEN_MODEL={self._model}",
             "-e", "HOME=/workspace/home",
             "-e", "TMPDIR=/workspace/tmp",
+            "-e",
+            "CS_REPOSITORY_PREFLIGHT="
+            + request.repository_preflight.model_dump_json(),
         ]
+        for name, value in self._proxy_environment.items():
+            argv += ["-e", f"{name}={value}"]
         if request.test_cmd:
             argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
         argv += [
@@ -247,20 +358,106 @@ class ContainerAiderEditor:
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
-        # Secrets by NAME only → docker reads the value from our env, never argv.
-        argv += ["-e", "GH_TOKEN"]
+        # Provider secrets are forwarded by NAME only. Repository authority is
+        # absent from argv and environ and is consumed from stdin instead.
         for key in self._present_secret_keys():
             argv += ["-e", key]
-        argv.append(self._image)
+        if self._proxy_environment:
+            argv += [
+                "--entrypoint",
+                "python",
+                self._image,
+                *relay_command(["python", "/app/run_changeset.py"]),
+            ]
+        else:
+            argv.append(self._image)
+        return argv
+
+    def _sandbox_argv(
+        self,
+        *,
+        container_name: str | None,
+        role: str,
+    ) -> list[str]:
+        """Common hardening for isolated inspection and editor containers."""
+        argv = [
+            self._docker,
+            "run",
+            "--rm",
+            "-i",
+            "--pid",
+            "private",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            str(self._pids),
+            "--memory",
+            str(self._memory),
+            "--cpus",
+            str(self._cpus),
+            "--tmpfs",
+            "/workspace:rw,nosuid,nodev,noexec,size=4g,uid=1000,gid=1000",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
+            "--user",
+            "1000:1000",
+            "--label",
+            f"dev.apdl.codegen.role={role}",
+        ]
+        if container_name is not None:
+            argv += ["--name", container_name]
+        if self._proxy_environment:
+            argv += [
+                "--network",
+                "none",
+                "--mount",
+                worker_socket_mount(self._egress_socket_volume),
+            ]
+        elif self._network:
+            argv += ["--network", self._network]
+        return argv
+
+    def _preflight_argv(
+        self,
+        request: EditRequest,
+        *,
+        container_name: str | None = None,
+    ) -> list[str]:
+        """Build the provider-free repository-inspection container command."""
+        source_branch = request.branch if request.existing_branch else request.base_branch
+        argv = self._sandbox_argv(container_name=container_name, role="inspection")
+        argv += [
+            "-e",
+            f"CS_REPO={request.repo}",
+            "-e",
+            f"CS_SOURCE_BRANCH={source_branch}",
+            "-e",
+            "HOME=/workspace/home",
+            "-e",
+            "TMPDIR=/workspace/tmp",
+        ]
+        for name, value in self._proxy_environment.items():
+            argv += ["-e", f"{name}={value}"]
+        argv += ["--entrypoint", "python", self._image]
+        if self._proxy_environment:
+            argv += relay_command(["python", "-m", "app.inspection.preflight_cli"])
+        else:
+            argv += ["-m", "app.inspection.preflight_cli"]
         return argv
 
     def _docker_env(self, request: EditRequest) -> dict[str, str]:
-        """The environment for the ``docker`` client process (carries the secrets)."""
+        """Docker client environment carrying provider keys, never Git authority."""
         env = self._docker_control_env()
-        env["GH_TOKEN"] = request.token
         for key in self._present_secret_keys():
             env[key] = os.environ[key]
         return env
+
+    @staticmethod
+    def _credential_envelope(token: str) -> bytes:
+        return (json.dumps({"read_token": token}) + "\n").encode()
 
     @staticmethod
     def _docker_control_env() -> dict[str, str]:
@@ -354,33 +551,169 @@ class ContainerAiderEditor:
             error=f"sandbox produced no result (exit {rc}): {tail}",
         )
 
+    def _parse_preflight_result(
+        self,
+        rc: int,
+        stdout: str,
+        stderr: str,
+        request: EditRequest,
+    ) -> RepositoryPreflightAttestation:
+        """Validate the first container's metadata-only inspection result."""
+        data = _last_json(stdout)
+        if rc != 0 or data is None or data.get("success") is not True:
+            if isinstance(data, dict) and isinstance(data.get("error"), str):
+                detail = data["error"]
+            else:
+                detail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
+            raise RuntimeError(f"repository preflight failed: {detail}")
+        attestation = RepositoryPreflightAttestation.model_validate(
+            data.get("attestation")
+        )
+        source_branch = request.branch if request.existing_branch else request.base_branch
+        if (
+            attestation.repository != request.repo
+            or attestation.source_branch != source_branch
+        ):
+            raise RuntimeError("repository preflight identity mismatch")
+        return attestation
+
     async def _run_docker(
         self,
         argv: list[str],
         env: dict[str, str],
         *,
         container_name: str,
+        stdin_data: bytes | None = None,
     ) -> tuple[int, str, str]:
         """Run ``docker run`` keeping stdout (the JSON result) and stderr separate."""
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        spawn_task = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                *argv,
+                env=env,
+                stdin=(
+                    asyncio.subprocess.PIPE
+                    if stdin_data is not None
+                    else asyncio.subprocess.DEVNULL
+                ),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
         )
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            proc = await asyncio.shield(spawn_task)
+        except asyncio.CancelledError:
+            # The subprocess creation coroutine may have crossed into Docker
+            # before cancellation was delivered. Wait for that race to settle,
+            # then reap the client and verify the deterministic name is absent.
+            try:
+                await self._finish_spawn_cleanup_uninterruptibly(
+                    container_name,
+                    spawn_task,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Sandbox spawn cleanup failed while cancellation was "
+                    "pending for %s",
+                    container_name,
+                )
+            raise
+        try:
+            communication = (
+                proc.communicate(stdin_data)
+                if stdin_data is not None
+                else proc.communicate()
+            )
+            out, err = await asyncio.wait_for(communication, timeout=self._timeout)
         except asyncio.TimeoutError:
-            await self._stop_container_and_client(container_name, proc)
+            await self._finish_cleanup_uninterruptibly(container_name, proc)
             return 124, "", f"sandbox timed out after {self._timeout}s"
         except asyncio.CancelledError:
-            await self._stop_container_and_client(container_name, proc)
+            # Cancellation is preserved, but cleanup is a bounded security
+            # obligation. Repeated cancellation must not interrupt docker rm -f.
+            try:
+                await self._finish_cleanup_uninterruptibly(container_name, proc)
+            except Exception:
+                logger.exception(
+                    "Sandbox cleanup failed while cancellation was pending for %s",
+                    container_name,
+                )
             raise
-        return (
+        except Exception:
+            await self._finish_cleanup_uninterruptibly(container_name, proc)
+            raise
+        result = (
             proc.returncode or 0,
             (out or b"").decode("utf-8", "replace"),
             (err or b"").decode("utf-8", "replace"),
         )
+        # `docker run --rm` is not sufficient evidence of cleanup: the client
+        # can lose its daemon stream and exit while the named container keeps
+        # running. Reap first, then force-remove and verify absence on every
+        # completed path before returning the captured result.
+        await self._finish_cleanup_uninterruptibly(container_name, proc)
+        return result
+
+    async def _finish_spawn_cleanup_uninterruptibly(
+        self,
+        container_name: str,
+        spawn_task: asyncio.Task[asyncio.subprocess.Process],
+    ) -> None:
+        """Settle a cancelled Docker spawn and verify its named container absent."""
+
+        async def cleanup() -> None:
+            try:
+                client_process = await spawn_task
+            except (asyncio.CancelledError, Exception):
+                # Even an unsuccessful client spawn can be ambiguous at the
+                # daemon boundary, so absence of the reserved name is checked.
+                await self._verified_remove_container(container_name)
+                return
+            await self._stop_container_and_client(
+                container_name,
+                client_process,
+            )
+
+        cleanup_task = asyncio.create_task(
+            asyncio.wait_for(cleanup(), timeout=45)
+        )
+        cancellation_interrupted_cleanup = False
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                cancellation_interrupted_cleanup = True
+                continue
+        await cleanup_task
+        if cancellation_interrupted_cleanup:
+            raise asyncio.CancelledError
+
+    async def _finish_cleanup_uninterruptibly(
+        self,
+        container_name: str,
+        client_process: asyncio.subprocess.Process,
+    ) -> None:
+        """Complete bounded cleanup even if this task is cancelled repeatedly."""
+        cleanup = asyncio.create_task(
+            asyncio.wait_for(
+                self._stop_container_and_client(container_name, client_process),
+                timeout=45,
+            )
+        )
+        cancellation_interrupted_cleanup = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # The caller's original cancellation is re-raised after this
+                # helper returns. Suppress only repeated interrupts while the
+                # independently scheduled cleanup task finishes.
+                cancellation_interrupted_cleanup = True
+                continue
+        await cleanup
+        if cancellation_interrupted_cleanup:
+            raise asyncio.CancelledError
 
     async def _stop_container_and_client(
         self,
@@ -402,6 +735,10 @@ class ContainerAiderEditor:
                 await client_process.wait()
 
         # With the creator reaped, this final remove cannot race a later start.
+        await self._verified_remove_container(container_name)
+
+    async def _verified_remove_container(self, container_name: str) -> None:
+        """Force-remove a named sandbox and prove that it is absent."""
         # Retry once and distinguish an already-absent container from a daemon
         # failure. Never claim cleanup succeeded while a provider-key-bearing
         # sandbox is still running.

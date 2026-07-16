@@ -12,12 +12,11 @@ Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
 on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
-Token custody: a short-lived read-only installation token arrives as
-``GH_TOKEN``. We read it into the in-memory request and immediately drop it from
-``os.environ`` so it is not inherited by the Aider child process.
-``AiderEditor`` uses it only for the one-shot clone header. The worker never
-receives repository write authority; the sandbox also never receives the GitHub
-App private key, Postgres DSN, or internal token.
+Token custody: a short-lived read-only installation token arrives through a
+single JSON line on stdin, never process environment. We consume that pipe
+before cloning; ``AiderEditor`` uses the token only for the one-shot clone
+header. The worker never receives repository write authority; the sandbox also
+never receives the GitHub App private key, Postgres DSN, or internal token.
 """
 
 from __future__ import annotations
@@ -31,12 +30,26 @@ import sys
 
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import EditRequest, EditResult
+from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.policy import EffectiveCodegenSafetyPolicy
 
 
-def _request_from_env() -> EditRequest:
+def _read_token() -> str:
+    try:
+        payload = json.loads(sys.stdin.readline())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError("missing repository read credential") from exc
+    if not isinstance(payload, dict) or set(payload) != {"read_token"}:
+        raise ValueError("invalid repository read credential envelope")
+    token = payload["read_token"]
+    if not isinstance(token, str) or not token:
+        raise ValueError("missing repository read credential")
+    return token
+
+
+def _request_from_env(token: str) -> EditRequest:
     """Build the EditRequest from the env the orchestrator passed via ``docker -e``."""
     safety_policy = EffectiveCodegenSafetyPolicy.model_validate_json(
         os.environ["CS_SAFETY_POLICY"]
@@ -49,7 +62,7 @@ def _request_from_env() -> EditRequest:
         project_scope=os.environ.get("CS_PROJECT_SCOPE", os.environ["CS_REPO"]),
         base_branch=os.environ["CS_BASE"],
         branch=os.environ["CS_BRANCH"],
-        token=os.environ.get("GH_TOKEN", ""),
+        token=token,
         title=os.environ.get("CS_TITLE", ""),
         spec=os.environ["CS_SPEC"],
         constraints=json.loads(os.environ.get("CS_CONSTRAINTS", "[]")),
@@ -71,19 +84,20 @@ def _request_from_env() -> EditRequest:
             if os.environ.get("CS_RUNTIME_ACCEPTANCE_PLAN")
             else None
         ),
+        repository_preflight=RepositoryPreflightAttestation.model_validate_json(
+            os.environ["CS_REPOSITORY_PREFLIGHT"]
+        ),
         runtime_acceptance_policy=RuntimeAcceptancePolicy.model_validate_json(
             os.environ.get("CS_RUNTIME_ACCEPTANCE_POLICY", "{}")
         ),
     )
-    # The token now lives only in `request`; keep it out of every child's view.
-    os.environ.pop("GH_TOKEN", None)
     return request
 
 
 def main() -> int:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stderr)
     try:
-        request = _request_from_env()
+        request = _request_from_env(_read_token())
     except (KeyError, ValueError) as exc:
         print(json.dumps({"success": False, "error": f"invalid sandbox input: {exc}"}))
         return 1

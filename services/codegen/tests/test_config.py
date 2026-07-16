@@ -317,6 +317,8 @@ def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
 def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch):
     controller = "sha256:" + "a" * 64
     candidate = "sha256:" + "b" * 64
+    proxy = "sha256:" + "c" * 64
+    egress_policy = "d" * 64
     captured: dict[str, str] = {}
     provider = object()
 
@@ -331,6 +333,10 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", controller)
     monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", candidate)
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", egress_policy)
+    monkeypatch.setenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", proxy)
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "apdl-reviewed-egress")
+    monkeypatch.setenv("CODEGEN_MAX_CONCURRENT_JOBS", "1")
     monkeypatch.setattr("app.main.load_publication_authorizer", fake_loader)
 
     gate = _make_publication_gate()
@@ -339,15 +345,20 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
         candidate_image_id=candidate,
         codegen_revision="evaluated-revision",
         behavior_configuration_sha256=codegen_behavior_configuration_sha256(),
+        egress_policy_sha256=egress_policy,
+        egress_proxy_image_id=proxy,
+        reviewed_max_concurrent_jobs=1,
     )
 
     assert captured == {
         "expected_model": "test-model@1",
         "expected_codegen_revision": "evaluated-revision",
         "expected_candidate_identity_sha256": identity.identity_sha256,
+        "expected_egress_policy_sha256": egress_policy,
     }
     assert gate.provider is provider
     assert gate.candidate_identity_sha256 == identity.identity_sha256
+    assert gate.egress_policy_sha256 == egress_policy
 
 
 def test_publication_gate_rejects_mutable_image_identity(monkeypatch):
@@ -356,8 +367,27 @@ def test_publication_gate_rejects_mutable_image_identity(monkeypatch):
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", "controller:latest")
     monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", "candidate:latest")
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "d" * 64)
+    monkeypatch.setenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", "sha256:" + "e" * 64)
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "apdl-reviewed-egress")
+    monkeypatch.setenv("CODEGEN_MAX_CONCURRENT_JOBS", "1")
 
-    with pytest.raises(ValueError, match="validation errors"):
+    with pytest.raises(ValueError, match="immutable sha256"):
+        _make_publication_gate()
+
+
+def test_publication_gate_rejects_reviewed_concurrency_above_one(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
+    monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
+    monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", "sha256:" + "a" * 64)
+    monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", "sha256:" + "b" * 64)
+    monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "d" * 64)
+    monkeypatch.setenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", "sha256:" + "e" * 64)
+    monkeypatch.setenv("CODEGEN_EGRESS_SOCKET_VOLUME", "apdl-reviewed-egress")
+    monkeypatch.setenv("CODEGEN_MAX_CONCURRENT_JOBS", "2")
+
+    with pytest.raises(RuntimeError, match="MAX_CONCURRENT_JOBS=1"):
         _make_publication_gate()
 
 
@@ -367,19 +397,19 @@ def test_editor_defaults_to_isolated_container(monkeypatch):
     assert isinstance(editor, ContainerAiderEditor)
 
 
-def test_pr_stage_requires_named_filtered_sandbox_network(monkeypatch):
+def test_evaluated_pr_stage_requires_network_none_workers(monkeypatch):
     monkeypatch.setenv("CODEGEN_SANDBOX", "docker")
     monkeypatch.setattr(
         ContainerAiderEditor,
         "assert_runtime_ready",
         lambda self, *, expected_revision: None,
     )
-    for network in ("", "bridge", "default", "host", "none"):
+    for network in ("bridge", "default", "host", "none", "custom"):
         monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
         with pytest.raises(RuntimeError, match="SANDBOX_NETWORK"):
             _make_editor(RolloutStage.reviewed_pr)
 
-    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-egress-filtered")
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "")
     assert isinstance(
         _make_editor(RolloutStage.reviewed_pr), ContainerAiderEditor
     )
@@ -393,10 +423,12 @@ def test_development_pr_preflights_mutable_local_worker(monkeypatch):
         *,
         expected_revision: str,
         require_immutable_image: bool = True,
+        require_egress_policy: bool = True,
     ) -> None:
         observed.update(
             expected_revision=expected_revision,
             require_immutable_image=require_immutable_image,
+            require_egress_policy=require_egress_policy,
         )
 
     monkeypatch.setenv("CODEGEN_SANDBOX", "docker")
@@ -410,6 +442,7 @@ def test_development_pr_preflights_mutable_local_worker(monkeypatch):
     assert observed == {
         "expected_revision": DEVELOPMENT_CODEGEN_REVISION,
         "require_immutable_image": False,
+        "require_egress_policy": False,
     }
 
 

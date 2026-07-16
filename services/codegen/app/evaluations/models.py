@@ -335,7 +335,7 @@ class OutcomeStatus(str, Enum):
 
 
 class EvaluationOutcome(StrictModel):
-    schema_version: Literal["evaluation_outcome@2"] = "evaluation_outcome@2"
+    schema_version: Literal["evaluation_outcome@3"] = "evaluation_outcome@3"
     case_id: CaseId
     status: OutcomeStatus
     detections: list[DetectionObservation] = Field(default_factory=list)
@@ -343,6 +343,7 @@ class EvaluationOutcome(StrictModel):
     measurements: OutcomeMeasurements
     harness: HarnessObservation | None
     oracle_case_sha256: Sha256
+    egress_attestation_sha256: Sha256 | None = None
     unavailable_reason: str | None = Field(default=None, min_length=1)
     notes: list[EvaluationNote] = Field(default_factory=list, max_length=51)
 
@@ -371,15 +372,19 @@ class EvaluationOutcome(StrictModel):
 
 
 class CodegenCandidateIdentity(StrictModel):
-    """Content identity of the controller, candidate, and effective behavior."""
+    """Content identity of code, behavior, and enforced worker egress."""
 
-    schema_version: Literal["codegen_candidate_identity@1"] = (
-        "codegen_candidate_identity@1"
+    schema_version: Literal["codegen_candidate_identity@3"] = (
+        "codegen_candidate_identity@3"
     )
     controller_image_id: DockerImageId
     candidate_image_id: DockerImageId
     codegen_revision: str = Field(min_length=1)
     behavior_configuration_sha256: Sha256
+    egress_policy_sha256: Sha256
+    egress_proxy_image_id: DockerImageId
+    egress_transport: Literal["network_none_unix_socket@1"]
+    reviewed_max_concurrent_jobs: Literal[1]
     identity_sha256: Sha256
 
     @classmethod
@@ -390,13 +395,20 @@ class CodegenCandidateIdentity(StrictModel):
         candidate_image_id: str,
         codegen_revision: str,
         behavior_configuration_sha256: str,
+        egress_policy_sha256: str,
+        egress_proxy_image_id: str,
+        reviewed_max_concurrent_jobs: int,
     ) -> CodegenCandidateIdentity:
         payload = {
-            "schema_version": "codegen_candidate_identity@1",
+            "schema_version": "codegen_candidate_identity@3",
             "controller_image_id": controller_image_id,
             "candidate_image_id": candidate_image_id,
             "codegen_revision": codegen_revision,
             "behavior_configuration_sha256": behavior_configuration_sha256,
+            "egress_policy_sha256": egress_policy_sha256,
+            "egress_proxy_image_id": egress_proxy_image_id,
+            "egress_transport": "network_none_unix_socket@1",
+            "reviewed_max_concurrent_jobs": reviewed_max_concurrent_jobs,
         }
         return cls.model_validate(
             {**payload, "identity_sha256": canonical_sha256(payload)}
@@ -415,7 +427,7 @@ class CodegenCandidateIdentity(StrictModel):
 
 
 class EvaluationRun(StrictModel):
-    schema_version: Literal["evaluation_run@3"] = "evaluation_run@3"
+    schema_version: Literal["evaluation_run@5"] = "evaluation_run@5"
     run_id: str = Field(min_length=1)
     corpus_id: str = Field(min_length=1)
     corpus_sha256: Sha256
@@ -454,6 +466,18 @@ class EvaluationRun(StrictModel):
                 and outcome.harness.fixture_sha256 != fixture_sha
             ):
                 raise ValueError("harness fixture digest does not match run provenance")
+            if self.candidate_identity is None:
+                if outcome.egress_attestation_sha256 is not None:
+                    raise ValueError(
+                        "custom evaluation outcomes cannot claim Docker egress evidence"
+                    )
+            elif (
+                outcome.status is not OutcomeStatus.unavailable
+                and outcome.egress_attestation_sha256 is None
+            ):
+                raise ValueError(
+                    "measured Docker outcomes require trusted egress attestation"
+                )
         return self
 
     def evidence_sha256(self) -> str:
@@ -606,7 +630,7 @@ class EvaluationSummary(StrictModel):
 
 
 class EvaluationReport(StrictModel):
-    schema_version: Literal["evaluation_report@2"] = "evaluation_report@2"
+    schema_version: Literal["evaluation_report@4"] = "evaluation_report@4"
     run: EvaluationRun
     summary: EvaluationSummary
     report_sha256: Sha256

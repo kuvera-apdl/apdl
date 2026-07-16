@@ -27,7 +27,11 @@ from app.config import (
     codegen_controller_image_id,
     codegen_cors_origins,
     codegen_development_mode,
+    codegen_egress_policy_sha256,
+    codegen_egress_proxy_image_id,
+    codegen_egress_socket_volume,
     codegen_job_budget,
+    codegen_max_concurrent_jobs,
     codegen_model,
     codegen_revision,
     codegen_rollout_authorization_path,
@@ -95,17 +99,23 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
                 "development_pr requires CODEGEN_SANDBOX_NETWORK to name a "
                 "dedicated local sandbox network"
             )
-        if publication_stage and invalid_network:
+        if (
+            resolved_stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}
+            and network
+        ):
             raise RuntimeError(
-                "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
-                "operator-managed egress-filtered network"
+                "evaluated PR rollout stages use Docker --network none; "
+                "CODEGEN_SANDBOX_NETWORK must be empty"
             )
-        logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
+        logger.info(
+            "Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)"
+        )
         editor = ContainerAiderEditor()
         if resolved_stage is RolloutStage.development_pr:
             editor.assert_runtime_ready(
                 expected_revision=codegen_revision(),
                 require_immutable_image=False,
+                require_egress_policy=False,
             )
         elif publication_stage:
             editor.assert_runtime_ready(expected_revision=codegen_revision())
@@ -129,6 +139,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
     development_mode = codegen_development_mode()
     provider = None
     candidate_identity = None
+    egress_policy_sha256 = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
         raw_path = codegen_rollout_authorization_path()
         if not raw_path:
@@ -140,25 +151,44 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             raise RuntimeError(
                 "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
             )
+        egress_policy_sha256 = codegen_egress_policy_sha256()
+        if not egress_policy_sha256:
+            raise RuntimeError(
+                "CODEGEN_EGRESS_POLICY_SHA256 is required for PR rollout stages"
+            )
+        egress_proxy_image_id = codegen_egress_proxy_image_id()
+        if not egress_proxy_image_id:
+            raise RuntimeError(
+                "CODEGEN_EGRESS_PROXY_IMAGE_ID is required for PR rollout stages"
+            )
+        if not codegen_egress_socket_volume():
+            raise RuntimeError(
+                "CODEGEN_EGRESS_SOCKET_VOLUME is required for PR rollout stages"
+            )
+        reviewed_max_concurrent_jobs = codegen_max_concurrent_jobs()
+        if reviewed_max_concurrent_jobs != 1:
+            raise RuntimeError(
+                "evaluated PR rollout stages require CODEGEN_MAX_CONCURRENT_JOBS=1"
+            )
         candidate_identity = CodegenCandidateIdentity.build(
             controller_image_id=codegen_controller_image_id(),
             candidate_image_id=codegen_sandbox_image(),
             codegen_revision=revision,
-            behavior_configuration_sha256=(
-                codegen_behavior_configuration_sha256()
-            ),
+            behavior_configuration_sha256=(codegen_behavior_configuration_sha256()),
+            egress_policy_sha256=egress_policy_sha256,
+            egress_proxy_image_id=egress_proxy_image_id,
+            reviewed_max_concurrent_jobs=reviewed_max_concurrent_jobs,
         )
         provider = load_publication_authorizer(
             artifact_path,
             expected_model=model,
             expected_codegen_revision=revision,
             expected_candidate_identity_sha256=candidate_identity.identity_sha256,
+            expected_egress_policy_sha256=egress_policy_sha256,
         )
     elif stage is RolloutStage.development_pr:
         if not development_mode:
-            raise RuntimeError(
-                "development_pr requires CODEGEN_DEVELOPMENT_MODE=true"
-            )
+            raise RuntimeError("development_pr requires CODEGEN_DEVELOPMENT_MODE=true")
         if codegen_rollout_authorization_path():
             raise RuntimeError(
                 "development_pr must not receive an evaluated rollout bundle"
@@ -176,6 +206,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             if candidate_identity is not None
             else None
         ),
+        egress_policy_sha256=egress_policy_sha256,
         provider=provider,
         development_mode=development_mode,
     )
@@ -188,6 +219,9 @@ async def lifespan(application: FastAPI):
     application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
     application.state.codegen_rollout_stage = publication_gate.stage
+    # Attest the exact evaluated worker/proxy topology before opening database
+    # or GitHub-token lifecycle resources.
+    editor = _make_editor(publication_gate.stage)
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
     application.state.pg_pool = pool
     application.state.authenticator = PostgresAuthenticator(pool)
@@ -216,7 +250,6 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
-    editor = _make_editor(publication_gate.stage)
     repair_jobs: set[asyncio.Task] = set()
 
     def _repair_finished(task: asyncio.Task) -> None:

@@ -73,6 +73,7 @@ from app.editor.deadlines import (
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
 from app.editor.prompts import append_prompt, replace_latest_prompt
+from app.egress import EGRESS_PROXY_ENV
 from app.inspection import (
     DependencySlice,
     InspectionPathError,
@@ -234,6 +235,7 @@ _ENV_PASSTHROUGH: tuple[str, ...] = (
     "AZURE_API_KEY",
     "AZURE_API_BASE",
     "AZURE_API_VERSION",
+    *EGRESS_PROXY_ENV,
 )
 
 
@@ -263,7 +265,11 @@ def _agent_env(home: Path) -> dict[str, str]:
 
 def _git_env() -> dict[str, str]:
     """Git environment: no credential prompts, no inherited app/LLM secrets."""
-    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "LANG", *EGRESS_PROXY_ENV)
+        if key in os.environ
+    }
     env.setdefault("PATH", os.defpath)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -782,6 +788,22 @@ class AiderEditor:
             # 1. Production clones with one-shot auth.  Offline/shadow evaluation
             #    instead receives one clean, mutation-materialized checkout and
             #    must never gain a remote repository capability.
+            preflight = request.repository_preflight
+            source_branch = (
+                request.branch if request.existing_branch else request.base_branch
+            )
+            if not workspace_mode and config.codegen_isolated_worker() and preflight is None:
+                return fail(
+                    "Isolated repository editing requires credential-free preflight "
+                    "evidence."
+                )
+            if preflight is not None and (
+                preflight.repository != request.repo
+                or preflight.source_branch != source_branch
+            ):
+                return fail(
+                    "Repository preflight identity does not match the edit request."
+                )
             if workspace_mode:
                 if (
                     request.revert_sha
@@ -823,9 +845,6 @@ class AiderEditor:
             else:
                 # Repairs clone the existing PR branch; initial runs clone base
                 # and cut a new branch exactly as before.
-                clone_branch = (
-                    request.branch if request.existing_branch else request.base_branch
-                )
                 rc, out = await self._git(
                     None,
                     [
@@ -833,7 +852,7 @@ class AiderEditor:
                         "--depth",
                         "1",
                         "--branch",
-                        clone_branch,
+                        source_branch,
                         clone_url,
                         str(repo_dir),
                     ],
@@ -845,6 +864,24 @@ class AiderEditor:
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
             baseline = baseline.strip()
+            if preflight is not None:
+                # Trust-promotion boundary: the provider-bearing process may not
+                # derive any repository prompt/profile input until its checkout is
+                # proven Git-object-for-Git-object to be the symlink-free tree
+                # inspected in the separate credential-free PID namespace. A
+                # branch race therefore exits before `_probe_repo`, brief
+                # construction, contract reads, or any model invocation.
+                if baseline != preflight.head_sha:
+                    return fail(
+                        "Repository source moved after credential-free preflight."
+                    )
+                rc, source_tree = await self._git(
+                    repo_dir, ["rev-parse", "HEAD^{tree}"]
+                )
+                if rc != 0 or source_tree.strip() != preflight.tree_sha:
+                    return fail(
+                        "Repository tree does not match credential-free preflight."
+                    )
             if request.expected_head_sha and baseline != request.expected_head_sha:
                 return fail(
                     "Repair refused because the PR head changed from "

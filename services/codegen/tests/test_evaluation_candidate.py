@@ -6,6 +6,7 @@ They must never require a live model provider, Docker daemon, or GitHub reposito
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -23,13 +24,19 @@ from app.evaluations.models import (
     Ecosystem,
     EvidenceReference,
     EvidenceSource,
+    EvaluationExecution,
+    ExecutionMeasurements,
     HarnessObservation,
     MetricValue,
     RolloutPolicy,
 )
 from app.evaluations.runner import EvaluationInvocation
-from app.evaluations.subprocess_executor import PublicEvaluationInvocation
-from app.evaluations.subprocess_executor import SubprocessEvaluationExecutor
+from app.evaluations.subprocess_executor import (
+    EvaluationExecutorError,
+    PublicEvaluationInvocation,
+    SubprocessEvaluationExecutor,
+    _BoundedBytes,
+)
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 
 
@@ -50,6 +57,17 @@ def _public_invocation() -> PublicEvaluationInvocation:
         invocation_id=_INVOCATION_ID,
         ecosystem=Ecosystem.python,
         task=_task(),
+    )
+
+
+def _successful_execution() -> EvaluationExecution:
+    unavailable = {
+        name: MetricValue(unavailable_reason="not measured")
+        for name in ExecutionMeasurements.model_fields
+    }
+    return EvaluationExecution(
+        invocation_id=_INVOCATION_ID,
+        measurements=ExecutionMeasurements(**unavailable),
     )
 
 
@@ -272,9 +290,14 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     }
     for name, value in source_environment.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("CODEGEN_EVALUATION_NETWORK", "apdl-codegen-egress-filtered")
-
-    executor = DockerEvaluationExecutor(image=_PINNED_IMAGE)
+    executor = DockerEvaluationExecutor(
+        image=_PINNED_IMAGE,
+        proxy_url="http://127.0.0.1:3128",
+        probe_image="sha256:" + "a" * 64,
+        egress_policy_sha256="b" * 64,
+        egress_proxy_image_id="sha256:" + "c" * 64,
+        egress_socket_volume="apdl-codegen-evaluation-egress",
+    )
     argv = executor._docker_argv(
         invocation,
         container_name="apdl-evaluation-contract-test",
@@ -293,7 +316,11 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     assert "--cpus" in argv
     assert "--user" in argv
     assert "--network" in argv
-    assert argv[argv.index("--network") + 1] == "apdl-codegen-egress-filtered"
+    assert argv[argv.index("--network") + 1] == "none"
+    socket_mount = argv[argv.index("--mount", argv.index("--network")) + 1]
+    assert "src=apdl-codegen-evaluation-egress" in socket_mount
+    assert "readonly" in socket_mount
+    assert "relay-exec" in argv
     assert str(workspace.resolve()) in rendered
     assert _PINNED_IMAGE in argv
     assert "OPENAI_API_KEY" in argv
@@ -302,6 +329,8 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     assert "docker.sock" not in rendered
 
     assert environment["OPENAI_API_KEY"] == _PROVIDER_SECRET
+    assert environment["HTTP_PROXY"] == "http://127.0.0.1:3128"
+    assert environment["https_proxy"] == "http://127.0.0.1:3128"
     for forbidden in (
         "GITHUB_TOKEN",
         "GH_TOKEN",
@@ -318,7 +347,313 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
 
 def test_docker_evaluator_requires_an_immutable_image_reference():
     with pytest.raises(ValueError, match="digest|immutable|sha256"):
-        DockerEvaluationExecutor(image="apdl-codegen-evaluator:latest")
+        DockerEvaluationExecutor(
+            image="apdl-codegen-evaluator:latest",
+            probe_image="sha256:" + "a" * 64,
+            egress_policy_sha256="b" * 64,
+            egress_proxy_image_id="sha256:" + "c" * 64,
+            egress_socket_volume="apdl-codegen-evaluation-egress",
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluation_repeated_cancellation_cannot_interrupt_cleanup(
+    monkeypatch,
+):
+    executor = DockerEvaluationExecutor(
+        image=_PINNED_IMAGE,
+        probe_image="sha256:" + "a" * 64,
+        egress_policy_sha256="b" * 64,
+        egress_proxy_image_id="sha256:" + "c" * 64,
+        egress_socket_volume="apdl-codegen-evaluation-egress",
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    container_removed = asyncio.Event()
+
+    async def terminate(_process):
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    async def remove(name):
+        assert name == "apdl-codegen-eval-repeat-cancel"
+        container_removed.set()
+
+    async def completed_reader():
+        return None
+
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor._terminate_process_tree",
+        terminate,
+    )
+    monkeypatch.setattr(executor, "_remove_container", remove)
+    task = asyncio.create_task(
+        executor._finish_cleanup_uninterruptibly(
+            "apdl-codegen-eval-repeat-cancel",
+            object(),
+            asyncio.create_task(completed_reader()),
+            asyncio.create_task(completed_reader()),
+        )
+    )
+    await cleanup_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert container_removed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_cancellation_during_spawn_still_removes_named_candidate(
+    tmp_path: Path,
+    monkeypatch,
+):
+    executor = DockerEvaluationExecutor(
+        image=_PINNED_IMAGE,
+        probe_image="sha256:" + "a" * 64,
+        egress_policy_sha256="b" * 64,
+        egress_proxy_image_id="sha256:" + "c" * 64,
+        egress_socket_volume="apdl-codegen-evaluation-egress",
+    )
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+    removed = asyncio.Event()
+    observed_name = ""
+
+    async def image_ready():
+        return None
+
+    async def attest(_callable, **_kwargs):
+        return object()
+
+    async def spawn(*args, **_kwargs):
+        nonlocal observed_name
+        observed_name = args[args.index("--name") + 1]
+        spawn_started.set()
+        await release_spawn.wait()
+        return object()
+
+    async def terminate(_process):
+        return None
+
+    async def remove(name):
+        assert name == observed_name
+        removed.set()
+
+    monkeypatch.setattr(executor, "_validate_image_revision", image_ready)
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor.asyncio.to_thread",
+        attest,
+    )
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor._terminate_process_tree",
+        terminate,
+    )
+    monkeypatch.setattr(executor, "_remove_container", remove)
+
+    task = asyncio.create_task(
+        executor.execute(
+            EvaluationInvocation(
+                invocation_id=_INVOCATION_ID,
+                ecosystem=Ecosystem.python,
+                task=_task(),
+                workspace=workspace,
+            )
+        )
+    )
+    await spawn_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release_spawn.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert observed_name.startswith("apdl-codegen-eval-")
+    assert removed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("returncode", "cleanup_fails", "expected_error"),
+    [
+        (0, False, None),
+        (125, False, "exited with status 125"),
+        (0, True, "could not verify completed candidate removal"),
+    ],
+)
+async def test_evaluation_completed_client_always_verifies_candidate_removal(
+    tmp_path: Path,
+    monkeypatch,
+    returncode,
+    cleanup_fails,
+    expected_error,
+):
+    executor = DockerEvaluationExecutor(
+        image=_PINNED_IMAGE,
+        probe_image="sha256:" + "a" * 64,
+        egress_policy_sha256="b" * 64,
+        egress_proxy_image_id="sha256:" + "c" * 64,
+        egress_socket_volume="apdl-codegen-evaluation-egress",
+    )
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    stdout_stream = object()
+    stderr_stream = object()
+    result_payload = _successful_execution().model_dump_json().encode()
+    observed_name = ""
+    removals: list[str] = []
+
+    class Input:
+        def __init__(self):
+            self.written = b""
+            self.closed = False
+
+        def write(self, payload):
+            self.written += payload
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    class CompletedProcess:
+        def __init__(self):
+            self.returncode = returncode
+            self.stdin = Input()
+            self.stdout = stdout_stream
+            self.stderr = stderr_stream
+            self.waited = False
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    process = CompletedProcess()
+
+    async def image_ready():
+        return None
+
+    async def attest(_callable, **_kwargs):
+        return object()
+
+    async def spawn(*args, **_kwargs):
+        nonlocal observed_name
+        observed_name = args[args.index("--name") + 1]
+        return process
+
+    async def read_bounded(stream, *, retain_bytes):
+        assert retain_bytes > 0
+        data = result_payload if stream is stdout_stream else b"stream ended"
+        return _BoundedBytes(data=data, total_bytes=len(data))
+
+    async def terminate(observed_process):
+        assert observed_process is process
+        assert process.waited is True
+
+    async def remove(name):
+        removals.append(name)
+        if cleanup_fails:
+            raise EvaluationExecutorError(
+                "could not verify completed candidate removal"
+            )
+
+    monkeypatch.setattr(executor, "_validate_image_revision", image_ready)
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor.asyncio.to_thread",
+        attest,
+    )
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor.asyncio.create_subprocess_exec",
+        spawn,
+    )
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor._read_bounded",
+        read_bounded,
+    )
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor._terminate_process_tree",
+        terminate,
+    )
+    monkeypatch.setattr(executor, "_remove_container", remove)
+
+    invocation = EvaluationInvocation(
+        invocation_id=_INVOCATION_ID,
+        ecosystem=Ecosystem.python,
+        task=_task(),
+        workspace=workspace,
+    )
+    if expected_error is None:
+        result = await executor.execute(invocation)
+        assert result == _successful_execution()
+    else:
+        with pytest.raises(EvaluationExecutorError, match=expected_error):
+            await executor.execute(invocation)
+
+    assert observed_name.startswith("apdl-codegen-eval-")
+    assert removals == [observed_name]
+    assert process.stdin.closed is True
+    assert _INVOCATION_ID.encode() in process.stdin.written
+
+
+@pytest.mark.asyncio
+async def test_evaluation_reattests_immediately_before_every_candidate(
+    tmp_path: Path,
+    monkeypatch,
+):
+    executor = DockerEvaluationExecutor(
+        image=_PINNED_IMAGE,
+        probe_image="sha256:" + "a" * 64,
+        egress_policy_sha256="b" * 64,
+        egress_proxy_image_id="sha256:" + "c" * 64,
+        egress_socket_volume="apdl-codegen-evaluation-egress",
+    )
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    (workspace / ".git").mkdir()
+    launch_ids: list[str] = []
+
+    async def image_ready():
+        return None
+
+    async def attest(_callable, **kwargs):
+        launch_ids.append(kwargs["launch_id"])
+        raise RuntimeError("attestation sentinel")
+
+    monkeypatch.setattr(executor, "_validate_image_revision", image_ready)
+    monkeypatch.setattr(
+        "app.evaluations.docker_executor.asyncio.to_thread",
+        attest,
+    )
+
+    for suffix in ("a", "b"):
+        invocation_id = f"eval_inv_{suffix * 32}"
+        with pytest.raises(RuntimeError, match="attestation sentinel"):
+            await executor.execute(
+                EvaluationInvocation(
+                    invocation_id=invocation_id,
+                    ecosystem=Ecosystem.python,
+                    task=_task(),
+                    workspace=workspace,
+                )
+            )
+
+    assert launch_ids == [
+        "eval_inv_" + "a" * 32,
+        "eval_inv_" + "b" * 32,
+    ]
 
 
 @pytest.mark.asyncio

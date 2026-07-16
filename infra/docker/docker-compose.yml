@@ -280,10 +280,17 @@ services:
       AZURE_API_BASE: ${AZURE_API_BASE:-}
       AZURE_API_VERSION: ${AZURE_API_VERSION:-}
       # The isolated worker is the fail-closed default. PR rollout stages also
-      # require an explicitly named, egress-filtered sandbox network.
+      # use Docker --network none plus an attested proxy Unix socket in the
+      # reviewed rollout overlay.
       CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-docker}
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
       CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:-}
+      # Egress attestation is enabled only by the reviewed rollout overlay.
+      # Clear ambient host values so the normal offline stack cannot claim it.
+      CODEGEN_EGRESS_POLICY_SHA256: ""
+      CODEGEN_EGRESS_PROXY_IMAGE_ID: ""
+      CODEGEN_EGRESS_SOCKET_VOLUME: ""
+      CODEGEN_EGRESS_PROXY_URL: http://127.0.0.1:3128
       CODEGEN_TRUSTED_REPOS_ONLY: ${CODEGEN_TRUSTED_REPOS_ONLY:-false}
       # Max changeset jobs to run at once. Each runs a coding agent + the repo's
       # build/test (CPU/memory heavy), so the default serializes (1); raise only
