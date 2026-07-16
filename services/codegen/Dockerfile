@@ -1,12 +1,31 @@
 FROM python:3.12-slim
 # git: the in-process editor clones/commits with it.
-# docker.io (CLI): only used when CODEGEN_SANDBOX=docker (Option B) to launch the
+# docker CLI: only used when CODEGEN_SANDBOX=docker (Option B) to launch the
 #   per-changeset sandbox container via a mounted Docker socket; unused otherwise.
+#   Install the pinned upstream static client instead of relying on Debian's
+#   docker.io package: on current slim images docker-cli is only a recommended
+#   package, so --no-install-recommends otherwise produces a controller without
+#   the executable container_editor invokes.
 # nodejs (Node 20 LTS via NodeSource, bundles npm): the default in-process editor
 #   runs the customer repo's build/test command here, so JS/TS repos need a Node
 #   toolchain to satisfy detected commands like `npm install && npm run build`.
+ARG TARGETARCH
+ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_SHA256_AMD64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
+ARG DOCKER_CLI_SHA256_ARM64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git docker.io curl ca-certificates gnupg \
+    && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
+    && case "$TARGETARCH" in \
+        amd64) docker_arch=x86_64; docker_sha256="$DOCKER_CLI_SHA256_AMD64" ;; \
+        arm64) docker_arch=aarch64; docker_sha256="$DOCKER_CLI_SHA256_ARM64" ;; \
+        *) echo "Unsupported Docker CLI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSLo /tmp/docker.tgz \
+        "https://download.docker.com/linux/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+    && echo "${docker_sha256}  /tmp/docker.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
+    && rm /tmp/docker.tgz \
+    && docker --version \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
