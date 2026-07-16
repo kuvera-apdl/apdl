@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,10 @@ async def test_get_due_experiments_uses_database_timestamp_comparison():
 
 
 def test_row_to_experiment_includes_canonical_columns():
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    created = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    updated = datetime(2026, 5, 2, tzinfo=timezone.utc)
     row = {
         "key": "checkout",
         "project_id": "apdl",
@@ -172,11 +177,11 @@ def test_row_to_experiment_includes_canonical_columns():
         "primary_metric_json": "{}",
         "statistical_plan": None,
         "traffic_percentage": 100.0,
-        "start_date": "",
-        "end_date": "",
+        "start_date": start,
+        "end_date": end,
         "version": 3,
-        "created_at": "2026-06-01T00:00:00+00:00",
-        "updated_at": "2026-06-01T00:00:00+00:00",
+        "created_at": created,
+        "updated_at": updated,
     }
 
     exp = postgres._row_to_experiment(row)
@@ -187,6 +192,10 @@ def test_row_to_experiment_includes_canonical_columns():
     assert exp["statistical_plan"] is None
     assert exp["traffic_percentage"] == 100.0
     assert exp["version"] == 3
+    assert exp["start_date"] is start
+    assert exp["end_date"] is end
+    assert exp["created_at"] is created
+    assert exp["updated_at"] is updated
 
 
 def test_create_experiments_table_defines_canonical_columns():

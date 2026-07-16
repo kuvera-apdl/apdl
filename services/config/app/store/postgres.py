@@ -68,7 +68,12 @@ def _row_to_flag(row) -> dict:
 
 
 def _row_to_experiment(row) -> dict:
-    """Convert an asyncpg Record to an experiment dict."""
+    """Convert an asyncpg Record without erasing database timestamp types.
+
+    Experiment records are reused by the transactional mutation authority, so
+    ``TIMESTAMPTZ`` values must remain ``datetime`` instances until an API
+    serializer explicitly formats them for transport.
+    """
     return {
         "key": row["key"],
         "project_id": row["project_id"],
@@ -81,15 +86,15 @@ def _row_to_experiment(row) -> dict:
         "primary_metric_json": row["primary_metric_json"],
         "statistical_plan": _json_field(row["statistical_plan"], None),
         "traffic_percentage": float(row["traffic_percentage"]),
-        "start_date": str(row["start_date"]) if row["start_date"] else None,
-        "end_date": str(row["end_date"]) if row["end_date"] else None,
+        "start_date": row["start_date"],
+        "end_date": row["end_date"],
         "version": row["version"],
         "creation_idempotency_key": row.get("creation_idempotency_key"),
         "creation_idempotency_request_sha256": row.get(
             "creation_idempotency_request_sha256"
         ),
-        "created_at": str(row["created_at"]),
-        "updated_at": str(row["updated_at"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 

@@ -1,7 +1,7 @@
 """Failure-injection tests for the sole Config write authority."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,6 +64,39 @@ class FakePool:
 
     def acquire(self):
         return _Context(self.conn)
+
+
+class StrictExperimentTimestampConn:
+    """Minimal asyncpg contract double for experiment lifecycle persistence."""
+
+    def __init__(self, row: dict):
+        self.row = row
+        self.bound_timestamps: list[tuple[datetime | None, datetime | None]] = []
+
+    async def fetchrow(self, sql: str, *args):
+        if "FROM experiments" in sql and "FOR UPDATE" in sql:
+            return dict(self.row)
+        if "UPDATE experiments SET" in sql:
+            start_date, end_date = args[11], args[12]
+            assert start_date is None or isinstance(start_date, datetime)
+            assert end_date is None or isinstance(end_date, datetime)
+            self.bound_timestamps.append((start_date, end_date))
+            self.row = {
+                **self.row,
+                "status": args[3],
+                "description": args[4],
+                "default_variant": args[5],
+                "variants_json": args[6],
+                "targeting_rules_json": args[7],
+                "primary_metric_json": args[8],
+                "traffic_percentage": args[10],
+                "start_date": start_date,
+                "end_date": end_date,
+                "version": self.row["version"] + 1,
+                "updated_at": datetime.now(timezone.utc),
+            }
+            return dict(self.row)
+        raise AssertionError(sql)
 
 
 def make_flag(overrides: dict | None = None) -> dict:
@@ -395,6 +428,71 @@ async def test_atomic_authority_freezes_analysis_fields_after_draft(monkeypatch)
     assert caught.value.fields == ["default_variant"]
     locked_flag.assert_not_awaited()
     assert conn.last_transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("initial_status", "target_status", "end_offset"),
+    [
+        ("scheduled", "running", timedelta(days=30)),
+        ("running", "completed", timedelta(days=-1)),
+        ("running", "stopped", timedelta(days=30)),
+    ],
+)
+async def test_experiment_lifecycle_binds_typed_database_timestamps(
+    monkeypatch,
+    initial_status,
+    target_status,
+    end_offset,
+):
+    now = datetime.now(timezone.utc)
+    row = make_experiment(
+        {
+            "status": initial_status,
+            "start_date": now - timedelta(days=30),
+            "end_date": now + end_offset,
+            "created_at": now - timedelta(days=60),
+            "updated_at": now - timedelta(days=1),
+        }
+    )
+    conn = StrictExperimentTimestampConn(row)
+    desired = {
+        **mutations.pg_store._row_to_experiment(row),
+        "status": target_status,
+    }
+    monkeypatch.setattr(
+        mutations,
+        "_locked_flag",
+        AsyncMock(return_value=make_flag()),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_update_flag",
+        AsyncMock(return_value=make_flag({"version": 2})),
+    )
+    monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_flag_change",
+        AsyncMock(return_value=7),
+    )
+    monkeypatch.setattr(mutations, "_enqueue_experiment_change", AsyncMock())
+
+    updated, _ = await mutations._update_experiment_bundle(
+        conn,
+        desired=desired,
+        expected_version=1,
+        actor="credential:test",
+        origin="experiment",
+    )
+
+    assert updated["status"] == target_status
+    assert len(conn.bound_timestamps) == 1
+    start_date, end_date = conn.bound_timestamps[0]
+    assert isinstance(start_date, datetime)
+    assert isinstance(end_date, datetime)
+    assert updated["start_date"] is start_date
+    assert updated["end_date"] is end_date
 
 
 def test_atomic_authority_allows_status_only_change_after_draft():

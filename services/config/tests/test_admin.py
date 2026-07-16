@@ -1,6 +1,7 @@
 """HTTP contract tests for atomic Config administration."""
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import asyncpg
@@ -798,8 +799,12 @@ async def test_list_experiments_serializes_datetimes_and_version(monkeypatch):
             return_value=[
                 make_experiment(
                     {
-                        "start_date": "2026-06-01 00:00:00+00:00",
-                        "end_date": "2026-07-01 00:00:00+00:00",
+                        "start_date": datetime(
+                            2026, 6, 1, tzinfo=timezone.utc
+                        ),
+                        "end_date": datetime(
+                            2026, 7, 1, tzinfo=timezone.utc
+                        ),
                     }
                 )
             ]
