@@ -75,6 +75,59 @@ describe('request', () => {
     expect((apiError.body as { current_version: number }).current_version).toBe(7)
   })
 
+  test('preserves the canonical authentication throttle delay', async () => {
+    server.use(
+      http.post('http://config.test/api/auth/login', () =>
+        HttpResponse.json(
+          {
+            error: 'auth_throttled',
+            message: 'Too many attempts. Try again later.',
+            retry_after_seconds: 7,
+          },
+          {
+            status: 429,
+            headers: { 'Retry-After': '7' },
+          },
+        ),
+      ),
+    )
+
+    const error = (await request(conn, '/api/auth/login', {
+      method: 'POST',
+      body: {},
+    }).catch((caught: unknown) => caught)) as ApiError
+
+    expect(error.status).toBe(429)
+    expect(error.code).toBe('auth_throttled')
+    expect(error.retryAfterSeconds).toBe(7)
+  })
+
+  test('rejects a drifted authentication throttle envelope', async () => {
+    server.use(
+      http.post('http://config.test/api/auth/login', () =>
+        HttpResponse.json(
+          {
+            error: 'auth_throttled',
+            message: 'Too many attempts. Try again later.',
+            retry_after_seconds: 7,
+          },
+          {
+            status: 429,
+            headers: { 'Retry-After': '8' },
+          },
+        ),
+      ),
+    )
+
+    await expect(
+      request(conn, '/api/auth/login', { method: 'POST', body: {} }),
+    ).rejects.toMatchObject({
+      status: 429,
+      code: 'schema_mismatch',
+      retryAfterSeconds: null,
+    })
+  })
+
   test('notifies the auth boundary on 401 unless explicitly suppressed', async () => {
     let unauthorizedEvents = 0
     const onUnauthorized = () => {

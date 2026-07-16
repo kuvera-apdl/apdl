@@ -32,13 +32,21 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly body: unknown
+  readonly retryAfterSeconds: number | null
 
-  constructor(status: number, code: string, message: string, body: unknown = null) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    body: unknown = null,
+    retryAfterSeconds: number | null = null,
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.body = body
+    this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -63,6 +71,7 @@ interface ErrorEnvelope {
   error?: unknown
   message?: unknown
   detail?: unknown
+  retry_after_seconds?: unknown
 }
 
 /** CurlSpec mirroring exactly what request() would send. */
@@ -85,8 +94,44 @@ export function apiCurl(
   }
 }
 
-export function errorFromResponse(status: number, body: unknown, statusText: string): ApiError {
+function positiveRetrySeconds(value: unknown): number | null {
+  return Number.isInteger(value) && Number(value) > 0 && Number(value) <= 86_400
+    ? Number(value)
+    : null
+}
+
+export function errorFromResponse(
+  status: number,
+  body: unknown,
+  statusText: string,
+  headers?: Headers,
+): ApiError {
   const envelope: ErrorEnvelope = typeof body === 'object' && body !== null ? body : {}
+  if (status === 429 && envelope.error === 'auth_throttled') {
+    const retryAfterSeconds = positiveRetrySeconds(envelope.retry_after_seconds)
+    const retryAfterHeader = headers?.get('retry-after') ?? null
+    const headerSeconds =
+      retryAfterHeader === null ? null : positiveRetrySeconds(Number(retryAfterHeader))
+    if (
+      typeof envelope.message !== 'string' ||
+      retryAfterSeconds === null ||
+      (retryAfterHeader !== null && headerSeconds !== retryAfterSeconds)
+    ) {
+      return new ApiError(
+        status,
+        'schema_mismatch',
+        'Authentication throttle response does not match the canonical schema',
+        body,
+      )
+    }
+    return new ApiError(
+      status,
+      envelope.error,
+      envelope.message,
+      body,
+      retryAfterSeconds,
+    )
+  }
   if (typeof envelope.error === 'string' && typeof envelope.message === 'string') {
     return new ApiError(status, envelope.error, envelope.message, body)
   }
@@ -180,7 +225,12 @@ export async function request<T>(
     }
 
     if (!response.ok) {
-      const apiError = errorFromResponse(response.status, data, response.statusText)
+      const apiError = errorFromResponse(
+        response.status,
+        data,
+        response.statusText,
+        response.headers,
+      )
       if (
         response.status === 401 &&
         options.redirectOnUnauthorized !== false &&

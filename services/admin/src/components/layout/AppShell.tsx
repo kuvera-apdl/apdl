@@ -31,6 +31,7 @@ import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SecurityNotificationBanner } from '@/components/layout/SecurityNotificationBanner'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -367,6 +368,7 @@ export function AppShell() {
         </header>
         <main className="min-h-0 flex-1 overflow-auto">
           <div className="mx-auto w-full max-w-7xl space-y-6 p-6">
+            <SecurityNotificationBanner />
             <Outlet />
           </div>
         </main>
