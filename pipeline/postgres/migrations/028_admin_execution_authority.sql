@@ -156,8 +156,8 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1
-        FROM admin_project_execution_authorizations AS authorization
-        WHERE authorization.project_id = candidate_project_id
+        FROM admin_project_execution_authorizations AS execution_authority
+        WHERE execution_authority.project_id = candidate_project_id
     ) THEN
         RAISE EXCEPTION USING
             ERRCODE = '42501',
@@ -172,8 +172,8 @@ $apdl_assert_execution_project_authorized$;
 DELETE FROM admin_user_projects AS membership
 WHERE NOT EXISTS (
           SELECT 1
-          FROM admin_project_execution_authorizations AS authorization
-          WHERE authorization.project_id = membership.project_id
+          FROM admin_project_execution_authorizations AS execution_authority
+          WHERE execution_authority.project_id = membership.project_id
       )
   AND membership.roles
       && ARRAY['agents:run', 'agents:manage', 'agents:approve']::TEXT[]
@@ -199,8 +199,8 @@ SET roles = ARRAY(
 )
 WHERE NOT EXISTS (
           SELECT 1
-          FROM admin_project_execution_authorizations AS authorization
-          WHERE authorization.project_id = membership.project_id
+          FROM admin_project_execution_authorizations AS execution_authority
+          WHERE execution_authority.project_id = membership.project_id
       )
   AND membership.roles
       && ARRAY['agents:run', 'agents:manage', 'agents:approve']::TEXT[];
@@ -208,8 +208,8 @@ WHERE NOT EXISTS (
 DELETE FROM auth_credentials AS credential
 WHERE NOT EXISTS (
           SELECT 1
-          FROM admin_project_execution_authorizations AS authorization
-          WHERE authorization.project_id = credential.project_id
+          FROM admin_project_execution_authorizations AS execution_authority
+          WHERE execution_authority.project_id = credential.project_id
       )
   AND credential.roles
       && ARRAY['agents:run', 'agents:manage', 'agents:approve']::TEXT[]
@@ -235,8 +235,8 @@ SET roles = ARRAY(
 )
 WHERE NOT EXISTS (
           SELECT 1
-          FROM admin_project_execution_authorizations AS authorization
-          WHERE authorization.project_id = credential.project_id
+          FROM admin_project_execution_authorizations AS execution_authority
+          WHERE execution_authority.project_id = credential.project_id
       )
   AND credential.roles
       && ARRAY['agents:run', 'agents:manage', 'agents:approve']::TEXT[];
@@ -288,8 +288,8 @@ SET status = 'failed',
 WHERE test_run.status = 'running'
   AND NOT EXISTS (
       SELECT 1
-      FROM admin_project_execution_authorizations AS authorization
-      WHERE authorization.project_id = test_run.project_id
+      FROM admin_project_execution_authorizations AS execution_authority
+      WHERE execution_authority.project_id = test_run.project_id
   );
 
 UPDATE codegen_changesets AS changeset
@@ -299,8 +299,8 @@ SET status = 'error',
 WHERE changeset.status IN ('queued', 'cloning', 'editing', 'pushing', 'pr_open')
   AND NOT EXISTS (
       SELECT 1
-      FROM admin_project_execution_authorizations AS authorization
-      WHERE authorization.project_id = changeset.project_id
+      FROM admin_project_execution_authorizations AS execution_authority
+      WHERE execution_authority.project_id = changeset.project_id
   );
 
 -- Registration is the canonical future-table contract.  Every table that can

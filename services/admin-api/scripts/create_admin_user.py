@@ -128,11 +128,12 @@ async def provision(args: argparse.Namespace) -> None:
             project = await conn.fetchrow(
                 """
                 SELECT project.created_by,
-                       (authorization.project_id IS NOT NULL)
+                       (execution_authority.project_id IS NOT NULL)
                            AS execution_authorized
                 FROM admin_projects AS project
-                LEFT JOIN admin_project_execution_authorizations AS authorization
-                  ON authorization.project_id = project.project_id
+                LEFT JOIN admin_project_execution_authorizations
+                    AS execution_authority
+                  ON execution_authority.project_id = project.project_id
                 WHERE project.project_id = $1
                 FOR UPDATE OF project
                 """,

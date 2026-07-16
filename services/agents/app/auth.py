@@ -60,8 +60,8 @@ class PostgresAuthenticator:
                            EXISTS (
                                SELECT 1
                                FROM admin_project_execution_authorizations
-                                   AS authorization
-                               WHERE authorization.project_id =
+                                   AS execution_authority
+                               WHERE execution_authority.project_id =
                                    credential.project_id
                            ) AS execution_authorized
                     FROM auth_credentials AS credential

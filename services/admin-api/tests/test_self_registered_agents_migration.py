@@ -96,6 +96,7 @@ def test_migration_015_execution_table_is_not_covered_by_a_number_bump_only() ->
 
 
 def test_execution_authority_is_canonical_audited_and_immutable() -> None:
+    assert " AS authorization" not in SQL_028
     assert "CREATE TABLE admin_project_execution_authorizations" in SQL_028
     assert "'operator_provisioned'" in SQL_028
     assert "'self_registered_override'" in SQL_028
