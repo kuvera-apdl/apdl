@@ -229,6 +229,7 @@ jobs:
             services/ingestion/requirements.lock \
             services/config/requirements.lock \
             services/query/requirements.lock \
+            services/agents/requirements.lock \
             services/admin-api/requirements.lock \
             pipeline/redis/requirements.lock
           do
@@ -241,7 +242,7 @@ jobs:
           # services/codegen means the offline API dependency set only. The
           # unsupported Aider editor/worker `agent` extra is not installed by
           # the 0.3.0 stack and is explicitly excluded by SUPPORT.md.
-          for project in sdk/python services/agents services/codegen
+          for project in sdk/python services/codegen
           do
             slug="${project//\//-}"
             requirements="$RUNNER_TEMP/$slug-audit.txt"
