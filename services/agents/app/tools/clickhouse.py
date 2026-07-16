@@ -162,16 +162,19 @@ async def query_retention(
     return_selector: EventSelectorPayload,
     start_date: str,
     end_date: str,
-    period: str = "day",
+    cohort_mode: Literal["first_match_in_window"],
+    period: Literal["day", "week"] = "day",
 ) -> dict[str, Any]:
-    """Compute an N-day or N-week retention grid.
+    """Compute a window-relative N-day or N-week retention grid.
 
     Args:
         project_id: The project to query.
-        cohort_selector: Selector that defines the cohort (first occurrence).
+        cohort_selector: Selector whose first match in the window defines entry.
         return_selector: Selector to check for retention.
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
+        cohort_mode: Required declaration that cohorts use first match in the
+            selected window. Existing actors may re-enter on that match.
         period: "day" or "week".
     """
     return await _post("/v1/query/retention", {
@@ -180,6 +183,7 @@ async def query_retention(
         "return_selector": return_selector,
         "start_date": start_date,
         "end_date": end_date,
+        "cohort_mode": cohort_mode,
         "period": period,
     })
 

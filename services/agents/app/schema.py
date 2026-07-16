@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 15
-MIGRATION_NAME = "015_custom_agent_contracts_and_retry_lineage.sql"
+MIGRATION_VERSION = 19
+MIGRATION_NAME = "019_retention_cohort_mode.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),

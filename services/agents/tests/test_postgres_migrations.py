@@ -26,6 +26,9 @@ CODEGEN_DEVELOPMENT_PUBLICATION_SQL = (
 CUSTOM_AGENT_CONTRACT_SQL = (
     POSTGRES_MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
 ).read_text()
+RETENTION_COHORT_MODE_SQL = (
+    POSTGRES_MIGRATIONS / "019_retention_cohort_mode.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -208,6 +211,21 @@ def test_retry_lineage_migration_backfills_one_child_and_enforces_uniqueness():
     assert "codegen_changesets_retry_of_changeset_id_fkey" in sql
     assert "codegen_changesets_one_retry_child_idx" in sql
     assert "WHERE retry_of_changeset_id IS NOT NULL" in sql
+
+
+def test_retention_preset_migration_is_narrow_and_order_preserving():
+    sql = RETENTION_COHORT_MODE_SQL
+
+    assert "WITH ORDINALITY" in sql
+    assert "ORDER BY entry.ordinality" in sql
+    assert "WHEN jsonb_typeof(agent.preset_tools) = 'array'" in sql
+    assert "ELSE '[]'::jsonb" in sql
+    assert "entry.value ->> 'tool' = 'query_retention'" in sql
+    assert "jsonb_typeof(entry.value -> 'params') = 'object'" in sql
+    assert "NOT (entry.value -> 'params' ? 'cohort_mode')" in sql
+    assert "'{params,cohort_mode}'" in sql
+    assert "to_jsonb('first_match_in_window'::text)" in sql
+    assert "agent.preset_tools IS DISTINCT FROM migrated.preset_tools" in sql
 
 
 def test_database_runners_enforce_the_single_engine_authority():

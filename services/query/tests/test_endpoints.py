@@ -689,12 +689,14 @@ async def test_retention_analysis(client):
             "filters": [{"property": "plan", "operator": "eq", "value": "pro"}],
         },
         "return_selector": {"event_name": "login", "filters": []},
+        "cohort_mode": "first_match_in_window",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["cohort_mode"] == "first_match_in_window"
     assert body["cohort_selector"] == "signup[plan eq pro]"
     assert body["return_selector"] == "login"
     assert len(body["cohorts"]) == 1
@@ -720,6 +722,7 @@ async def test_retention_weekly(client):
             "event_name": "login",
             "filters": [{"property": "device_type", "operator": "neq", "value": "bot"}],
         },
+        "cohort_mode": "first_match_in_window",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
         "period": "week",
@@ -729,6 +732,29 @@ async def test_retention_weekly(client):
     body = resp.json()
     assert len(body["cohorts"]) == 1
     assert body["cohorts"][0]["retention"][1] == 50.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        {},
+        {"cohort_mode": "all_history"},
+    ],
+)
+async def test_retention_requires_canonical_window_relative_mode(client, payload_update):
+    payload = {
+        "project_id": PROJECT_ID,
+        "cohort_selector": {"event_name": "signup", "filters": []},
+        "return_selector": {"event_name": "login", "filters": []},
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+    }
+    payload.update(payload_update)
+
+    resp = await client.post("/v1/query/retention", json=payload)
+
+    assert resp.status_code == 422
 
 
 # ------------------------------------------------------------------

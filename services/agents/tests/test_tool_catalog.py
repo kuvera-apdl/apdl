@@ -105,6 +105,40 @@ async def test_run_tool_injects_project_and_date_window(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retention_tool_requires_and_forwards_window_relative_mode(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_retention(**kwargs):
+        captured.update(kwargs)
+        return {"cohort_mode": "first_match_in_window", "cohorts": []}
+
+    monkeypatch.setattr(tool_catalog.clickhouse, "query_retention", fake_retention)
+    params = {
+        "cohort_selector": {"event_name": "signup"},
+        "return_selector": {"event_name": "login"},
+        "cohort_mode": "first_match_in_window",
+    }
+
+    await tool_catalog.run_tool(_ctx(project_id="proj-1"), "query_retention", params)
+
+    assert captured["project_id"] == "proj-1"
+    assert captured["cohort_mode"] == "first_match_in_window"
+
+    with pytest.raises(ValidationError):
+        await tool_catalog.run_tool(
+            _ctx(),
+            "query_retention",
+            {key: value for key, value in params.items() if key != "cohort_mode"},
+        )
+    with pytest.raises(ValidationError):
+        await tool_catalog.run_tool(
+            _ctx(),
+            "query_retention",
+            {**params, "cohort_mode": "all_history"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_tool_scopes_config_service_tools_to_ctx_project(monkeypatch):
     seen: list[str] = []
 

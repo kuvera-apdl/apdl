@@ -242,7 +242,7 @@ def build_retention_query(
     *,
     period: str,
 ) -> str:
-    """Build a day or week retention query using selectors for both event sets."""
+    """Build first-match-in-window retention using selectors for both event sets."""
     cohort_condition = build_selector_condition(
         cohort_selector,
         params,

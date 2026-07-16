@@ -29,7 +29,7 @@ credential; health and readiness probes remain public.
 | `POST` | `/v1/query/events/breakdown` | Top property values for a selector |
 | `POST` | `/v1/query/funnel` | N-step funnel (2–20 steps, 1–90 day window) |
 | `POST` | `/v1/query/cohort` | Compare a metric across values of a user property |
-| `POST` | `/v1/query/retention` | Day/week retention from a cohort selector to a return selector |
+| `POST` | `/v1/query/retention` | Window-relative day/week retention (`first_match_in_window`) |
 | `GET`  | `/v1/query/experiment/{key}` | Config-owned conversion experiment analysis |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate a feature-flag guardrail on demand |
 | `GET`  | `/health` / `/ready` | Liveness / ClickHouse readiness probes |
@@ -82,6 +82,16 @@ curl -s http://localhost:8082/v1/query/events/count \
     ]
   }'
 ```
+
+## Window-relative retention
+
+`POST /v1/query/retention` requires the canonical
+`"cohort_mode": "first_match_in_window"` in both its request and response.
+An actor enters a cohort on their first matching cohort event inside the
+selected start and end dates. Earlier history is not consulted, so an existing
+actor may re-enter on their first matching event in the selected dates. Treat
+this as window-relative engagement retention, not lifetime acquisition
+retention.
 
 ## Experiment statistics
 

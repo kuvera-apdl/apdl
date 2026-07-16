@@ -81,6 +81,7 @@ class RetentionParams(BaseModel):
     model_config = {"extra": "forbid"}
     cohort_selector: EventSelector
     return_selector: EventSelector
+    cohort_mode: Literal["first_match_in_window"]
     period: Literal["day", "week"] = "day"
 
 
@@ -172,6 +173,7 @@ async def _run_retention(ctx: AgentContext, p: RetentionParams, start: str, end:
         return_selector=p.return_selector.payload(),
         start_date=start,
         end_date=end,
+        cohort_mode=p.cohort_mode,
         period=p.period,
     )
 
@@ -251,7 +253,8 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             "query_retention",
-            "N-day / N-week retention grid for a cohort.",
+            "Window-relative retention: actors enter on their first matching event "
+            "in the selected dates, so existing actors may re-enter.",
             RetentionParams,
             _run_retention,
         ),

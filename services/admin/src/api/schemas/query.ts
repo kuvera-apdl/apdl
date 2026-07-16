@@ -144,6 +144,7 @@ export const retentionRequestSchema = z
     end_date: dateSchema,
     cohort_selector: eventSelectorSchema,
     return_selector: eventSelectorSchema,
+    cohort_mode: z.literal('first_match_in_window'),
     period: z.enum(['day', 'week']),
   })
   .strict()
@@ -241,6 +242,7 @@ export const retentionCohortSchema = z
 
 export const retentionResponseSchema = z
   .object({
+    cohort_mode: z.literal('first_match_in_window'),
     cohort_selector: z.string(),
     return_selector: z.string(),
     cohorts: z.array(retentionCohortSchema),

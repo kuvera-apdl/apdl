@@ -401,6 +401,7 @@ class RetentionRequest(DateRangeRequest):
                         "event_name": "$click",
                         "filters": [{"property": "href", "operator": "eq", "value": "/signup"}],
                     },
+                    "cohort_mode": "first_match_in_window",
                     "start_date": "2025-01-01",
                     "end_date": "2025-01-31",
                     "period": "day",
@@ -412,6 +413,7 @@ class RetentionRequest(DateRangeRequest):
     project_id: ProjectId
     cohort_selector: EventSelector
     return_selector: EventSelector
+    cohort_mode: Literal["first_match_in_window"]
     period: Literal["day", "week"] = "day"
 
 
@@ -422,6 +424,7 @@ class RetentionCohort(BaseModel):
 
 
 class RetentionResponse(BaseModel):
+    cohort_mode: Literal["first_match_in_window"]
     cohort_selector: str
     return_selector: str
     cohorts: list[RetentionCohort]

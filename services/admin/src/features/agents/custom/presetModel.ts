@@ -105,6 +105,7 @@ export function presetToWire(draft: PresetDraft): PresetToolCall {
         params: {
           cohort_selector: selectorToWire(draft.selector),
           return_selector: selectorToWire(draft.returnSelector),
+          cohort_mode: 'first_match_in_window',
           period: draft.period,
         },
       }

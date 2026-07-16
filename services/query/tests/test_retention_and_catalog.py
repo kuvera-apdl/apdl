@@ -41,6 +41,14 @@ def test_retention_week_query_is_clickhouse_compatible():
     assert ">=" not in sql
 
 
+def test_retention_cohorts_on_first_match_inside_selected_window():
+    sql = build_retention_query(_sel("signup"), _sel("login"), {}, period="day")
+    cohort_cte = sql.split("activity AS", maxsplit=1)[0]
+
+    assert "min(e.event_date) AS cohort_date" in cohort_cte
+    assert "e.event_date BETWEEN %(start_date)s AND %(end_date)s" in cohort_cte
+
+
 def test_event_catalog_query_shape():
     sql = build_event_catalog_query({})
     assert "GROUP BY e.event_name" in sql
