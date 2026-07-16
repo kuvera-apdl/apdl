@@ -36,18 +36,22 @@ export const KNOWN_RUN_STATUSES = [
   'started',
   'running',
   'waiting_approval',
+  'approval_queued',
   'approved',
   'rejected',
   'completed',
   'completed_with_errors',
+  'manual_intervention',
   'failed',
+  'cancelled',
 ] as const
 
 export const TERMINAL_RUN_STATUSES = new Set<string>([
   'completed',
   'completed_with_errors',
+  'manual_intervention',
   'failed',
-  'rejected',
+  'cancelled',
 ])
 
 export const runStatusSchema = z
@@ -71,42 +75,96 @@ export const runStatusSchema = z
 
 export const itemDecisionSchema = z
   .object({
-    item_id: z.string(),
+    item_id: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => value.trim() === value && value.length > 0, {
+        message: 'item_id must be a bounded non-whitespace identifier',
+      }),
     approved: z.boolean(),
   })
   .strict()
 
-// Per-item batched decisions (one per gated item) OR a legacy whole-gate
-// `approved`. The server requires exactly one; the console sends `decisions`.
+// One strict decision per persisted gate item. Whole-gate verdicts are
+// intentionally unsupported: they made missing and duplicate identities
+// ambiguous at the mutation boundary.
 export const approvalRequestSchema = z
   .object({
-    decisions: z.array(itemDecisionSchema).optional(),
-    approved: z.boolean().optional(),
-    comment: z.string().optional(),
+    decisions: z.array(itemDecisionSchema).min(1).max(100),
+    comment: z.string().max(2_000).optional(),
   })
   .strict()
-  // The server requires exactly one of `decisions` / `approved` (400s otherwise).
-  // Enforce it here so a future caller is caught client-side, not after a round
-  // trip. Current callers always send exactly one.
-  .refine((v) => (v.decisions !== undefined) !== (v.approved !== undefined), {
-    message: 'Provide exactly one of `decisions` or `approved`.',
+  .superRefine((value, context) => {
+    const seen = new Set<string>()
+    value.decisions.forEach((decision, index) => {
+      if (seen.has(decision.item_id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['decisions', index, 'item_id'],
+          message: `duplicate decision for ${decision.item_id}`,
+        })
+      }
+      seen.add(decision.item_id)
+    })
   })
 
-// The count/array fields were added after the original { run_id, status,
-// message } envelope. Services deploy independently, so the console may briefly
-// run against a backend that still returns the old shape — keep these tolerant
-// (optional + default) so a successful approval never trips schema_mismatch and
-// surfaces a spurious "Decision failed" while the run was approved server-side.
+export const approvalCommandStatusSchema = z.enum([
+  'queued',
+  'processing',
+  'succeeded',
+  'manual_intervention',
+])
+
+export const approvalEffectStatusSchema = z.enum([
+  'queued',
+  'processing',
+  'retryable_failed',
+  'succeeded',
+  'failed',
+  'manual_intervention',
+])
+
+export const approvalEffectTypeSchema = z.enum([
+  'stage_experiment_draft',
+  'open_treatment_changeset',
+  'open_code_changeset',
+  'record_experiment_rejection',
+  'record_proposal_rejection',
+  'quarantine_feature_proposal',
+])
+
+export const approvalEffectSchema = z
+  .object({
+    effect_id: z.string().min(1),
+    item_id: z.string().min(1).max(128),
+    effect_type: approvalEffectTypeSchema,
+    status: approvalEffectStatusSchema,
+    attempt_count: z.number().int().nonnegative(),
+    last_error: z.string().nullable(),
+    result: z.record(z.unknown()).nullable(),
+  })
+  .strict()
+
+// POST and status GET share one strict durable-command envelope. A successful
+// POST means the decision and effect intents are committed, not that any
+// Config or Codegen mutation has already completed.
 export const approvalResponseSchema = z
   .object({
-    run_id: z.string(),
-    status: z.string(),
-    approved_count: z.number().int().optional(),
-    rejected_count: z.number().int().optional(),
-    forked_runs: z.array(z.string()).optional(),
-    opened_changesets: z.array(z.string()).optional(),
-    errors: z.array(z.string()).optional(),
-    message: z.string(),
+    command_id: z.string().min(1),
+    run_id: z.string().min(1),
+    actor_credential_id: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
+    actor_user_id: z.string().uuid().nullable(),
+    gate_id: z.string().min(1),
+    gate_agent: z.enum(['experiment_design', 'feature_proposal', 'code_implementation']),
+    status: approvalCommandStatusSchema,
+    approved_count: z.number().int().nonnegative(),
+    rejected_count: z.number().int().nonnegative(),
+    comment: z.string().nullable(),
+    last_error: z.string().nullable(),
+    created_at: z.string().min(1),
+    updated_at: z.string().min(1),
+    effects: z.array(approvalEffectSchema),
   })
   .strict()
 

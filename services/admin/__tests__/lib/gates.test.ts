@@ -88,10 +88,10 @@ test('feature_proposal gate → a "make permanent?" ship decision', () => {
   expect(d.evidence).toContainEqual({ label: 'from', value: 'exp_dark' })
 })
 
-test('positional fallback id for an unkeyed item', () => {
+test('an unkeyed item invalidates the strict persisted gate', () => {
   const decisions = decisionsForRun(
     run({ phase: 'feature_proposal_approval' }),
     results({ feature_proposals: [{ title: 'No id' }] }),
   )
-  expect(decisions[0]!.itemId).toBe('__index_0')
+  expect(decisions).toEqual([])
 })

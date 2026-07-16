@@ -71,6 +71,11 @@ export function DecidePage() {
   const canApprove = hasWorkspaceRole(active, 'agents:approve')
   const queryClient = useQueryClient()
   const { decisions, isPending, error, refetch, endpointMissing } = useDecisions()
+  const decisionsPerRun = useMemo(() => {
+    const counts = new Map<string, number>()
+    decisions.forEach((decision) => counts.set(decision.runId, (counts.get(decision.runId) ?? 0) + 1))
+    return counts
+  }, [decisions])
 
   const decide = useMutation({
     mutationFn: ({ decision, approved }: { decision: Decision; approved: boolean }) =>
@@ -78,24 +83,13 @@ export function DecidePage() {
         decisions: [{ item_id: decision.itemId, approved }],
       }),
     onSuccess: (res, { approved }) => {
-      const opened = (res.opened_changesets ?? []).length
-      const forked = (res.forked_runs ?? []).length
-      const errors = res.errors ?? []
-      const summary =
-        `${approved ? 'Approved' : 'Rejected'} — run resumes` +
-        (forked ? ` · ${forked} PR run(s) forked` : '') +
-        (opened ? ` · ${opened} PR(s) opened` : '')
-      if (errors.length > 0) {
-        toast.warning(`${summary} · ${errors.length} deployment error(s)`, {
-          description: errors.join(' · '),
-        })
-      } else {
-        toast.success(summary)
-      }
+      toast.success(`${approved ? 'Approved' : 'Rejected'} — effects queued`, {
+        description: `${res.effects.length} durable effect${res.effects.length === 1 ? '' : 's'} · command ${res.command_id}`,
+      })
       void queryClient.invalidateQueries({ queryKey: [active?.id ?? 'none', 'decide'] })
     },
     onError: (err) => {
-      if (err instanceof ApiError && err.status === 400) {
+      if (err instanceof ApiError && err.status === 409) {
         toast.info('This run is no longer awaiting a decision — refreshing.')
         void queryClient.invalidateQueries({ queryKey: [active?.id ?? 'none', 'decide'] })
       } else {
@@ -106,6 +100,10 @@ export function DecidePage() {
 
   const actionsFor = (decision: Decision) => {
     if (!canApprove) return []
+    // The backend accepts only one exact decision set for the entire persisted
+    // gate. Multi-item gates are reviewed and submitted together on the run
+    // page; never turn one card click into an implicit verdict for siblings.
+    if (decisionsPerRun.get(decision.runId) !== 1) return []
     const accept = { experiment_design: 'Approve design', feature_proposal: 'Make permanent', code_implementation: 'Open PR' }
     return [
       {
@@ -181,7 +179,10 @@ export function DecidePage() {
               evidence={decision.evidence}
               detail={decision.detail}
               actions={actionsFor(decision)}
-              detailLink={{ to: `/agents/runs/${encodeURIComponent(decision.runId)}`, label: 'Full run' }}
+              detailLink={{
+                to: `/agents/runs/${encodeURIComponent(decision.runId)}`,
+                label: (decisionsPerRun.get(decision.runId) ?? 0) > 1 ? 'Review full gate' : 'Full run',
+              }}
               emphasis={index === 0}
             />
           ))}

@@ -18,7 +18,13 @@ describe('runToLoopStage', () => {
     expect(runToLoopStage('completed', 'done')).toBe('done')
     expect(runToLoopStage('completed_with_errors', 'done')).toBe('failed')
     expect(runToLoopStage('failed', 'error')).toBe('failed')
-    expect(runToLoopStage('rejected', 'x')).toBe('done')
+    expect(runToLoopStage('manual_intervention', 'code_implementation_approval')).toBe('failed')
+    expect(runToLoopStage('cancelled', 'cancelled')).toBe('failed')
+  })
+
+  test('approval outcomes remain active while the supervisor is resuming', () => {
+    expect(runToLoopStage('approved', 'resuming')).toBe('building')
+    expect(runToLoopStage('rejected', 'resuming')).toBe('building')
   })
 
   test('unknown status degrades to designing, never throws', () => {
