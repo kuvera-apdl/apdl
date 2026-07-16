@@ -18,6 +18,7 @@ CLICKHOUSE_USER="${CLICKHOUSE_USER:-apdl}"
 CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-apdl_dev}"
 CLICKHOUSE_DB="${CLICKHOUSE_DB:-apdl}"
 CLICKHOUSE_MIGRATIONS_DIR="${CLICKHOUSE_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/clickhouse/migrations}"
+CLICKHOUSE_BACKFILLS_DIR="${CLICKHOUSE_BACKFILLS_DIR:-$ROOT_DIR/pipeline/clickhouse/backfills}"
 CLICKHOUSE_READY_RETRIES="${CLICKHOUSE_READY_RETRIES:-30}"
 CLICKHOUSE_READY_INTERVAL="${CLICKHOUSE_READY_INTERVAL:-2}"
 
@@ -28,6 +29,11 @@ fi
 
 if [ ! -d "$CLICKHOUSE_MIGRATIONS_DIR" ]; then
     echo "ClickHouse migrations directory not found: $CLICKHOUSE_MIGRATIONS_DIR" >&2
+    exit 1
+fi
+
+if [ ! -d "$CLICKHOUSE_BACKFILLS_DIR" ]; then
+    echo "ClickHouse backfills directory not found: $CLICKHOUSE_BACKFILLS_DIR" >&2
     exit 1
 fi
 
@@ -77,5 +83,106 @@ for migration in "$CLICKHOUSE_MIGRATIONS_DIR"/*.sql; do
         --database "$CLICKHOUSE_DB" \
         --multiquery < "$migration"
 done
+
+backfill_lock_dir="${TMPDIR:-/tmp}/apdl-clickhouse-backfills-$container_id.lock"
+backfill_snapshot=""
+
+cleanup_backfill() {
+    if [ -n "$backfill_snapshot" ]; then
+        rm -f "$backfill_snapshot"
+    fi
+    rmdir "$backfill_lock_dir" 2>/dev/null || true
+}
+
+if ! mkdir "$backfill_lock_dir" 2>/dev/null; then
+    echo "Another ClickHouse backfill runner holds: $backfill_lock_dir" >&2
+    exit 1
+fi
+trap cleanup_backfill EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+docker exec "$container_id" clickhouse-client \
+    --user "$CLICKHOUSE_USER" \
+    --password "$CLICKHOUSE_PASSWORD" \
+    --database "$CLICKHOUSE_DB" \
+    --query "
+        CREATE TABLE IF NOT EXISTS apdl_schema_backfills (
+            name String,
+            checksum FixedString(64),
+            completed_at DateTime64(3)
+        ) ENGINE = ReplacingMergeTree(completed_at)
+        ORDER BY (name, checksum)
+    " >/dev/null
+
+for backfill in "$CLICKHOUSE_BACKFILLS_DIR"/*.sql; do
+    [ -f "$backfill" ] || continue
+
+    backfill_name="$(basename "$backfill")"
+    if [[ ! "$backfill_name" =~ ^[0-9]{3}_[a-z0-9_]+\.sql$ ]]; then
+        echo "Invalid ClickHouse backfill name: $backfill_name" >&2
+        exit 1
+    fi
+
+    backfill_snapshot="$(mktemp "${TMPDIR:-/tmp}/apdl-clickhouse-backfill.XXXXXX.sql")"
+    cp "$backfill" "$backfill_snapshot"
+    if command -v sha256sum >/dev/null 2>&1; then
+        backfill_checksum="$(sha256sum "$backfill_snapshot" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        backfill_checksum="$(shasum -a 256 "$backfill_snapshot" | awk '{print $1}')"
+    else
+        echo "A SHA-256 utility is required for ClickHouse backfills" >&2
+        exit 1
+    fi
+
+    recorded_checksum="$(docker exec "$container_id" clickhouse-client \
+        --user "$CLICKHOUSE_USER" \
+        --password "$CLICKHOUSE_PASSWORD" \
+        --database "$CLICKHOUSE_DB" \
+        --format TSVRaw \
+        --query "
+            SELECT multiIf(
+                count() = 0,
+                '',
+                uniqExact(checksum) = 1,
+                toString(any(checksum)),
+                '__multiple_checksums__'
+            )
+            FROM apdl_schema_backfills FINAL
+            WHERE name = '$backfill_name'
+        ")"
+
+    if [ -n "$recorded_checksum" ]; then
+        if [ "$recorded_checksum" != "$backfill_checksum" ]; then
+            echo "ClickHouse backfill checksum drift: $backfill_name" >&2
+            exit 1
+        fi
+        echo "  Already applied $backfill_name"
+        rm -f "$backfill_snapshot"
+        backfill_snapshot=""
+        continue
+    fi
+
+    echo "  Backfilling $backfill_name"
+    docker exec -i "$container_id" clickhouse-client \
+        --user "$CLICKHOUSE_USER" \
+        --password "$CLICKHOUSE_PASSWORD" \
+        --database "$CLICKHOUSE_DB" \
+        --multiquery < "$backfill_snapshot"
+    docker exec "$container_id" clickhouse-client \
+        --user "$CLICKHOUSE_USER" \
+        --password "$CLICKHOUSE_PASSWORD" \
+        --database "$CLICKHOUSE_DB" \
+        --query "
+            INSERT INTO apdl_schema_backfills
+                (name, checksum, completed_at)
+            VALUES ('$backfill_name', '$backfill_checksum', now64(3))
+        " >/dev/null
+    rm -f "$backfill_snapshot"
+    backfill_snapshot=""
+done
+
+trap - EXIT INT TERM
+cleanup_backfill
 
 echo "==> ClickHouse initialization complete"

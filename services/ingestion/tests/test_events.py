@@ -1207,8 +1207,7 @@ async def test_multiple_mixed_valid_and_invalid_events(client):
 
 
 @pytest.mark.asyncio
-async def test_valid_identify_event(client):
-    """ValidIdentifyEvent"""
+async def test_user_only_identify_remains_a_valid_trait_update(client):
     event = canonical_event(
         "identify",
         "identify",
@@ -1221,6 +1220,30 @@ async def test_valid_identify_event(client):
     assert resp.status_code == 202
     body = resp.json()
     assert body["accepted"] == 1
+    published = published_events()[0]
+    assert published["user_id"] == "usr_123"
+    assert "anonymous_id" not in published
+    assert published["project_id"] == "testproj"
+
+
+@pytest.mark.asyncio
+async def test_identify_alias_assertion_keeps_both_ids_and_server_tenant(client):
+    event = canonical_event(
+        "identify",
+        "identify",
+        user_id="usr_123",
+        anonymous_id="anon_123",
+        traits={"plan": "pro"},
+    )
+
+    resp = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+
+    assert resp.status_code == 202
+    published = published_events()[0]
+    assert published["type"] == "identify"
+    assert published["user_id"] == "usr_123"
+    assert published["anonymous_id"] == "anon_123"
+    assert published["project_id"] == "testproj"
 
 
 @pytest.mark.asyncio

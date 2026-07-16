@@ -19,6 +19,7 @@
       "event": "identify",
       "type": "identify",
       "user_id": "user-42",
+      "anonymous_id": "anon-42",
       "timestamp": "2026-07-13T12:00:01.000Z",
       "traits": {"plan": "pro"},
       "context": {"library": {"name": "apdl-python", "version": "0.3.0"}},
@@ -119,6 +120,19 @@
         "context": {},
         "message_id": "message-invalid-4",
         "extra": true
+      }
+    },
+    {
+      "name": "competing_alias_field",
+      "event": {
+        "event": "identify",
+        "type": "identify",
+        "user_id": "user-42",
+        "anonymous_id": "anon-42",
+        "previous_id": "legacy-user",
+        "timestamp": "2026-07-13T12:00:00.000Z",
+        "context": {},
+        "message_id": "message-invalid-5"
       }
     }
   ]

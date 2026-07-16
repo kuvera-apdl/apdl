@@ -71,6 +71,24 @@ Each `POST /v1/events` request goes through six stages:
    ambiguous operation failure returns `503`; clients retry the same stable
    `message_id` values and ClickHouse deduplicates them.
 
+### Identity alias contract
+
+An `identify` event with both a nonempty `user_id` and `anonymous_id` is the
+only alias assertion. The relationship is bound to the authenticated
+server-derived `project_id`; client-supplied tenant fields, alias event types,
+`previous_id`, and other competing identity shapes are rejected. An `identify`
+event with only `user_id` remains a user-trait update and creates no alias.
+
+Ingestion preserves both identifiers and publishes the assertion to the
+project's Redis stream. It does not claim that a `202` response makes the alias
+immediately query-visible: visibility begins only after the writer durably
+projects the identify event into ClickHouse. Query then applies an unambiguous
+alias retroactively to retained events for the same project and anonymous ID;
+conflicting user claims remain unresolved rather than choosing a winner.
+Accepted alias assertions are irreversible commands: reusing a `message_id`
+does not unlink an identity. Correcting a bad assertion requires an explicit
+operator rebuild; there is no implicit unmerge event or field.
+
 The three quota stages use these exact capacity/refill-per-second pairs:
 
 | Stage (cost unit) | Global | Project | Confidential credential | Browser credential | IP | Identity |

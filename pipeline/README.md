@@ -114,11 +114,40 @@ copy of the events table.
   evaluation results projected from events
 - `frontend_health_events` (007, ReplacingMergeTree) — idempotent frontend
   errors and web-vitals projected from events
+- `identity_alias_assertions` (011, ReplacingMergeTree) — durable tenant-bound,
+  append-only `identify` assertions keyed by the complete claim; exact retries
+  collapse, but reusing a message ID cannot retract an accepted identity command
+- `identity_alias_resolution_state` (011, AggregatingMergeTree) — compact
+  min/max claim state per project and anonymous ID; matching extrema resolve an
+  alias and differing extrema record a conflict
 
 **Materialized views**
 
 - `feature_flag_exposures_mv` (006) — extracts flag fields from `events.properties` into `feature_flag_exposures`
 - `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
+- `identity_alias_assertions_mv` (011) — projects only `identify` events that
+  contain both canonical identity fields
+- `identity_alias_resolution_state_mv` (011) — folds assertions into the
+  constant-size conflict-aware resolution state
+
+`resolved_identity_aliases` resolves only when the minimum and maximum claimed
+user IDs match. Conflicting claims stay visible with an empty resolved user and
+Query leaves those actors separate. Accepted assertions are irreversible; an
+operator must rebuild the assertion and resolution tables to remove a bad
+claim. The alias becomes visible after writer durability and applies
+retroactively across retained event history. A user-only `identify` is a trait
+update, not an alias assertion.
+
+Historical recovery lives in `pipeline/clickhouse/backfills/`, outside the
+replayed schema migrations. The initializer records each backfill's name and
+SHA-256 checksum in `apdl_schema_backfills`, serializes runners with a local
+single-writer lock, and executes the exact temporary snapshot it hashed. It
+submits the retained-history scan only once and preserves distinct checksum
+evidence so drift fails closed. The migration can recover only the current
+`FINAL` form of identify events still inside the raw-event TTL; older or
+already-overwritten pre-migration assertions cannot be reconstructed. A
+missing backfill directory is an initialization error rather than an implicit
+opt-out.
 
 Supported Query Service analytics read each ReplacingMergeTree with `FINAL` so
 retries are deduplicated before aggregation. Migration 004 removes the legacy

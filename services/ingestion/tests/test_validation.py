@@ -402,8 +402,7 @@ class TestSingleEventValidation:
         assert result["valid"] is False
         assert any(error["field"] == "type" for error in result["errors"])
 
-    def test_valid_identify_event(self):
-        """ValidIdentifyEvent"""
+    def test_user_only_identify_remains_a_valid_trait_update(self):
         event = canonical_event(
             "identify",
             "identify",
@@ -413,6 +412,34 @@ class TestSingleEventValidation:
         event.pop("anonymous_id")
         result = validate_single_event(event)
         assert result["valid"] is True
+
+    def test_identify_with_both_ids_is_the_canonical_alias_assertion(self):
+        event = canonical_event(
+            "identify",
+            "identify",
+            user_id="usr_42",
+            anonymous_id="anon_42",
+            traits={"plan": "pro"},
+        )
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is True
+
+    @pytest.mark.parametrize("field", ["previous_id", "alias_id", "actor_id"])
+    def test_identify_rejects_competing_alias_fields(self, field):
+        event = canonical_event(
+            "identify",
+            "identify",
+            user_id="usr_42",
+            anonymous_id="anon_42",
+        )
+        event[field] = "legacy-identity"
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == field for error in result["errors"])
 
     def test_valid_page_event(self):
         """ValidPageEvent"""

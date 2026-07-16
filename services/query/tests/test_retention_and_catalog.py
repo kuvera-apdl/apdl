@@ -43,7 +43,7 @@ def test_retention_week_query_is_clickhouse_compatible():
 
 def test_event_catalog_query_shape():
     sql = build_event_catalog_query({})
-    assert "GROUP BY event_name" in sql
+    assert "GROUP BY e.event_name" in sql
     assert "ORDER BY event_count DESC" in sql
     assert "LIMIT %(limit)s" in sql
 
@@ -52,9 +52,9 @@ def test_event_count_qualifies_event_name_to_avoid_alias_shadow():
     # The literal label is aliased AS event_name; if the filter referenced the
     # bare column, ClickHouse would bind it to that alias and every selector
     # would match all events (returning the grand total). The filter must
-    # target the real column, events.event_name.
+    # target the real column, e.event_name.
     sql = build_event_count_query([_sel("page"), _sel("$click")], {})
-    assert sql.count("events.event_name =") == 4
+    assert sql.count("e.event_name =") == 4
     assert "AS event_name" in sql
     assert "1 AS is_total" in sql
 

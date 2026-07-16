@@ -118,7 +118,12 @@ class APDLClient:
         *,
         anonymous_id: str | None = None,
     ) -> None:
-        """Associates traits with a user identity."""
+        """Associate traits, and optionally assert an anonymous-to-user alias.
+
+        Passing both ``user_id`` and ``anonymous_id`` emits the canonical,
+        irreversible alias assertion. Omitting ``anonymous_id`` remains a
+        user-trait update and creates no identity link.
+        """
         self._enqueue("identify", event="identify", traits=traits,
                       user_id=user_id, anonymous_id=anonymous_id)
 

@@ -54,12 +54,15 @@ endpoints.
 
 ## Actor identity and totals
 
-All user-counting queries use one namespaced actor identity: `u:<user_id>`
-when `user_id` is present, otherwise `a:<anonymous_id>`. Events with neither
-identity do not contribute to unique-user counts. The namespace prevents the
-same raw text in the two identity domains from being collapsed accidentally.
-Range-wide totals are computed directly with `uniqExact`; they are never
-derived by summing per-bucket unique counts.
+All user-counting queries use the tenant-bound canonical actor contract. A
+direct `user_id` wins; otherwise an anonymous identity with one unambiguous,
+writer-durable alias resolves to that user; otherwise the namespaced anonymous
+identity remains separate. Alias assertions are irreversible and apply
+retroactively across retained history. Conflicting aliases are never guessed
+or merged: the actors remain split, and experiment responses report degraded
+identity quality instead of a decision snapshot. Events with neither identity
+do not contribute to unique-user counts. Range-wide totals use `uniqExact`
+directly and are never derived by summing per-bucket unique counts.
 
 ### Example: event counts
 

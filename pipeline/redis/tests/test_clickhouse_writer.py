@@ -787,6 +787,41 @@ def test_writer_uses_shared_canonical_contract_fixture(monkeypatch):
             )
 
 
+def test_writer_preserves_both_ids_on_identify_alias_assertion(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(
+        event="identify",
+        type="identify",
+        user_id="user-1",
+        anonymous_id="anon-1",
+        message_id="message-identify-alias",
+    )
+
+    row = writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+    assert row["project_id"] == "demo"
+    assert row["event_type"] == "identify"
+    assert row["user_id"] == "user-1"
+    assert row["anonymous_id"] == "anon-1"
+
+
+def test_writer_keeps_user_only_identify_distinct_from_alias_assertion(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(
+        event="identify",
+        type="identify",
+        user_id="user-1",
+        message_id="message-identify-traits",
+    )
+    payload.pop("anonymous_id")
+
+    row = writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+    assert row["event_type"] == "identify"
+    assert row["user_id"] == "user-1"
+    assert row["anonymous_id"] == ""
+
+
 def test_legacy_alias_event_is_rejected(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 

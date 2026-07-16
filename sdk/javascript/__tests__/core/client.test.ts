@@ -350,15 +350,19 @@ describe('APDLClient', () => {
         userId: 'user-42',
         traits: { plan: 'pro', name: 'Alice' },
       });
+      expect((queue[0] as TrackEvent).anonymousId).toBeTruthy();
     });
 
-    it('should set userId on subsequent events', () => {
+    it('should retain one anonymous ID across identify and subsequent events', () => {
       client.identify('user-42');
       client.track('page_loaded');
 
       const queue = client.debug.getQueue();
       expect(queue.length).toBe(2);
-      expect((queue[1] as Record<string, unknown>).userId).toBe('user-42');
+      const identifyEvent = queue[0] as TrackEvent;
+      const subsequentEvent = queue[1] as TrackEvent;
+      expect(subsequentEvent.userId).toBe('user-42');
+      expect(subsequentEvent.anonymousId).toBe(identifyEvent.anonymousId);
     });
   });
 
@@ -425,8 +429,12 @@ describe('APDLClient', () => {
       // The identify and after_reset events (queue was flushed/cleared partially)
       const afterReset = queue.find(
         (e: unknown) => (e as Record<string, unknown>).event === 'after_reset'
-      ) as Record<string, unknown> | undefined;
+      ) as TrackEvent | undefined;
+      const identifyEvent = queue.find(
+        (e: unknown) => (e as Record<string, unknown>).type === 'identify'
+      ) as TrackEvent | undefined;
       expect(afterReset?.userId).toBeUndefined();
+      expect(afterReset?.anonymousId).not.toBe(identifyEvent?.anonymousId);
     });
   });
 
