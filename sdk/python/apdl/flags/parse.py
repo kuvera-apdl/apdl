@@ -22,11 +22,12 @@ _COLLECTION_KEYS = {"schema_version", "project_id", "flags"}
 
 @dataclass
 class FlagConfigParseResult:
+    project_id: str
     flags: list[GateConfig] = field(default_factory=list)
     invalid_keys: list[str] = field(default_factory=list)
 
 
-def _extract_candidates(data: Any) -> list[Any] | None:
+def _extract_candidates(data: Any) -> tuple[str, list[Any]] | None:
     if not isinstance(data, dict) or not set(data.keys()) <= _COLLECTION_KEYS:
         return None
     if data.get("schema_version") != 2:
@@ -37,7 +38,7 @@ def _extract_candidates(data: Any) -> list[Any] | None:
     flags = data.get("flags")
     if not isinstance(flags, list):
         return None
-    return flags
+    return project_id, flags
 
 
 def parse_flag_config_result(data: Any) -> FlagConfigParseResult | None:
@@ -45,11 +46,12 @@ def parse_flag_config_result(data: Any) -> FlagConfigParseResult | None:
 
     Returns ``None`` when the payload's overall shape is unrecognizable.
     """
-    candidates = _extract_candidates(data)
-    if candidates is None:
+    envelope = _extract_candidates(data)
+    if envelope is None:
         return None
 
-    result = FlagConfigParseResult()
+    project_id, candidates = envelope
+    result = FlagConfigParseResult(project_id=project_id)
     for candidate in candidates:
         try:
             result.flags.append(GateConfig.model_validate(candidate))

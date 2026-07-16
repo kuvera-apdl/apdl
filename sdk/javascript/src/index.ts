@@ -55,10 +55,7 @@ export { NoopClient } from './core/noop-client';
 // Re-export hash utilities for advanced usage
 export { hashBucket, isInRollout, percentageBucket } from './flags/hash';
 
-// Entry points: `init()` / `APDL.init()` for explicit setup, and the lazy
-// `apdl` module-scope singleton for zero-config, SSR-safe usage.
-import { apdl, APDL, init, maybeAutoStart } from './core/init';
+// Entry points: `init()` / `APDL.init()` for explicit setup, and the lazy,
+// import-side-effect-free `apdl` singleton for SSR-safe usage.
+import { apdl, APDL, init } from './core/init';
 export { apdl, APDL, init };
-
-// Auto-start auto-capture on the first browser tick when env config is present.
-maybeAutoStart();

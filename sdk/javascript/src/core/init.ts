@@ -100,9 +100,9 @@ function ensureClient(): APDLApi {
 }
 
 /**
- * A module-scope client that just works (item 3): import and use it directly,
- * no `'use client'` / `useEffect` needed. It no-ops on the server and auto-starts
- * on first use in the browser, reading config from env conventions.
+ * A lazy module-scope client. Importing the package is side-effect free; the
+ * client initializes only after an application explicitly calls one of these
+ * methods. It no-ops on the server and reads config from env conventions.
  *
  * ```ts
  * import { apdl } from '@apdl-oss/sdk';
@@ -135,25 +135,3 @@ export const apdl: APDLApi = {
     return ensureClient().debug;
   },
 };
-
-/**
- * Auto-start on the first browser tick when env config is present, so merely
- * importing the package wires up auto-capture. A no-op when config is absent
- * (the lazy client stays inert) or on the server.
- */
-export function maybeAutoStart(): void {
-  if (!isBrowser()) {
-    return;
-  }
-  const resolved = resolveConfig({}, { strict: false });
-  if (resolved === null) {
-    return;
-  }
-  const schedule =
-    typeof queueMicrotask === 'function'
-      ? queueMicrotask
-      : (cb: () => void) => setTimeout(cb, 0);
-  schedule(() => {
-    ensureClient();
-  });
-}

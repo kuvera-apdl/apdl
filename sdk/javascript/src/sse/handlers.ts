@@ -20,10 +20,12 @@ interface SSEMessage {
  */
 export class SSEHandlers {
   private flagCache: FlagCache;
+  private projectId: string;
   private debug: boolean;
 
-  constructor(flagCache: FlagCache, debug = false) {
+  constructor(flagCache: FlagCache, projectId: string, debug = false) {
     this.flagCache = flagCache;
+    this.projectId = projectId;
     this.debug = debug;
   }
 
@@ -64,7 +66,7 @@ export class SSEHandlers {
     try {
       const parsed = JSON.parse(data) as unknown;
       const result = parseFlagConfigResult(parsed);
-      if (result !== null) {
+      if (result !== null && result.project_id === this.projectId) {
         if (result.flags.length > 0 || result.invalid_keys.length === 0) {
           this.flagCache.set(result.flags, 'sse', result.invalid_keys);
         } else {

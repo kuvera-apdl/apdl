@@ -278,7 +278,7 @@ class APDLClient:
         if data is None:
             return False
         result = parse_flag_config_result(data)
-        if result is None:
+        if result is None or result.project_id != self._config.project_id:
             return False
         if result.flags or not result.invalid_keys:
             self._flag_cache.set(result.flags, "initial_fetch", result.invalid_keys)

@@ -62,6 +62,7 @@ describe('flag config schema parsing', () => {
     });
 
     expect(result).toEqual({
+      project_id: 'apdl',
       flags: [makeFlag({ key: 'valid' })],
       invalid_keys: ['invalid'],
     });

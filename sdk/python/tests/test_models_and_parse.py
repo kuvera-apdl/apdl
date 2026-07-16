@@ -181,6 +181,7 @@ def test_result_source_none_string_rejected():
 def test_parse_v2_envelope():
     result = parse_flag_config_result(envelope())
     assert result is not None
+    assert result.project_id == "p1"
     assert result.flags[0].key == "g"
     assert result.invalid_keys == []
 
