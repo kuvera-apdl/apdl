@@ -100,6 +100,11 @@ from app.runtime.models import (
 from app.runtime.planner import build_runtime_acceptance_plan
 from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
+from app.safety.paths import (
+    ChangedPathError,
+    parse_git_changed_paths,
+    parse_git_numstat,
+)
 from app.safety.policy import VerifiedProtectedPathExemption
 from app.semantic_review import (
     ModelResponseStatus,
@@ -167,6 +172,7 @@ class _DeadlineCommandExecutor:
             output_limit=output_limit,
         )
 
+
 _PROFILE_INPUT_NAMES = {
     "package.json",
     "pyproject.toml",
@@ -225,6 +231,7 @@ _ENV_PASSTHROUGH: tuple[str, ...] = (
     "AZURE_API_VERSION",
 )
 
+
 def _basic_auth_header(token: str) -> str:
     """GitHub App token → a one-shot Basic auth header value (never persisted)."""
     raw = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -258,22 +265,14 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _parse_numstat(numstat: str) -> dict[str, int]:
-    """Parse ``git diff --numstat`` into a diff_stat dict.
+def _parse_numstat(numstat: bytes) -> tuple[dict[str, int], list[str]]:
+    """Parse strict NUL-delimited numstat bytes and retain their exact paths."""
+    return parse_git_numstat(numstat)
 
-    Returns ``{"files", "additions", "deletions"}``. Binary files render their
-    counts as ``-``; they count toward ``files`` but contribute zero lines.
-    """
-    files = additions = deletions = 0
-    for line in numstat.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        added, removed, _path = parts
-        files += 1
-        additions += int(added) if added.isdigit() else 0
-        deletions += int(removed) if removed.isdigit() else 0
-    return {"files": files, "additions": additions, "deletions": deletions}
+
+def _git_error(output: bytes) -> str:
+    """Decode diagnostic Git output without weakening strict path decoding."""
+    return _tail(output.decode("utf-8", "replace"))
 
 
 def _capability_preamble(has_test_runner: bool, verify_cmd: str | None) -> str:
@@ -662,9 +661,7 @@ class AiderEditor:
                 if scratch_base == repo_dir or repo_dir in scratch_base.parents:
                     continue
                 try:
-                    work = Path(
-                        tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base)
-                    )
+                    work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base))
                 except OSError:
                     continue
                 break
@@ -746,8 +743,7 @@ class AiderEditor:
             if rc != 0:
                 return (
                     False,
-                    "could not stage the authorized runtime workflow: "
-                    + _tail(out),
+                    "could not stage the authorized runtime workflow: " + _tail(out),
                 )
             rc, out = await self._git(
                 repo_dir,
@@ -756,8 +752,7 @@ class AiderEditor:
             if rc != 0:
                 return (
                     False,
-                    "could not commit the authorized runtime workflow: "
-                    + _tail(out),
+                    "could not commit the authorized runtime workflow: " + _tail(out),
                 )
             return True, None
 
@@ -768,7 +763,11 @@ class AiderEditor:
             #    instead receives one clean, mutation-materialized checkout and
             #    must never gain a remote repository capability.
             if workspace_mode:
-                if request.revert_sha or request.existing_branch or request.expected_head_sha:
+                if (
+                    request.revert_sha
+                    or request.existing_branch
+                    or request.expected_head_sha
+                ):
                     return fail(
                         "Workspace evaluation does not support remote revert or "
                         "existing-branch repair inputs."
@@ -868,9 +867,7 @@ class AiderEditor:
                     "request can be created."
                 )
 
-            inspection_snapshot = _inspection_for_ledger(
-                repo_dir, requirement_ledger
-            )
+            inspection_snapshot = _inspection_for_ledger(repo_dir, requirement_ledger)
             verification_plan = build_verification_plan(
                 requirement_ledger, repo_profile
             )
@@ -1213,11 +1210,23 @@ class AiderEditor:
                 agent_pending = True
 
                 # Compute the diff for the review + pre-push gates. No diff → no PR.
-                rc, names = await self._git(
-                    repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                rc, names = await self._git_bytes(
+                    repo_dir,
+                    [
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        "--no-renames",
+                        f"{base}..HEAD",
+                    ],
                 )
-                changed_paths = [p for p in names.splitlines() if p.strip()]
-                if rc != 0 or not changed_paths:
+                if rc != 0:
+                    return fail(f"could not inspect changed paths: {_git_error(names)}")
+                try:
+                    changed_paths = parse_git_changed_paths(names)
+                except ChangedPathError as exc:
+                    return fail(f"could not inspect changed paths safely: {exc}")
+                if not changed_paths:
                     # Surface aider's own output so a no-op edit (e.g. an unreachable
                     # or misnamed model) is diagnosable from the changeset error.
                     return fail(
@@ -1237,10 +1246,11 @@ class AiderEditor:
                         verification_plan,
                         policy=request.runtime_acceptance_policy,
                     )
-                    workflow_changed, workflow_error = (
-                        await synchronize_runtime_workflow(
-                            repo_profile, runtime_acceptance_plan
-                        )
+                    (
+                        workflow_changed,
+                        workflow_error,
+                    ) = await synchronize_runtime_workflow(
+                        repo_profile, runtime_acceptance_plan
                     )
                     if workflow_error:
                         return fail(workflow_error)
@@ -1259,14 +1269,28 @@ class AiderEditor:
                             verification_plan,
                             policy=request.runtime_acceptance_policy,
                         )
-                        rc, names = await self._git(
-                            repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                        rc, names = await self._git_bytes(
+                            repo_dir,
+                            [
+                                "diff",
+                                "--name-only",
+                                "-z",
+                                "--no-renames",
+                                f"{base}..HEAD",
+                            ],
                         )
                         if rc != 0:
-                            return fail("could not inspect regenerated workflow diff")
-                        changed_paths = [
-                            path for path in names.splitlines() if path.strip()
-                        ]
+                            return fail(
+                                "could not inspect regenerated workflow diff: "
+                                + _git_error(names)
+                            )
+                        try:
+                            changed_paths = parse_git_changed_paths(names)
+                        except ChangedPathError as exc:
+                            return fail(
+                                "could not inspect regenerated workflow diff safely: "
+                                f"{exc}"
+                            )
                         _, diff_text = await self._git(
                             repo_dir, ["diff", f"{base}..HEAD"]
                         )
@@ -1279,8 +1303,7 @@ class AiderEditor:
                     policy_authorized_workflow_paths=(
                         [RUNTIME_ACCEPTANCE_WORKFLOW_PATH]
                         if request.runtime_acceptance_policy.enabled
-                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH
-                        in changed_paths
+                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH in changed_paths
                         else []
                     ),
                 )
@@ -1466,10 +1489,26 @@ class AiderEditor:
                     "map to changed or confirmed-existing code before PR creation."
                 )
 
-            _, numstat = await self._git(
-                repo_dir, ["diff", "--numstat", f"{base}..HEAD"]
+            rc, numstat = await self._git_bytes(
+                repo_dir,
+                [
+                    "diff",
+                    "--numstat",
+                    "-z",
+                    "--no-renames",
+                    f"{base}..HEAD",
+                ],
             )
-            diff_stat = _parse_numstat(numstat)
+            if rc != 0:
+                return fail(f"could not inspect diff statistics: {_git_error(numstat)}")
+            try:
+                diff_stat, numstat_paths = _parse_numstat(numstat)
+            except ChangedPathError as exc:
+                return fail(f"could not inspect diff statistics safely: {exc}")
+            if numstat_paths != changed_paths:
+                return fail(
+                    "Git changed-path and numstat records disagree; branch NOT pushed."
+                )
 
             # Contract evidence is valid only for the exact manifest/lockfile
             # hashes it was compiled from. A dependency edit must be resolved in
@@ -1496,10 +1535,7 @@ class AiderEditor:
                 and runtime_acceptance_plan is not None
                 and runtime_acceptance_plan.checks
             ):
-                workflow_path = (
-                    repo_dir
-                    / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
-                )
+                workflow_path = repo_dir / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                 expected_workflow = render_github_actions_workflow(
                     runtime_acceptance_plan,
                     repo_profile,
@@ -1507,8 +1543,7 @@ class AiderEditor:
                 )
                 if (
                     not workflow_path.is_file()
-                    or workflow_path.read_text(encoding="utf-8")
-                    != expected_workflow
+                    or workflow_path.read_text(encoding="utf-8") != expected_workflow
                 ):
                     return fail(
                         "The policy-authorized runtime workflow does not match "
@@ -1599,6 +1634,28 @@ class AiderEditor:
     async def _git(
         self, cwd: Path | None, args: list[str], *, auth_header: str | None = None
     ) -> tuple[int, str]:
+        argv, env = self._git_invocation(cwd, args, auth_header=auth_header)
+        return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
+
+    async def _git_bytes(
+        self, cwd: Path | None, args: list[str], *, auth_header: str | None = None
+    ) -> tuple[int, bytes]:
+        """Run Git without decoding security-sensitive path output."""
+        argv, env = self._git_invocation(cwd, args, auth_header=auth_header)
+        return await self._exec_bytes(
+            argv,
+            cwd=None,
+            env=env,
+            timeout=self._git_timeout,
+        )
+
+    @staticmethod
+    def _git_invocation(
+        cwd: Path | None,
+        args: list[str],
+        *,
+        auth_header: str | None,
+    ) -> tuple[list[str], dict[str, str]]:
         env = _git_env()
         if auth_header is not None:
             # Inject the one-shot ``http.extraHeader`` via GIT_CONFIG_* env vars
@@ -1614,7 +1671,7 @@ class AiderEditor:
         if cwd is not None:
             argv += ["-C", str(cwd)]
         argv += args
-        return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
+        return argv, env
 
     async def _revert_commit(
         self, repo_dir: Path, sha: str, auth_header: str
@@ -1661,6 +1718,23 @@ class AiderEditor:
         A non-zero exit is data, not an error — only spawn faults or a timeout
         surface as exceptions (caught by :meth:`implement`) or a synthetic 124.
         """
+        returncode, output = await self._exec_bytes(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+        )
+        return returncode, output.decode("utf-8", "replace")
+
+    async def _exec_bytes(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        env: dict[str, str],
+        timeout: int | float,
+    ) -> tuple[int, bytes]:
+        """Run a subprocess and return undecoded combined output bytes."""
         deadline = _RUN_DEADLINE.get()
         if deadline is not None:
             try:
@@ -1668,7 +1742,7 @@ class AiderEditor:
             except CodegenDeadlineExceeded:
                 return (
                     124,
-                    "Codegen job deadline exhausted before subprocess start",
+                    b"Codegen job deadline exhausted before subprocess start",
                 )
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -1682,5 +1756,5 @@ class AiderEditor:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return 124, f"timed out after {timeout}s"
-        return proc.returncode or 0, (stdout or b"").decode("utf-8", "replace")
+            return 124, f"timed out after {timeout}s".encode()
+        return proc.returncode or 0, stdout or b""

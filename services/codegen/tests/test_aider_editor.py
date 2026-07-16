@@ -58,7 +58,11 @@ def test_tail_snaps_to_line_boundary_and_marks_truncation():
     # A long first line then a clean second line; the tail budget lands inside
     # the first line, so the excerpt must drop that partial line, not begin
     # mid-word, and must announce how much was dropped.
-    text = "verification failed: apdl-oss/sdk/dist/apdl.esm.js\n" + "x" * 50 + "\nreal error line"
+    text = (
+        "verification failed: apdl-oss/sdk/dist/apdl.esm.js\n"
+        + "x" * 50
+        + "\nreal error line"
+    )
     out = _tail(text, limit=20)
     assert out.startswith("[…truncated ")
     body = out.split("\n", 1)[1]
@@ -85,24 +89,34 @@ def test_tail_keeps_a_complete_line_that_exactly_fits_the_limit():
 
 
 def test_parse_numstat_sums_files_and_lines():
-    out = "10\t2\tapp/a.py\n5\t0\tapp/b.py\n"
-    assert _parse_numstat(out) == {"files": 2, "additions": 15, "deletions": 2}
+    out = b"10\t2\tapp/a.py\x005\t0\tapp/b.py\x00"
+    assert _parse_numstat(out) == (
+        {"files": 2, "additions": 15, "deletions": 2},
+        ["app/a.py", "app/b.py"],
+    )
 
 
 def test_parse_numstat_counts_binary_as_touched_zero_lines():
-    out = "-\t-\tassets/logo.png\n3\t1\tREADME.md\n"
-    assert _parse_numstat(out) == {"files": 2, "additions": 3, "deletions": 1}
+    out = b"-\t-\tassets/logo.png\x003\t1\tREADME.md\x00"
+    assert _parse_numstat(out) == (
+        {"files": 2, "additions": 3, "deletions": 1},
+        ["assets/logo.png", "README.md"],
+    )
 
 
-def test_parse_numstat_ignores_malformed_lines():
-    assert _parse_numstat("garbage\n\n") == {"files": 0, "additions": 0, "deletions": 0}
+def test_parse_numstat_rejects_malformed_records():
+    with pytest.raises(ValueError, match="malformed"):
+        _parse_numstat(b"garbage\x00")
 
 
 def test_capability_preamble_warns_when_no_runner():
     text = _capability_preamble(has_test_runner=False, verify_cmd="npm run build")
     assert "NO test framework" in text
     assert "npm run build" in text
-    assert "do NOT import a test library" in text.lower() or "not import a test" in text.lower()
+    assert (
+        "do NOT import a test library" in text.lower()
+        or "not import a test" in text.lower()
+    )
 
 
 def test_capability_preamble_invites_tests_when_runner_present():
@@ -121,7 +135,9 @@ def test_probe_repo_prefers_override_cmd_but_keeps_repo_runner_signal(tmp_path):
 
 
 def test_build_message_prepends_preamble():
-    msg = _build_message("Do the thing.", ["keep it small"], preamble="## Context\nrepo has no tests")
+    msg = _build_message(
+        "Do the thing.", ["keep it small"], preamble="## Context\nrepo has no tests"
+    )
     assert msg.startswith("## Context\nrepo has no tests")
     assert msg.endswith("Constraints:\n- keep it small")
     assert "Do the thing." in msg
@@ -243,8 +259,12 @@ async def _capture_aider_argv(editor: AiderEditor, monkeypatch) -> list[str]:
 
     await editor.implement(
         EditRequest(
-            repo="acme/widgets", base_branch="main", branch="apdl/x",
-            token="ghs_tok", title="x", spec="do a thing",
+            repo="acme/widgets",
+            base_branch="main",
+            branch="apdl/x",
+            token="ghs_tok",
+            title="x",
+            spec="do a thing",
         )
     )
     return captured["argv"]
@@ -288,7 +308,11 @@ async def test_aider_argv_omits_conventions_when_disabled(monkeypatch, tmp_path)
     monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     argv = await _capture_aider_argv(editor, monkeypatch)
-    read_names = [Path(argv[index + 1]).name for index, value in enumerate(argv) if value == "--read"]
+    read_names = [
+        Path(argv[index + 1]).name
+        for index, value in enumerate(argv)
+        if value == "--read"
+    ]
     assert "CONVENTIONS.md" not in read_names
     assert "INSPECTION.md" in read_names
 
@@ -301,7 +325,9 @@ def _fake_probe_with_refs(refs):
 
 
 @pytest.mark.asyncio
-async def test_aider_argv_does_not_read_unversioned_sdk_reference(monkeypatch, tmp_path):
+async def test_aider_argv_does_not_read_unversioned_sdk_reference(
+    monkeypatch, tmp_path
+):
     # Static SDK guidance is disabled unless it can be tied to an exact version.
     monkeypatch.setenv("CODEGEN_KEEP_WORKDIR", "true")
     monkeypatch.setattr(
@@ -332,7 +358,9 @@ async def test_aider_argv_omits_sdk_reference_when_disabled(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_sdk_reference_env_cannot_enable_unversioned_guidance(monkeypatch, tmp_path):
+async def test_sdk_reference_env_cannot_enable_unversioned_guidance(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("CODEGEN_SDK_REFERENCE", "true")
     monkeypatch.setattr(
         aider_editor,
@@ -379,13 +407,21 @@ async def test_implement_does_not_run_local_verification_gate(monkeypatch, tmp_p
     async def fake_exec(_argv, **_kwargs):
         return 0, "done"  # aider "succeeds" (empty clone → nothing to verify)
 
+    async def fake_git_bytes(*_args, **_kwargs):
+        return 0, b""
+
     monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_git_bytes", fake_git_bytes)
     monkeypatch.setattr(editor, "_exec", fake_exec)
 
     result = await editor.implement(
         EditRequest(
-            repo="acme/widgets", base_branch="main", branch="apdl/x",
-            token="ghs_tok", title="x", spec="do a thing",
+            repo="acme/widgets",
+            base_branch="main",
+            branch="apdl/x",
+            token="ghs_tok",
+            title="x",
+            spec="do a thing",
         )
     )
 
@@ -412,13 +448,21 @@ async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_
     async def fake_exec(_argv, **_kwargs):
         return 0, "done"
 
+    async def fake_git_bytes(*_args, **_kwargs):
+        return 0, b""
+
     monkeypatch.setattr(editor, "_git", fake_git)
+    monkeypatch.setattr(editor, "_git_bytes", fake_git_bytes)
     monkeypatch.setattr(editor, "_exec", fake_exec)
 
     result = await editor.implement(
         EditRequest(
-            repo="acme/widgets", base_branch="main", branch="apdl/x",
-            token="ghs_tok", title="x", spec="do a thing",
+            repo="acme/widgets",
+            base_branch="main",
+            branch="apdl/x",
+            token="ghs_tok",
+            title="x",
+            spec="do a thing",
         )
     )
 
@@ -432,8 +476,12 @@ async def test_implement_opts_out_of_verify_gate_when_disabled(monkeypatch, tmp_
 
 def _request(test_cmd: str | None = "make test") -> EditRequest:
     return EditRequest(
-        repo="acme/widgets", base_branch="main", branch="apdl/x",
-        token="ghs_tok", title="Bot filter", spec="Build a bot filter.",
+        repo="acme/widgets",
+        base_branch="main",
+        branch="apdl/x",
+        token="ghs_tok",
+        title="Bot filter",
+        spec="Build a bot filter.",
         test_cmd=test_cmd,
     )
 
@@ -470,6 +518,7 @@ class _Pipeline:
         self._test_results = list(test_results or [])
         self._diff_text = diff_text or "diff --git a/app/x.ts b/app/x.ts\n+new"
         self._changed_paths = list(changed_paths or ["app/x.ts\n"])
+        self._last_changed_paths = ["app/x.ts"]
         repo_path: Path | None = None
 
         async def fake_git(cwd, args, **_kwargs):
@@ -483,13 +532,6 @@ class _Pipeline:
                     target = repo / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(content)
-            if args[0] == "diff" and "--name-only" in args:
-                value = self._changed_paths[0]
-                if len(self._changed_paths) > 1:
-                    self._changed_paths.pop(0)
-                return 0, value
-            if args[0] == "diff" and "--numstat" in args:
-                return 0, "5\t1\tapp/x.ts\n"
             if args[0] == "diff":
                 return 0, self._diff_text
             if args[0] == "rev-list":
@@ -497,6 +539,30 @@ class _Pipeline:
             if args[0] == "push":
                 self.pushed = True
             return 0, ""  # clone / checkout / config / fetch / revert
+
+        async def fake_git_bytes(_cwd, args, **_kwargs):
+            self.git_calls.append(list(args))
+            if args[0] == "diff" and "--name-only" in args:
+                value = self._changed_paths[0]
+                if len(self._changed_paths) > 1:
+                    self._changed_paths.pop(0)
+                self._last_changed_paths = [path for path in value.splitlines() if path]
+                return (
+                    0,
+                    b"".join(
+                        path.encode("utf-8") + b"\x00"
+                        for path in self._last_changed_paths
+                    ),
+                )
+            if args[0] == "diff" and "--numstat" in args:
+                return (
+                    0,
+                    b"".join(
+                        b"5\t1\t" + path.encode("utf-8") + b"\x00"
+                        for path in self._last_changed_paths
+                    ),
+                )
+            raise AssertionError(f"unexpected raw Git command: {args}")
 
         async def fake_exec(argv, **_kwargs):
             self.aider_messages.append(argv[argv.index("--message") + 1])
@@ -508,6 +574,7 @@ class _Pipeline:
             return 0, "aider ok"
 
         monkeypatch.setattr(editor, "_git", fake_git)
+        monkeypatch.setattr(editor, "_git_bytes", fake_git_bytes)
         monkeypatch.setattr(editor, "_exec", fake_exec)
 
 
@@ -518,10 +585,16 @@ def _strict_review_response(
     rationale: str = "The repository evidence supports the change.",
     instructions: list[str] | None = None,
 ) -> str:
-    requirement_ids = sorted(set(re.findall(r'"requirement_id": "(REQ-[0-9]{3})"', prompt)))
-    evidence_ids = sorted(set(re.findall(r'"evidence_id": "(ev_[0-9a-f]{24})"', prompt)))
+    requirement_ids = sorted(
+        set(re.findall(r'"requirement_id": "(REQ-[0-9]{3})"', prompt))
+    )
+    evidence_ids = sorted(
+        set(re.findall(r'"evidence_id": "(ev_[0-9a-f]{24})"', prompt))
+    )
     assert requirement_ids and evidence_ids
-    actions = instructions or ([] if decision == "approved" else ["Fix the evidenced defect."])
+    actions = instructions or (
+        [] if decision == "approved" else ["Fix the evidenced defect."]
+    )
     return json.dumps(
         {
             "schema_version": "review_model_response@1",
@@ -605,7 +678,8 @@ async def test_high_risk_fails_closed_on_unparseable_review(monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path):
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(brief_reply=_BRIEF),
     )
     pipeline = _Pipeline(editor, monkeypatch)
@@ -626,7 +700,9 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
     assert "# GitHub CI verification plan" in pipeline.aider_messages[0]
     assert "# GitHub CI Runtime Acceptance Plan" in pipeline.aider_messages[0]
     assert result.verification_plan is not None
-    assert result.verification_plan.disposition is PlanDisposition.unverified_external_ci
+    assert (
+        result.verification_plan.disposition is PlanDisposition.unverified_external_ci
+    )
     assert result.verification_coverage is not None
     assert (
         result.verification_coverage.disposition
@@ -730,9 +806,12 @@ async def test_authorized_runtime_workflow_is_generated_and_remains_policy_scope
     assert result.verification_coverage.policy_authorized_workflow_paths == [workflow]
     assert result.verification_coverage.changed_protected_workflow_paths == []
     assert ["add", "--", workflow] in pipeline.git_calls
-    assert pipeline.git_calls.count(
-        ["commit", "-m", "chore(ci): add runtime acceptance evidence"]
-    ) == 2
+    assert (
+        pipeline.git_calls.count(
+            ["commit", "-m", "chore(ci): add runtime acceptance evidence"]
+        )
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -780,9 +859,7 @@ async def test_runtime_workflow_refuses_non_apdl_owned_path_collision(
             "package.json": '{"scripts":{"test":"vitest run"}}',
             "package-lock.json": '{"lockfileVersion":3,"packages":{}}',
             RUNTIME_ACCEPTANCE_WORKFLOW_PATH: (
-                "name: Existing repository workflow\n"
-                "on: [pull_request]\n"
-                "jobs: {}\n"
+                "name: Existing repository workflow\non: [pull_request]\njobs: {}\n"
             ),
         },
     )
@@ -920,7 +997,8 @@ async def test_medium_risk_missing_test_coverage_retries_before_push(
 async def test_edit_loop_keeps_raw_spec_when_brief_disabled(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(),
     )
     pipeline = _Pipeline(editor, monkeypatch)
@@ -937,7 +1015,8 @@ async def test_local_verify_failure_is_not_executed(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(
-        editor, monkeypatch,
+        editor,
+        monkeypatch,
         test_results=[(False, "Module not found: hashBucket"), (True, "")],
     )
 
@@ -968,7 +1047,8 @@ async def test_local_verify_failures_do_not_block_generation(monkeypatch, tmp_pa
 async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(
             review_replies=[
                 {
@@ -992,11 +1072,14 @@ async def test_review_rejection_retries_with_instructions(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_review_rejection_without_retries_fails_the_changeset(monkeypatch, tmp_path):
+async def test_review_rejection_without_retries_fails_the_changeset(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("CODEGEN_BRIEF", "false")
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "0")
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(
             review_replies=[
                 {
@@ -1040,7 +1123,8 @@ async def test_secret_in_diff_blocks_the_push_itself(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(
-        editor, monkeypatch,
+        editor,
+        monkeypatch,
         diff_text="diff --git a/.env.local b/.env.local\n+AWS_KEY=AKIAIOSFODNN7EXAMPLE",
     )
 
@@ -1061,9 +1145,7 @@ async def test_gates_honor_the_connection_policy(monkeypatch, tmp_path):
 
     request = _request()
     request.safety_policy = resolve_effective_policy(
-        TenantCodegenConnectionPolicy(
-            gates=TenantCodegenGatesPolicy(max_lines=5)
-        ),
+        TenantCodegenConnectionPolicy(gates=TenantCodegenGatesPolicy(max_lines=5)),
         PlatformCodegenSafetyPolicy(),
     )
     result = await editor.implement(request)
@@ -1099,7 +1181,8 @@ async def test_brief_message_does_not_duplicate_the_preamble(monkeypatch, tmp_pa
     # The brief is compiled WITH the verification context as input; prepending
     # it again would put the same block in the message twice.
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(brief_reply=_BRIEF),
     )
     pipeline = _Pipeline(editor, monkeypatch)
@@ -1121,7 +1204,9 @@ def _revert_request() -> EditRequest:
 
 
 @pytest.mark.asyncio
-async def test_revert_applies_git_revert_without_invoking_the_agent(monkeypatch, tmp_path):
+async def test_revert_applies_git_revert_without_invoking_the_agent(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(editor, monkeypatch)
@@ -1142,7 +1227,9 @@ async def test_revert_does_not_run_local_verification(monkeypatch, tmp_path):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(
-        editor, monkeypatch, test_results=[(False, "type error after revert"), (True, "")]
+        editor,
+        monkeypatch,
+        test_results=[(False, "type error after revert"), (True, "")],
     )
 
     result = await editor.implement(_revert_request())
@@ -1155,9 +1242,12 @@ async def test_revert_does_not_run_local_verification(monkeypatch, tmp_path):
 async def test_revert_skips_the_quality_review(monkeypatch, tmp_path):
     # A mechanical revert's diff is not judged against the spec — a reviewer
     # rejection here would be noise, not signal.
-    rejected = '{"approved": false, "problems": ["looks weird"], "fix_instructions": "x"}'
+    rejected = (
+        '{"approved": false, "problems": ["looks weird"], "fix_instructions": "x"}'
+    )
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(review_replies=[rejected]),
     )
     pipeline = _Pipeline(editor, monkeypatch)
@@ -1201,7 +1291,8 @@ async def test_revert_conflict_fails_cleanly(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_prompt_transcript_records_brief_edit_and_review(monkeypatch, tmp_path):
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=_routing_complete(brief_reply=_BRIEF),
     )
     _Pipeline(editor, monkeypatch)
@@ -1245,7 +1336,8 @@ async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
 
     monkeypatch.setattr(aider_editor, "append_prompt", recording_append_prompt)
     editor = AiderEditor(
-        model="claude-opus-4-8", workdir_base=str(tmp_path),
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
         complete=unusable_brief,
     )
     _Pipeline(editor, monkeypatch)
@@ -1262,7 +1354,9 @@ async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_prompt_transcript_survives_raised_brief_completion(monkeypatch, tmp_path):
+async def test_prompt_transcript_survives_raised_brief_completion(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
 
     async def broken_brief(_system, _user):
@@ -1289,7 +1383,8 @@ async def test_prompt_transcript_has_no_local_verify_retry(monkeypatch, tmp_path
     monkeypatch.setenv("CODEGEN_EDIT_RETRIES", "1")
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     _Pipeline(
-        editor, monkeypatch,
+        editor,
+        monkeypatch,
         test_results=[(False, "Module not found: hashBucket"), (False, "still red")],
     )
 
@@ -1321,7 +1416,9 @@ async def test_prompt_transcript_lists_attached_context_files(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_named_dependency_blocks_when_install_is_not_isolated(monkeypatch, tmp_path):
+async def test_named_dependency_blocks_when_install_is_not_isolated(
+    monkeypatch, tmp_path
+):
     """Exact package claims cannot fall back to model knowledge on the API host."""
     profile = RepoProfile(
         packages=[
