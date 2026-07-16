@@ -5,9 +5,9 @@
 > the Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console are the
 > supported core. Agents is an opt-in operator preview; only the Codegen API
 > control plane is a source-only offline preview. Its editor/worker and
-> publication paths are unsupported. ETL v2, Kafka, Flink, Kubernetes, Terraform,
+> publication paths are unsupported. ETL v2, Kubernetes, Terraform,
 > multi-replica operation, upgrades, backup, and restore are not supported.
-> See [Support](../SUPPORT.md).
+> Redis Streams is the only included event bus. See [Support](../SUPPORT.md).
 
 APDL is a product analytics and experimentation platform with an optional
 operator-run Agents preview. Events flow in from the SDKs and land in
@@ -31,7 +31,7 @@ feedback cycle remains a product direction rather than a current capability.
 | Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | Core, source-built | [README](../services/admin-api/README.md) |
 | Admin Console | React, Vite, nginx | 5173 | Core, source-built | [README](../services/admin/README.md) |
 | Redis-to-ClickHouse writer | Python, clickhouse-driver | — | Core, source-built | [README](../pipeline/README.md) |
-| ETL v2 / Kafka / Flink | Python / design scaffolds | — | Unsupported | [README](../pipeline/README.md) |
+| ETL v2 | Python design prototype | — | Unsupported | [README](../pipeline/README.md) |
 
 ## The three flows
 
@@ -136,11 +136,11 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
 
 ## Deployment boundary
 
-Redis Streams is the only 0.3.0 event bus. The checked-in Kafka/Flink files and
-the ETL package are future design/scaffolding and are not connected to the live
-runtime, release artifacts, or support contract. Prototype v2 SQL is quarantined
-under `pipeline/etl/clickhouse/` and is not applied by supported setup. The
-repository contains no supported Kubernetes or Terraform deployment.
+Redis Streams is the only 0.3.0 event bus. The ETL package is future design
+scaffolding and is not connected to the live runtime, release artifacts, or
+support contract. Prototype v2 SQL is quarantined under
+`pipeline/etl/clickhouse/` and is not applied by supported setup. The repository
+contains no supported Kubernetes or Terraform deployment.
 
 Compose runs a single instance of each service and uses a local-development
 nginx Gateway. Cross-replica cache/SSE behavior, hardened public ingress,

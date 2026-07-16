@@ -49,9 +49,10 @@ must not be treated as hardened public ingress.
   `.[agent]` dependency extra, `Dockerfile.worker`, sandbox execution, and all
   publication rollout overlays are experimental source only, are not installed
   by the supported stack, and are outside the 0.3.0 dependency/security gate.
-- **Unsupported:** ETL v2, Kafka, Flink, Kubernetes, Terraform, multi-replica
-  operation, in-place upgrades, backup, restore, disaster recovery, managed
-  cloud deployment, production ingress, and production security/SLO claims.
+- **Unsupported:** ETL v2, Kubernetes, Terraform, multi-replica operation,
+  in-place upgrades, backup, restore, disaster recovery, managed cloud
+  deployment, production ingress, and production security/SLO claims. Redis
+  Streams is the only included event bus.
 
 Experimental and design files may remain in the repository, but their presence
 does not put them in the release or support contract.

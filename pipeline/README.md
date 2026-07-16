@@ -5,9 +5,9 @@ the ClickHouse schema, and provides the ETL framework for custom event types.
 
 For APDL 0.3.0, only the Redis-to-ClickHouse writer and the PostgreSQL and
 ClickHouse migrations used by the source-built single-node core are supported.
-ETL v2, Kafka, and Flink are disconnected future/experimental surfaces: they
-are not started by the supported stack, published as release artifacts, or
-covered by the runtime support contract.
+ETL v2 is a disconnected experimental surface: it is not started by the
+supported stack, published as a release artifact, or covered by the runtime
+support contract. Redis Streams is the only event bus included in APDL.
 
 ## Layout
 
@@ -17,8 +17,6 @@ covered by the runtime support contract.
 | `clickhouse/` | Supported core migrations | SQL migrations and reference schemas (tables + materialized views) |
 | `postgres/` | Supported core migrations | The authoritative, versioned PostgreSQL migration sequence |
 | `etl/` | Unsupported experiment | Standalone custom-events ETL framework (`apdl-etl` package), not wired to live events |
-| `kafka/` | Unsupported design | Future Kafka topic definitions, not a runtime |
-| `flink/` | Unsupported design | Future Flink jobs, not a runtime |
 
 ## ClickHouse writer
 
@@ -246,13 +244,6 @@ service, or release artifact connects it to the 0.3.0 runtime. New event types
 can be scaffolded for research with `make new-transform`; this is not a
 supported extension contract. Full design details:
 [`etl/docs/etl-framework.md`](etl/docs/etl-framework.md).
-
-## Kafka and Flink (unsupported designs)
-
-`kafka/topics.yaml` and `flink/` preserve future scaling ideas. No default
-runtime, build artifact, CI integration test, or supported deployment connects
-them to APDL. Do not treat the files as migration guidance or an available
-alternative to Redis Streams.
 
 ## Running locally
 
