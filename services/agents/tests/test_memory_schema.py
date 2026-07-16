@@ -50,9 +50,10 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 19
-    assert MIGRATION_NAME == "019_retention_cohort_mode.sql"
+    assert MIGRATION_VERSION == 20
+    assert MIGRATION_NAME == "020_agents_governance.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
+    assert ("feature_proposals", "project_id") in REQUIRED_COLUMNS
     assert ("custom_agent_test_runs", "lease_expires_at") in REQUIRED_COLUMNS
 
 

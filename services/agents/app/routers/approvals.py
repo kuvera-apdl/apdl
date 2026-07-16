@@ -474,6 +474,7 @@ async def _apply_approval_effects(
                 try:
                     await mark_failed(
                         pool,
+                        project_id,
                         proposal_id,
                         "PR rejected at the approval gate.",
                         run_id,
@@ -728,7 +729,7 @@ async def _open_approved_changeset(
 
     if (not title or not spec) and proposal_id:
         try:
-            proposal = await get_proposal(pool, proposal_id)
+            proposal = await get_proposal(pool, project_id, proposal_id)
         except Exception:
             logger.exception("[%s] Could not load proposal %s", run_id, proposal_id)
             proposal = None
@@ -746,6 +747,7 @@ async def _open_approved_changeset(
             try:
                 await mark_failed(
                     pool,
+                    project_id,
                     proposal_id,
                     "Missing title/spec at approval.",
                     run_id,
@@ -769,7 +771,9 @@ async def _open_approved_changeset(
         logger.exception("[%s] Failed to open changeset for %s", run_id, proposal_id)
         if proposal_id:
             try:
-                await mark_failed(pool, proposal_id, str(exc), run_id)
+                await mark_failed(
+                    pool, project_id, proposal_id, str(exc), run_id
+                )
             except Exception:
                 logger.exception(
                     "[%s] Could not mark proposal %s failed", run_id, proposal_id
@@ -779,7 +783,9 @@ async def _open_approved_changeset(
     changeset_id = str(result.get("changeset_id") or "").strip()
     if changeset_id and proposal_id:
         try:
-            await mark_implemented(pool, proposal_id, changeset_id, run_id)
+            await mark_implemented(
+                pool, project_id, proposal_id, changeset_id, run_id
+            )
         except Exception:
             logger.exception(
                 "[%s] Could not mark proposal %s implemented", run_id, proposal_id
@@ -824,7 +830,7 @@ async def _fork_proposal(
     # earlier run can sit at implemented/failed, or the insert may have been
     # skipped entirely. Forking anyway would create a run that claims nothing
     # and reports success while the approval silently did nothing.
-    row = await get_proposal(pool, proposal_id)
+    row = await get_proposal(pool, project_id, proposal_id)
     if row is None or row.get("status") != "approved":
         logger.warning(
             "[%s] Proposal %s is not claimable after enqueue (status=%r) — not forking",

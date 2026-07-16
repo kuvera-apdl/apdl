@@ -207,10 +207,11 @@ class _Conn:
             return "OK"
 
         if "SET status = 'implementing'" in query:
-            proposal_ids = set(args[0])
-            claim_run_id = str(args[1])
+            project_id = str(args[0])
+            proposal_ids = set(args[1])
+            claim_run_id = str(args[2])
             for proposal_id, proposal in self.proposals.items():
-                if proposal_id in proposal_ids:
+                if proposal["project_id"] == project_id and proposal_id in proposal_ids:
                     proposal.update(
                         status="implementing",
                         claim_run_id=claim_run_id,

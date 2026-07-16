@@ -54,10 +54,17 @@ class _FakeConn:
         if "FROM feature_proposals" in query:
             # The post-enqueue claimability check: the enqueued proposal
             # exists as an approved row unless the test says otherwise.
-            proposal_id = args[0]
+            project_id, proposal_id = args
             return self.store.get(
                 "proposal_rows", {}
-            ).get(proposal_id, {"proposal_id": proposal_id, "status": "approved"})
+            ).get(
+                (project_id, proposal_id),
+                {
+                    "project_id": project_id,
+                    "proposal_id": proposal_id,
+                    "status": "approved",
+                },
+            )
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
     async def fetch(self, query: str, *args: Any):
@@ -516,8 +523,8 @@ async def test_code_implementation_gate_opens_pr_on_approval(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_1", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
-        implemented.append((proposal_id, changeset_id, run_id))
+    async def fake_implemented(pool, project_id, proposal_id, changeset_id, run_id):
+        implemented.append((project_id, proposal_id, changeset_id, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
@@ -536,7 +543,7 @@ async def test_code_implementation_gate_opens_pr_on_approval(monkeypatch):
     assert opened and opened[0]["title"] == "Add dark mode"
     assert opened[0]["project_id"] == "demo" and opened[0]["run_id"] == "run-1"
     assert opened[0]["context"] == {"proposal_id": "p1"}
-    assert implemented == [("p1", "cs_1", "run-1")]
+    assert implemented == [("demo", "p1", "cs_1", "run-1")]
     # Opening a PR is not a new run fork — no kicked run carries a target proposal.
     assert not any(k.get("target_proposal_id") for k in kicked)
     assert _resumes(kicked)  # the run still resumes to finalize
@@ -553,8 +560,8 @@ async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_1"}
 
-    async def fake_failed(pool, proposal_id, error, run_id):
-        failed.append((proposal_id, error, run_id))
+    async def fake_failed(pool, project_id, proposal_id, error, run_id):
+        failed.append((project_id, proposal_id, error, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_failed", fake_failed)
@@ -569,7 +576,9 @@ async def test_code_implementation_gate_reject_marks_failed(monkeypatch):
 
     assert resp.status_code == 200
     assert opened == []  # nothing opened on reject
-    assert failed == [("p1", "PR rejected at the approval gate.", "run-1")]
+    assert failed == [
+        ("demo", "p1", "PR rejected at the approval gate.", "run-1")
+    ]
     assert resp.json()["opened_changesets"] == []
     assert _resumes(kicked)
 
@@ -588,8 +597,8 @@ async def test_blanket_approve_skips_safety_halted_changeset(monkeypatch):
         opened.append(kwargs)
         return {"changeset_id": "cs_ok", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
-        implemented.append((proposal_id, changeset_id, run_id))
+    async def fake_implemented(pool, project_id, proposal_id, changeset_id, run_id):
+        implemented.append((project_id, proposal_id, changeset_id, run_id))
 
     monkeypatch.setattr(approvals, "open_changeset", fake_open)
     monkeypatch.setattr(approvals, "mark_implemented", fake_implemented)
@@ -612,7 +621,7 @@ async def test_blanket_approve_skips_safety_halted_changeset(monkeypatch):
     assert resp.status_code == 200
     # Only the approvable changeset (p1) is opened; the halted p2 is skipped.
     assert [o["title"] for o in opened] == ["Add dark mode"]
-    assert implemented == [("p1", "cs_ok", "run-1")]
+    assert implemented == [("demo", "p1", "cs_ok", "run-1")]
     assert resp.json()["opened_changesets"] == ["cs_ok"]
     assert _resumes(kicked)
 

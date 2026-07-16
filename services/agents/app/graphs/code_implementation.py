@@ -145,6 +145,7 @@ class CodeImplementationAgent(BaseAgent):
         try:
             await mark_implemented(
                 ctx.pool,
+                ctx.project_id,
                 proposal_id,
                 result["changeset_id"],
                 ctx.run_id,
@@ -158,6 +159,8 @@ class CodeImplementationAgent(BaseAgent):
     @staticmethod
     async def _safe_fail(ctx: AgentContext, proposal_id: str, error: str) -> None:
         try:
-            await mark_failed(ctx.pool, proposal_id, error, ctx.run_id)
+            await mark_failed(
+                ctx.pool, ctx.project_id, proposal_id, error, ctx.run_id
+            )
         except Exception as exc:
             logger.warning("Could not mark proposal %s failed: %s", proposal_id, exc)

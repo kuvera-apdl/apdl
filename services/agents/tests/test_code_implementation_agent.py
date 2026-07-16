@@ -39,11 +39,13 @@ def _patch(monkeypatch, proposals, *, open_result=None):
         calls["opened"].append(kwargs)
         return open_result or {"changeset_id": "cs_1", "status": "queued"}
 
-    async def fake_implemented(pool, proposal_id, changeset_id, run_id):
-        calls["implemented"].append((proposal_id, changeset_id, run_id))
+    async def fake_implemented(pool, project_id, proposal_id, changeset_id, run_id):
+        calls["implemented"].append(
+            (project_id, proposal_id, changeset_id, run_id)
+        )
 
-    async def fake_failed(pool, proposal_id, error, run_id):
-        calls["failed"].append((proposal_id, error, run_id))
+    async def fake_failed(pool, project_id, proposal_id, error, run_id):
+        calls["failed"].append((project_id, proposal_id, error, run_id))
 
     monkeypatch.setattr(code_implementation, "claim_proposals", fake_claim)
     monkeypatch.setattr(code_implementation, "open_changeset", fake_open)
@@ -65,7 +67,7 @@ async def test_l3_opens_changeset_and_marks_implemented(monkeypatch):
     assert calls["opened"][0]["title"] == "Add dark mode"
     assert calls["opened"][0]["run_id"] == "run-1"
     assert calls["opened"][0]["context"] == {"proposal_id": "p1"}
-    assert calls["implemented"] == [("p1", "cs_1", "run-1")]
+    assert calls["implemented"] == [("apdl", "p1", "cs_1", "run-1")]
     assert result.metadata["opened"] == 1
 
 
@@ -102,7 +104,7 @@ async def test_bad_spec_fails_safety_and_marks_failed(monkeypatch):
     assert result.output[0]["decision"] == "halt"
     assert result.output[0]["safety_result"]["passed"] is False
     assert calls["opened"] == []
-    assert calls["failed"][0][0] == "p2"
+    assert calls["failed"][0][:2] == ("apdl", "p2")
 
 
 @pytest.mark.asyncio
@@ -117,7 +119,7 @@ async def test_codegen_failure_marks_proposal_failed(monkeypatch):
     result = await CodeImplementationAgent().run(_make_ctx(4), {})
 
     assert "error" in result.output[0]
-    assert calls["failed"][0] == ("p1", "codegen down", "run-1")
+    assert calls["failed"][0] == ("apdl", "p1", "codegen down", "run-1")
 
 
 @pytest.mark.asyncio

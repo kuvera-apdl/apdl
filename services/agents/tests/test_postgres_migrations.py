@@ -29,6 +29,9 @@ CUSTOM_AGENT_CONTRACT_SQL = (
 RETENTION_COHORT_MODE_SQL = (
     POSTGRES_MIGRATIONS / "019_retention_cohort_mode.sql"
 ).read_text()
+AGENTS_GOVERNANCE_SQL = (
+    POSTGRES_MIGRATIONS / "020_agents_governance.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -117,6 +120,11 @@ def test_agents_core_migration_matches_the_running_service_contracts():
     assert AGENTS_CORE_SQL.index("CREATE TABLE agent_memory_legacy_vectors") < (
         AGENTS_CORE_SQL.index("DELETE FROM agent_memory")
     )
+
+
+def test_agents_governance_scopes_feature_proposal_identity_to_project():
+    assert "DROP CONSTRAINT feature_proposals_pkey" in AGENTS_GOVERNANCE_SQL
+    assert "PRIMARY KEY (project_id, proposal_id)" in AGENTS_GOVERNANCE_SQL
 
 
 def test_observability_migration_uses_text_tenant_and_run_identifiers():
