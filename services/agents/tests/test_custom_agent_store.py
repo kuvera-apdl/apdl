@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.store import custom_agents as store
+
+
+AGENTS_MIGRATION_SQL = (
+    Path(__file__).resolve().parents[3]
+    / "pipeline"
+    / "postgres"
+    / "migrations"
+    / "004_agents_core.sql"
+).read_text()
 
 
 def _definition(**overrides: Any) -> dict[str, Any]:
@@ -84,9 +94,9 @@ class _FakePool:
 
 def test_ddl_enforces_active_slug_uniqueness_only():
     # Partial unique index: archive-then-recreate under the same slug works.
-    assert "WHERE status = 'active'" in store.CUSTOM_AGENTS_INDEX_DDL
-    assert "UNIQUE INDEX" in store.CUSTOM_AGENTS_INDEX_DDL
-    assert "(project_id, slug)" in store.CUSTOM_AGENTS_INDEX_DDL
+    assert "WHERE status = 'active'" in AGENTS_MIGRATION_SQL
+    assert "UNIQUE INDEX" in AGENTS_MIGRATION_SQL
+    assert "(project_id, slug)" in AGENTS_MIGRATION_SQL
 
 
 def test_row_to_dict_parses_jsonb_strings_and_tolerates_garbage():
@@ -160,7 +170,7 @@ def test_row_to_dict_defaults_missing_preset_tools_to_empty():
 
 
 def test_migration_adds_preset_tools_column():
-    assert "ADD COLUMN IF NOT EXISTS preset_tools" in store.CUSTOM_AGENTS_MIGRATE_DDL
+    assert "ADD COLUMN IF NOT EXISTS preset_tools" in AGENTS_MIGRATION_SQL
 
 
 @pytest.mark.asyncio

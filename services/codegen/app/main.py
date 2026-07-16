@@ -33,7 +33,7 @@ from app.config import (
     codegen_stale_sweep_interval,
     postgres_url,
 )
-from app.db import ALL_DDL
+from app.db import assert_schema_ready
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
@@ -121,8 +121,7 @@ async def lifespan(application: FastAPI):
     application.state.pg_pool = pool
 
     async with pool.acquire() as conn:
-        for ddl in ALL_DDL:
-            await conn.execute(ddl)
+        await assert_schema_ready(conn)
 
     # Recover orphans: in-process background jobs can't survive a restart, so any
     # changeset left in an active (post-claim, pre-PR) state from before this
@@ -236,7 +235,7 @@ async def lifespan(application: FastAPI):
     else:
         logger.info("Stale sweeper disabled (CODEGEN_STALE_SWEEP_INTERVAL=0)")
 
-    logger.info("Codegen service started: PostgreSQL pool and schema initialized")
+    logger.info("Codegen service started: PostgreSQL schema migration verified")
     yield
 
     for task in (poller_task, sweeper_task):

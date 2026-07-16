@@ -75,7 +75,7 @@ describe('EventQueue', () => {
     vi.useFakeTimers();
     config = createConfig();
     transport = new Transport(CLIENT_KEY);
-    storage = new OfflineStorage();
+    storage = new OfflineStorage({ projectId: config.projectId });
     scrubber = new Scrubber(false); // No built-in scrubbers for testing
     consentManager = new ConsentManager(
       { analytics: true, personalization: true, experiments: true },
@@ -302,6 +302,34 @@ describe('EventQueue', () => {
       expect(queue.length).toBeGreaterThanOrEqual(1);
 
       queue.stop();
+    });
+
+    it('should discard restored events when analytics consent was revoked', async () => {
+      const offlineEvent = createEvent({ event: 'revoked_consent_event' });
+      await storage.store([offlineEvent]);
+      consentManager.update({ analytics: false });
+
+      await queue.start();
+
+      expect(queue.length).toBe(0);
+      expect(await storage.count()).toBe(0);
+    });
+
+    it('should re-check consent after an asynchronous offline drain', async () => {
+      const offlineEvent = createEvent({ event: 'consent_race_event' });
+      let resolveDrain: ((events: TrackEvent[]) => void) | undefined;
+      vi.spyOn(storage, 'drain').mockImplementation(
+        () => new Promise((resolve) => {
+          resolveDrain = resolve;
+        })
+      );
+
+      const startPromise = queue.start();
+      consentManager.update({ analytics: false });
+      resolveDrain?.([offlineEvent]);
+      await startPromise;
+
+      expect(queue.length).toBe(0);
     });
   });
 

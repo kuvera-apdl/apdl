@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user
+.PHONY: all setup deps build test clean lint check fmt fmt-check dev dev-all dev-down install-hooks lint-staged migrate-clickhouse migrate-postgres test-sdk-python lint-sdk-python setup-sdk release-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user test-writer lint-writer
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ deps:
 	@echo "==> Setting up Codegen service"
 	cd services/codegen && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
-	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
+	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements-dev.txt --python .venv/bin/python
 	@echo "==> Setting up ETL framework"
 	cd pipeline/etl && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Python SDK"
@@ -52,9 +52,9 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-etl test-admin-api test-admin
+test: test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-etl test-admin-api test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl lint-admin-api lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer lint-etl lint-admin-api lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -191,6 +191,12 @@ build-codegen-sandbox:
 run-pipeline:
 	cd pipeline/redis && .venv/bin/python clickhouse_writer.py
 
+test-writer:
+	cd pipeline/redis && .venv/bin/python -m pytest -q
+
+lint-writer:
+	cd pipeline/redis && .venv/bin/ruff check clickhouse_writer.py tests/
+
 test-etl:
 	cd pipeline/etl && .venv/bin/python -m pytest -v
 
@@ -235,4 +241,4 @@ smoke:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-etl test-etl lint-admin-api test-admin-api lint-admin test-admin
+ci: lint-sdk test-sdk lint-sdk-python test-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer test-writer lint-etl test-etl lint-admin-api test-admin-api lint-admin test-admin

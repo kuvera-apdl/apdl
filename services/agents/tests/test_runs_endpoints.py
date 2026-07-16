@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.graphs.supervisor import _persist_results
 from app.main import app
+from app.store.run_leases import RunLeaseLostError
 
 
 def _run_row(run_id: str, project_id: str = "demo", status: str = "completed") -> dict:
@@ -220,14 +221,23 @@ async def test_run_audit_returns_parsed_entries():
 @pytest.mark.asyncio
 async def test_persist_results_upserts_jsonb():
     pool = FakePool({"runs": [], "results": [], "audit": []})
-    await _persist_results(pool, "run-9", "behavior_analysis", "insights", [{"a": 1}])
+    await _persist_results(
+        pool,
+        "run-9",
+        "behavior_analysis",
+        "insights",
+        [{"a": 1}],
+        "worker-9",
+    )
     query, args = pool.conn.executes[0]
+    assert "FROM agent_runs" in query and "FOR UPDATE" in query
     assert "INSERT INTO agent_run_results" in query
     assert "ON CONFLICT (run_id, agent_name)" in query
     assert args[0] == "run-9"
     assert args[1] == "behavior_analysis"
     assert args[2] == "insights"
     assert json.loads(args[3]) == [{"a": 1}]
+    assert args[4] == "worker-9"
 
 
 @pytest.mark.asyncio
@@ -237,4 +247,17 @@ async def test_persist_results_never_raises():
             raise RuntimeError("boom")
 
     # Must swallow the failure — persistence cannot kill a run.
-    await _persist_results(ExplodingPool(), "run-9", "x", "insights", [])
+    await _persist_results(ExplodingPool(), "run-9", "x", "insights", [], "worker-9")
+
+
+@pytest.mark.asyncio
+async def test_persist_results_fences_a_stale_owner():
+    pool = FakePool({"runs": [], "results": [], "audit": []})
+
+    async def stale_execute(query: str, *args):
+        return "INSERT 0 0"
+
+    pool.conn.execute = stale_execute
+
+    with pytest.raises(RunLeaseLostError):
+        await _persist_results(pool, "run-9", "x", "insights", [], "worker-stale")

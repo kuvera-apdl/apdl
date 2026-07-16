@@ -17,22 +17,6 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-FEATURE_PROPOSALS_DDL = """
-CREATE TABLE IF NOT EXISTS feature_proposals (
-    proposal_id   TEXT PRIMARY KEY,
-    project_id    TEXT NOT NULL,
-    run_id        TEXT,
-    status        TEXT NOT NULL DEFAULT 'approved',
-    title         TEXT NOT NULL,
-    spec          TEXT NOT NULL,
-    priority      TEXT,
-    changeset_id  TEXT,
-    error         TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -179,13 +163,16 @@ async def enqueue_proposals(
 async def claim_proposals(
     pool: asyncpg.Pool,
     project_id: str,
+    run_id: str,
     limit: int = 5,
     proposal_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Claim up to ``limit`` approved proposals, marking them ``implementing``.
 
     ``FOR UPDATE SKIP LOCKED`` makes concurrent claims disjoint, so the drain is
-    safe to run from both the approval kick and a scheduled sweep. When
+    safe to run from both the approval kick and a scheduled sweep. ``run_id``
+    records the exact implementing run so expiry recovery can reopen only work
+    abandoned by that run. When
     ``proposal_id`` is given, claim only that proposal (one PR per approved
     proposal); the ``status='approved'`` guard still applies, so an
     already-claimed proposal yields an empty (no-op) claim rather than a
@@ -222,10 +209,12 @@ async def claim_proposals(
                 await conn.execute(
                     """
                     UPDATE feature_proposals
-                    SET status = 'implementing', updated_at = now()
+                    SET status = 'implementing', claim_run_id = $2,
+                        error = NULL, updated_at = now()
                     WHERE proposal_id = ANY($1::text[])
                     """,
                     [c["proposal_id"] for c in claimed],
+                    run_id,
                 )
     return claimed
 
@@ -271,27 +260,45 @@ async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] |
     return dict(row) if row is not None else None
 
 
-async def mark_implemented(pool: asyncpg.Pool, proposal_id: str, changeset_id: str) -> None:
+async def mark_implemented(
+    pool: asyncpg.Pool,
+    proposal_id: str,
+    changeset_id: str,
+    run_id: str,
+) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE feature_proposals
-            SET status = 'implemented', changeset_id = $2, updated_at = now()
+            SET status = 'implemented', changeset_id = $2,
+                claim_run_id = NULL, updated_at = now()
             WHERE proposal_id = $1
+              AND status = 'implementing'
+              AND claim_run_id = $3
             """,
             proposal_id,
             changeset_id,
+            run_id,
         )
 
 
-async def mark_failed(pool: asyncpg.Pool, proposal_id: str, error: str) -> None:
+async def mark_failed(
+    pool: asyncpg.Pool,
+    proposal_id: str,
+    error: str,
+    run_id: str,
+) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
             UPDATE feature_proposals
-            SET status = 'failed', error = $2, updated_at = now()
+            SET status = 'failed', error = $2,
+                claim_run_id = NULL, updated_at = now()
             WHERE proposal_id = $1
+              AND status = 'implementing'
+              AND claim_run_id = $3
             """,
             proposal_id,
             error,
+            run_id,
         )

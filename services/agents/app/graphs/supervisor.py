@@ -10,6 +10,7 @@ for every agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import traceback
@@ -22,6 +23,13 @@ from app.framework import AgentContext, BaseAgent, CustomAgent, get_agent, is_re
 from app.memory.pgvector_store import PgVectorStore
 from app.safety.audit import AuditLogger
 from app.store.custom_agents import fetch_active_by_slugs
+from app.store.run_leases import (
+    RunLeaseLostError,
+    acquire_run_lease,
+    maintain_run_lease,
+    new_lease_owner_id,
+    run_while_lease_owned,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,24 +39,32 @@ async def _update_run(
     run_id: str,
     status: str,
     phase: str,
+    lease_owner_id: str,
     insights_count: int = 0,
     experiments_count: int = 0,
 ) -> None:
-    """Update the agent_runs table with current progress."""
+    """Update progress only while this supervisor owns an unexpired lease."""
     async with pool.acquire() as conn:
-        await conn.execute(
+        updated = await conn.execute(
             """
             UPDATE agent_runs
             SET status = $2, phase = $3, insights_count = $4,
-                experiments_count = $5, updated_at = now()
+                experiments_count = $5, updated_at = now(),
+                lease_owner_id = CASE WHEN $2 = 'running' THEN lease_owner_id ELSE NULL END,
+                lease_expires_at = CASE WHEN $2 = 'running' THEN lease_expires_at ELSE NULL END
             WHERE run_id = $1
+              AND lease_owner_id = $6
+              AND lease_expires_at > now()
             """,
             run_id,
             status,
             phase,
             insights_count,
             experiments_count,
+            lease_owner_id,
         )
+    if isinstance(updated, str) and updated.endswith(" 0"):
+        raise RunLeaseLostError(f"Run {run_id} is no longer owned by {lease_owner_id}")
 
 
 async def _persist_results(
@@ -57,17 +73,28 @@ async def _persist_results(
     agent_name: str,
     produces: str,
     output: Any,
+    lease_owner_id: str,
 ) -> None:
-    """Persist an agent's output at phase completion (admin-plan gap G3).
+    """Persist an agent's output only while its supervisor still owns the run.
 
-    Best-effort: persistence failures are logged and must never kill a run.
+    Ordinary persistence failures remain best-effort. A lost lease is a fence:
+    the stale worker must stop before any later audit or external effect.
     """
     try:
         async with pool.acquire() as conn:
-            await conn.execute(
+            inserted = await conn.execute(
                 """
+                WITH owned_run AS (
+                    SELECT run_id
+                    FROM agent_runs
+                    WHERE run_id = $1
+                      AND lease_owner_id = $5
+                      AND lease_expires_at > now()
+                    FOR UPDATE
+                )
                 INSERT INTO agent_run_results (run_id, agent_name, produces, output)
-                VALUES ($1, $2, $3, $4::jsonb)
+                SELECT $1, $2, $3, $4::jsonb
+                FROM owned_run
                 ON CONFLICT (run_id, agent_name)
                 DO UPDATE SET output = EXCLUDED.output, created_at = now()
                 """,
@@ -75,7 +102,14 @@ async def _persist_results(
                 agent_name,
                 produces,
                 json.dumps(output if isinstance(output, list) else [output], default=str),
+                lease_owner_id,
             )
+        if isinstance(inserted, str) and inserted.endswith(" 0"):
+            raise RunLeaseLostError(
+                f"Run {run_id} is no longer owned by {lease_owner_id}"
+            )
+    except RunLeaseLostError:
+        raise
     except Exception:
         logger.exception("[%s] Failed to persist %s results", run_id, agent_name)
 
@@ -174,7 +208,70 @@ async def run_supervisor(
     target_proposal_id: str | None = None,
     target_experiment_id: str | None = None,
 ) -> None:
-    """Execute the supervisor orchestration as a background task.
+    """Acquire exclusive run ownership and execute the supervisor graph."""
+    lease_owner_id = new_lease_owner_id()
+    lease_claim_started = asyncio.get_running_loop().time()
+    try:
+        acquired = await acquire_run_lease(pool, run_id, lease_owner_id)
+    except Exception:
+        logger.exception("[%s] Could not acquire agent run lease", run_id)
+        return
+
+    if not acquired:
+        logger.info("[%s] Run is already owned by another supervisor", run_id)
+        return
+
+    lease_stop = asyncio.Event()
+    lease_lost = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        maintain_run_lease(
+            pool,
+            run_id,
+            lease_owner_id,
+            lease_stop,
+            lease_lost,
+            confirmed_at=lease_claim_started,
+        )
+    )
+    try:
+        await _run_owned_supervisor(
+            pool=pool,
+            vector_store=vector_store,
+            run_id=run_id,
+            project_id=project_id,
+            analysis_types=analysis_types,
+            time_range_days=time_range_days,
+            autonomy_level=autonomy_level,
+            lease_owner_id=lease_owner_id,
+            lease_lost=lease_lost,
+            resume=resume,
+            target_proposal_id=target_proposal_id,
+            target_experiment_id=target_experiment_id,
+        )
+    finally:
+        lease_stop.set()
+        await heartbeat_task
+        # Normal terminal/waiting transitions clear ownership in _update_run.
+        # An abnormal active exit deliberately retains owner + expiry so the
+        # grace-delayed reaper can recover it; clearing here would turn it into
+        # a 24-hour legacy orphan with no immediate recovery signal.
+
+
+async def _run_owned_supervisor(
+    pool: asyncpg.Pool,
+    vector_store: PgVectorStore,
+    run_id: str,
+    project_id: str,
+    analysis_types: list[str],
+    time_range_days: int,
+    autonomy_level: int,
+    lease_owner_id: str,
+    lease_lost: asyncio.Event,
+    resume: bool = False,
+    target_proposal_id: str | None = None,
+    target_experiment_id: str | None = None,
+) -> None:
+    """Execute one supervisor graph while holding an unexpired lease.
 
     Resolves the requested ``analysis_types`` against the agent registry, runs
     each in pipeline order, and passes outputs forward via shared state.
@@ -217,6 +314,9 @@ async def run_supervisor(
     # transient DB error while reloading prior results used to kill the task
     # before any status update, wedging the run at phase 'resuming' forever.
     try:
+        if lease_lost.is_set():
+            raise RunLeaseLostError(f"Run {run_id} lease expired before execution")
+
         completed: set[str] = set()
         if resume:
             completed = await _load_prior_results(pool, run_id, state)
@@ -236,6 +336,8 @@ async def run_supervisor(
         )
 
         for agent in agents:
+            if lease_lost.is_set():
+                raise RunLeaseLostError(f"Run {run_id} lease expired")
             if agent.name in completed:
                 logger.info("[%s] Skipping %s — already completed (resume)", run_id, agent.name)
                 continue
@@ -250,13 +352,35 @@ async def run_supervisor(
                 })
                 continue
 
-            await _update_run(pool, run_id, "running", agent.name, **_counts())
+            await _update_run(
+                pool,
+                run_id,
+                "running",
+                agent.name,
+                lease_owner_id,
+                **_counts(),
+            )
             logger.info("[%s] Running agent: %s", run_id, agent.name)
 
             try:
-                result = await agent.run(ctx, state)
+                result = await run_while_lease_owned(
+                    agent.run(ctx, state),
+                    lease_lost,
+                    run_id=run_id,
+                )
+                if lease_lost.is_set():
+                    raise RunLeaseLostError(f"Run {run_id} lease expired")
                 state[agent.produces] = result.output
-                await _persist_results(pool, run_id, agent.name, agent.produces, result.output)
+                await _persist_results(
+                    pool,
+                    run_id,
+                    agent.name,
+                    agent.produces,
+                    result.output,
+                    lease_owner_id,
+                )
+                if lease_lost.is_set():
+                    raise RunLeaseLostError(f"Run {run_id} lease expired")
 
                 await audit.log(run_id, f"{agent.name}_complete", {
                     "produced": agent.produces,
@@ -266,7 +390,11 @@ async def run_supervisor(
 
                 if result.metadata.get("needs_approval"):
                     await _update_run(
-                        pool, run_id, "waiting_approval", f"{agent.name}_approval",
+                        pool,
+                        run_id,
+                        "waiting_approval",
+                        f"{agent.name}_approval",
+                        lease_owner_id,
                         **_counts(),
                     )
                     await audit.log(run_id, "waiting_approval", {
@@ -280,6 +408,8 @@ async def run_supervisor(
                     # Without this return the loop would fall through to the
                     # unconditional "completed" below and the gate would be lost.
                     return
+            except RunLeaseLostError:
+                raise
             except Exception as exc:
                 error_msg = f"{agent.name} failed: {exc}"
                 logger.error("[%s] %s", run_id, error_msg)
@@ -287,7 +417,14 @@ async def run_supervisor(
                 await audit.log(run_id, f"{agent.name}_error", {"error": str(exc)})
 
         final_status = "completed" if not state["errors"] else "completed_with_errors"
-        await _update_run(pool, run_id, final_status, "done", **_counts())
+        await _update_run(
+            pool,
+            run_id,
+            final_status,
+            "done",
+            lease_owner_id,
+            **_counts(),
+        )
 
         await audit.log(run_id, "supervisor_complete", {
             "status": final_status,
@@ -307,13 +444,24 @@ async def run_supervisor(
             len(state["feature_proposals"]),
         )
 
+    except RunLeaseLostError:
+        # Another worker/reaper now owns the state transition. This stale task
+        # must not overwrite it or emit an audit entry claiming failure.
+        logger.warning("[%s] Supervisor stopped after losing its lease", run_id)
     except Exception as exc:
         logger.error("[%s] Supervisor failed: %s\n%s", run_id, exc, traceback.format_exc())
         # The failure path itself must be crash-proof (the original error is
         # often DB-related, so these updates can fail too) and must not zero
         # out real progress counters.
         try:
-            await _update_run(pool, run_id, "failed", "error", **_counts())
+            await _update_run(
+                pool,
+                run_id,
+                "failed",
+                "error",
+                lease_owner_id,
+                **_counts(),
+            )
         except Exception:
             logger.exception("[%s] Could not mark run failed", run_id)
         try:

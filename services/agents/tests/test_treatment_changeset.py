@@ -105,6 +105,10 @@ async def test_open_returns_changeset_id_and_links_ledger(monkeypatch):
 
     assert changeset_id == "cs-1"
     assert captured["project_id"] == "apdl" and captured["run_id"] == "run-1"
+    assert captured["context"] == {
+        "experiment_id": "exp_cta",
+        "flag_key": "exp_cta",
+    }
     assert "Do not modify or remove the control code path." in captured["constraints"]
     assert linked == [("exp_cta", "cs-1")]
 

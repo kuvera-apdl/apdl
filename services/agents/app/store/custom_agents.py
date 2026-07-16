@@ -21,48 +21,6 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-CUSTOM_AGENTS_DDL = """
-CREATE TABLE IF NOT EXISTS custom_agents (
-    agent_id             TEXT PRIMARY KEY,
-    project_id           TEXT NOT NULL,
-    slug                 TEXT NOT NULL,
-    display_name         TEXT NOT NULL,
-    description          TEXT NOT NULL DEFAULT '',
-    system_prompt        TEXT NOT NULL,
-    user_prompt_template TEXT NOT NULL,
-    model_tier           TEXT NOT NULL DEFAULT 'reasoning'
-                         CHECK (model_tier IN ('fast', 'reasoning')),
-    tools                JSONB NOT NULL DEFAULT '[]',
-    preset_tools         JSONB NOT NULL DEFAULT '[]',
-    requires             JSONB NOT NULL DEFAULT '[]',
-    produces             TEXT NOT NULL,
-    memory_query         TEXT,
-    memory_top_k         INTEGER NOT NULL DEFAULT 5,
-    pipeline_order       INTEGER NOT NULL DEFAULT 100,
-    max_tool_steps       INTEGER NOT NULL DEFAULT 8,
-    status               TEXT NOT NULL DEFAULT 'active'
-                         CHECK (status IN ('active', 'archived')),
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-"""
-
-# Separate statement: asyncpg's simple-query protocol handles multi-statement
-# strings, but keeping DDL units small mirrors ensure_agent_memory_schema.
-CUSTOM_AGENTS_INDEX_DDL = """
-CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_agents_project_slug
-    ON custom_agents (project_id, slug) WHERE status = 'active';
-"""
-
-# Idempotent forward migration for databases that booted an older build
-# (the table DDL above is CREATE IF NOT EXISTS, so it never alters).
-CUSTOM_AGENTS_MIGRATE_DDL = """
-ALTER TABLE custom_agents
-    ADD COLUMN IF NOT EXISTS max_tool_steps INTEGER NOT NULL DEFAULT 8;
-ALTER TABLE custom_agents
-    ADD COLUMN IF NOT EXISTS preset_tools JSONB NOT NULL DEFAULT '[]';
-"""
-
 
 class SlugConflictError(Exception):
     """Another active custom agent in the project already uses this slug."""

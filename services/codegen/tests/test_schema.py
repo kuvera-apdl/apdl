@@ -1,11 +1,10 @@
-"""Tests for fail-fast Agents schema validation."""
+"""Tests for fail-fast Codegen schema validation."""
 
 from pathlib import Path
 
 import pytest
 
-from app.memory.embeddings import EMBEDDING_DIMENSIONS
-from app.schema import MIGRATION_NAME, REQUIRED_COLUMNS, assert_schema_ready
+from app.db import MIGRATION_NAME, REQUIRED_COLUMNS, assert_schema_ready
 
 
 class FakeConn:
@@ -15,20 +14,16 @@ class FakeConn:
         ledger_exists: bool = True,
         migration_name: str | None = MIGRATION_NAME,
         columns=REQUIRED_COLUMNS,
-        dimension: int = EMBEDDING_DIMENSIONS,
     ):
         self.ledger_exists = ledger_exists
         self.migration_name = migration_name
         self.columns = set(columns)
-        self.dimension = dimension
 
     async def fetchval(self, sql: str, *args):
         if "to_regclass" in sql:
             return self.ledger_exists
         if "apdl_schema_migrations" in sql:
             return self.migration_name
-        if "atttypmod" in sql:
-            return self.dimension
         raise AssertionError(sql)
 
     async def fetch(self, sql: str, *args):
@@ -52,19 +47,16 @@ async def test_rejects_missing_migration_ledger():
 
 @pytest.mark.asyncio
 async def test_rejects_incomplete_schema_at_startup():
-    columns = REQUIRED_COLUMNS - {("agent_runs", "status")}
-    with pytest.raises(RuntimeError, match="agent_runs.status"):
+    columns = REQUIRED_COLUMNS - {("codegen_changesets", "head_sha")}
+    with pytest.raises(RuntimeError, match="codegen_changesets.head_sha"):
         await assert_schema_ready(FakeConn(columns=columns))
 
 
-@pytest.mark.asyncio
-async def test_rejects_vector_dimension_drift_without_mutating_rows():
-    with pytest.raises(RuntimeError, match="explicit migration"):
-        await assert_schema_ready(FakeConn(dimension=1536))
-
-
-def test_agents_startup_contains_no_postgres_ddl():
-    main_source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
+def test_codegen_startup_contains_no_postgres_ddl():
+    app_dir = Path(__file__).parents[1] / "app"
+    main_source = (app_dir / "main.py").read_text()
+    db_source = (app_dir / "db.py").read_text()
     assert "CREATE TABLE" not in main_source
     assert "ALTER TABLE" not in main_source
-    assert "CREATE EXTENSION" not in main_source
+    assert "CREATE TABLE" not in db_source
+    assert "ALTER TABLE" not in db_source

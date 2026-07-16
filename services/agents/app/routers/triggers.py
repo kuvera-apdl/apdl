@@ -15,6 +15,7 @@ from app.auth import require_project
 from app.framework.registry import is_registered, registered_agents
 from app.graphs.supervisor import run_supervisor
 from app.store.custom_agents import fetch_active_by_slugs
+from app.store.run_leases import RUN_LEASE_SECONDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -127,13 +128,17 @@ async def trigger_agent_run(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO agent_runs (run_id, project_id, trigger_type, autonomy_level, status, phase, config)
-            VALUES ($1, $2, $3, $4, 'started', 'initializing', $5::jsonb)
+            INSERT INTO agent_runs
+                (run_id, project_id, trigger_type, autonomy_level, status, phase,
+                 lease_expires_at, config)
+            VALUES ($1, $2, $3, $4, 'started', 'initializing',
+                    now() + ($5 * interval '1 second'), $6::jsonb)
             """,
             run_id,
             body.project_id,
             body.trigger_type.value,
             body.autonomy_level,
+            RUN_LEASE_SECONDS,
             json.dumps(
                 {
                     "analysis_types": body.analysis_types,

@@ -159,7 +159,11 @@ async def test_custom_agent_runs_in_pipeline_order_and_persists(monkeypatch):
     assert custom_persist[2] == "churn_signals"
     assert json.loads(custom_persist[3]) == [{"signal": "activation drop"}]
 
-    statuses = [args[1] for query, args in pool.conn.executed if "UPDATE agent_runs" in query]
+    statuses = [
+        args[1]
+        for query, args in pool.conn.executed
+        if "UPDATE agent_runs" in query and "SET status = $2" in query
+    ]
     assert statuses[-1] == "completed"
 
 
@@ -180,7 +184,11 @@ async def test_unknown_slug_is_error_not_crash(monkeypatch):
         autonomy_level=2,
     )
 
-    statuses = [args[1] for query, args in pool.conn.executed if "UPDATE agent_runs" in query]
+    statuses = [
+        args[1]
+        for query, args in pool.conn.executed
+        if "UPDATE agent_runs" in query and "SET status = $2" in query
+    ]
     assert statuses[-1] == "completed_with_errors"
 
 
@@ -256,5 +264,9 @@ async def test_resume_skips_completed_custom_agent(monkeypatch):
     )
 
     assert builtin.ran_at is None
-    statuses = [args[1] for query, args in pool.conn.executed if "UPDATE agent_runs" in query]
+    statuses = [
+        args[1]
+        for query, args in pool.conn.executed
+        if "UPDATE agent_runs" in query and "SET status = $2" in query
+    ]
     assert statuses[-1] == "completed"
