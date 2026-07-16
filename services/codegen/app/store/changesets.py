@@ -18,7 +18,9 @@ from app.editor.prompts import bound_prompt_transcript
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
+    AuthorizedRevertControl,
     Changeset,
+    ChangesetControlMetadata,
     ChangesetStatus,
     TaskSpec,
     assert_transition,
@@ -63,14 +65,17 @@ def changeset_request_sha256(
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
+    controls: ChangesetControlMetadata | None = None,
 ) -> str:
-    """Hash the exact canonical client intent with JSON types preserved."""
+    """Hash canonical task intent and any server-owned child-operation controls."""
     canonical = {
         "project_id": project_id,
         "run_id": run_id,
         "base_branch": base_branch,
         "task": TaskSpec.model_validate(task).model_dump(mode="json"),
     }
+    if controls is not None:
+        canonical["controls"] = controls.model_dump(mode="json")
     encoded = json.dumps(
         canonical,
         sort_keys=True,
@@ -204,8 +209,14 @@ def _tenant_policy_snapshot_from_row(
     return TenantCodegenConnectionPolicy.model_validate_json(raw)
 
 
+def _controls_from_row(row: asyncpg.Record) -> ChangesetControlMetadata:
+    value = row["control_metadata"]
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return ChangesetControlMetadata.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
-    return Changeset(
+    changeset = Changeset(
         changeset_id=row["changeset_id"],
         project_id=row["project_id"],
         run_id=row["run_id"],
@@ -248,12 +259,24 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+    changeset._controls = _controls_from_row(row)
+    return changeset
 
 
 def _assert_idempotency_request(row: asyncpg.Record, request_sha256: str) -> None:
     if str(row["idempotency_request_sha256"]) != request_sha256:
         raise ChangesetIdempotencyConflict(
             "Idempotency key is already bound to a different canonical request payload"
+        )
+
+
+def _assert_revert_control(
+    row: asyncpg.Record, source_changeset_id: str
+) -> None:
+    revert = _controls_from_row(row).revert
+    if revert is None or revert.source_changeset_id != source_changeset_id:
+        raise ChangesetIdempotencyConflict(
+            "Idempotency key is already bound to a different revert authority"
         )
 
 
@@ -277,6 +300,32 @@ async def get_idempotent_changeset(
         )
     if row is None:
         return None
+    _assert_idempotency_request(row, idempotency_request_sha256)
+    return _row_to_changeset(row)
+
+
+async def get_idempotent_revert_changeset(
+    pool: asyncpg.Pool,
+    *,
+    project_id: str,
+    source_changeset_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
+) -> Changeset | None:
+    """Resolve the canonical authorized revert child before mutable policy."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT *
+            FROM codegen_changesets
+            WHERE project_id = $1 AND idempotency_key = $2
+            """,
+            project_id,
+            idempotency_key,
+        )
+    if row is None:
+        return None
+    _assert_revert_control(row, source_changeset_id)
     _assert_idempotency_request(row, idempotency_request_sha256)
     return _row_to_changeset(row)
 
@@ -332,6 +381,7 @@ async def create_changeset(
     """
     if repository_target.project_id != project_id:
         raise ValueError("Changeset project does not match its repository grant")
+    controls = ChangesetControlMetadata()
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -342,9 +392,10 @@ async def create_changeset(
                      task, tenant_policy_snapshot,
                      effective_safety_policy_sha256, repository_grant_id,
                      repository_id, repository_installation_id,
-                     repository_full_name, repository_target_quarantined)
+                     repository_full_name, repository_target_quarantined,
+                     control_metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10, $11, $12, $13, $14, false)
+                        $10, $11, $12, $13, $14, false, $15::jsonb)
                 ON CONFLICT (project_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -366,6 +417,7 @@ async def create_changeset(
                 repository_target.repository_id,
                 repository_target.installation_id,
                 repository_target.repository_full_name,
+                controls.model_dump_json(),
             )
             created = row is not None
             if row is None:
@@ -388,6 +440,118 @@ async def create_changeset(
     return _row_to_changeset(row), created
 
 
+async def create_revert_changeset(
+    pool: asyncpg.Pool,
+    *,
+    changeset_id: str,
+    source_changeset_id: str,
+    project_id: str,
+    idempotency_key: str,
+    idempotency_request_sha256: str,
+    run_id: str | None,
+    base_branch: str | None,
+    task: dict[str, Any],
+    repository_target: RepositoryTarget,
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
+    effective_safety_policy_sha256: str | None = None,
+) -> tuple[Changeset, bool]:
+    """Create the one server-authorized child of a merged changeset."""
+    if repository_target.project_id != project_id:
+        raise ValueError("Changeset project does not match its repository grant")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            source = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE changeset_id = $1
+                FOR SHARE
+                """,
+                source_changeset_id,
+            )
+            if source is None:
+                raise ValueError("Revert source changeset does not exist")
+            if (
+                str(source["project_id"]) != project_id
+                or ChangesetStatus(source["status"]) is not ChangesetStatus.merged
+            ):
+                raise ValueError(
+                    "Revert source must be a merged changeset in the same project"
+                )
+            controls = ChangesetControlMetadata(
+                revert=AuthorizedRevertControl(
+                    source_changeset_id=source_changeset_id,
+                    merge_sha=source["merge_sha"],
+                )
+            )
+            expected_request_sha256 = changeset_request_sha256(
+                project_id=project_id,
+                run_id=run_id,
+                base_branch=base_branch,
+                task=task,
+                controls=controls,
+            )
+            if idempotency_request_sha256 != expected_request_sha256:
+                raise ValueError(
+                    "Revert request digest does not match its authorized target"
+                )
+            row = await conn.fetchrow(
+                """
+                INSERT INTO codegen_changesets
+                    (changeset_id, project_id, idempotency_key,
+                     idempotency_request_sha256, run_id, status, base_branch,
+                     task, tenant_policy_snapshot,
+                     effective_safety_policy_sha256, repository_grant_id,
+                     repository_id, repository_installation_id,
+                     repository_full_name, repository_target_quarantined,
+                     control_metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+                        $10, $11, $12, $13, $14, false, $15::jsonb)
+                ON CONFLICT (project_id, idempotency_key) DO NOTHING
+                RETURNING *
+                """,
+                changeset_id,
+                project_id,
+                idempotency_key,
+                idempotency_request_sha256,
+                run_id,
+                ChangesetStatus.queued.value,
+                base_branch,
+                json.dumps(task),
+                (
+                    tenant_policy_snapshot.model_dump_json()
+                    if tenant_policy_snapshot is not None
+                    else None
+                ),
+                effective_safety_policy_sha256,
+                repository_target.grant_id,
+                repository_target.repository_id,
+                repository_target.installation_id,
+                repository_target.repository_full_name,
+                controls.model_dump_json(),
+            )
+            created = row is not None
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT *
+                    FROM codegen_changesets
+                    WHERE project_id = $1 AND idempotency_key = $2
+                    FOR UPDATE
+                    """,
+                    project_id,
+                    idempotency_key,
+                )
+                if row is None:
+                    raise RuntimeError(
+                        "Revert idempotency conflict did not resolve to an "
+                        "existing row"
+                    )
+                _assert_revert_control(row, source_changeset_id)
+                _assert_idempotency_request(row, idempotency_request_sha256)
+    return _row_to_changeset(row), created
+
+
 async def create_retry_changeset(
     pool: asyncpg.Pool,
     *,
@@ -399,6 +563,7 @@ async def create_retry_changeset(
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
+    controls: ChangesetControlMetadata,
     repository_target: RepositoryTarget,
     tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
     effective_safety_policy_sha256: str | None = None,
@@ -411,6 +576,15 @@ async def create_retry_changeset(
     """
     if repository_target.project_id != project_id:
         raise ValueError("Changeset project does not match its repository grant")
+    expected_request_sha256 = changeset_request_sha256(
+        project_id=project_id,
+        run_id=run_id,
+        base_branch=base_branch,
+        task=task,
+        controls=controls,
+    )
+    if idempotency_request_sha256 != expected_request_sha256:
+        raise ValueError("Retry request digest does not match its private controls")
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -421,9 +595,10 @@ async def create_retry_changeset(
                      task, tenant_policy_snapshot, effective_safety_policy_sha256,
                      repository_grant_id, repository_id,
                      repository_installation_id, repository_full_name,
-                     repository_target_quarantined, retry_of_changeset_id)
+                     repository_target_quarantined, retry_of_changeset_id,
+                     control_metadata)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10, $11, $12, $13, $14, false, $15)
+                        $10, $11, $12, $13, $14, false, $15, $16::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING *
                 """,
@@ -446,6 +621,7 @@ async def create_retry_changeset(
                 repository_target.installation_id,
                 repository_target.repository_full_name,
                 retry_of_changeset_id,
+                controls.model_dump_json(),
             )
             if row is not None:
                 return _row_to_changeset(row), True

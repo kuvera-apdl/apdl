@@ -46,9 +46,11 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_segmented_publication_migration():
-    with pytest.raises(RuntimeError, match="024_codegen_segmented_publication.sql"):
-        await assert_schema_ready(FakeConn(migration_name="023_llm_governance.sql"))
+async def test_rejects_database_without_private_task_controls_migration():
+    with pytest.raises(RuntimeError, match="025_codegen_private_task_controls.sql"):
+        await assert_schema_ready(
+            FakeConn(migration_name="024_codegen_segmented_publication.sql")
+        )
 
 
 @pytest.mark.asyncio
@@ -85,6 +87,28 @@ def test_durable_effects_migration_defines_strict_changeset_idempotency():
     assert "FOREIGN KEY (project_id, retry_of_changeset_id)" in migration
     assert "REFERENCES codegen_changesets(project_id, changeset_id)" in migration
     assert "'legacy:'\n        || md5(" in migration
+
+
+def test_private_task_controls_migration_enforces_authority_boundary():
+    migration = (
+        Path(__file__).parents[3]
+        / "pipeline/postgres/migrations/025_codegen_private_task_controls.sql"
+    ).read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS control_metadata JSONB NOT NULL" in migration
+    assert "changeset_controls@1" in migration
+    assert "codegen_changesets_public_task_context_check" in migration
+    assert "codegen_changesets_control_metadata_check" in migration
+    assert "codegen changeset control metadata is immutable" in migration
+    assert "private revert control requires a merged source" in migration
+    for key in (
+        "risk_level",
+        "revert_sha",
+        "reverts_changeset",
+        "reverts_pr_number",
+        "retry_of",
+    ):
+        assert key in migration
 
 
 def test_shutdown_awaits_requeued_jobs_before_closing_database():

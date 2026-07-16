@@ -458,9 +458,16 @@ class FakeConn:
                 "created_at": changeset["created_at"],
                 "updated_at": changeset["updated_at"],
             }
+        if (
+            "SELECT *" in query
+            and "FROM codegen_changesets" in query
+            and "WHERE changeset_id = $1" in query
+        ):
+            return self._rows("changesets").get(args[0])
         if "INSERT INTO codegen_changesets" in query:
             is_retry = "retry_of_changeset_id" in query
             retry_of_changeset_id = args[14] if is_retry else None
+            control_metadata = args[15] if is_retry else args[14]
             if any(
                 (
                     is_retry
@@ -515,6 +522,7 @@ class FakeConn:
                 "tenant_policy_snapshot": args[8],
                 "effective_safety_policy_sha256": args[9],
                 "retry_of_changeset_id": retry_of_changeset_id,
+                "control_metadata": control_metadata,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -874,6 +882,7 @@ class FakePool:
         branch: str | None = None,
         base_branch: str = "main",
         merge_sha: str | None = None,
+        control_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Seed one canonical lifecycle row for endpoint and job tests."""
         connection = self.store["connections"].get(project_id)
@@ -938,6 +947,14 @@ class FakePool:
             ),
             "effective_safety_policy_sha256": None,
             "retry_of_changeset_id": None,
+            "control_metadata": json.dumps(
+                control_metadata
+                or {
+                    "schema_version": "changeset_controls@1",
+                    "risk_level": "high",
+                    "revert": None,
+                }
+            ),
             "error": None,
             "created_at": _T0,
             "updated_at": _T0,

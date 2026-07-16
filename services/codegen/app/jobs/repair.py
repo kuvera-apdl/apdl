@@ -12,7 +12,6 @@ import asyncpg
 
 from app.config import codegen_ci_repair_budget_seconds, codegen_ci_repair_retries
 from app.editor.base import Editor, EditRequest, EditResult
-from app.evaluations.models import RiskLevel
 from app.models.observations import (
     CIRemediationAttempt,
     CIRemediationStatus,
@@ -502,9 +501,7 @@ async def repair_failed_ci(
         )
         return
     try:
-        risk = RiskLevel(
-            str(changeset.task.context.get("risk_level") or "low").lower()
-        )
+        risk = changeset.controls.risk_level
         authorization = publication_gate.authorize(
             risk=risk,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",

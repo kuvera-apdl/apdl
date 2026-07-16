@@ -9,11 +9,19 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    field_validator,
+)
 
 from app.contracts.models import ContractBundle
+from app.evaluations.models import RiskLevel
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.models.observations import (
     CIRemediationStatus,
@@ -100,6 +108,16 @@ def assert_transition(current: ChangesetStatus, target: ChangesetStatus) -> None
 
 # --- API payloads (Strict Schema Rule: unknown fields are rejected) ---------
 
+RESERVED_TASK_CONTEXT_KEYS = frozenset(
+    {
+        "revert_sha",
+        "reverts_changeset",
+        "reverts_pr_number",
+        "retry_of",
+        "risk_level",
+    }
+)
+
 
 class TaskSpec(BaseModel):
     """The implementation brief handed to the sandboxed coding engine."""
@@ -108,8 +126,40 @@ class TaskSpec(BaseModel):
 
     title: str = Field(min_length=1, max_length=200)
     spec: str = Field(min_length=1)
-    context: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, JsonValue] = Field(default_factory=dict)
     constraints: list[str] = Field(default_factory=list)
+
+    @field_validator("context")
+    @classmethod
+    def reject_private_control_keys(
+        cls, value: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        reserved = sorted(RESERVED_TASK_CONTEXT_KEYS.intersection(value))
+        if reserved:
+            joined = ", ".join(reserved)
+            raise ValueError(
+                f"task context contains reserved private control keys: {joined}"
+            )
+        return value
+
+
+class AuthorizedRevertControl(BaseModel):
+    """Server-authorized source and exact target for one revert operation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    source_changeset_id: str = Field(min_length=1, max_length=128)
+    merge_sha: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ChangesetControlMetadata(BaseModel):
+    """Immutable service-owned execution controls, never part of the public task."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["changeset_controls@1"] = "changeset_controls@1"
+    risk_level: RiskLevel = RiskLevel.high
+    revert: AuthorizedRevertControl | None = None
 
 
 class ChangesetCreate(BaseModel):
@@ -132,6 +182,9 @@ class Changeset(BaseModel):
     """Canonical changeset record as returned by the API."""
 
     model_config = ConfigDict(extra="forbid")
+    _controls: ChangesetControlMetadata = PrivateAttr(
+        default_factory=ChangesetControlMetadata
+    )
 
     changeset_id: str
     project_id: str
@@ -184,3 +237,8 @@ class Changeset(BaseModel):
     error: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @property
+    def controls(self) -> ChangesetControlMetadata:
+        """Return immutable internal controls without exposing them in the API."""
+        return self._controls

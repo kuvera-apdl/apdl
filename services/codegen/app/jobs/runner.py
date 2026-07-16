@@ -23,7 +23,6 @@ import asyncpg
 
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
-from app.evaluations.models import RiskLevel
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
 from app.models.observations import ExternalCIStatus, PullRequestObservation
 from app.publication import (
@@ -258,12 +257,7 @@ async def _execute_changeset_job(
                 effective_safety_policy.canonical_digest()
             ),
         )
-        try:
-            risk = RiskLevel(
-                str(changeset.task.context.get("risk_level") or "low").lower()
-            )
-        except ValueError as exc:
-            raise ValueError("task risk_level must be low, medium, or high") from exc
+        risk = changeset.controls.risk_level
         authorization = publication_gate.authorize(
             risk=risk,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
@@ -292,7 +286,11 @@ async def _execute_changeset_job(
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
-        revert_sha = changeset.task.context.get("revert_sha")
+        revert_sha = (
+            changeset.controls.revert.merge_sha
+            if changeset.controls.revert is not None
+            else None
+        )
         async with mint_token(changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
@@ -307,7 +305,7 @@ async def _execute_changeset_job(
                     test_cmd=tenant_policy.test_cmd,
                     safety_policy=effective_safety_policy,
                     runtime_acceptance_policy=runtime_policy,
-                    revert_sha=revert_sha if isinstance(revert_sha, str) else None,
+                    revert_sha=revert_sha,
                     risk_level=risk.value,
                 )
             )
@@ -319,7 +317,7 @@ async def _execute_changeset_job(
                 title=changeset.task.title,
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
-                risk=str(changeset.task.context.get("risk_level") or "low").lower(),
+                risk=risk.value,
                 verification_command=tenant_policy.test_cmd,
             )
             if result.success:

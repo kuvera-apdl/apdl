@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 24
-MIGRATION_NAME = "024_codegen_segmented_publication.sql"
+MIGRATION_VERSION = 25
+MIGRATION_NAME = "025_codegen_private_task_controls.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -64,6 +64,7 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "ci_retry_count"),
         ("codegen_changesets", "ci_remediation_status"),
         ("codegen_changesets", "retry_of_changeset_id"),
+        ("codegen_changesets", "control_metadata"),
         ("codegen_pull_request_observations", "github_updated_at"),
         ("codegen_ci_verification_observations", "evidence_hash"),
         ("codegen_runtime_evidence_observations", "ci_observation_id"),

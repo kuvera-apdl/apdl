@@ -10,13 +10,17 @@ import pytest
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
-from app.evaluations.models import RolloutStage
+from app.evaluations.models import RiskLevel, RolloutStage
 from app.github.app_auth import AuthorizedRepositoryTarget, InstallationToken
 from app.github.pulls import PullRequest
 from app.github.token_broker import GitHubTokenBroker
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.jobs.runner import run_changeset_job as _run_changeset_job
-from app.models.changeset import ChangesetStatus
+from app.models.changeset import (
+    AuthorizedRevertControl,
+    ChangesetControlMetadata,
+    ChangesetStatus,
+)
 from app.models.connection import RepositoryTarget
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
 from app.publication import (
@@ -784,11 +788,30 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
             gates=TenantCodegenGatesPolicy(max_files=5),
         ),
     )
-    task = {**_TASK, "context": {"revert_sha": "cafebabe"}}
-    await store.create_changeset(
+    pool.add_changeset(
+        "cs_source",
+        "demo",
+        status="merged",
+        merge_sha="cafebabe",
+    )
+    task = {**_TASK, "context": {}}
+    controls = ChangesetControlMetadata(
+        revert=AuthorizedRevertControl(
+            source_changeset_id="cs_source",
+            merge_sha="cafebabe",
+        )
+    )
+    await store.create_revert_changeset(
         pool, changeset_id="cs_pol00001", project_id="demo",
+        source_changeset_id="cs_source",
         idempotency_key="test:cs-pol00001",
-        idempotency_request_sha256=_request_hash("demo", None, "main", task),
+        idempotency_request_sha256=store.changeset_request_sha256(
+            project_id="demo",
+            run_id=None,
+            base_branch="main",
+            task=task,
+            controls=controls,
+        ),
         run_id=None, base_branch="main", task=task,
         repository_target=_repository_target(pool),
         tenant_policy_snapshot=TenantCodegenConnectionPolicy(
@@ -814,6 +837,7 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
     assert editor.last_request.test_cmd == "make ci"
     assert editor.last_request.safety_policy.max_files == 5
     assert editor.last_request.revert_sha == "cafebabe"
+    assert editor.last_request.risk_level == "high"
 
 
 @pytest.mark.asyncio
@@ -1197,23 +1221,21 @@ async def test_job_persists_verification_evidence_and_labels_pr_body_as_expected
 
 
 @pytest.mark.asyncio
-async def test_job_opens_draft_pr_for_higher_risk_change():
+async def test_job_uses_private_risk_control_for_higher_risk_change():
     pool = FakePool()
     pool.add_connection("demo")
-    task = {**_TASK, "context": {"risk_level": "medium"}}
-    await store.create_changeset(
-        pool,
-        changeset_id="cs_risk0001",
-        project_id="demo",
-        idempotency_key="test:cs-risk0001",
-        idempotency_request_sha256=_request_hash("demo", None, "main", task),
-        run_id=None,
-        base_branch="main",
-        task=task,
-        repository_target=_repository_target(pool),
-        tenant_policy_snapshot=TenantCodegenConnectionPolicy(),
+    pool.add_changeset(
+        "cs_risk0001",
+        "demo",
+        control_metadata={
+            "schema_version": "changeset_controls@1",
+            "risk_level": "medium",
+            "revert": None,
+        },
     )
     calls: dict = {}
+    gate = allowing_publication_gate(RolloutStage.reviewed_pr)
+    editor = FakeEditor()
 
     async def open_pr(**kwargs) -> PullRequest:
         calls.update(kwargs)
@@ -1222,15 +1244,17 @@ async def test_job_opens_draft_pr_for_higher_risk_change():
     await run_changeset_job(
         pool,
         "cs_risk0001",
-        editor=FakeEditor(),
+        editor=editor,
         mint_token=_mint,
         open_pr=open_pr,
-        publication_gate=allowing_publication_gate(RolloutStage.reviewed_pr),
+        publication_gate=gate,
     )
 
     stored = await store.get_changeset(pool, "cs_risk0001")
     assert stored.status is ChangesetStatus.pr_open
     assert stored.github_pr_status is GitHubPRStatus.draft
+    assert gate.calls == [(RiskLevel.medium, "demo:10")]
+    assert editor.last_request.risk_level == "medium"
     assert calls["draft"] is True
 
 

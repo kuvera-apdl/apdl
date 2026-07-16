@@ -15,6 +15,7 @@ from app.editor.prompts import (
     PROMPT_TRANSCRIPT_MAX_BYTES,
     serialized_prompt_bytes,
 )
+from app.evaluations.models import RiskLevel
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
 from app.models.observations import (
@@ -297,8 +298,15 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
             ],
         )
     )
+    gate = allowing_publication_gate()
 
-    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+    await repair_failed_ci(
+        pool,
+        failed,
+        editor=editor,
+        mint_token=_mint,
+        publication_gate=gate,
+    )
 
     final = await changeset_store.get_changeset(pool, "cs-repair")
     assert editor.last_request is not None
@@ -306,6 +314,8 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
     assert editor.last_request.branch == "apdl/existing"
     assert editor.last_request.expected_head_sha == "head-failed"
     assert failed.failure_summary in editor.last_request.spec
+    assert editor.last_request.risk_level == "high"
+    assert gate.calls == [(RiskLevel.high, "demo:10")]
     assert final.status is ChangesetStatus.pr_open
     assert final.head_sha == "head-repaired"
     assert final.external_ci_status is ExternalCIStatus.pending
