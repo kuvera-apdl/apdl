@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -30,8 +31,21 @@ def make_settings(**overrides) -> Settings:
         "cookie_secure": False,
         "session_ttl_seconds": 28_800,
         "session_idle_seconds": 1_800,
-        "login_failure_limit": 5,
-        "login_lock_seconds": 900,
+        "login_risk_hmac_key": "test-admin-login-risk-key-32-bytes",
+        "trusted_proxy_cidrs": (
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
+        ),
+        "login_rate_window_seconds": 60,
+        "login_global_rate_limit": 600,
+        "login_network_rate_limit": 30,
+        "login_device_rate_limit": 20,
+        "login_progressive_failure_threshold": 3,
+        "login_progressive_base_delay_seconds": 1,
+        "login_progressive_max_delay_seconds": 60,
+        "login_account_notice_threshold": 50,
+        "login_account_risk_window_seconds": 86_400,
+        "login_device_ttl_seconds": 31_536_000,
         "max_request_bytes": 2_097_152,
         "stream_authority_check_seconds": 5.0,
         "upstream_read_timeout_seconds": 60.0,

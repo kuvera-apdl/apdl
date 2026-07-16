@@ -352,6 +352,8 @@ services:
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
+      APDL_ADMIN_TRUSTED_PROXY_CIDRS: '${APDL_ADMIN_TRUSTED_PROXY_CIDRS:-["172.30.255.0/28"]}'
+      APDL_ADMIN_LOGIN_RISK_HMAC_KEY: ${APDL_ADMIN_LOGIN_RISK_HMAC_KEY:-local-admin-login-risk-key-change-me}
       APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS: ${APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS:-5}
       APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS: ${APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS:-60}
       APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS: ${APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS:-2}
@@ -377,6 +379,9 @@ services:
         condition: service_healthy
       query:
         condition: service_healthy
+    networks:
+      - default
+      - admin-edge
 
   # Admin console — static SPA served by nginx. Only /api is dynamic, and it is
   # forwarded to admin-api on the private Compose network.
@@ -398,6 +403,8 @@ services:
     depends_on:
       admin-api:
         condition: service_healthy
+    networks:
+      - admin-edge
 
   # Gateway — single SDK front door. Routes /v1/events to ingestion and
   # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
@@ -427,3 +434,9 @@ volumes:
   redis-data:
   clickhouse-data:
   postgres-data:
+
+networks:
+  admin-edge:
+    ipam:
+      config:
+        - subnet: 172.30.255.0/28

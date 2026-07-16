@@ -10,10 +10,12 @@ MIGRATION_014 = MIGRATIONS / "014_disable_self_registered_agents.sql"
 MIGRATION_015 = MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
 MIGRATION_028 = MIGRATIONS / "028_admin_execution_authority.sql"
 MIGRATION_029 = MIGRATIONS / "029_admin_managed_credentials.sql"
+MIGRATION_030 = MIGRATIONS / "030_admin_login_risk.sql"
 MIGRATION_RUNNER = ROOT / "pipeline" / "postgres" / "migrate.py"
 SQL_014 = MIGRATION_014.read_text(encoding="utf-8")
 SQL_015 = MIGRATION_015.read_text(encoding="utf-8")
 SQL_028 = MIGRATION_028.read_text(encoding="utf-8")
+SQL_030 = MIGRATION_030.read_text(encoding="utf-8")
 RUNNER_SOURCE = MIGRATION_RUNNER.read_text(encoding="utf-8")
 EXECUTION_ROLES = ("agents:run", "agents:manage", "agents:approve")
 EXECUTION_TABLES = {
@@ -34,6 +36,7 @@ def test_postgres_migration_sequence_includes_the_complete_execution_fence() -> 
     assert names[14] == MIGRATION_015.name
     assert names[27] == MIGRATION_028.name
     assert names[28] == MIGRATION_029.name
+    assert names[29] == MIGRATION_030.name
     assert [name[:3] for name in names] == [
         f"{version:03d}" for version in range(1, len(names) + 1)
     ]
@@ -175,3 +178,14 @@ def test_active_codegen_work_is_terminalized_before_the_table_fence() -> None:
         "changeset.status IN ('queued', 'cloning', 'editing', 'pushing', 'pr_open')"
         in SQL_028[reconciliation:registration]
     )
+
+
+def test_login_risk_migration_replaces_deterministic_account_lockout() -> None:
+    assert "DROP COLUMN IF EXISTS failed_login_attempts" in SQL_030
+    assert "DROP COLUMN IF EXISTS locked_until" in SQL_030
+    assert "CREATE TABLE admin_login_rate_buckets" in SQL_030
+    assert "scope IN ('global', 'network', 'device')" in SQL_030
+    assert "CREATE TABLE admin_login_source_risk" in SQL_030
+    assert "CREATE TABLE admin_login_account_risk" in SQL_030
+    assert "CREATE TABLE admin_security_notifications" in SQL_030
+    assert "suspicious_login_activity" in SQL_030

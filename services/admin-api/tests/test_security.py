@@ -48,15 +48,29 @@ def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
     monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.delenv("APDL_ADMIN_ALLOWED_ORIGINS", raising=False)
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
 
     settings = Settings.from_env()
 
     assert settings.allowed_origins == frozenset(
         {"http://localhost:5173", "http://localhost:5174"}
     )
+    assert settings.trusted_proxy_cidrs == ()
+    assert settings.login_progressive_failure_threshold == 3
+    assert settings.login_account_notice_threshold == 50
     assert settings.stream_authority_check_seconds == 5.0
     assert settings.upstream_read_timeout_seconds == 60.0
     assert settings.readiness_probe_timeout_seconds == 2.0
+
+
+def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "true")
+    monkeypatch.delenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="deployment-unique"):
+        Settings.from_env()
 
 
 @pytest.mark.parametrize(
@@ -73,4 +87,33 @@ def test_settings_reject_invalid_admin_durations(monkeypatch, name: str) -> None
     monkeypatch.setenv(name, "0")
 
     with pytest.raises(ValueError, match="positive duration"):
+        Settings.from_env()
+
+
+def test_settings_reject_short_login_risk_secret(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.setenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", "too-short")
+
+    with pytest.raises(ValueError, match="at least 32 bytes"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "172.30.255.0/28",
+        '["172.30.255.1/28"]',
+        '["not-a-network"]',
+    ],
+)
+def test_settings_reject_noncanonical_trusted_proxy_cidrs(
+    monkeypatch,
+    raw: str,
+) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.setenv("APDL_ADMIN_TRUSTED_PROXY_CIDRS", raw)
+
+    with pytest.raises(ValueError, match="TRUSTED_PROXY_CIDRS"):
         Settings.from_env()

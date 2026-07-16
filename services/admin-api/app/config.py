@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import math
 import os
 import re
@@ -15,6 +16,7 @@ API_KEY_PATTERN = re.compile(
     r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
 )
 SERVICE_NAMES = frozenset({"ingestion", "config", "query", "agents", "codegen"})
+LOCAL_LOGIN_RISK_HMAC_KEY = "local-admin-login-risk-key-change-me"
 
 
 def _json_object(name: str, raw: str) -> dict[str, str]:
@@ -80,6 +82,35 @@ def _positive_float(name: str, default: str) -> float:
     return value
 
 
+def _secret(name: str, default: str) -> str:
+    value = os.getenv(name, default)
+    if len(value.encode("utf-8")) < 32:
+        raise ValueError(f"{name} must contain at least 32 bytes")
+    return value
+
+
+def _proxy_cidrs(raw: str) -> tuple[
+    ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "APDL_ADMIN_TRUSTED_PROXY_CIDRS must be a JSON array"
+        ) from exc
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError("APDL_ADMIN_TRUSTED_PROXY_CIDRS must be a JSON array")
+    try:
+        networks = tuple(ipaddress.ip_network(item, strict=True) for item in value)
+    except ValueError as exc:
+        raise ValueError(
+            "APDL_ADMIN_TRUSTED_PROXY_CIDRS contains an invalid network"
+        ) from exc
+    return networks
+
+
 def _service_keys() -> dict[str, str]:
     keys = _json_object(
         "APDL_SERVICE_API_KEYS", os.getenv("APDL_SERVICE_API_KEYS", "{}")
@@ -121,8 +152,20 @@ class Settings:
     cookie_secure: bool
     session_ttl_seconds: int
     session_idle_seconds: int
-    login_failure_limit: int
-    login_lock_seconds: int
+    login_risk_hmac_key: str
+    trusted_proxy_cidrs: tuple[
+        ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+    ]
+    login_rate_window_seconds: int
+    login_global_rate_limit: int
+    login_network_rate_limit: int
+    login_device_rate_limit: int
+    login_progressive_failure_threshold: int
+    login_progressive_base_delay_seconds: int
+    login_progressive_max_delay_seconds: int
+    login_account_notice_threshold: int
+    login_account_risk_window_seconds: int
+    login_device_ttl_seconds: int
     max_request_bytes: int
     stream_authority_check_seconds: float
     upstream_read_timeout_seconds: float
@@ -141,7 +184,7 @@ class Settings:
             parsed = urlparse(url)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError(f"Invalid {name} service URL")
-        return cls(
+        settings = cls(
             postgres_url=os.getenv(
                 "POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl"
             ),
@@ -160,8 +203,46 @@ class Settings:
             session_idle_seconds=_positive_int(
                 "APDL_ADMIN_SESSION_IDLE_SECONDS", "1800"
             ),
-            login_failure_limit=_positive_int("APDL_ADMIN_LOGIN_FAILURE_LIMIT", "5"),
-            login_lock_seconds=_positive_int("APDL_ADMIN_LOGIN_LOCK_SECONDS", "900"),
+            login_risk_hmac_key=_secret(
+                "APDL_ADMIN_LOGIN_RISK_HMAC_KEY",
+                LOCAL_LOGIN_RISK_HMAC_KEY,
+            ),
+            trusted_proxy_cidrs=_proxy_cidrs(
+                os.getenv(
+                    "APDL_ADMIN_TRUSTED_PROXY_CIDRS",
+                    "[]",
+                )
+            ),
+            login_rate_window_seconds=_positive_int(
+                "APDL_ADMIN_LOGIN_RATE_WINDOW_SECONDS", "60"
+            ),
+            login_global_rate_limit=_positive_int(
+                "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT", "600"
+            ),
+            login_network_rate_limit=_positive_int(
+                "APDL_ADMIN_LOGIN_NETWORK_RATE_LIMIT", "30"
+            ),
+            login_device_rate_limit=_positive_int(
+                "APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT", "20"
+            ),
+            login_progressive_failure_threshold=_positive_int(
+                "APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD", "3"
+            ),
+            login_progressive_base_delay_seconds=_positive_int(
+                "APDL_ADMIN_LOGIN_PROGRESSIVE_BASE_DELAY_SECONDS", "1"
+            ),
+            login_progressive_max_delay_seconds=_positive_int(
+                "APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS", "60"
+            ),
+            login_account_notice_threshold=_positive_int(
+                "APDL_ADMIN_LOGIN_ACCOUNT_NOTICE_THRESHOLD", "50"
+            ),
+            login_account_risk_window_seconds=_positive_int(
+                "APDL_ADMIN_LOGIN_ACCOUNT_RISK_WINDOW_SECONDS", "86400"
+            ),
+            login_device_ttl_seconds=_positive_int(
+                "APDL_ADMIN_LOGIN_DEVICE_TTL_SECONDS", "31536000"
+            ),
             max_request_bytes=_positive_int("APDL_ADMIN_MAX_REQUEST_BYTES", "2097152"),
             stream_authority_check_seconds=_positive_float(
                 "APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS", "5"
@@ -173,3 +254,28 @@ class Settings:
                 "APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS", "2"
             ),
         )
+        if (
+            settings.login_progressive_max_delay_seconds
+            < settings.login_progressive_base_delay_seconds
+        ):
+            raise ValueError(
+                "APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS "
+                "must be at least the base delay"
+            )
+        if settings.login_global_rate_limit < max(
+            settings.login_network_rate_limit,
+            settings.login_device_rate_limit,
+        ):
+            raise ValueError(
+                "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT must be at least "
+                "the network and device limits"
+            )
+        if (
+            settings.cookie_secure
+            and settings.login_risk_hmac_key == LOCAL_LOGIN_RISK_HMAC_KEY
+        ):
+            raise ValueError(
+                "APDL_ADMIN_LOGIN_RISK_HMAC_KEY must be deployment-unique "
+                "when secure cookies are enabled"
+            )
+        return settings

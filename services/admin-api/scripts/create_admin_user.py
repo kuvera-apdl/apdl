@@ -194,7 +194,6 @@ async def provision(args: argparse.Namespace) -> None:
                     """
                     UPDATE admin_users
                     SET password_hash = $2, active = TRUE,
-                        failed_login_attempts = 0, locked_until = NULL,
                         updated_at = NOW()
                     WHERE user_id = $1
                     """,

@@ -19,6 +19,8 @@ CredentialRole = Literal[
     "query:read",
 ]
 CredentialAuditAction = Literal["create", "rotate", "revoke"]
+SecurityNotificationKind = Literal["suspicious_login_activity"]
+SecurityNotificationStatus = Literal["unread", "acknowledged"]
 
 MANAGED_CREDENTIAL_ROLE_ORDER: tuple[CredentialRole, ...] = (
     "events:write",
@@ -179,3 +181,15 @@ class CredentialAuditEntry(BaseModel):
         if (self.action == "rotate") != (self.successor_credential_id is not None):
             raise ValueError("only rotate audit entries identify a successor")
         return self
+
+
+class SecurityNotification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    notification_id: UUID
+    kind: SecurityNotificationKind
+    status: SecurityNotificationStatus
+    observed_failures: int = Field(gt=0)
+    window_started_at: datetime
+    last_detected_at: datetime
+    created_at: datetime
