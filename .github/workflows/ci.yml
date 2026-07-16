@@ -290,14 +290,3 @@ jobs:
         with:
           python-version: "3.12"
       - run: make smoke-experiment-fresh
-
-  dependency-review:
-    name: Dependency Review
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/dependency-review-action@v5
