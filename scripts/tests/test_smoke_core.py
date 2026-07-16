@@ -282,6 +282,44 @@ class ResponseContractTests(unittest.TestCase):
         self.assertEqual(state.created_version, 7)
 
 
+class HealthContractTests(unittest.TestCase):
+    def test_admin_readiness_matches_core_and_optional_capability_contract(self) -> None:
+        args = make_args()
+        args.admin_url = "http://admin.test"
+        responses = [
+            (200, {"status": "ok"}),
+            (200, {"status": "ready"}),
+            (200, {"status": "ready"}),
+            (
+                200,
+                {
+                    "status": "ready",
+                    "degraded": True,
+                    "core": {
+                        "postgres": "ready",
+                        "ingestion": "ready",
+                        "config": "ready",
+                        "query": "ready",
+                    },
+                    "capabilities": {
+                        "agents": "not_ready",
+                        "codegen": "not_ready",
+                    },
+                },
+            ),
+        ]
+
+        with (
+            patch.object(smoke_core, "_request_json", side_effect=responses),
+            patch.object(
+                smoke_core,
+                "_request_bytes",
+                return_value=(200, b"apdl gateway ok\n"),
+            ),
+        ):
+            smoke_core._check_health(args)
+
+
 class CleanupTests(unittest.TestCase):
     def test_cleanup_failure_does_not_replace_primary_failure(self) -> None:
         args = make_args()
