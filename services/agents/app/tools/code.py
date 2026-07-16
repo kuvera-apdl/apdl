@@ -14,6 +14,8 @@ from urllib.parse import quote
 
 import httpx
 
+from app.service_auth import service_headers
+
 CODEGEN_SERVICE_URL = os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084")
 _TIMEOUT = 30.0
 
@@ -24,21 +26,22 @@ def _seg(value: str) -> str:
     return quote(value, safe="")
 
 
-def _headers() -> dict[str, str]:
-    token = os.getenv("APDL_INTERNAL_TOKEN", "")
-    return {"X-APDL-Internal-Token": token} if token else {}
-
-
-async def _get(path: str, params: dict[str, Any] | None = None) -> Any:
+async def _get(
+    project_id: str, path: str, params: dict[str, Any] | None = None
+) -> Any:
     async with httpx.AsyncClient(base_url=CODEGEN_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get(path, params=params, headers=_headers())
+        resp = await client.get(path, params=params, headers=service_headers(project_id))
         resp.raise_for_status()
         return resp.json()
 
 
-async def _post(path: str, payload: dict[str, Any] | None = None) -> Any:
+async def _post(
+    project_id: str, path: str, payload: dict[str, Any] | None = None
+) -> Any:
     async with httpx.AsyncClient(base_url=CODEGEN_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(path, json=payload, headers=_headers())
+        resp = await client.post(
+            path, json=payload, headers=service_headers(project_id)
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -70,12 +73,12 @@ async def open_changeset(
         payload["run_id"] = run_id
     if base_branch is not None:
         payload["base_branch"] = base_branch
-    return await _post("/v1/changesets", payload)
+    return await _post(project_id, "/v1/changesets", payload)
 
 
-async def get_changeset(changeset_id: str) -> dict[str, Any]:
+async def get_changeset(project_id: str, changeset_id: str) -> dict[str, Any]:
     """Fetch lifecycle, GitHub PR, external CI, and remediation projections."""
-    return await _get(f"/v1/changesets/{_seg(changeset_id)}")
+    return await _get(project_id, f"/v1/changesets/{_seg(changeset_id)}")
 
 
 async def get_repo_context(project_id: str) -> dict[str, Any]:
@@ -85,14 +88,18 @@ async def get_repo_context(project_id: str) -> dict[str, Any]:
     specs name real files and stay inside the repo's capabilities instead of
     demanding infrastructure it does not have.
     """
-    return await _get(f"/v1/connections/{_seg(project_id)}/repo-context")
+    return await _get(project_id, f"/v1/connections/{_seg(project_id)}/repo-context")
 
 
 async def list_changesets(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """List the project's changesets (newest first), incl. task title + PR state."""
-    return await _get("/v1/changesets", params={"project_id": project_id, "limit": limit})
+    return await _get(
+        project_id,
+        "/v1/changesets",
+        params={"project_id": project_id, "limit": limit},
+    )
 
 
-async def revert_changeset(changeset_id: str) -> dict[str, Any]:
+async def revert_changeset(project_id: str, changeset_id: str) -> dict[str, Any]:
     """Roll back a merged changeset by opening a revert PR (a new changeset)."""
-    return await _post(f"/v1/changesets/{_seg(changeset_id)}/revert")
+    return await _post(project_id, f"/v1/changesets/{_seg(changeset_id)}/revert")

@@ -7,12 +7,11 @@ local, …) chosen via ``CODEGEN_MODEL``, edits inside a clone, and iterates on 
 failures reported by GitHub CI. The model is now a config choice, not a vendor
 lock-in.
 
-Execution model (v1): a subprocess in a constrained, throwaway workdir on the
-codegen host. The hardened container image (``Dockerfile.worker``) is the deploy
-substrate to graduate to — running each changeset inside its own container is the
-documented next step. This real path is INTEGRATION-UNTESTED here (it needs
-``aider`` on PATH, a model key, and a live repo) — the tested execution path runs
-through ``FakeEditor``.
+Execution model: the API defaults to a hardened, per-change container from
+``Dockerfile.worker``. An in-process subprocess is available only for explicitly
+trusted local repositories while publication is disabled. The real isolated path
+still needs integration evidence with a model key and disposable live repository;
+the deterministic boundary and argv/env construction are unit-tested.
 
 Token custody (entirely ours now — there is no Anthropic git proxy): the GitHub
 installation token is used only by the orchestrator for clone/push, injected into
@@ -20,9 +19,10 @@ git as a one-shot ``http.extraHeader`` via ``GIT_CONFIG_*`` environment variable
 Going through the env (not ``-c`` on the command line) keeps the header — and the
 reversible base64 token inside it — off git's argv, so it can't leak through
 ``ps`` / ``/proc/<pid>/cmdline``; it is likewise never written to ``.git/config``.
-It is never handed to the agent/test subprocesses either: the agent runs with a
-minimal env — PATH/HOME plus LLM provider keys only — never the GitHub token or
-APDL secrets.
+It is never handed to Aider: that process runs with an isolated home, empty
+service-owned configuration, and only the required model-provider credentials —
+never the GitHub token or APDL service secrets. Repository-defined commands are
+disabled; GitHub CI is the execution authority.
 """
 
 from __future__ import annotations
@@ -78,14 +78,19 @@ from app.requirements import (
     render_requirement_ledger,
 )
 from app.requirements.models import ImplementationStatus, RequirementLedger
-from app.runtime.github_actions import render_github_actions_workflow
+from app.runtime.github_actions import (
+    render_github_actions_workflow,
+    workflow_content_is_apdl_owned,
+)
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
+    RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
     RuntimeAcceptancePlan,
 )
 from app.runtime.planner import build_runtime_acceptance_plan
 from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
+from app.safety.policy import VerifiedProtectedPathExemption
 from app.semantic_review import (
     ModelResponseStatus,
     ReviewDecision,
@@ -161,15 +166,13 @@ def _tail(text: str, limit: int = _ERR_TAIL) -> str:
     return f"[…truncated {dropped} leading chars of {len(text)}…]\n{clipped}"
 
 
-# Env vars forwarded to the agent + test subprocesses. LLM access only: the
+# Env vars forwarded to the agent subprocess. LLM access only: the
 # GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
 # APDL_INTERNAL_TOKEN, POSTGRES_URL, …) are deliberately NOT in this allowlist.
 _ENV_PASSTHROUGH: tuple[str, ...] = (
     "PATH",
-    "HOME",
     "LANG",
     "LC_ALL",
-    "TMPDIR",
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
     "OPENAI_BASE_URL",
@@ -199,10 +202,19 @@ def _basic_auth_header(token: str) -> str:
     return f"AUTHORIZATION: basic {raw}"
 
 
-def _agent_env() -> dict[str, str]:
-    """Minimal environment for the agent subprocess — LLM keys only."""
+def _agent_env(home: Path) -> dict[str, str]:
+    """Minimal agent environment with an isolated home and no repo configuration."""
+    home.mkdir(parents=True, exist_ok=True)
+    tmp = home / "tmp"
+    tmp.mkdir(exist_ok=True)
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
     env.setdefault("PATH", os.defpath)
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(tmp)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["AIDER_CONFIG_FILE"] = os.devnull
+    env["AIDER_ENV_FILE"] = os.devnull
     env["AIDER_ANALYTICS"] = "false"  # headless: no phone-home / update prompts
     env["AIDER_CHECK_UPDATE"] = "false"
     return env
@@ -563,12 +575,79 @@ class AiderEditor:
             logger.exception("Aider edit failed for %s", request.repo)
             return EditResult(success=False, branch=request.branch, error=str(exc))
 
-    async def _run(self, request: EditRequest) -> EditResult:
+    async def implement_workspace(
+        self,
+        request: EditRequest,
+        workspace: Path,
+    ) -> EditResult:
+        """Run the production editing pipeline in an existing evaluation checkout.
+
+        This is the credential-free execution seam used by the offline/shadow
+        evaluator.  The caller owns a clean, already-materialized git workspace;
+        this method edits that checkout in place and deliberately performs no
+        clone, branch creation, fetch, or push.  Everything between repository
+        preparation and publication remains identical to :meth:`implement`:
+        profiling, requirement compilation, exact-contract resolution, the
+        configured brief/Aider/review loop, verification coverage, and the full
+        deterministic safety gate all still run.
+
+        Evaluation workspaces cannot represent an existing-PR repair or remote
+        revert because either operation requires GitHub state and credentials.
+        Ordinary candidate failures follow the Editor contract and are returned
+        as ``EditResult(success=False)`` rather than raised.
+        """
+        try:
+            return await self._run(request, workspace=workspace)
+        except Exception as exc:  # keep the same never-raise attempt contract
+            # The evaluator's stderr crosses a trust boundary.  Do not log the
+            # raw exception or candidate-controlled repository text here; the
+            # typed result remains available to the in-process caller.
+            logger.error("Aider workspace edit failed with an internal error")
+            return EditResult(success=False, branch=request.branch, error=str(exc))
+
+    async def _run(
+        self,
+        request: EditRequest,
+        *,
+        workspace: Path | None = None,
+    ) -> EditResult:
         keep = config.codegen_keep_workdir()
-        work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
-        repo_dir = work / "repo"
-        header = _basic_auth_header(request.token)
-        clone_url = f"https://github.com/{request.repo}.git"
+        workspace_mode = workspace is not None
+        if workspace_mode:
+            assert workspace is not None
+            repo_dir = workspace.expanduser().resolve()
+            # Evaluation context/config files must remain outside the candidate
+            # repository even if CODEGEN_WORKDIR was accidentally pointed at the
+            # mounted checkout. Try the configured base first, then safe local
+            # fallbacks, accepting only a directory outside the resolved repo.
+            work: Path | None = None
+            for candidate in (
+                Path(self._workdir_base),
+                Path(tempfile.gettempdir()),
+                repo_dir.parent,
+            ):
+                scratch_base = candidate.expanduser().resolve()
+                if scratch_base == repo_dir or repo_dir in scratch_base.parents:
+                    continue
+                try:
+                    work = Path(
+                        tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base)
+                    )
+                except OSError:
+                    continue
+                break
+            if work is None:
+                raise RuntimeError(
+                    "Workspace evaluation requires a writable scratch directory "
+                    "outside the git worktree."
+                )
+        else:
+            work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
+            repo_dir = work / "repo"
+        # A workspace evaluation never even derives an auth header, so an empty
+        # token is a valid input and no credential can reach git accidentally.
+        header = None if workspace_mode else _basic_auth_header(request.token)
+        clone_url = None if workspace_mode else f"https://github.com/{request.repo}.git"
         # Prompt transcript for the operator UI (see EditResult.prompts). Every
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
@@ -585,7 +664,7 @@ class AiderEditor:
         )
         generated_runtime_workflow: GeneratedRuntimeWorkflowAttestation | None = None
         review_verdict: ReviewVerdict | None = None
-        gates_policy = dict(request.gates_policy or {})
+        verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
 
         def fail(error: str) -> EditResult:
             return EditResult(
@@ -608,25 +687,27 @@ class AiderEditor:
             profile: RepoProfile,
             plan: RuntimeAcceptancePlan,
         ) -> tuple[bool, str | None]:
-            """Write only the policy-authorized generated workflow when needed."""
-            if (
-                not request.runtime_acceptance_policy.workflow_changes_authorized
-                or not plan.checks
-            ):
+            """Write only the effectively granted, APDL-owned workflow."""
+            if not request.runtime_acceptance_policy.enabled or not plan.checks:
                 return False, None
-            workflow_relative = (
-                request.runtime_acceptance_policy.generated_workflow_path
-            )
+            workflow_relative = RUNTIME_ACCEPTANCE_WORKFLOW_PATH
             workflow_path = repo_dir / workflow_relative
             desired = render_github_actions_workflow(
                 plan,
                 profile,
                 policy=request.runtime_acceptance_policy,
             )
-            if workflow_path.exists() and workflow_path.read_text(
-                encoding="utf-8"
-            ) == desired:
-                return False, None
+            if workflow_path.exists():
+                current = workflow_path.read_text(encoding="utf-8")
+                if current == desired:
+                    return False, None
+                if not workflow_content_is_apdl_owned(current):
+                    return (
+                        False,
+                        "runtime workflow generation refused: the reserved path "
+                        f"{workflow_relative} already contains non-APDL-owned "
+                        "content",
+                    )
             workflow_path.parent.mkdir(parents=True, exist_ok=True)
             workflow_path.write_text(desired, encoding="utf-8")
             rc, out = await self._git(repo_dir, ["add", "--", workflow_relative])
@@ -649,26 +730,64 @@ class AiderEditor:
             return True, None
 
         try:
-            # 1. Clone with one-shot auth. Repairs clone the existing PR branch;
-            #    initial runs clone base and cut a new branch.
-            clone_branch = (
-                request.branch if request.existing_branch else request.base_branch
-            )
-            rc, out = await self._git(
-                None,
-                [
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    clone_branch,
-                    clone_url,
-                    str(repo_dir),
-                ],
-                auth_header=header,
-            )
-            if rc != 0:
-                return fail(f"clone failed: {_tail(out)}")
+            # 1. Production clones with one-shot auth.  Offline/shadow evaluation
+            #    instead receives one clean, mutation-materialized checkout and
+            #    must never gain a remote repository capability.
+            if workspace_mode:
+                if request.revert_sha or request.existing_branch or request.expected_head_sha:
+                    return fail(
+                        "Workspace evaluation does not support remote revert or "
+                        "existing-branch repair inputs."
+                    )
+                if not repo_dir.is_dir():
+                    return fail("Workspace evaluation requires an existing directory.")
+                rc, out = await self._git(
+                    repo_dir, ["rev-parse", "--is-inside-work-tree"]
+                )
+                if rc != 0 or out.strip() != "true":
+                    return fail("Workspace evaluation requires a git worktree.")
+                rc, out = await self._git(repo_dir, ["rev-parse", "--show-toplevel"])
+                if rc != 0:
+                    return fail("Workspace evaluation could not resolve its git root.")
+                try:
+                    git_root = Path(out.strip()).expanduser().resolve(strict=True)
+                except (OSError, RuntimeError):
+                    return fail("Workspace evaluation could not resolve its git root.")
+                if git_root != repo_dir:
+                    return fail(
+                        "Workspace evaluation directory must be the git worktree root."
+                    )
+                rc, out = await self._git(
+                    repo_dir, ["status", "--porcelain", "--untracked-files=all"]
+                )
+                if rc != 0:
+                    return fail(
+                        "Workspace evaluation could not inspect checkout state: "
+                        + _tail(out)
+                    )
+                if out.strip():
+                    return fail("Workspace evaluation requires a clean git worktree.")
+            else:
+                # Repairs clone the existing PR branch; initial runs clone base
+                # and cut a new branch exactly as before.
+                clone_branch = (
+                    request.branch if request.existing_branch else request.base_branch
+                )
+                rc, out = await self._git(
+                    None,
+                    [
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        clone_branch,
+                        clone_url,
+                        str(repo_dir),
+                    ],
+                    auth_header=header,
+                )
+                if rc != 0:
+                    return fail(f"clone failed: {_tail(out)}")
             rc, baseline = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
@@ -678,7 +797,7 @@ class AiderEditor:
                     "Repair refused because the PR head changed from "
                     f"{request.expected_head_sha} to {baseline}."
                 )
-            if not request.existing_branch:
+            if not workspace_mode and not request.existing_branch:
                 rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
                 if rc != 0:
                     return fail(f"branch failed: {_tail(out)}")
@@ -860,7 +979,7 @@ class AiderEditor:
                 f"{task_text.rstrip()}\n\n"
                 f"{render_requirement_ledger(requirement_ledger)}\n\n"
                 f"{render_verification_plan(verification_plan)}\n\n"
-                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.workflow_changes_authorized)}"
+                f"{render_runtime_acceptance_plan(runtime_acceptance_plan, workflow_changes_authorized=request.runtime_acceptance_policy.enabled)}"
             )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
@@ -869,8 +988,19 @@ class AiderEditor:
             settings_file.write_text(
                 _model_settings_yaml(self._model), encoding="utf-8"
             )
+            # A connected repository is untrusted input. Pin Aider to empty,
+            # service-owned config/env files outside the clone and explicitly
+            # disable every facility that can run repository-provided commands.
+            aider_config = work / "aider.conf.yml"
+            aider_config.write_text("{}\n", encoding="utf-8")
+            aider_env = work / "aider.env"
+            aider_env.write_text("", encoding="utf-8")
             argv = [
                 self._aider_bin,
+                "--config",
+                str(aider_config),
+                "--env-file",
+                str(aider_env),
                 "--model",
                 self._model,
                 "--model-settings-file",
@@ -878,6 +1008,17 @@ class AiderEditor:
                 "--yes-always",
                 "--no-stream",
                 "--no-pretty",
+                "--no-auto-lint",
+                "--no-auto-test",
+                "--no-suggest-shell-commands",
+                "--no-git-commit-verify",
+                "--no-detect-urls",
+                "--disable-playwright",
+                "--no-notifications",
+                "--no-watch-files",
+                "--no-restore-chat-history",
+                "--no-analytics",
+                "--no-check-update",
             ]
             if self._conventions:
                 # Standing house rules as a read-only context file (kept outside
@@ -904,7 +1045,7 @@ class AiderEditor:
                     render_runtime_acceptance_plan(
                         runtime_acceptance_plan,
                         workflow_changes_authorized=(
-                            request.runtime_acceptance_policy.workflow_changes_authorized
+                            request.runtime_acceptance_policy.enabled
                         ),
                     ),
                     encoding="utf-8",
@@ -936,6 +1077,7 @@ class AiderEditor:
             #     prose.
             agent_pending = True
             if request.revert_sha:
+                assert header is not None  # workspace mode rejects remote reverts above
                 revert_error = await self._revert_commit(
                     repo_dir, request.revert_sha, header
                 )
@@ -988,7 +1130,7 @@ class AiderEditor:
                     rc, out = await self._exec(
                         [*argv, "--message", message],
                         cwd=repo_dir,
-                        env=_agent_env(),
+                        env=_agent_env(work / "agent-home"),
                         timeout=self._agent_timeout,
                     )
                     if rc != 0:
@@ -1062,9 +1204,9 @@ class AiderEditor:
                     verification_plan,
                     changed_paths=changed_paths,
                     policy_authorized_workflow_paths=(
-                        [request.runtime_acceptance_policy.generated_workflow_path]
-                        if request.runtime_acceptance_policy.workflow_changes_authorized
-                        and request.runtime_acceptance_policy.generated_workflow_path
+                        [RUNTIME_ACCEPTANCE_WORKFLOW_PATH]
+                        if request.runtime_acceptance_policy.enabled
+                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                         in changed_paths
                         else []
                     ),
@@ -1213,8 +1355,8 @@ class AiderEditor:
                 break
 
             generated_path = (
-                request.runtime_acceptance_policy.generated_workflow_path
-                if request.runtime_acceptance_policy.workflow_changes_authorized
+                RUNTIME_ACCEPTANCE_WORKFLOW_PATH
+                if request.runtime_acceptance_policy.enabled
                 else None
             )
             material_changed_paths = [
@@ -1260,13 +1402,13 @@ class AiderEditor:
                     )
 
             if (
-                request.runtime_acceptance_policy.workflow_changes_authorized
+                request.runtime_acceptance_policy.enabled
                 and runtime_acceptance_plan is not None
                 and runtime_acceptance_plan.checks
             ):
                 workflow_path = (
                     repo_dir
-                    / request.runtime_acceptance_policy.generated_workflow_path
+                    / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
                 )
                 expected_workflow = render_github_actions_workflow(
                     runtime_acceptance_plan,
@@ -1283,7 +1425,7 @@ class AiderEditor:
                         "the deterministic renderer; branch NOT pushed."
                     )
                 generated_runtime_workflow = GeneratedRuntimeWorkflowAttestation(
-                    path=request.runtime_acceptance_policy.generated_workflow_path,
+                    path=RUNTIME_ACCEPTANCE_WORKFLOW_PATH,
                     content_sha256=hashlib.sha256(
                         expected_workflow.encode("utf-8")
                     ).hexdigest(),
@@ -1291,9 +1433,14 @@ class AiderEditor:
                         runtime_acceptance_plan.evidence_hash()
                     ),
                 )
-                allowed = set(gates_policy.get("allowed_protected_paths") or [])
-                allowed.add(generated_runtime_workflow.path)
-                gates_policy["allowed_protected_paths"] = sorted(allowed)
+                verified_exemptions = (
+                    VerifiedProtectedPathExemption(
+                        content_sha256=generated_runtime_workflow.content_sha256,
+                        runtime_acceptance_plan_sha256=(
+                            generated_runtime_workflow.runtime_acceptance_plan_sha256
+                        ),
+                    ),
+                )
 
             # Deterministic pre-push gates on the FULL diff, before anything
             # reaches the remote: a secret-bearing or protected-path change must
@@ -1303,7 +1450,8 @@ class AiderEditor:
                 diff_stat=diff_stat,
                 changed_paths=changed_paths,
                 diff_text=diff_text,
-                policy=gates_policy,
+                policy=request.safety_policy,
+                verified_exemptions=verified_exemptions,
             )
             if not gate.passed:
                 return fail(
@@ -1311,24 +1459,29 @@ class AiderEditor:
                     + "; ".join(gate.violations)
                 )
 
-            # 6. Push the branch from the orchestrator (token via one-shot header).
-            push_args = ["push"]
-            if request.expected_head_sha:
-                push_args.append(
-                    "--force-with-lease="
-                    f"refs/heads/{request.branch}:{request.expected_head_sha}"
+            # 6. Production publishes the gated branch.  Evaluation deliberately
+            #    leaves the resulting commit only in its materialized workspace;
+            #    the sealed outer harness inspects that tree after this returns.
+            if not workspace_mode:
+                push_args = ["push"]
+                if request.expected_head_sha:
+                    push_args.append(
+                        "--force-with-lease="
+                        f"refs/heads/{request.branch}:{request.expected_head_sha}"
+                    )
+                push_args += ["origin", f"{request.branch}:{request.branch}"]
+                assert header is not None
+                rc, out = await self._git(
+                    repo_dir,
+                    push_args,
+                    auth_header=header,
                 )
-            push_args += ["origin", f"{request.branch}:{request.branch}"]
-            rc, out = await self._git(
-                repo_dir,
-                push_args,
-                auth_header=header,
-            )
-            if rc != 0:
-                return fail(f"push failed: {_tail(out)}")
+                if rc != 0:
+                    return fail(f"push failed: {_tail(out)}")
             rc, head_sha = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
-                return fail(f"could not resolve pushed head: {_tail(head_sha)}")
+                label = "workspace" if workspace_mode else "pushed"
+                return fail(f"could not resolve {label} head: {_tail(head_sha)}")
 
             return EditResult(
                 success=True,

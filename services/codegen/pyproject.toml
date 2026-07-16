@@ -22,6 +22,9 @@ dependencies = [
 
 [project.scripts]
 apdl-codegen-eval = "app.evaluations.cli:main"
+apdl-codegen-evaluate-candidate = "app.evaluations.candidate:main"
+apdl-codegen-grant-repository = "app.github.grant_cli:main"
+apdl-codegen-revoke-repository = "app.github.grant_cli:revoke_main"
 
 [project.optional-dependencies]
 dev = [
@@ -34,5 +37,5 @@ dev = [
 # it is only needed where the real editor runs (the codegen host or the sandbox
 # image), not for the FakeEditor-backed tests. Pulls in LiteLLM for any model.
 agent = [
-    "aider-chat>=0.50",
+    "aider-chat==0.86.2",
 ]

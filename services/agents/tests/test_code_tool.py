@@ -9,7 +9,10 @@ from app.tools import code
 async def test_open_changeset_posts_task(monkeypatch):
     captured: dict[str, Any] = {}
 
-    async def fake_post(path: str, payload: dict[str, Any] | None = None):
+    async def fake_post(
+        project_id: str, path: str, payload: dict[str, Any] | None = None
+    ):
+        captured["project_id"] = project_id
         captured["path"] = path
         captured["payload"] = payload
         return {"changeset_id": "cs_1", "status": "queued"}
@@ -25,6 +28,7 @@ async def test_open_changeset_posts_task(monkeypatch):
     )
 
     assert result["changeset_id"] == "cs_1"
+    assert captured["project_id"] == "demo"
     assert captured["path"] == "/v1/changesets"
     assert captured["payload"]["project_id"] == "demo"
     assert captured["payload"]["run_id"] == "run-1"
@@ -34,12 +38,13 @@ async def test_open_changeset_posts_task(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_changeset(monkeypatch):
-    async def fake_get(path: str):
+    async def fake_get(project_id: str, path: str):
+        assert project_id == "demo"
         return {"changeset_id": path.rsplit("/", 1)[-1], "status": "pr_open"}
 
     monkeypatch.setattr(code, "_get", fake_get)
 
-    result = await code.get_changeset("cs_9")
+    result = await code.get_changeset("demo", "cs_9")
     assert result["changeset_id"] == "cs_9"
     assert result["status"] == "pr_open"
 
@@ -48,19 +53,47 @@ async def test_get_changeset(monkeypatch):
 async def test_revert_changeset_hits_endpoint(monkeypatch):
     captured: dict[str, Any] = {}
 
-    async def fake_post(path: str, payload: dict[str, Any] | None = None):
+    async def fake_post(
+        project_id: str, path: str, payload: dict[str, Any] | None = None
+    ):
+        assert project_id == "demo"
         captured["path"] = path
         return {"changeset_id": "cs_revert", "status": "queued"}
 
     monkeypatch.setattr(code, "_post", fake_post)
 
-    result = await code.revert_changeset("cs_9")
+    result = await code.revert_changeset("demo", "cs_9")
     assert captured["path"] == "/v1/changesets/cs_9/revert"
     assert result["changeset_id"] == "cs_revert"
 
 
-def test_headers_carry_internal_token(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "s3cret")
-    assert code._headers() == {"X-APDL-Internal-Token": "s3cret"}
-    monkeypatch.delenv("APDL_INTERNAL_TOKEN", raising=False)
-    assert code._headers() == {}
+@pytest.mark.asyncio
+async def test_http_calls_use_project_scoped_service_key(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, path, *, params, headers):
+            seen.update(path=path, params=params, headers=headers)
+            return _Response()
+
+    monkeypatch.setattr(code.httpx, "AsyncClient", lambda **_kwargs: _Client())
+    monkeypatch.setenv(
+        "APDL_SERVICE_API_KEYS",
+        '{"demo":"proj_demo_0123456789abcdef"}',
+    )
+
+    await code._get("demo", "/v1/changesets", params={"project_id": "demo"})
+    assert seen["headers"] == {"X-API-Key": "proj_demo_0123456789abcdef"}

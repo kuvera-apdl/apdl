@@ -22,6 +22,7 @@ from app.models.changeset import (
     TaskSpec,
     assert_transition,
 )
+from app.models.connection import RepositoryTarget
 from app.models.observations import (
     CIRemediationStatus,
     ExternalCIStatus,
@@ -30,6 +31,7 @@ from app.models.observations import (
 )
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
+from app.safety.policy import TenantCodegenConnectionPolicy
 from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
 from app.verification.models import VerificationCoverage, VerificationPlan
@@ -159,6 +161,16 @@ def _publication_authorization_from_row(
     return PublicationAuthorization.model_validate_json(raw)
 
 
+def _tenant_policy_snapshot_from_row(
+    row: asyncpg.Record,
+) -> TenantCodegenConnectionPolicy | None:
+    value = _optional_column(row, "tenant_policy_snapshot")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return TenantCodegenConnectionPolicy.model_validate_json(raw)
+
+
 def _row_to_changeset(row: asyncpg.Record) -> Changeset:
     return Changeset(
         changeset_id=row["changeset_id"],
@@ -195,6 +207,10 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         runtime_evidence_assessment=_runtime_evidence_assessment_from_row(row),
         review_verdict=_review_verdict_from_row(row),
         publication_authorization=_publication_authorization_from_row(row),
+        tenant_policy_snapshot=_tenant_policy_snapshot_from_row(row),
+        effective_safety_policy_sha256=_optional_column(
+            row, "effective_safety_policy_sha256"
+        ),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -209,14 +225,24 @@ async def create_changeset(
     run_id: str | None,
     base_branch: str | None,
     task: dict[str, Any],
+    repository_target: RepositoryTarget,
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None,
+    effective_safety_policy_sha256: str | None = None,
 ) -> Changeset:
-    """Insert a new changeset in the ``queued`` state."""
+    """Insert queued work with an immutable, grant-verified repository target."""
+    if repository_target.project_id != project_id:
+        raise ValueError("Changeset project does not match its repository grant")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO codegen_changesets
-                (changeset_id, project_id, run_id, status, base_branch, task)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                (changeset_id, project_id, run_id, status, base_branch, task,
+                 tenant_policy_snapshot, effective_safety_policy_sha256,
+                 repository_grant_id, repository_id,
+                 repository_installation_id, repository_full_name,
+                 repository_target_quarantined)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8,
+                    $9, $10, $11, $12, false)
             RETURNING *
             """,
             changeset_id,
@@ -225,8 +251,49 @@ async def create_changeset(
             ChangesetStatus.queued.value,
             base_branch,
             json.dumps(task),
+            (
+                tenant_policy_snapshot.model_dump_json()
+                if tenant_policy_snapshot is not None
+                else None
+            ),
+            effective_safety_policy_sha256,
+            repository_target.grant_id,
+            repository_target.repository_id,
+            repository_target.installation_id,
+            repository_target.repository_full_name,
         )
     return _row_to_changeset(row)
+
+
+async def set_safety_policy_provenance(
+    pool: asyncpg.Pool,
+    changeset_id: str,
+    *,
+    tenant_policy_snapshot: TenantCodegenConnectionPolicy,
+    effective_safety_policy_sha256: str,
+) -> Changeset | None:
+    """Persist the immutable tenant snapshot and latest effective-policy digest.
+
+    A legacy row may not have a tenant snapshot yet, so the first safe execution
+    fills it. Once present it is never replaced by a later connection update.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE codegen_changesets
+            SET tenant_policy_snapshot = COALESCE(
+                    tenant_policy_snapshot, $2::jsonb
+                ),
+                effective_safety_policy_sha256 = $3,
+                updated_at = now()
+            WHERE changeset_id = $1
+            RETURNING *
+            """,
+            changeset_id,
+            tenant_policy_snapshot.model_dump_json(),
+            effective_safety_policy_sha256,
+        )
+    return _row_to_changeset(row) if row else None
 
 
 async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | None:
@@ -239,41 +306,52 @@ async def get_changeset(pool: asyncpg.Pool, changeset_id: str) -> Changeset | No
 
 
 async def get_changeset_by_head_sha(
-    pool: asyncpg.Pool, head_sha: str, repo: str
+    pool: asyncpg.Pool,
+    head_sha: str,
+    repository_id: int,
+    installation_id: int,
 ) -> Changeset | None:
-    """Find an open changeset by exact GitHub head SHA and repository."""
+    """Find open work by exact head and immutable GitHub repository identity."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
-            JOIN codegen_connections conn ON conn.project_id = cs.project_id
             WHERE cs.head_sha = $1
-              AND conn.repo = $2
+              AND cs.repository_id = $2
+              AND cs.repository_installation_id = $3
+              AND NOT cs.repository_target_quarantined
               AND cs.status = 'pr_open'
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
             head_sha,
-            repo,
+            repository_id,
+            installation_id,
         )
     return _row_to_changeset(row) if row else None
 
 
 async def get_changeset_by_pr_number(
-    pool: asyncpg.Pool, pr_number: int, repo: str
+    pool: asyncpg.Pool,
+    pr_number: int,
+    repository_id: int,
+    installation_id: int,
 ) -> Changeset | None:
-    """Find the APDL changeset associated with a GitHub pull request."""
+    """Find work by PR number and immutable GitHub repository identity."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT cs.* FROM codegen_changesets cs
-            JOIN codegen_connections conn ON conn.project_id = cs.project_id
-            WHERE cs.pr_number = $1 AND conn.repo = $2
+            WHERE cs.pr_number = $1
+              AND cs.repository_id = $2
+              AND cs.repository_installation_id = $3
+              AND NOT cs.repository_target_quarantined
             ORDER BY cs.created_at DESC
             LIMIT 1
             """,
             pr_number,
-            repo,
+            repository_id,
+            installation_id,
         )
     return _row_to_changeset(row) if row else None
 

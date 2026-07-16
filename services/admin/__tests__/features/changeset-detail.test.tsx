@@ -60,6 +60,8 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     runtime_evidence_assessment: null,
     review_verdict: null,
     publication_authorization: null,
+    tenant_policy_snapshot: null,
+    effective_safety_policy_sha256: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
     created_at: '2026-07-01T03:15:31.000000Z',
     updated_at: '2026-07-01T03:21:35.000000Z',

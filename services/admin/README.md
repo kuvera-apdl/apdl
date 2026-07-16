@@ -3,7 +3,7 @@
 Single-page admin console for the APDL platform. The browser talks only to the
 same-origin [Admin API](../admin-api/README.md), which authenticates human
 users, enforces project roles, and injects service credentials server-side.
-Service API keys and the codegen internal token never enter frontend JavaScript.
+Project API keys never enter frontend JavaScript.
 
 Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan.md`
 (vault). This package implements **all plan phases (0–7)**:

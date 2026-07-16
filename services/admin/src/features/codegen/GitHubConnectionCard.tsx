@@ -37,7 +37,7 @@ export function GitHubConnectionCard() {
           </div>
           {query.isSuccess ? (
             connection ? (
-              <Badge className="bg-emerald-600 hover:bg-emerald-600">Connected</Badge>
+              <Badge className="bg-emerald-600 hover:bg-emerald-600">Verified grant</Badge>
             ) : (
               <Badge variant="outline">Not connected</Badge>
             )
@@ -52,12 +52,12 @@ export function GitHubConnectionCard() {
         ) : connection ? (
           <div className="space-y-1 text-sm">
             <a
-              href={`https://github.com/${connection.repo}`}
+              href={`https://github.com/${connection.repository_full_name}`}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1 font-medium hover:underline"
             >
-              {connection.repo}
+              {connection.repository_full_name}
               <ExternalLink className="h-3 w-3" />
             </a>
             <p className="text-muted-foreground">
@@ -65,15 +65,15 @@ export function GitHubConnectionCard() {
               <code className="rounded bg-muted px-1 py-0.5 text-xs">
                 {connection.default_base_branch}
               </code>
-              {' · '}installation #{connection.installation_id}
-              {' · '}connected <RelativeTime value={connection.updated_at} />
+              {' · '}repository #{connection.repository_id}
+              {' · '}grant <code className="font-mono text-xs">{connection.grant_id}</code>
+              {' · '}verified <RelativeTime value={connection.updated_at} />
             </p>
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
-            No repository is configured. Repository onboarding uses the server-side codegen
-            operator workflow so a tenant session cannot enumerate or bind repositories owned by
-            another project.
+            No verified repository grant is active. An operator must authorize the exact GitHub
+            repository ID before Codegen can enqueue or publish work for this project.
           </p>
         )}
       </CardContent>

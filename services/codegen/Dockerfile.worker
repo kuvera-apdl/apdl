@@ -1,7 +1,8 @@
 # APDL codegen agent sandbox — the untrusted-code boundary (decision D4 / Option B).
 #
-# One ephemeral container per changeset: it clones the repo, runs the OSS coding
-# agent (Aider) + the customer's build/test, and pushes the branch — all isolated
+# One ephemeral container per changeset: it clones the repo, runs the pinned OSS
+# coding agent (Aider), performs sanitized contract inspection, and pushes the
+# branch — all isolated
 # from the codegen API container (which holds the GitHub App key, the Postgres
 # DSN, and the internal token). The orchestrator
 # (app.editor.container_editor.ContainerAiderEditor) launches it with `docker run`;
@@ -14,23 +15,46 @@
 #   * egress allowlist: github.com + package registries only; block the APDL
 #     internal CIDR and the cloud metadata IP (169.254.169.254)
 # The install token arrives as GH_TOKEN; the runner drops it from the environment
-# before aider/tests run, so only the model provider key is ever exposed to the
-# untrusted code.
+# before Aider starts. Repository-defined lint, test, hook, shell-suggestion, and
+# browser commands are disabled; GitHub CI remains the execution authority.
+ARG CODEGEN_REVISION
+
+# The evaluation controller contains sealed corpus/oracle material. The candidate
+# must run the same production editor without receiving those answers. Prune them
+# in an intermediate stage, then copy only that pruned tree into the final image;
+# deleting them after a direct COPY would leave them recoverable from an image
+# layer.
+FROM python:3.12-slim AS candidate-source
+WORKDIR /candidate
+COPY pyproject.toml .
+COPY app/ app/
+RUN rm -rf \
+        app/evaluations/fixtures \
+        app/evaluations/corpus_v2.json \
+        app/evaluations/oracles_v1.json \
+    && find app -type d -name __pycache__ -prune -exec rm -rf '{}' +
+
 FROM python:3.12-slim
-# git: clone/commit. nodejs (Node 20 LTS via NodeSource, bundles npm): the sandbox
-# runs the customer repo's build/test here, so JS/TS repos need a Node toolchain.
+ARG CODEGEN_REVISION
+RUN test -n "$CODEGEN_REVISION" \
+    && test "$CODEGEN_REVISION" != "development-unversioned"
+LABEL org.opencontainers.image.revision="$CODEGEN_REVISION" \
+      dev.apdl.codegen.revision="$CODEGEN_REVISION" \
+      dev.apdl.codegen.role="candidate"
+# git: clone/commit. nodejs (Node 20 LTS via NodeSource, bundles npm): sanitized
+# exact-lock contract inspection for JS/TS repositories needs a Node toolchain.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
-# The model-agnostic coding agent (any model via LiteLLM, chosen at run time via
-# CODEGEN_MODEL).
-RUN pip install --no-cache-dir aider-chat uv
-# The editor imports the profiler, contract resolver, deterministic safety
-# gates, and strict pipeline schemas. Copy the complete app package so the
-# worker image exercises the same code as the API process.
-COPY app/ /app/app/
+# Install the pruned APDL package and its pinned, model-agnostic Aider engine.
+# This also installs the `apdl-codegen-evaluate-candidate` entry point used by
+# the Docker evaluation controller. Production changesets continue to enter via
+# run_changeset.py below, so both paths exercise the same packaged editor code.
+COPY --from=candidate-source /candidate /opt/apdl-codegen
+RUN pip install --no-cache-dir uv "/opt/apdl-codegen[agent]" \
+    && rm -rf /opt/apdl-codegen
 COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \
@@ -38,6 +62,7 @@ RUN useradd --create-home --uid 1000 agent \
 USER agent
 WORKDIR /app
 ENV PYTHONPATH=/app \
+    CODEGEN_REVISION="$CODEGEN_REVISION" \
     CODEGEN_WORKDIR=/workspace \
     APDL_CODEGEN_ISOLATED_WORKER=true \
     AIDER_ANALYTICS=false \

@@ -62,7 +62,6 @@ shell history; `--password-stdin` supports secret-manager pipelines.
 | `POSTGRES_URL` | Admin users, memberships, and sessions |
 | `APDL_SERVICE_API_KEYS` | JSON object of project-scoped service keys; server-only |
 | `APDL_DEV_API_KEY` | Explicit local-only credential provisioned by `make migrate-postgres` |
-| `APDL_INTERNAL_TOKEN` | Server-only codegen credential |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
 | `CONFIG_SERVICE_URL` | Private config URL |
 | `QUERY_SERVICE_URL` | Private query URL |

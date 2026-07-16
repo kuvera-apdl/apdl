@@ -23,6 +23,7 @@ from app.models.observations import ExternalCIStatus
 _REQUIREMENT_ID_PATTERN = r"^REQ-[0-9]{3}$"
 _HEAD_SHA_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"
 _ARTIFACT_NAME_PATTERN = r"^[A-Za-z0-9_.-]{1,128}$"
+RUNTIME_ACCEPTANCE_WORKFLOW_PATH = ".github/workflows/apdl-runtime-acceptance.yml"
 
 
 class StrictModel(BaseModel):
@@ -51,32 +52,27 @@ class RuntimeEvidenceStatus(str, Enum):
     unverified = "unverified"
 
 
-class RuntimeAcceptancePolicy(StrictModel):
-    """Repository policy for the one canonical generated Actions workflow."""
+class RuntimeAcceptanceRequest(StrictModel):
+    """Tenant preference for runtime acceptance; never an execution grant."""
 
-    schema_version: Literal["runtime_acceptance_policy@1"] = (
-        "runtime_acceptance_policy@1"
+    schema_version: Literal["runtime_acceptance_request@1"] = (
+        "runtime_acceptance_request@1"
     )
-    workflow_changes_authorized: StrictBool = False
-    generated_workflow_path: str = ".github/workflows/apdl-runtime-acceptance.yml"
+    enabled: StrictBool = False
 
-    @field_validator("generated_workflow_path")
-    @classmethod
-    def validate_workflow_path(cls, value: str) -> str:
-        normalized = _relative_path(value)
-        prefix = ".github/workflows/"
-        filename = normalized.removeprefix(prefix)
-        if (
-            not normalized.startswith(prefix)
-            or "/" in filename
-            or not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:yml|yaml)", filename)
-        ):
-            raise ValueError(
-                "generated runtime workflows must use .github/workflows/*.yml"
-            )
-        if value != normalized:
-            raise ValueError("generated runtime workflow path must be canonical")
-        return normalized
+
+class RuntimeAcceptancePolicy(StrictModel):
+    """Trusted effective grant for the canonical generated Actions workflow.
+
+    Service code constructs this only after intersecting the tenant request with
+    operator-owned policy. The workflow path is deliberately absent from this
+    contract so neither caller can redirect the grant to another workflow.
+    """
+
+    schema_version: Literal["runtime_acceptance_policy@2"] = (
+        "runtime_acceptance_policy@2"
+    )
+    enabled: StrictBool = False
 
 
 def _relative_path(value: str) -> str:

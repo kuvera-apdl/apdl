@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,8 +12,9 @@ from app.jobs import ci_poller
 from tests.fakes import FakePool
 
 
-async def _mint(_installation_id: int, _repo: str) -> str:
-    return "ghs_tok"
+@asynccontextmanager
+async def _mint(_changeset_id: str):
+    yield "ghs_tok"
 
 
 async def _get_pr(_repo: str, _number: int, _token: str) -> dict:

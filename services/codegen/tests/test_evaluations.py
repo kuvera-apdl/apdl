@@ -32,6 +32,7 @@ from app.evaluations.fixtures import (
 )
 from app.evaluations.metrics import aggregate_metrics, build_evaluation_report
 from app.evaluations.models import (
+    CodegenCandidateIdentity,
     DetectionChannel,
     DetectionObservation,
     Ecosystem,
@@ -83,6 +84,12 @@ from app.evaluations.subprocess_executor import (
 
 
 SHA = "1" * 64
+CANDIDATE_IDENTITY = CodegenCandidateIdentity.build(
+    controller_image_id="sha256:" + "a" * 64,
+    candidate_image_id="sha256:" + "b" * 64,
+    codegen_revision="deadbeef",
+    behavior_configuration_sha256="c" * 64,
+)
 
 
 def _evidence(source: EvidenceSource = EvidenceSource.executor) -> EvidenceReference:
@@ -191,13 +198,13 @@ def _outcome(case_id: str, status: OutcomeStatus) -> EvaluationOutcome:
     execution = _execution_measurements()
     measurements = OutcomeMeasurements.model_validate(
         {
-            **execution.model_dump(mode="json"),
+            **execution.model_dump(mode="python"),
             "behavioral_acceptance": (
-                _metric(None, "harness did not complete").model_dump(mode="json")
+                _metric(None, "harness did not complete").model_dump(mode="python")
                 if unavailable
                 else _metric(
                     float(passed), source=EvidenceSource.fixture_harness
-                ).model_dump(mode="json")
+                ).model_dump(mode="python")
             ),
         }
     )
@@ -239,6 +246,7 @@ def _run(
         stage=stage,
         model=model,
         codegen_revision=codegen_revision,
+        candidate_identity=CANDIDATE_IDENTITY,
         started_at=now,
         finished_at=now,
         outcomes=outcomes,
@@ -248,10 +256,12 @@ def _run(
 def _corpus_aligned_run() -> EvaluationRun:
     corpus = load_corpus()
     oracle_set = load_oracle_set()
+    oracle_by_case = {oracle.case_id: oracle for oracle in oracle_set.oracles}
     outcomes = []
     for case in corpus.cases:
-        payload = _outcome(case.case_id, OutcomeStatus.detected).model_dump(mode="json")
+        payload = _outcome(case.case_id, OutcomeStatus.detected).model_dump(mode="python")
         payload["harness"]["fixture_sha256"] = case.fixture_sha256
+        payload["oracle_case_sha256"] = canonical_sha256(oracle_by_case[case.case_id])
         outcomes.append(EvaluationOutcome.model_validate(payload))
     now = datetime(2026, 1, 1, tzinfo=UTC)
     return EvaluationRun(
@@ -265,6 +275,7 @@ def _corpus_aligned_run() -> EvaluationRun:
         stage=RolloutStage.offline,
         model="test-model@1",
         codegen_revision="deadbeef",
+        candidate_identity=CANDIDATE_IDENTITY,
         started_at=now,
         finished_at=now,
         outcomes=outcomes,
@@ -326,6 +337,25 @@ def test_strict_models_reject_unknown_fields_and_nonfinite_values():
         )
 
 
+def test_candidate_identity_is_strict_and_content_addressed():
+    assert CANDIDATE_IDENTITY.identity_sha256 == canonical_sha256(
+        CANDIDATE_IDENTITY.model_dump(
+            mode="json", exclude={"identity_sha256"}
+        )
+    )
+    tampered = CANDIDATE_IDENTITY.model_dump(mode="python")
+    tampered["candidate_image_id"] = "sha256:" + "e" * 64
+    with pytest.raises(ValidationError, match="identity_sha256"):
+        CodegenCandidateIdentity.model_validate(tampered)
+    with pytest.raises(ValidationError):
+        CodegenCandidateIdentity.build(
+            controller_image_id="controller:latest",
+            candidate_image_id="sha256:" + "b" * 64,
+            codegen_revision="deadbeef",
+            behavior_configuration_sha256="c" * 64,
+        )
+
+
 def test_rollout_revalidates_model_instances_before_comparing_thresholds():
     poisoned_policy = RolloutPolicy().model_copy(
         update={"minimum_requirement_coverage": math.nan}
@@ -361,8 +391,8 @@ def test_metric_availability_and_ranges_are_strict():
     with pytest.raises(ValidationError):
         ExecutionMeasurements(
             **{
-                **_execution_measurements().model_dump(mode="json"),
-                "first_pass_ci_success": _metric(0.5).model_dump(mode="json"),
+                **_execution_measurements().model_dump(mode="python"),
+                "first_pass_ci_success": _metric(0.5).model_dump(mode="python"),
             }
         )
 
@@ -449,7 +479,7 @@ def test_segmented_report_rejects_run_corpus_alignment_drift():
         build_segmented_report(subset, corpus)
 
     segmented = build_segmented_report(run, corpus)
-    unsorted = segmented.model_dump(mode="json", exclude={"segmented_report_sha256"})
+    unsorted = segmented.model_dump(mode="python", exclude={"segmented_report_sha256"})
     unsorted["segments"] = list(reversed(unsorted["segments"]))
     with pytest.raises(ValidationError, match="deterministically sorted"):
         SegmentedEvaluationReport.model_validate(
@@ -464,19 +494,34 @@ def _passing_report(
     *,
     stage: RolloutStage = RolloutStage.offline,
 ) -> EvaluationReport:
-    outcomes = [
-        *[
-            _outcome(f"detected-{index}", OutcomeStatus.detected)
-            for index in range(10)
-        ],
-        *[
-            _outcome(f"accepted-{index}", OutcomeStatus.accepted)
-            for index in range(20)
-        ],
-    ]
-    return build_evaluation_report(
-        _run(outcomes, run_id="passing-run", stage=stage)
+    corpus = load_corpus()
+    oracle_set = load_oracle_set()
+    oracle_by_case = {oracle.case_id: oracle for oracle in oracle_set.oracles}
+    outcomes: list[EvaluationOutcome] = []
+    for index, case in enumerate(corpus.cases):
+        status = OutcomeStatus.detected if index < 2 else OutcomeStatus.accepted
+        payload = _outcome(case.case_id, status).model_dump(mode="python")
+        payload["harness"]["fixture_sha256"] = case.fixture_sha256
+        payload["oracle_case_sha256"] = canonical_sha256(oracle_by_case[case.case_id])
+        outcomes.append(EvaluationOutcome.model_validate(payload))
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    run = EvaluationRun(
+        run_id="passing-run",
+        corpus_id=corpus.corpus_id,
+        corpus_sha256=corpus.evidence_sha256(),
+        oracle_set_sha256=oracle_set.evidence_sha256(),
+        fixture_sha256_by_case={
+            case.case_id: case.fixture_sha256 for case in corpus.cases
+        },
+        stage=stage,
+        model="test-model@1",
+        codegen_revision="deadbeef",
+        candidate_identity=CANDIDATE_IDENTITY,
+        started_at=now,
+        finished_at=now,
+        outcomes=outcomes,
     )
+    return build_evaluation_report(run)
 
 
 def _passing_summary():
@@ -551,8 +596,9 @@ def test_rollout_decision_is_deterministic_and_canary_is_low_risk():
         canary_identity="acme/repo:case",
     )
     assert first == second
-    assert first.allowed is True
-    assert first.ready_for_review is True
+    assert first.allowed is False
+    assert first.ready_for_review is False
+    assert any("reviewed-PR CI evidence" in reason for reason in first.reasons)
 
     denied = decide_rollout(
         requested_stage=RolloutStage.low_risk_canary,
@@ -589,11 +635,13 @@ def test_operator_bundle_is_content_addressed_and_loads_strictly(tmp_path: Path)
         path,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
     authorizer = load_publication_authorizer(
         path,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
 
     assert loaded == bundle
@@ -617,6 +665,7 @@ def test_publication_bundle_loader_rejects_ambiguous_or_nonfinite_json(
             path,
             expected_model="test-model@1",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     path.write_text('{"value":NaN}', encoding="utf-8")
     with pytest.raises(ValueError, match="non-finite JSON value"):
@@ -624,6 +673,7 @@ def test_publication_bundle_loader_rejects_ambiguous_or_nonfinite_json(
             path,
             expected_model="test-model@1",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
 
 
@@ -639,12 +689,14 @@ def test_publication_bundle_loader_rejects_symlink_nonregular_and_oversize(
             symlink,
             expected_model="test-model@1",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     with pytest.raises(ValueError, match="regular file"):
         load_publication_bundle(
             tmp_path,
             expected_model="test-model@1",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     oversized = tmp_path / "oversized.json"
     with oversized.open("wb") as handle:
@@ -654,9 +706,10 @@ def test_publication_bundle_loader_rejects_symlink_nonregular_and_oversize(
             oversized,
             expected_model="test-model@1",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
 
-def test_publication_bundle_is_bound_to_expected_model_and_revision(tmp_path: Path):
+def test_publication_bundle_is_bound_to_model_revision_and_candidate(tmp_path: Path):
     path = tmp_path / "publication-bundle.json"
     path.write_text(_operator_bundle().model_dump_json(), encoding="utf-8")
 
@@ -665,12 +718,21 @@ def test_publication_bundle_is_bound_to_expected_model_and_revision(tmp_path: Pa
             path,
             expected_model="different-model",
             expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     with pytest.raises(ValueError, match="expected revision"):
         load_publication_bundle(
             path,
             expected_model="test-model@1",
             expected_codegen_revision="different-revision",
+            expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
+        )
+    with pytest.raises(ValueError, match="candidate identity"):
+        load_publication_bundle(
+            path,
+            expected_model="test-model@1",
+            expected_codegen_revision="deadbeef",
+            expected_candidate_identity_sha256="f" * 64,
         )
 
 
@@ -713,20 +775,37 @@ def test_publication_bundle_accepts_nonpublishing_stages_and_rejects_fabrication
             RolloutPolicy(minimum_behavioral_acceptance_rate=0.6),
         )
 
+    untrusted_run = _passing_report().run.model_copy(
+        update={"candidate_identity": None}
+    )
+    with pytest.raises(ValueError, match="trusted Docker candidate identity"):
+        build_publication_bundle(
+            build_evaluation_report(untrusted_run),
+            RolloutPolicy(minimum_behavioral_acceptance_rate=0.6),
+        )
+
     report = _passing_report()
-    summary_payload = report.summary.model_dump(mode="json")
+    summary_payload = report.summary.model_dump(mode="python")
     retry_metric = dict(summary_payload["mean_retries"])
     retry_metric["numerator"] = float(retry_metric["denominator"])
     retry_metric["value"] = 1.0
     summary_payload["mean_retries"] = retry_metric
     fabricated_summary = EvaluationSummary.model_validate(summary_payload)
     report_payload = {
-        "schema_version": "evaluation_report@1",
+        "schema_version": "evaluation_report@2",
+        "run": report.run.model_dump(mode="python"),
+        "summary": fabricated_summary.model_dump(mode="python"),
+    }
+    report_digest_payload = {
+        "schema_version": "evaluation_report@2",
         "run": report.run.model_dump(mode="json"),
         "summary": fabricated_summary.model_dump(mode="json"),
     }
     fabricated_report = EvaluationReport.model_validate(
-        {**report_payload, "report_sha256": canonical_sha256(report_payload)}
+        {
+            **report_payload,
+            "report_sha256": canonical_sha256(report_digest_payload),
+        }
     )
     with pytest.raises(ValueError, match="summary does not match"):
         build_publication_bundle(
@@ -741,12 +820,14 @@ def test_authorizer_recomputes_and_content_addresses_each_request():
         bundle,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
     request = PublicationRequest(
         requested_stage=RolloutStage.reviewed_pr,
         risk=RiskLevel.high,
         model="test-model@1",
         codegen_revision="deadbeef",
+        candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
 
     first = authorizer.authorize(request)
@@ -773,6 +854,7 @@ def test_authorizer_recomputes_canary_identity_instead_of_trusting_a_decision():
         bundle,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
 
     def authorize(identity: str) -> PublicationAuthorization:
@@ -782,14 +864,15 @@ def test_authorizer_recomputes_canary_identity_instead_of_trusting_a_decision():
                 risk=RiskLevel.low,
                 model="test-model@1",
                 codegen_revision="deadbeef",
+                candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
                 canary_identity=identity,
             )
         )
 
     first = authorize("acme/repo:request-1")
     second = authorize("acme/repo:request-2")
-    assert first.decision.allowed is True
-    assert second.decision.allowed is True
+    assert first.decision.allowed is False
+    assert second.decision.allowed is False
     assert first.decision.canary_identity_sha256 != (
         second.decision.canary_identity_sha256
     )
@@ -806,16 +889,23 @@ def test_authorizer_rejects_request_identity_drift_and_nonpublication_stages():
         _operator_bundle(),
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
     for field, value, match in (
         ("model", "different-model", "model does not match"),
         ("codegen_revision", "different-revision", "revision does not match"),
+        (
+            "candidate_identity_sha256",
+            "f" * 64,
+            "candidate identity does not match",
+        ),
     ):
         payload = {
             "requested_stage": RolloutStage.reviewed_pr,
             "risk": RiskLevel.low,
             "model": "test-model@1",
             "codegen_revision": "deadbeef",
+            "candidate_identity_sha256": CANDIDATE_IDENTITY.identity_sha256,
         }
         payload[field] = value
         with pytest.raises(ValueError, match=match):
@@ -828,6 +918,7 @@ def test_authorizer_rejects_request_identity_drift_and_nonpublication_stages():
                 risk=RiskLevel.low,
                 model="test-model@1",
                 codegen_revision="deadbeef",
+                candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
             )
 
 
@@ -841,6 +932,7 @@ def test_authorizer_persists_denial_without_granting_publish_capabilities():
         bundle,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
     authorization = authorizer.authorize(
         PublicationRequest(
@@ -848,6 +940,7 @@ def test_authorizer_persists_denial_without_granting_publish_capabilities():
             risk=RiskLevel.low,
             model="test-model@1",
             codegen_revision="deadbeef",
+            candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     )
 
@@ -862,6 +955,7 @@ def test_publication_authorization_rejects_content_address_tampering():
         _operator_bundle(),
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
     )
     authorization = authorizer.authorize(
         PublicationRequest(
@@ -869,9 +963,10 @@ def test_publication_authorization_rejects_content_address_tampering():
             risk=RiskLevel.low,
             model="test-model@1",
             codegen_revision="deadbeef",
+            candidate_identity_sha256=CANDIDATE_IDENTITY.identity_sha256,
         )
     )
-    payload = authorization.model_dump(mode="json")
+    payload = authorization.model_dump(mode="python")
     payload["report_sha256"] = SHA
     with pytest.raises(ValidationError, match="authorization_sha256"):
         PublicationAuthorization.model_validate(payload)
@@ -1081,13 +1176,28 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
     monkeypatch,
     capsys,
 ):
-    worker = tmp_path / "cli-worker.py"
-    _write_valid_worker(worker)
+    class FakeDockerEvaluationExecutor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def execute(self, invocation: EvaluationInvocation):
+            return EvaluationExecution(
+                invocation_id=invocation.invocation_id,
+                measurements=_execution_measurements(),
+            )
+
+    monkeypatch.setattr(
+        "app.evaluations.cli.DockerEvaluationExecutor",
+        FakeDockerEvaluationExecutor,
+    )
     policy_path = tmp_path / "rollout-policy.json"
     policy_path.write_text(
         RolloutPolicy(
             minimum_sample_size=8,
             minimum_metric_denominator=1,
+            maximum_escaped_defect_rate=1.0,
+            minimum_requirement_coverage=0.0,
+            minimum_behavioral_acceptance_rate=0.0,
         ).model_dump_json(),
         encoding="utf-8",
     )
@@ -1100,10 +1210,10 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
         "argv",
         [
             "apdl-codegen-eval",
-            "--executor",
-            sys.executable,
-            "--executor-arg",
-            str(worker),
+            "--controller-image-id",
+            "sha256:" + "c" * 64,
+            "--docker-image",
+            "sha256:" + "a" * 64,
             "--stage",
             "offline",
             "--model",
@@ -1128,8 +1238,11 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
     main()
 
     stdout = json.loads(capsys.readouterr().out)
-    completed = CompletedEvaluation.model_validate(stdout["completed_evaluation"])
+    completed = CompletedEvaluation.model_validate_json(
+        json.dumps(stdout["completed_evaluation"])
+    )
     run = load_evaluation_run(run_path)
+    assert run.candidate_identity is not None
     report = EvaluationReport.model_validate_json(report_path.read_text(encoding="utf-8"))
     segmented = SegmentedEvaluationReport.model_validate_json(
         segmented_path.read_text(encoding="utf-8")
@@ -1138,6 +1251,7 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
         bundle_path,
         expected_model="test-model@1",
         expected_codegen_revision="deadbeef",
+        expected_candidate_identity_sha256=run.candidate_identity.identity_sha256,
     )
     assert completed.run == run
     assert completed.report == report
@@ -1150,6 +1264,84 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
     assert 'apdl-codegen-eval = "app.evaluations.cli:main"' in pyproject.read_text(
         encoding="utf-8"
     )
+
+
+def test_cli_custom_executor_cannot_emit_publication_bundle(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "apdl-codegen-eval",
+            "--executor",
+            sys.executable,
+            "--model",
+            "test-model@1",
+            "--codegen-revision",
+            "deadbeef",
+            "--bundle-output",
+            str(tmp_path / "bundle.json"),
+        ],
+    )
+    with pytest.raises(SystemExit):
+        main()
+    assert not (tmp_path / "bundle.json").exists()
+
+
+def test_cli_custom_executor_policy_output_never_contains_bundle(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    class FakeSubprocessEvaluationExecutor:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        async def execute(self, invocation: EvaluationInvocation):
+            return EvaluationExecution(
+                invocation_id=invocation.invocation_id,
+                measurements=_execution_measurements(),
+            )
+
+    monkeypatch.setattr(
+        "app.evaluations.cli.SubprocessEvaluationExecutor",
+        FakeSubprocessEvaluationExecutor,
+    )
+    policy_path = tmp_path / "rollout-policy.json"
+    policy_path.write_text(
+        RolloutPolicy(
+            minimum_sample_size=8,
+            minimum_metric_denominator=1,
+            maximum_escaped_defect_rate=1.0,
+            minimum_requirement_coverage=0.0,
+            minimum_behavioral_acceptance_rate=0.0,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "apdl-codegen-eval",
+            "--executor",
+            "/advanced/custom-executor",
+            "--model",
+            "test-model@1",
+            "--codegen-revision",
+            "deadbeef",
+            "--rollout-policy",
+            str(policy_path),
+        ],
+    )
+
+    main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reviewed_pr_decision"]["allowed"] is True
+    assert "publication_bundle" not in payload
 
 
 @pytest.mark.asyncio

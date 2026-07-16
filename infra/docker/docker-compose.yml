@@ -140,7 +140,6 @@ services:
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -159,11 +158,12 @@ services:
     build:
       context: ../../services/codegen
       dockerfile: Dockerfile
-    ports:
-      - "8084:8084"
+    # Deliberately not published on the host. Agents and the Admin API reach
+    # Codegen by its private Compose service name (`http://codegen:8084`).
+    expose:
+      - "8084"
     environment:
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       # Provide the private key one of three ways (see .env.example). Base64 is
       # the simplest to carry through .env in Docker (no multi-line / no mount).
@@ -171,14 +171,19 @@ services:
       GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
       GITHUB_APP_PRIVATE_KEY_PATH: ${GITHUB_APP_PRIVATE_KEY_PATH:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      # Empty disables the webhook endpoint; the CI poller remains available.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
       CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
       # Fail-closed rollout gate. Production PR stages require a read-only
       # operator evidence bundle bound to this exact model + revision.
       CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
-      CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-offline}
-      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ${CODEGEN_ROLLOUT_AUTHORIZATION_PATH:-}
+      # The base stack is evaluation-only even if an old host .env still carries
+      # publication settings. PR stages are enabled exclusively by the reviewed
+      # rollout overlay, which also requires immutable evaluated image IDs.
+      CODEGEN_ROLLOUT_STAGE: offline
+      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ""
+      CODEGEN_PLATFORM_SAFETY_POLICY_PATH: ${CODEGEN_PLATFORM_SAFETY_POLICY_PATH:-}
       # Aider prompt caching (default on): caches the static prefix (system + repo
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
       # "false" to disable.
@@ -193,14 +198,42 @@ services:
       CODEGEN_REVIEW: ${CODEGEN_REVIEW:-true}
       CODEGEN_HELPER_MODEL: ${CODEGEN_HELPER_MODEL:-}
       CODEGEN_EDIT_RETRIES: ${CODEGEN_EDIT_RETRIES:-1}
+      CODEGEN_REQUIRE_VERIFY: ${CODEGEN_REQUIRE_VERIFY:-false}
+      CODEGEN_CONVENTIONS: ${CODEGEN_CONVENTIONS:-true}
+      CODEGEN_CONTRACTS: ${CODEGEN_CONTRACTS:-true}
+      CODEGEN_CONTRACT_INSTALL_TIMEOUT: ${CODEGEN_CONTRACT_INSTALL_TIMEOUT:-600}
+      CODEGEN_TIMEOUT: ${CODEGEN_TIMEOUT:-1800}
+      CODEGEN_GIT_TIMEOUT: ${CODEGEN_GIT_TIMEOUT:-300}
+      CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
+      # May tighten but never exceed the 3000s GitHub write-token safety cap.
+      CODEGEN_JOB_BUDGET: ${CODEGEN_JOB_BUDGET:-3000}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      # Editor execution model: unset = in-process subprocess (default); "docker"
-      # = isolated sandbox container per changeset (Option B). Needs the sandbox
-      # image (`make build-codegen-sandbox`) + the Docker socket mounted below.
-      CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VERTEXAI_PROJECT: ${VERTEXAI_PROJECT:-}
+      VERTEXAI_LOCATION: ${VERTEXAI_LOCATION:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      TOGETHERAI_API_KEY: ${TOGETHERAI_API_KEY:-}
+      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-}
+      AZURE_API_KEY: ${AZURE_API_KEY:-}
+      AZURE_API_BASE: ${AZURE_API_BASE:-}
+      AZURE_API_VERSION: ${AZURE_API_VERSION:-}
+      # The isolated worker is the fail-closed default. PR rollout stages also
+      # require an explicitly named, egress-filtered sandbox network.
+      CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-docker}
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
+      CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:-}
+      CODEGEN_TRUSTED_REPOS_ONLY: ${CODEGEN_TRUSTED_REPOS_ONLY:-false}
       # Max changeset jobs to run at once. Each runs a coding agent + the repo's
       # build/test (CPU/memory heavy), so the default serializes (1); raise only
       # on a host with cores to spare. Excess jobs wait in `queued`.
@@ -219,6 +252,8 @@ services:
     #    CODEGEN_SANDBOX=docker). SECURITY: grants host-root-equivalent access.
     #  * Rollout bundle: mount CODEGEN_ROLLOUT_AUTHORIZATION_PATH read-only for
     #    reviewed_pr or low_risk_canary; offline/shadow need no bundle.
+    #  * Platform safety policy: mount CODEGEN_PLATFORM_SAFETY_POLICY_PATH
+    #    read-only at the same absolute path when overriding built-in defaults.
     # volumes:
     #   - ${GITHUB_APP_PRIVATE_KEY_PATH}:${GITHUB_APP_PRIVATE_KEY_PATH}:ro
     #   - /var/run/docker.sock:/var/run/docker.sock
@@ -242,7 +277,7 @@ services:
         condition: service_healthy
 
   # Admin backend-for-frontend. Human sessions and tenant roles live in
-  # PostgreSQL; service credentials and the codegen token never enter the SPA.
+  # PostgreSQL; project service credentials never enter the SPA.
   admin-api:
     build:
       context: ../../services/admin-api
@@ -256,7 +291,6 @@ services:
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_DEV_API_KEY: ${APDL_DEV_API_KEY:-}
-      APDL_INTERNAL_TOKEN: ${APDL_INTERNAL_TOKEN:-apdl-dev-internal-token}
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
     depends_on:

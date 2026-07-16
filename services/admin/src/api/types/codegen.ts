@@ -1,7 +1,6 @@
 import type { z } from 'zod'
 
 import type {
-  accessibleRepoSchema,
   changesetPromptSchema,
   changesetSchema,
   contractBundleSchema,
@@ -9,7 +8,6 @@ import type {
   inspectionSnapshotSchema,
   requirementLedgerSchema,
   reviewVerdictSchema,
-  repoConnectionCreateSchema,
   repoConnectionSchema,
   taskSpecSchema,
   verificationCoverageSchema,
@@ -53,5 +51,3 @@ export type CIVerificationObservation = z.infer<typeof ciVerificationObservation
 export type CIRemediationAttempt = z.infer<typeof ciRemediationAttemptSchema>
 export type ChangesetObservationHistory = z.infer<typeof changesetObservationHistorySchema>
 export type RepoConnection = z.infer<typeof repoConnectionSchema>
-export type RepoConnectionCreate = z.infer<typeof repoConnectionCreateSchema>
-export type AccessibleRepo = z.infer<typeof accessibleRepoSchema>

@@ -13,42 +13,49 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.auth import PostgresAuthenticator, authenticate_request
 from app.config import (
     codegen_ci_poll_interval,
+    codegen_controller_image_id,
     codegen_cors_origins,
     codegen_job_budget,
     codegen_model,
     codegen_revision,
     codegen_rollout_authorization_path,
     codegen_rollout_stage,
+    codegen_sandbox_mode,
+    codegen_sandbox_image,
+    codegen_sandbox_network,
     codegen_stale_sweep_interval,
+    codegen_trusted_repos_only,
     postgres_url,
 )
 from app.db import assert_schema_ready
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
-from app.evaluations.models import RolloutStage
+from app.editor.environment import codegen_behavior_configuration_sha256
+from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
-from app.github.app_auth import mint_token_for_repo
 from app.github.checks import get_ci_evidence
 from app.github.pulls import get_pull_request, open_pull_request
+from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
-from app.routers import changesets, connections, github, webhooks
+from app.routers import changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
+from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -59,26 +66,44 @@ _ORPHAN_ERROR = (
 logger = logging.getLogger(__name__)
 
 
-async def _mint_token(installation_id: int, repo: str) -> str:
-    """Mint a short-lived installation token (string) for the changeset job.
-
-    Delegates to :func:`mint_token_for_repo`, which self-heals a stale (rotated)
-    installation id on a 404 by re-resolving it from the repo.
-    """
-    token = await mint_token_for_repo(installation_id, repo)
-    return token.token
-
-
-def _make_editor() -> Editor:
+def _make_editor(stage: RolloutStage | None = None) -> Editor:
     """Pick the editor execution model from ``CODEGEN_SANDBOX``.
 
-    ``docker`` runs each changeset in an isolated, ephemeral sandbox container
-    (Option B); anything else uses the in-process subprocess editor (default).
+    The isolated Docker worker is the default. In-process execution is available
+    only for explicitly trusted local repositories while publication is disabled.
     """
-    if os.getenv("CODEGEN_SANDBOX", "").strip().lower() == "docker":
+    resolved_stage = stage or codegen_rollout_stage()
+    mode = codegen_sandbox_mode()
+    publication_stage = resolved_stage in {
+        RolloutStage.reviewed_pr,
+        RolloutStage.low_risk_canary,
+    }
+    if mode == "docker":
+        network = codegen_sandbox_network()
+        if publication_stage and network in {
+            "",
+            "bridge",
+            "default",
+            "host",
+            "none",
+        }:
+            raise RuntimeError(
+                "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
+                "operator-managed egress-filtered network"
+            )
         logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
-        return ContainerAiderEditor()
-    logger.info("Codegen editor: in-process subprocess execution")
+        editor = ContainerAiderEditor()
+        if publication_stage:
+            editor.assert_runtime_ready(expected_revision=codegen_revision())
+        return editor
+    if publication_stage:
+        raise RuntimeError("PR rollout stages require CODEGEN_SANDBOX=docker")
+    if not codegen_trusted_repos_only():
+        raise RuntimeError(
+            "In-process codegen requires CODEGEN_TRUSTED_REPOS_ONLY=true and is "
+            "limited to offline/shadow development"
+        )
+    logger.warning("Codegen editor: trusted-repository in-process development mode")
     return AiderEditor()
 
 
@@ -88,6 +113,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
     model = codegen_model()
     revision = codegen_revision()
     provider = None
+    candidate_identity = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
         raw_path = codegen_rollout_authorization_path()
         if not raw_path:
@@ -99,15 +125,29 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             raise RuntimeError(
                 "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
             )
+        candidate_identity = CodegenCandidateIdentity.build(
+            controller_image_id=codegen_controller_image_id(),
+            candidate_image_id=codegen_sandbox_image(),
+            codegen_revision=revision,
+            behavior_configuration_sha256=(
+                codegen_behavior_configuration_sha256()
+            ),
+        )
         provider = load_publication_authorizer(
             artifact_path,
             expected_model=model,
             expected_codegen_revision=revision,
+            expected_candidate_identity_sha256=candidate_identity.identity_sha256,
         )
     return ConfiguredPublicationGate(
         stage=stage,
         model=model,
         codegen_revision=revision,
+        candidate_identity_sha256=(
+            candidate_identity.identity_sha256
+            if candidate_identity is not None
+            else None
+        ),
         provider=provider,
     )
 
@@ -115,10 +155,15 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
+    platform_safety_policy = load_platform_safety_policy()
+    application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
     application.state.codegen_rollout_stage = publication_gate.stage
     pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
     application.state.pg_pool = pool
+    application.state.authenticator = PostgresAuthenticator(pool)
+    token_broker = GitHubTokenBroker(pool)
+    application.state.github_token_broker = token_broker
 
     async with pool.acquire() as conn:
         await assert_schema_ready(conn)
@@ -140,7 +185,7 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
-    editor = _make_editor()
+    editor = _make_editor(publication_gate.stage)
     repair_jobs: set[asyncio.Task] = set()
 
     def _repair_finished(task: asyncio.Task) -> None:
@@ -161,8 +206,9 @@ async def lifespan(application: FastAPI):
                 pool,
                 observation,
                 editor=editor,
-                mint_token=_mint_token,
+                mint_token=token_broker.write_changeset,
                 publication_gate=publication_gate,
+                platform_safety_policy=platform_safety_policy,
             )
         )
         repair_jobs.add(task)
@@ -171,9 +217,10 @@ async def lifespan(application: FastAPI):
     application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
         "editor": editor,
-        "mint_token": _mint_token,
+        "mint_token": token_broker.write_changeset,
         "open_pr": open_pull_request,
         "publication_gate": publication_gate,
+        "platform_safety_policy": platform_safety_policy,
     }
 
     # Re-enqueue work a restart orphaned before it began: a queued row produced
@@ -181,12 +228,13 @@ async def lifespan(application: FastAPI):
     # claim transition guarantees a single winner even with a concurrent
     # replica doing the same. (References are held so the tasks aren't GC'd.)
     queued_ids = await changeset_store.list_queued_changeset_ids(pool)
-    application.state.requeued_jobs = [
+    requeued_jobs = [
         asyncio.create_task(
             run_changeset_job(pool, changeset_id, **application.state.job_deps)
         )
         for changeset_id in queued_ids
     ]
+    application.state.requeued_jobs = requeued_jobs
     if queued_ids:
         logger.info(
             "Re-enqueued %d queued changeset(s) from before this boot: %s",
@@ -197,7 +245,7 @@ async def lifespan(application: FastAPI):
     application.state.github_sync_deps = {
         "get_pull_request": get_pull_request,
         "get_ci_evidence": get_ci_evidence,
-        "mint_token": _mint_token,
+        "mint_token": token_broker.read_changeset,
         "repair_failure": _schedule_ci_repair,
         "collect_runtime": collect_runtime_evidence,
     }
@@ -247,6 +295,13 @@ async def lifespan(application: FastAPI):
         task.cancel()
     if repair_jobs:
         await asyncio.gather(*repair_jobs, return_exceptions=True)
+    for task in requeued_jobs:
+        task.cancel()
+    if requeued_jobs:
+        # A requeued editor may still own a GitHub token lease and an isolated
+        # worker. Await cancellation while PostgreSQL and broker dependencies
+        # are alive so its context manager can revoke the credential cleanly.
+        await asyncio.gather(*requeued_jobs, return_exceptions=True)
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 
@@ -270,9 +325,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(connections.router)
-app.include_router(changesets.router)
-app.include_router(github.router)
+auth_dependencies = [Depends(authenticate_request)]
+app.include_router(connections.router, dependencies=auth_dependencies)
+app.include_router(changesets.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
 
 

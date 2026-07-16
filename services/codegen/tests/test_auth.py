@@ -1,35 +1,112 @@
-"""Internal-token guard behavior."""
+"""Project-scoped API-key authentication and authorization."""
+
+from __future__ import annotations
+
+import hashlib
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import PostgresAuthenticator, authenticate_request
 from app.main import app
 from tests.fakes import FakePool
 
+_VALID_KEY = "proj_demo_0123456789abcdef"
+
+
+class _AuthConnection:
+    def __init__(self, row: dict | None) -> None:
+        self._row = row
+
+    async def fetchrow(self, _query: str, provided_hash: str):
+        if self._row is None or self._row["key_hash"] != provided_hash:
+            return None
+        return self._row
+
+
+class _AuthPool:
+    def __init__(self, row: dict | None) -> None:
+        self._connection = _AuthConnection(row)
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self._connection
+
+
+def _row(
+    key: str = _VALID_KEY,
+    *,
+    project_id: str = "demo",
+    roles: tuple[str, ...] = ("agents:read", "agents:manage"),
+    active: bool = True,
+    expires_at: datetime | None = None,
+) -> dict:
+    return {
+        "credential_id": "codegen-test",
+        "project_id": project_id,
+        "key_hash": hashlib.sha256(key.encode()).hexdigest(),
+        "roles": roles,
+        "active": active,
+        "expires_at": expires_at,
+    }
+
 
 @pytest.mark.asyncio
-async def test_internal_token_enforced_when_configured(monkeypatch):
-    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "s3cret")
+async def test_api_key_is_required_and_internal_token_has_no_authority(
+    monkeypatch, authorized_codegen_request
+):
+    app.dependency_overrides.pop(authenticate_request, None)
+    monkeypatch.setenv("APDL_INTERNAL_TOKEN", "obsolete-global-token")
     app.state.pg_pool = FakePool()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # Missing token → 401 before the handler runs.
+    app.state.authenticator = PostgresAuthenticator(_AuthPool(_row()))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
         missing = await client.get("/v1/connections/demo")
-        assert missing.status_code == 401
-
-        # Correct token → passes auth (then 404 because no such connection).
-        ok = await client.get(
-            "/v1/connections/demo", headers={"X-APDL-Internal-Token": "s3cret"}
+        obsolete = await client.get(
+            "/v1/connections/demo",
+            headers={"X-APDL-Internal-Token": "obsolete-global-token"},
         )
-        assert ok.status_code == 404
+        valid = await client.get(
+            "/v1/connections/demo", headers={"X-API-Key": _VALID_KEY}
+        )
+
+    assert missing.status_code == 401
+    assert obsolete.status_code == 401
+    assert valid.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_no_token_configured_is_permissive(monkeypatch):
-    monkeypatch.delenv("APDL_INTERNAL_TOKEN", raising=False)
+@pytest.mark.parametrize(
+    "row,key",
+    [
+        (None, _VALID_KEY),
+        (_row(active=False), _VALID_KEY),
+        (
+            _row(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)),
+            _VALID_KEY,
+        ),
+        (
+            _row("proj_other_0123456789abcdef", project_id="demo"),
+            "proj_other_0123456789abcdef",
+        ),
+    ],
+)
+async def test_invalid_revoked_expired_or_mismatched_keys_are_rejected(
+    row, key, authorized_codegen_request
+):
+    app.dependency_overrides.pop(authenticate_request, None)
     app.state.pg_pool = FakePool()
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get("/v1/connections/demo")
-    # Permissive in local dev: auth passes, handler returns 404 for unknown project.
-    assert resp.status_code == 404
+    app.state.authenticator = PostgresAuthenticator(_AuthPool(row))
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(
+            "/v1/connections/demo", headers={"X-API-Key": key}
+        )
+
+    assert response.status_code == 401

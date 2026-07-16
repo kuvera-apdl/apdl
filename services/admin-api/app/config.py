@@ -106,7 +106,6 @@ class Settings:
     postgres_url: str
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
-    internal_token: str
     allowed_origins: frozenset[str]
     cookie_secure: bool
     session_ttl_seconds: int
@@ -134,7 +133,6 @@ class Settings:
             ),
             service_urls=service_urls,
             service_api_keys=_service_keys(),
-            internal_token=os.getenv("APDL_INTERNAL_TOKEN", ""),
             allowed_origins=_json_origins(
                 os.getenv(
                     "APDL_ADMIN_ALLOWED_ORIGINS",

@@ -85,6 +85,10 @@ export function PublicationAuthorizationCard({
         ) : null}
 
         <div className="grid gap-4 sm:grid-cols-2">
+          <Digest
+            title="Candidate identity SHA-256"
+            value={authorization.expected_candidate_identity_sha256}
+          />
           <Digest title="Evaluation report SHA-256" value={authorization.report_sha256} />
           <Digest title="Evidence bundle SHA-256" value={authorization.bundle_sha256} />
           <Digest title="Rollout policy SHA-256" value={authorization.policy_sha256} />

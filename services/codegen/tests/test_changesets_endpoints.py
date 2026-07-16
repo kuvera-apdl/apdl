@@ -89,6 +89,52 @@ async def test_get_unknown_changeset_404():
 
 
 @pytest.mark.asyncio
+async def test_changeset_routes_reject_another_project(
+    authorized_codegen_request,
+):
+    pool = FakePool()
+    pool.add_connection("other")
+    pool.add_changeset("cs-other", "other", status="merged", pr_number=7)
+    authorized_codegen_request("demo", frozenset({"agents:read", "agents:manage"}))
+
+    async with _client(pool) as client:
+        responses = [
+            await client.get("/v1/changesets", params={"project_id": "other"}),
+            await client.get("/v1/changesets/cs-other"),
+            await client.get("/v1/changesets/cs-other/observations"),
+            await client.get("/v1/changesets/cs-other/runtime-observations"),
+            await client.post("/v1/changesets/cs-other/abandon"),
+            await client.post("/v1/changesets/cs-other/revert"),
+            await client.post("/v1/changesets/cs-other/retry"),
+        ]
+        create = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "other",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
+        )
+
+    assert all(response.status_code == 403 for response in [*responses, create])
+
+
+@pytest.mark.asyncio
+async def test_changeset_mutation_requires_manage_role(authorized_codegen_request):
+    pool = FakePool()
+    pool.add_connection("demo")
+    authorized_codegen_request("demo", frozenset({"agents:read"}))
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "demo",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_runtime_observations_endpoint_returns_exact_head_journal():
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets")

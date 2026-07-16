@@ -4,16 +4,16 @@ This is how the editor runs under ``CODEGEN_SANDBOX=docker`` (decision D4 /
 Option B). The orchestrator (``app.editor.container_editor.ContainerAiderEditor``)
 launches one ephemeral container per changeset from the hardened sandbox image
 and this script runs *inside* it. It reuses the very same ``AiderEditor`` used by
-the in-process path — clone → aider → verify → push — so the edit logic lives in
+the in-process path — clone → Aider → gate → push — so the edit logic lives in
 exactly one place; the only difference is *where* it runs.
 
 Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
-on **stdout** and send everything else (logs, aider/test output) to **stderr**,
+on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
 Token custody: the short-lived install token arrives as ``GH_TOKEN``. We read it
 into the in-memory request and immediately drop it from ``os.environ`` so it is
-not visible to the (untrusted) aider/test child processes — not even via
+not visible to the Aider child process — not even via
 ``/proc/<pid>/environ``. ``AiderEditor`` then uses it only for the one-shot
 clone/push git header. The model provider key necessarily stays in the
 environment (aider needs it); the sandbox never receives the GitHub App private
@@ -33,10 +33,17 @@ from app.editor.aider_editor import AiderEditor
 from app.editor.base import EditRequest, EditResult
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
+from app.safety.policy import EffectiveCodegenSafetyPolicy
 
 
 def _request_from_env() -> EditRequest:
     """Build the EditRequest from the env the orchestrator passed via ``docker -e``."""
+    safety_policy = EffectiveCodegenSafetyPolicy.model_validate_json(
+        os.environ["CS_SAFETY_POLICY"]
+    )
+    expected_policy_sha256 = os.environ["CS_SAFETY_POLICY_SHA256"]
+    if safety_policy.canonical_digest() != expected_policy_sha256:
+        raise ValueError("effective safety policy digest does not match its payload")
     request = EditRequest(
         repo=os.environ["CS_REPO"],
         project_scope=os.environ.get("CS_PROJECT_SCOPE", os.environ["CS_REPO"]),
@@ -47,7 +54,7 @@ def _request_from_env() -> EditRequest:
         spec=os.environ["CS_SPEC"],
         constraints=json.loads(os.environ.get("CS_CONSTRAINTS", "[]")),
         test_cmd=(os.environ.get("CS_TEST_CMD") or None),
-        gates_policy=json.loads(os.environ.get("CS_GATES_POLICY") or "null"),
+        safety_policy=safety_policy,
         revert_sha=(os.environ.get("CS_REVERT_SHA") or None),
         existing_branch=os.environ.get("CS_EXISTING_BRANCH") == "true",
         expected_head_sha=(os.environ.get("CS_EXPECTED_HEAD_SHA") or None),

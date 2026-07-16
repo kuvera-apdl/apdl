@@ -7,13 +7,12 @@ import hmac
 import json
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
 from app.config import github_webhook_secret
 from app.jobs.ci import sync_github_state
 from app.store import changesets as changeset_store
 
-router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 _PR_ACTIONS = {
     "opened",
     "ready_for_review",
@@ -29,6 +28,28 @@ def _signature_valid(body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature or "")
 
 
+async def _verify_github_signature(request: Request) -> None:
+    """Fail closed unless the request has a configured, valid GitHub HMAC."""
+    secret = github_webhook_secret()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub webhook endpoint is disabled until a secret is configured.",
+        )
+    body = await request.body()
+    if not _signature_valid(
+        body, request.headers.get("X-Hub-Signature-256", ""), secret
+    ):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+
+
+router = APIRouter(
+    prefix="/webhooks",
+    tags=["webhooks"],
+    dependencies=[Depends(_verify_github_signature)],
+)
+
+
 def _head_sha(event: str, payload: dict[str, Any]) -> str:
     if event == "check_run":
         run = payload.get("check_run") or {}
@@ -40,17 +61,19 @@ def _head_sha(event: str, payload: dict[str, Any]) -> str:
     return ""
 
 
+def _positive_github_id(value: object) -> int | None:
+    """Parse webhook identities without accepting booleans as integer IDs."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 @router.post("/github")
 async def github_webhook(
     request: Request, background_tasks: BackgroundTasks
 ) -> dict[str, str]:
     """Verify a webhook and use it only as a trigger for live GitHub recovery."""
     body = await request.body()
-    secret = github_webhook_secret()
-    if secret and not _signature_valid(
-        body, request.headers.get("X-Hub-Signature-256", ""), secret
-    ):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
     try:
         payload = json.loads(body or b"{}")
     except json.JSONDecodeError:
@@ -59,8 +82,13 @@ async def github_webhook(
         raise HTTPException(status_code=400, detail="Webhook body must be an object.")
 
     event = request.headers.get("X-GitHub-Event", "")
-    repository = str((payload.get("repository") or {}).get("full_name") or "")
-    if not repository:
+    repository = payload.get("repository") or {}
+    installation = payload.get("installation") or {}
+    if not isinstance(repository, dict) or not isinstance(installation, dict):
+        return {"status": "ignored"}
+    repository_id = _positive_github_id(repository.get("id"))
+    installation_id = _positive_github_id(installation.get("id"))
+    if repository_id is None or installation_id is None:
         return {"status": "ignored"}
     pool = request.app.state.pg_pool
     action = "polled"
@@ -73,7 +101,7 @@ async def github_webhook(
         number = payload.get("number") or (payload.get("pull_request") or {}).get(
             "number"
         )
-        if not isinstance(number, int):
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             return {"status": "ignored"}
         delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
         if not delivery_id:
@@ -82,14 +110,14 @@ async def github_webhook(
                 detail="GitHub pull-request webhook is missing its delivery ID.",
             )
         changeset = await changeset_store.get_changeset_by_pr_number(
-            pool, number, repository
+            pool, number, repository_id, installation_id
         )
     elif event in {"check_run", "check_suite", "status"}:
         head_sha = _head_sha(event, payload)
         if not head_sha:
             return {"status": "ignored"}
         changeset = await changeset_store.get_changeset_by_head_sha(
-            pool, head_sha, repository
+            pool, head_sha, repository_id, installation_id
         )
     else:
         return {"status": "ignored"}

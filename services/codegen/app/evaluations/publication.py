@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import Field, model_validator
 
 from app.evaluations.metrics import aggregate_metrics
+from app.evaluations.corpus import validate_run_provenance
 from app.evaluations.json_io import parse_strict_json_object, read_bounded_regular_text
 from app.evaluations.models import (
     EvaluationReport,
@@ -29,17 +31,25 @@ MAX_ROLLOUT_POLICY_BYTES = 64 * 1024
 class PublicationEvidenceBundle(StrictModel):
     """Content-addressed report and policy selected by an operator."""
 
-    schema_version: Literal["publication_evidence_bundle@1"] = (
-        "publication_evidence_bundle@1"
+    schema_version: Literal["publication_evidence_bundle@2"] = (
+        "publication_evidence_bundle@2"
     )
     report: EvaluationReport
     policy: RolloutPolicy
+    candidate_identity_sha256: Sha256
     report_sha256: Sha256
     policy_sha256: Sha256
     bundle_sha256: Sha256
 
     @model_validator(mode="after")
     def validate_content_addresses(self) -> PublicationEvidenceBundle:
+        candidate_identity = self.report.run.candidate_identity
+        if candidate_identity is None:
+            raise ValueError("publication evidence requires a trusted candidate identity")
+        if self.candidate_identity_sha256 != candidate_identity.identity_sha256:
+            raise ValueError(
+                "bundle candidate identity does not match its evaluation run"
+            )
         if self.report_sha256 != self.report.report_sha256:
             raise ValueError("bundle report_sha256 does not match its report")
         if self.policy_sha256 != canonical_sha256(self.policy):
@@ -55,11 +65,12 @@ class PublicationEvidenceBundle(StrictModel):
 class PublicationRequest(StrictModel):
     """Current generation identity and requested GitHub publication stage."""
 
-    schema_version: Literal["publication_request@1"] = "publication_request@1"
+    schema_version: Literal["publication_request@2"] = "publication_request@2"
     requested_stage: RolloutStage
     risk: RiskLevel
     model: str = Field(min_length=1)
     codegen_revision: str = Field(min_length=1)
+    candidate_identity_sha256: Sha256
     canary_identity: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
@@ -80,12 +91,13 @@ class PublicationRequest(StrictModel):
 class PublicationAuthorization(StrictModel):
     """Persistable proof that trusted evidence was evaluated for one request."""
 
-    schema_version: Literal["publication_authorization@1"] = (
-        "publication_authorization@1"
+    schema_version: Literal["publication_authorization@2"] = (
+        "publication_authorization@2"
     )
     request: PublicationRequest
     expected_model: str = Field(min_length=1)
     expected_codegen_revision: str = Field(min_length=1)
+    expected_candidate_identity_sha256: Sha256
     report_sha256: Sha256
     bundle_sha256: Sha256
     policy_sha256: Sha256
@@ -99,6 +111,13 @@ class PublicationAuthorization(StrictModel):
         if self.request.codegen_revision != self.expected_codegen_revision:
             raise ValueError(
                 "publication request revision does not match expected_codegen_revision"
+            )
+        if (
+            self.request.candidate_identity_sha256
+            != self.expected_candidate_identity_sha256
+        ):
+            raise ValueError(
+                "publication request candidate identity does not match expected identity"
             )
         if self.decision.requested_stage is not self.request.requested_stage:
             raise ValueError("publication decision stage does not match its request")
@@ -124,7 +143,7 @@ class PublicationAuthorizationProvider(Protocol):
 
 
 def _revalidate_bundle(bundle: PublicationEvidenceBundle) -> PublicationEvidenceBundle:
-    payload = bundle.model_dump(mode="json")
+    payload = bundle.model_dump(mode="python")
     validated = PublicationEvidenceBundle.model_validate(payload)
     if validated.report.run.stage not in {RolloutStage.offline, RolloutStage.shadow}:
         raise ValueError(
@@ -133,6 +152,7 @@ def _revalidate_bundle(bundle: PublicationEvidenceBundle) -> PublicationEvidence
     recomputed = aggregate_metrics(validated.report.run)
     if recomputed != validated.report.summary:
         raise ValueError("evaluation report summary does not match its run outcomes")
+    validate_run_provenance(validated.report.run)
     return validated
 
 
@@ -141,8 +161,8 @@ def build_publication_bundle(
     policy: RolloutPolicy,
 ) -> PublicationEvidenceBundle:
     """Build an operator artifact after independently checking report arithmetic."""
-    validated_report = EvaluationReport.model_validate(report.model_dump(mode="json"))
-    validated_policy = RolloutPolicy.model_validate(policy.model_dump(mode="json"))
+    validated_report = EvaluationReport.model_validate(report.model_dump(mode="python"))
+    validated_policy = RolloutPolicy.model_validate(policy.model_dump(mode="python"))
     if validated_report.run.stage not in {
         RolloutStage.offline,
         RolloutStage.shadow,
@@ -152,15 +172,26 @@ def build_publication_bundle(
         )
     if aggregate_metrics(validated_report.run) != validated_report.summary:
         raise ValueError("evaluation report summary does not match its run outcomes")
+    validate_run_provenance(validated_report.run)
+    candidate_identity = validated_report.run.candidate_identity
+    if candidate_identity is None:
+        raise ValueError(
+            "publication evidence requires the default trusted Docker candidate identity"
+        )
     payload = {
-        "schema_version": "publication_evidence_bundle@1",
+        "schema_version": "publication_evidence_bundle@2",
         "report": validated_report.model_dump(mode="json"),
         "policy": validated_policy.model_dump(mode="json"),
+        "candidate_identity_sha256": candidate_identity.identity_sha256,
         "report_sha256": validated_report.report_sha256,
         "policy_sha256": canonical_sha256(validated_policy),
     }
-    return PublicationEvidenceBundle.model_validate(
-        {**payload, "bundle_sha256": canonical_sha256(payload)}
+    return PublicationEvidenceBundle.model_validate_json(
+        json.dumps(
+            {**payload, "bundle_sha256": canonical_sha256(payload)},
+            allow_nan=False,
+            separators=(",", ":"),
+        )
     )
 
 
@@ -169,12 +200,17 @@ def load_publication_bundle(
     *,
     expected_model: str,
     expected_codegen_revision: str,
+    expected_candidate_identity_sha256: str,
 ) -> PublicationEvidenceBundle:
     """Strictly load and bind an operator-selected bundle to the active generator."""
     payload = parse_strict_json_object(
         read_bounded_regular_text(path, max_bytes=MAX_PUBLICATION_BUNDLE_BYTES)
     )
-    bundle = _revalidate_bundle(PublicationEvidenceBundle.model_validate(payload))
+    bundle = _revalidate_bundle(
+        PublicationEvidenceBundle.model_validate_json(
+            json.dumps(payload, allow_nan=False, separators=(",", ":"))
+        )
+    )
     run = bundle.report.run
     if run.model != expected_model:
         raise ValueError(
@@ -184,6 +220,10 @@ def load_publication_bundle(
         raise ValueError(
             "evaluation codegen revision does not match the expected revision"
         )
+    if bundle.candidate_identity_sha256 != expected_candidate_identity_sha256:
+        raise ValueError(
+            "evaluation candidate identity does not match the expected deployment"
+        )
     return bundle
 
 
@@ -191,7 +231,9 @@ def load_rollout_policy(path: Path) -> RolloutPolicy:
     payload = parse_strict_json_object(
         read_bounded_regular_text(path, max_bytes=MAX_ROLLOUT_POLICY_BYTES)
     )
-    return RolloutPolicy.model_validate(payload)
+    return RolloutPolicy.model_validate_json(
+        json.dumps(payload, allow_nan=False, separators=(",", ":"))
+    )
 
 
 class TrustedPublicationAuthorizer:
@@ -203,6 +245,7 @@ class TrustedPublicationAuthorizer:
         *,
         expected_model: str,
         expected_codegen_revision: str,
+        expected_candidate_identity_sha256: str,
     ) -> None:
         validated = _revalidate_bundle(bundle)
         if validated.report.run.model != expected_model:
@@ -211,9 +254,19 @@ class TrustedPublicationAuthorizer:
             raise ValueError(
                 "evaluation codegen revision does not match expected_codegen_revision"
             )
+        if (
+            validated.candidate_identity_sha256
+            != expected_candidate_identity_sha256
+        ):
+            raise ValueError(
+                "evaluation candidate identity does not match expected identity"
+            )
         self._bundle_json = validated.model_dump_json()
         self._expected_model = expected_model
         self._expected_codegen_revision = expected_codegen_revision
+        self._expected_candidate_identity_sha256 = (
+            expected_candidate_identity_sha256
+        )
 
     @property
     def bundle_sha256(self) -> str:
@@ -221,16 +274,27 @@ class TrustedPublicationAuthorizer:
 
     def _snapshot(self) -> PublicationEvidenceBundle:
         payload = parse_strict_json_object(self._bundle_json)
-        return _revalidate_bundle(PublicationEvidenceBundle.model_validate(payload))
+        return _revalidate_bundle(
+            PublicationEvidenceBundle.model_validate_json(
+                json.dumps(payload, allow_nan=False, separators=(",", ":"))
+            )
+        )
 
     def authorize(self, request: PublicationRequest) -> PublicationAuthorization:
         """Revalidate current identity and derive a fresh decision from trusted inputs."""
-        request = PublicationRequest.model_validate(request.model_dump(mode="json"))
+        request = PublicationRequest.model_validate(request.model_dump(mode="python"))
         if request.model != self._expected_model:
             raise ValueError("publication request model does not match expected_model")
         if request.codegen_revision != self._expected_codegen_revision:
             raise ValueError(
                 "publication request revision does not match expected_codegen_revision"
+            )
+        if (
+            request.candidate_identity_sha256
+            != self._expected_candidate_identity_sha256
+        ):
+            raise ValueError(
+                "publication request candidate identity does not match expected identity"
             )
         bundle = self._snapshot()
         decision = decide_rollout(
@@ -243,17 +307,27 @@ class TrustedPublicationAuthorizer:
         if decision.evaluation_summary_sha256 != bundle.report.summary.evidence_sha256():
             raise ValueError("publication decision does not bind the bundled summary")
         payload = {
-            "schema_version": "publication_authorization@1",
+            "schema_version": "publication_authorization@2",
             "request": request.model_dump(mode="json"),
             "expected_model": self._expected_model,
             "expected_codegen_revision": self._expected_codegen_revision,
+            "expected_candidate_identity_sha256": (
+                self._expected_candidate_identity_sha256
+            ),
             "report_sha256": bundle.report_sha256,
             "bundle_sha256": bundle.bundle_sha256,
             "policy_sha256": bundle.policy_sha256,
             "decision": decision.model_dump(mode="json"),
         }
-        return PublicationAuthorization.model_validate(
-            {**payload, "authorization_sha256": canonical_sha256(payload)}
+        return PublicationAuthorization.model_validate_json(
+            json.dumps(
+                {
+                    **payload,
+                    "authorization_sha256": canonical_sha256(payload),
+                },
+                allow_nan=False,
+                separators=(",", ":"),
+            )
         )
 
 
@@ -262,14 +336,17 @@ def load_publication_authorizer(
     *,
     expected_model: str,
     expected_codegen_revision: str,
+    expected_candidate_identity_sha256: str,
 ) -> TrustedPublicationAuthorizer:
     bundle = load_publication_bundle(
         path,
         expected_model=expected_model,
         expected_codegen_revision=expected_codegen_revision,
+        expected_candidate_identity_sha256=expected_candidate_identity_sha256,
     )
     return TrustedPublicationAuthorizer(
         bundle,
         expected_model=expected_model,
         expected_codegen_revision=expected_codegen_revision,
+        expected_candidate_identity_sha256=expected_candidate_identity_sha256,
     )

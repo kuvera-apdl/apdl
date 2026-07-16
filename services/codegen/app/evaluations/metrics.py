@@ -299,7 +299,7 @@ def build_evaluation_report(run: EvaluationRun) -> EvaluationReport:
     run = EvaluationRun.model_validate(run.model_dump(mode="python"))
     summary = aggregate_metrics(run)
     report_payload = {
-        "schema_version": "evaluation_report@1",
+        "schema_version": "evaluation_report@2",
         "run": run.model_dump(mode="json"),
         "summary": summary.model_dump(mode="json"),
     }

@@ -25,8 +25,10 @@ flowchart LR
     E --> F["Pre-push safety and semantic review"]
     F -->|Actionable rejection| E
     F --> R["Evidence-backed rollout authorization"]
-    R -->|Denied| O["No GitHub write credential"]
-    R -->|Reviewed PR or canary| G["Create pull request"]
+    V["Active operator-verified repository grant"] --> T["Exact repository authority check"]
+    R --> T
+    T -->|Denied or revoked| O["No GitHub write credential"]
+    T -->|Repository-scoped token| G["Create pull request"]
     G --> H["GitHub CI verification"]
     H -->|Failure| I["APDL failure diagnosis"]
     I -->|Repair budget available| M["Repair editor"]
@@ -47,10 +49,51 @@ flowchart LR
 - Keep repository discovery and validation deterministic where possible.
 - Keep models replaceable and route work according to task risk and complexity.
 - Preserve a complete evidence trail for every generated change.
+- Treat APDL project roles and GitHub repository ownership as separate
+  authorities. Only an operator-verified grant for an immutable GitHub
+  repository ID can enable repository access.
 - Keep the irreversible merge action outside APDL; GitHub repository policy is
   the merge authority.
 - Model changeset lifecycle, external CI, repair attempts, and GitHub PR state
   as separate canonical facts rather than overloading one status.
+
+## Repository Authority Prerequisite
+
+**Status: implemented (2026-07-13).** Codegen is private to the service network.
+Tenant principals cannot enumerate the shared GitHub App's repositories or
+submit repository/installation coordinates. A trusted operator activates a
+project-bound grant for one immutable GitHub repository ID. Changesets snapshot
+that target, every token lease re-checks it, and installation tokens are
+narrowed to the exact repository and operation permissions.
+
+The canonical authority chain is:
+
+```text
+APDL principal
+  -> same-project active RepositoryGrant
+  -> immutable changeset repository snapshot
+  -> rollout publication authorization
+  -> repository-scoped, minimum-permission GitHub token
+  -> branch or PR mutation
+```
+
+Repository names are display/locator metadata, never authority. Installation
+IDs remain internal to the trusted grant and are neither accepted from nor
+returned to tenant callers. Legacy connections remain untrusted until an
+operator re-verifies their numeric repository identity.
+
+### Exit Criteria
+
+- Sharing one GitHub App installation cannot let project A bind, enqueue, push,
+  poll, or repair repository B.
+- Revocation or repository identity drift prevents the next GitHub token lease.
+  Immediate cutoff of an already in-flight GitHub token additionally requires
+  suspending or uninstalling the App installation on GitHub.
+- Rebinding a project cannot retarget an existing changeset.
+- Every GitHub token is restricted to the snapshotted repository ID and the
+  minimum permissions for its operation.
+- Codegen has no host-published Compose port; Agents and Admin reach it only on
+  the private service network.
 
 ## Phase 0: Close Immediate Escape Routes
 
@@ -555,42 +598,48 @@ only defense against incorrect authoritative context.
 
 Introduce one strict schema for each pipeline boundary:
 
-1. `RepoProfile`
-2. `ContractEvidence`
-3. `RequirementLedger`
-4. `ReviewVerdict`
-5. `PullRequestObservation`
-6. `CIVerificationObservation`
-7. `CIRemediationAttempt`
-8. `RuntimeAcceptancePlan`
-9. `EvaluationRun` and `EvaluationReport`
-10. `PublicationAuthorization`
+1. `RepositoryGrant` and the read-only `RepositoryConnection` projection
+2. `RepoProfile`
+3. `ContractEvidence`
+4. `RequirementLedger`
+5. `ReviewVerdict`
+6. `PullRequestObservation`
+7. `CIVerificationObservation`
+8. `CIRemediationAttempt`
+9. `RuntimeAcceptancePlan`
+10. `EvaluationRun` and `EvaluationReport`
+11. `PublicationAuthorization`
 
 Do not introduce aliases or permissive fallback field names. Version schema
 changes explicitly and reject unknown or ambiguous shapes where practical.
 
 ## Recommended Implementation Order
 
-1. Remove merge capability from the codegen API, Agents service, and Admin
+1. Establish operator-verified repository grants, immutable changeset targets,
+   repository-scoped token minting, and private Codegen networking.
+2. Remove merge capability from the codegen API, Agents service, and Admin
    Console; make GitHub the only merge authority.
-2. Remove APDL-local verification as a merge or CI authority; retain only
+3. Remove APDL-local verification as a merge or CI authority; retain only
    deterministic pre-push safety gates.
-3. Separate changeset lifecycle, external CI, remediation attempts, and GitHub
+4. Separate changeset lifecycle, external CI, remediation attempts, and GitHub
    PR observation into strict canonical fields.
-4. Expand GitHub check, workflow, PR webhook, and polling synchronization.
-5. Implement deduplicated CI-failure diagnosis and bounded repair attempts on
+5. Expand GitHub check, workflow, PR webhook, and polling synchronization.
+6. Implement deduplicated CI-failure diagnosis and bounded repair attempts on
    the same PR branch.
-6. Implement the exact-version dependency contract resolver.
-7. Introduce canonical `RepoProfile` and `RequirementLedger` contracts.
-8. Add dependency-slice context retrieval for editing and CI remediation.
-9. Generate policy-based tests and runtime workflows for GitHub CI.
-10. Replace diff-only review with evidence-backed semantic review.
-11. Add the evaluation corpus and staged rollout controls.
+7. Implement the exact-version dependency contract resolver.
+8. Introduce canonical `RepoProfile` and `RequirementLedger` contracts.
+9. Add dependency-slice context retrieval for editing and CI remediation.
+10. Generate policy-based tests and runtime workflows for GitHub CI.
+11. Replace diff-only review with evidence-backed semantic review.
+12. Add the evaluation corpus and staged rollout controls.
 
 ## Program-Level Success Criteria
 
 The generalized codegen service is ready for broader autonomous use when:
 
+- no tenant principal can select repository coordinates or installation IDs,
+  and every GitHub mutation is bound to an active same-project grant for one
+  immutable repository ID;
 - at least five ecosystem adapters pass the repository-profile fixture suite;
 - all external API guidance is tied to exact installed versions;
 - every requirement is mapped to a change and expected GitHub CI evidence;

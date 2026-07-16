@@ -15,6 +15,7 @@ import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,6 +34,11 @@ from app.runtime.github_actions import workflow_attestation_is_valid
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.gates import evaluate_pre_push
 from app.safety.killswitch import automation_enabled
+from app.safety.policy import (
+    PlatformCodegenSafetyPolicy,
+    VerifiedProtectedPathExemption,
+    resolve_effective_policy,
+)
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
@@ -40,7 +46,7 @@ from app.verification.models import PlanDisposition, VerificationCoverage, Verif
 
 logger = logging.getLogger(__name__)
 
-TokenMinter = Callable[[int, str], Awaitable[str]]
+TokenMinter = Callable[[str], AbstractAsyncContextManager[str]]
 PROpener = Callable[..., Awaitable[Any]]
 
 #: Serializes changeset jobs to the configured concurrency (default 1). Created
@@ -155,6 +161,7 @@ async def run_changeset_job(
     mint_token: TokenMinter,
     open_pr: PROpener,
     publication_gate: PublicationGate,
+    platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
 ) -> None:
     """Run one changeset, gated by the concurrency slot.
 
@@ -169,6 +176,7 @@ async def run_changeset_job(
             mint_token=mint_token,
             open_pr=open_pr,
             publication_gate=publication_gate,
+            platform_safety_policy=platform_safety_policy,
         )
 
 
@@ -180,31 +188,41 @@ async def _execute_changeset_job(
     mint_token: TokenMinter,
     open_pr: PROpener,
     publication_gate: PublicationGate,
+    platform_safety_policy: PlatformCodegenSafetyPolicy | None,
 ) -> None:
     """Execute one changeset end-to-end (edit → push → open draft PR)."""
-    changeset = await store.get_changeset(pool, changeset_id)
-    if changeset is None:
-        logger.warning("Changeset job for unknown id %s", changeset_id)
-        return
-
-    if not automation_enabled(changeset.project_id):
-        await store.transition_changeset(
-            pool,
-            changeset_id,
-            ChangesetStatus.abandoned,
-            error="Code automation is disabled for this project (kill switch).",
-        )
-        return
-
     try:
-        connection = await connections_store.get_connection(pool, changeset.project_id)
-        if connection is None:
+        changeset = await store.get_changeset(pool, changeset_id)
+        if changeset is None:
+            logger.warning("Changeset job for unknown id %s", changeset_id)
+            return
+
+        if not automation_enabled(changeset.project_id):
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error,
-                error="Project repository connection is missing.",
+                pool,
+                changeset_id,
+                ChangesetStatus.abandoned,
+                error="Code automation is disabled for this project (kill switch).",
             )
             return
 
+        connection = await connections_store.get_connection_for_changeset(
+            pool, changeset_id
+        )
+        if connection is None:
+            await store.transition_changeset(
+                pool, changeset_id, ChangesetStatus.error,
+                error="Changeset repository grant is unavailable or revoked.",
+            )
+            return
+        tenant_policy = changeset.tenant_policy_snapshot or connection.tenant_policy
+        effective_safety_policy = resolve_effective_policy(
+            tenant_policy,
+            platform_safety_policy,
+        )
+        runtime_policy = RuntimeAcceptancePolicy(
+            enabled=effective_safety_policy.runtime_workflow_generation_enabled
+        )
         base_branch = changeset.base_branch or connection.default_base_branch
         # The queued → cloning transition doubles as the job's claim: it is
         # row-locked and state-machine-checked, so exactly one worker wins.
@@ -218,6 +236,14 @@ async def _execute_changeset_job(
                 changeset_id,
             )
             return
+        await store.set_safety_policy_provenance(
+            pool,
+            changeset_id,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=(
+                effective_safety_policy.canonical_digest()
+            ),
+        )
         try:
             risk = RiskLevel(
                 str(changeset.task.context.get("risk_level") or "low").lower()
@@ -226,7 +252,7 @@ async def _execute_changeset_job(
             raise ValueError("task risk_level must be low, medium, or high") from exc
         authorization = publication_gate.authorize(
             risk=risk,
-            canary_identity=f"{changeset.project_id}:{connection.repo}",
+            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
         await store.set_publication_authorization(
             pool, changeset_id, authorization
@@ -250,33 +276,27 @@ async def _execute_changeset_job(
                 "rollout authorization did not grant branch and PR publication"
             )
 
-        token = await mint_token(connection.installation_id, connection.repo)
-
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
         branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
-        policy = connection.policy if isinstance(connection.policy, dict) else {}
-        runtime_policy = RuntimeAcceptancePolicy.model_validate(
-            policy.get("runtime_acceptance") or {}
-        )
-        gates_policy = dict(policy.get("gates") or {})
         revert_sha = changeset.task.context.get("revert_sha")
-        result = await editor.implement(
-            EditRequest(
-                repo=connection.repo,
-                project_scope=changeset.project_id,
-                base_branch=base_branch,
-                branch=branch,
-                token=token,
-                title=changeset.task.title,
-                spec=changeset.task.spec,
-                constraints=changeset.task.constraints,
-                test_cmd=policy.get("test_cmd"),
-                gates_policy=gates_policy,
-                runtime_acceptance_policy=runtime_policy,
-                revert_sha=revert_sha if isinstance(revert_sha, str) else None,
-                risk_level=risk.value,
+        async with mint_token(changeset_id) as token:
+            result = await editor.implement(
+                EditRequest(
+                    repo=connection.repository_full_name,
+                    project_scope=changeset.project_id,
+                    base_branch=base_branch,
+                    branch=branch,
+                    token=token,
+                    title=changeset.task.title,
+                    spec=changeset.task.spec,
+                    constraints=changeset.task.constraints,
+                    test_cmd=tenant_policy.test_cmd,
+                    safety_policy=effective_safety_policy,
+                    runtime_acceptance_policy=runtime_policy,
+                    revert_sha=revert_sha if isinstance(revert_sha, str) else None,
+                    risk_level=risk.value,
+                )
             )
-        )
 
         # Protocol backstop for custom editors: the service, not an editor
         # implementation, owns the canonical ledger boundary.
@@ -286,7 +306,7 @@ async def _execute_changeset_job(
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
                 risk=str(changeset.task.context.get("risk_level") or "low").lower(),
-                verification_command=policy.get("test_cmd"),
+                verification_command=tenant_policy.test_cmd,
             )
             if result.success:
                 compiled = map_implementation_evidence(
@@ -372,20 +392,26 @@ async def _execute_changeset_job(
         # Backstop only: the editor already ran these gates on the FULL diff
         # before pushing. This re-check (on the possibly capped diff_text)
         # guards editors that don't gate themselves (e.g. a fake/custom Editor).
-        backstop_policy = dict(gates_policy)
+        verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
         if workflow_attestation_is_valid(
             result.generated_runtime_workflow,
             plan=result.runtime_acceptance_plan,
             policy=runtime_policy,
         ):
-            allowed = set(backstop_policy.get("allowed_protected_paths") or [])
-            allowed.add(result.generated_runtime_workflow.path)
-            backstop_policy["allowed_protected_paths"] = sorted(allowed)
+            verified_exemptions = (
+                VerifiedProtectedPathExemption(
+                    content_sha256=result.generated_runtime_workflow.content_sha256,
+                    runtime_acceptance_plan_sha256=(
+                        result.generated_runtime_workflow.runtime_acceptance_plan_sha256
+                    ),
+                ),
+            )
         gate = evaluate_pre_push(
             diff_stat=result.diff_stat,
             changed_paths=result.changed_paths,
             diff_text=result.diff_text,
-            policy=backstop_policy,
+            policy=effective_safety_policy,
+            verified_exemptions=verified_exemptions,
         )
         if not gate.passed:
             await store.transition_changeset(
@@ -425,52 +451,69 @@ async def _execute_changeset_job(
             or semantic_unverified
             or runtime_unverified
         )
-        pr = await open_pr(
-            repo=connection.repo,
-            head=result.branch or branch,
-            base=base_branch,
-            title=changeset.task.title,
-            body=_pr_body(
-                changeset.task,
-                result.requirement_ledger,
-                result.verification_plan,
-                result.verification_coverage,
-                result.runtime_acceptance_plan,
-                result.review_verdict,
-                authorization,
-            ),
-            token=token,
-            draft=draft,
+        pr_body = _pr_body(
+            changeset.task,
+            result.requirement_ledger,
+            result.verification_plan,
+            result.verification_coverage,
+            result.runtime_acceptance_plan,
+            result.review_verdict,
+            authorization,
         )
-        if not pr.head_sha or pr.head_sha != result.head_sha:
-            raise RuntimeError(
-                "GitHub PR head does not match the exact branch head pushed by codegen."
+        # Use a new lease for PR creation so the repository grant is checked
+        # again after the potentially long editor run and its token is revoked.
+        async with mint_token(changeset_id) as token:
+            pr = await open_pr(
+                repo=connection.repository_full_name,
+                head=result.branch or branch,
+                base=base_branch,
+                title=changeset.task.title,
+                body=pr_body,
+                token=token,
+                draft=draft,
             )
-        external_ci_status = (
-            ExternalCIStatus.unverified_external_ci
-            if lacks_external_ci
-            else ExternalCIStatus.pending
-        )
-        observation = PullRequestObservation(
-            observation_id=f"probs_{uuid.uuid4().hex}",
-            changeset_id=changeset_id,
-            repository=connection.repo,
-            pr_number=pr.number,
-            head_sha=pr.head_sha,
-            status=pr.status,
-            action="opened",
-            github_url=pr.url,
-            github_updated_at=pr.github_updated_at,
-            observed_at=datetime.now(timezone.utc),
-        )
-        await store.mark_pr_open(
-            pool,
-            changeset_id,
-            branch=result.branch or branch,
-            observation=observation,
-            external_ci_status=external_ci_status,
-            diff_stat=result.diff_stat,
-        )
+            if not pr.head_sha or pr.head_sha != result.head_sha:
+                raise RuntimeError(
+                    "GitHub PR head does not match the exact branch head pushed "
+                    "by codegen."
+                )
+            external_ci_status = (
+                ExternalCIStatus.unverified_external_ci
+                if lacks_external_ci
+                else ExternalCIStatus.pending
+            )
+            observation = PullRequestObservation(
+                observation_id=f"probs_{uuid.uuid4().hex}",
+                changeset_id=changeset_id,
+                repository=connection.repository_full_name,
+                pr_number=pr.number,
+                head_sha=pr.head_sha,
+                status=pr.status,
+                action="opened",
+                github_url=pr.url,
+                github_updated_at=pr.github_updated_at,
+                observed_at=datetime.now(timezone.utc),
+            )
+            # GitHub has already accepted an irreversible external result. A
+            # deploy cancellation must not leave the database in `pushing`
+            # with no way to associate the PR. Shield the atomic journal +
+            # projection and, if cancellation arrives, finish it before the
+            # token lease unwinds and propagates cancellation.
+            persist_pr = asyncio.create_task(
+                store.mark_pr_open(
+                    pool,
+                    changeset_id,
+                    branch=result.branch or branch,
+                    observation=observation,
+                    external_ci_status=external_ci_status,
+                    diff_stat=result.diff_stat,
+                )
+            )
+            try:
+                await asyncio.shield(persist_pr)
+            except asyncio.CancelledError:
+                await persist_pr
+                raise
         logger.info("Changeset %s opened GitHub PR %s", changeset_id, pr.url)
     except Exception as exc:
         logger.exception("Changeset job %s failed", changeset_id)
