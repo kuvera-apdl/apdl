@@ -26,7 +26,7 @@ class ReadyPool:
 def upstream_response(request: httpx.Request) -> httpx.Response:
     statuses = {
         "http://ingestion.test/health": "ok",
-        "http://config.test/health": "ok",
+        "http://config.test/ready": "ready",
         "http://query.test/ready": "ready",
     }
     return httpx.Response(200, json={"status": statuses[str(request.url)]})

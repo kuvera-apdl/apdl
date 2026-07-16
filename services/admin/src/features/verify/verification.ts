@@ -70,7 +70,7 @@ export async function runVerification(options: VerificationOptions): Promise<boo
   } = options
 
   // Step 1 — health.
-  update('health', { status: 'running', detail: 'Probing /health on all services…' })
+  update('health', { status: 'running', detail: 'Probing service liveness and readiness…' })
   const { result: healthResults, durationMs: healthMs } = await timed(() =>
     Promise.all(
       CORE_SERVICE_DESCRIPTORS.map(({ service }) =>

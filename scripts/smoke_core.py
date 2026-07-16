@@ -259,7 +259,7 @@ def _event_payload(state: SmokeState) -> dict[str, Any]:
 def _check_health(args: argparse.Namespace) -> None:
     checks = (
         ("Ingestion", _join_url(args.ingestion_url, "/health"), "ok"),
-        ("Config", _join_url(args.config_url, "/health"), "ok"),
+        ("Config", _join_url(args.config_url, "/ready"), "ready"),
         ("Query", _join_url(args.query_url, "/ready"), "ready"),
     )
     for name, url, expected in checks:

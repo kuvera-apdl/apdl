@@ -11,6 +11,22 @@ from app.store import postgres as pg_store
 
 logger = logging.getLogger(__name__)
 
+MIN_INTERVAL_SECONDS = 1
+MAX_INTERVAL_SECONDS = 86_400
+
+
+def validate_interval_seconds(interval_seconds: int) -> int:
+    if (
+        isinstance(interval_seconds, bool)
+        or not isinstance(interval_seconds, int)
+        or not MIN_INTERVAL_SECONDS <= interval_seconds <= MAX_INTERVAL_SECONDS
+    ):
+        raise ValueError(
+            "EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS must be between "
+            f"{MIN_INTERVAL_SECONDS} and {MAX_INTERVAL_SECONDS}"
+        )
+    return interval_seconds
+
 
 async def advance_due_experiments(
     pool,
@@ -50,6 +66,7 @@ async def run_lifecycle_monitor(
     interval_seconds: int,
 ) -> None:
     """Continuously run the atomic lifecycle scheduler."""
+    interval_seconds = validate_interval_seconds(interval_seconds)
     while True:
         try:
             await advance_due_experiments(pool)

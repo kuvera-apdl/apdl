@@ -8,8 +8,9 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import outbox
 from app.auth import (
@@ -198,9 +199,14 @@ def _start_lifecycle_monitor(pg_pool) -> asyncio.Task | None:
     if os.environ.get("EXPERIMENT_LIFECYCLE_ENABLED", "true").lower() != "true":
         logger.info("Experiment lifecycle monitor disabled")
         return None
-    interval_seconds = int(
-        os.environ.get("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", "300")
-    )
+    raw_interval = os.environ.get("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", "300")
+    try:
+        interval_seconds = int(raw_interval)
+    except ValueError as exc:
+        raise ValueError(
+            "EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS must be an integer"
+        ) from exc
+    lifecycle.validate_interval_seconds(interval_seconds)
     logger.info("Starting experiment lifecycle monitor every %ds", interval_seconds)
     return asyncio.create_task(
         lifecycle.run_lifecycle_monitor(
@@ -246,26 +252,35 @@ async def authenticated_identity(
 
 @app.get("/health")
 async def health_check():
-    """Liveness/readiness probe -- checks PG, Redis, and SSE connection count."""
-    status = {"status": "ok", "service": "apdl-config"}
+    """Process liveness does not depend on downstream availability."""
+    return {"status": "ok", "service": "apdl-config"}
+
+
+@app.get("/ready")
+async def readiness_check(request: Request):
+    """Return non-2xx while a required dependency cannot serve traffic."""
+    checks = {"postgres": "not_ready", "redis": "not_ready"}
 
     try:
-        async with app.state.pg_pool.acquire() as conn:
+        async with request.app.state.pg_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        status["postgres"] = "ok"
+        checks["postgres"] = "ready"
     except Exception as exc:
-        logger.error("Health check: PostgreSQL error: %s", exc)
-        status["postgres"] = "error"
-        status["status"] = "degraded"
+        logger.error("Readiness check: PostgreSQL error: %s", exc)
 
     try:
-        await app.state.redis.ping()
-        status["redis"] = "ok"
+        await request.app.state.redis.ping()
+        checks["redis"] = "ready"
     except Exception as exc:
-        logger.error("Health check: Redis error: %s", exc)
-        status["redis"] = "error"
-        status["status"] = "degraded"
+        logger.error("Readiness check: Redis error: %s", exc)
 
-    status["sse_connections"] = await app.state.broadcaster.total_connection_count()
-
-    return status
+    payload = {
+        "status": "ready",
+        "service": "apdl-config",
+        "checks": checks,
+        "sse": await request.app.state.broadcaster.metrics_snapshot(),
+    }
+    if any(value != "ready" for value in checks.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload

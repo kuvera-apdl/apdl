@@ -23,8 +23,9 @@ const server = setupServer(
     healthOk ? okHealth('ingestion') : HttpResponse.json({ status: 'degraded', service: 'ingestion' }, { status: 503 }),
   ),
   http.get('*/api/projects/demo/config/health', () =>
-    HttpResponse.json({ status: 'ok', service: 'apdl-config', postgres: 'ok', redis: 'ok', sse_connections: 1 }),
+    HttpResponse.json({ status: 'ok', service: 'apdl-config' }),
   ),
+  http.get('*/api/projects/demo/config/ready', () => HttpResponse.json({ status: 'ready' })),
   http.get('*/api/projects/demo/query/health', () => okHealth('apdl-query')),
   http.get('*/api/projects/demo/query/ready', () => HttpResponse.json({ status: 'ready' })),
   http.get('*/api/projects/demo/agents/health', () => okHealth('apdl-agents')),
