@@ -40,7 +40,8 @@ Each `POST /v1/events` request goes through four stages:
    "errors": [{"field", "message"}, ...]}` with every error collected, not
    just the first.
 4. **Atomic XADD** — each event is enriched with `server_timestamp`, client `ip`
-   (from `X-Forwarded-For`/`X-Real-IP`), and `project_id`, then published as
+   (the socket peer, or one canonical `X-Forwarded-For` address from a
+   configured trusted proxy), and `project_id`, then published as
    compact JSON to the Redis Stream `events:raw:{project_id}` in one Redis
    transaction with approximate `MAXLEN ~ 1000000` trimming. Success →
    `202 {"accepted": N}` only after the complete transaction. Any known or
@@ -97,6 +98,7 @@ curl -X POST http://localhost:8080/v1/events \
 |-------------|--------------------------|--------------------------------------|
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection for stream output   |
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
+| `INGESTION_TRUSTED_PROXY_CIDRS` | empty | Comma-separated canonical CIDRs allowed to supply the single-hop `X-Forwarded-For` contract |
 
 JSON, rate-limit, and stream-trim settings are compile-time constants under
 `app/validation/json_contract.py`, `app/middleware/rate_limit.py`, and

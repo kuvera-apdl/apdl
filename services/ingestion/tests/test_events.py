@@ -52,6 +52,7 @@ def _setup_mock_redis():
     pipeline.execute = AsyncMock(side_effect=execute)
     mock_redis.pipeline = MagicMock(return_value=pipeline)
     app.state.redis = mock_redis
+    app.state.trusted_proxy_networks = ()
     yield
 
 
@@ -129,6 +130,24 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
     assert "anonymousId" not in published
     assert "sessionId" not in published
     assert "messageId" not in published
+
+
+@pytest.mark.asyncio
+async def test_untrusted_forwarding_headers_do_not_reach_persisted_identity(client):
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("spoof-attempt")]},
+        headers={
+            **HEADERS,
+            "X-Forwarded-For": "203.0.113.99",
+            "X-Real-IP": "203.0.113.98",
+        },
+    )
+
+    assert resp.status_code == 202
+    pipeline = app.state.redis.pipeline.return_value
+    published = json.loads(pipeline.xadd.call_args.args[1]["event_json"])
+    assert published["ip"] == "127.0.0.1"
 
 
 @pytest.mark.asyncio

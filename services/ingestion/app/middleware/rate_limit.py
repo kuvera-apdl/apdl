@@ -8,6 +8,8 @@ import math
 from fastapi import Request
 from fastapi.responses import Response
 
+from app.client_ip import client_ip
+
 DEFAULT_CAPACITY = 1_000
 DEFAULT_RATE = 100  # cost units per second
 
@@ -55,12 +57,7 @@ async def check_rate_limit(
     if project_id:
         bucket_key = f"apdl:rate:project:{project_id}"
     else:
-        client_ip = (
-            request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-            or request.headers.get("x-real-ip", "")
-            or (request.client.host if request.client else "")
-        )
-        bucket_key = f"apdl:rate:ip:{client_ip}"
+        bucket_key = f"apdl:rate:ip:{client_ip(request)}"
 
     ttl_seconds = max(math.ceil(DEFAULT_CAPACITY / DEFAULT_RATE) * 2, 60)
     try:

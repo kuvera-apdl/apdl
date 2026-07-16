@@ -185,7 +185,7 @@ lint-ingestion:
 	cd services/ingestion && .venv/bin/ruff check app/
 
 run-ingestion:
-	cd services/ingestion && .venv/bin/python -m uvicorn app.main:app --reload --port 8080 $(SERVICE_ENV_FILE)
+	cd services/ingestion && .venv/bin/python -m uvicorn app.main:app --reload --port 8080 --no-proxy-headers $(SERVICE_ENV_FILE)
 
 # ─── Config Service (Python) ────────────────────────────────
 

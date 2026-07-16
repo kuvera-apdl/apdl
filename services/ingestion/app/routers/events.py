@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request, Response
 
 from app.auth import require_role
+from app.client_ip import client_ip
 from app.middleware.rate_limit import check_rate_limit, request_cost
 from app.privacy import sanitize_auto_capture_events
 from app.streaming.redis_producer import publish_batch
@@ -102,16 +103,12 @@ async def ingest_events(request: Request):
 
     now = datetime.now(timezone.utc)
     server_ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
-    client_ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or request.headers.get("x-real-ip", "")
-        or (request.client.host if request.client else "")
-    )
+    source_ip = client_ip(request)
     stream_key = f"events:raw:{project_id}"
 
     for event in events:
         event["server_timestamp"] = server_ts
-        event["ip"] = client_ip
+        event["ip"] = source_ip
         event["project_id"] = project_id
 
     try:
