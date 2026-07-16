@@ -16,8 +16,8 @@ import { CustomAgentWizardPage } from '../../src/features/agents/custom/CustomAg
 import { TriggerPage } from '../../src/features/agents/TriggerPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
-const BASE = 'http://localhost:8083'
-const QUERY_BASE = 'http://localhost:8082'
+const BASE = '*/api/projects/demo/agents'
+const QUERY_BASE = '*/api/projects/demo/query'
 
 function makeCustomAgent(overrides: Partial<CustomAgent> = {}): CustomAgent {
   return {
@@ -166,7 +166,7 @@ beforeEach(() => {
 function renderWithProviders(ui: React.ReactElement, initialPath: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[initialPath]}>{ui}</MemoryRouter>

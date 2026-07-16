@@ -14,6 +14,7 @@ import {
   Grid3x3,
   LayoutDashboard,
   Lightbulb,
+  LogOut,
   Monitor,
   Moon,
   PanelLeftClose,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -39,6 +41,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLive } from '@/core/live'
+import { useAuth } from '@/core/auth'
 import { useTheme, type Theme } from '@/core/theme'
 import { useWorkspace } from '@/core/workspace'
 import { useNow } from '@/lib/hooks'
@@ -237,7 +240,7 @@ function WorkspaceSwitcher() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
-        <DropdownMenuLabel>Workspaces</DropdownMenuLabel>
+        <DropdownMenuLabel>Authorized projects</DropdownMenuLabel>
         {workspaces.map((workspace) => (
           <DropdownMenuItem key={workspace.id} onSelect={() => setActive(workspace.id)}>
             <Check className={cn('opacity-0', workspace.id === active?.id && 'opacity-100')} />
@@ -246,7 +249,7 @@ function WorkspaceSwitcher() {
         ))}
         {workspaces.length > 0 ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => navigate('/settings/workspace')}>
-          Manage workspaces…
+          View access…
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -326,7 +329,8 @@ function ThemeToggle() {
 }
 
 export function AppShell() {
-  const { active, projectId } = useWorkspace()
+  const { projectId } = useWorkspace()
+  const { identity, logout } = useAuth()
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -344,11 +348,20 @@ export function AppShell() {
           <div className="flex items-center gap-3">
             <UtcClock />
             <LiveIndicator />
-            {active ? (
+            {identity ? (
               <span className="hidden text-sm text-muted-foreground md:inline">
-                actor: <span className="text-foreground">{active.actor}</span>
+                <span className="text-foreground">{identity.email}</span>
               </span>
             ) : null}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => void logout().catch(() => toast.error('Unable to revoke the session'))}
+              aria-label="Sign out"
+              title="Sign out"
+            >
+              <LogOut />
+            </Button>
             <ThemeToggle />
           </div>
         </header>

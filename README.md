@@ -66,7 +66,9 @@ make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
 
 ## Using the SDKs
 
-API keys follow `proj_{project_id}_{secret}` (secret: 16+ alphanumeric chars).
+API keys follow `proj_{project_id}_{secret}`. Services verify the full key against a
+hashed PostgreSQL record and derive project/role authority from that record;
+see [authentication and tenant authorization](docs/authentication.md).
 Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identical
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).
@@ -134,6 +136,8 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `config` | 8081 | Feature flags & experiments, SSE | [README](services/config/README.md) |
 | `query` | 8082 | Analytics queries on ClickHouse | [README](services/query/README.md) |
 | `agents` | 8083 | Autonomous AI agents | [README](services/agents/README.md) |
+| `admin-api` | 8085 (internal) | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `admin` | 5173 | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
 | `redis` | 6379 | Event streams + cache | — |
 | `clickhouse` | 8123 / 9000 | Analytics store (HTTP / native) | — |

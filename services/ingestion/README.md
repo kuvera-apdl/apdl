@@ -9,10 +9,12 @@ authenticates and validates them, and enqueues them onto Redis Streams for the
 
 Each `POST /v1/events` request goes through four stages:
 
-1. **Auth** — reads the API key from the `x-api-key` header or the `api_key`
-   query parameter. Keys have the format `proj_{project_id}_{secret}`
-   (project id: 1–64 alphanumeric chars; secret: 16+ alphanumeric chars).
-   Invalid or missing keys → `401 {"error": "unauthorized"}`.
+1. **Auth** — verifies the `x-api-key` header against the hashed PostgreSQL
+   credential registry, then derives project authority and roles from that
+   record. The project embedded in `proj_{project_id}_{secret}` is checked for
+   consistency but never trusted as authority.
+   Invalid, expired, or revoked keys return 401; keys without `events:write`
+   return 403. See [authentication](../../docs/authentication.md).
 2. **Rate limit** — in-memory token bucket per project (capacity 1000,
    refill 100 tokens/s). Exhausted buckets → `429 {"error": "rate_limited"}`
    with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers.
@@ -68,6 +70,7 @@ curl -X POST http://localhost:8080/v1/events \
 | Variable    | Default                  | Description                          |
 |-------------|--------------------------|--------------------------------------|
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection for stream output   |
+| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
 
 Rate-limit and stream-trim settings are compile-time constants
 (`app/middleware/rate_limit.py`, `app/streaming/redis_producer.py`).

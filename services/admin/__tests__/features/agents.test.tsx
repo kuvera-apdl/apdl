@@ -19,11 +19,14 @@ let monitorStatus = 'waiting_approval'
 let monitorPhase = 'experiment_design_approval'
 
 const server = setupServer(
-  http.post('http://localhost:8083/v1/agents/trigger', async ({ request }) => {
+  http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+    HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
+  ),
+  http.post('*/api/projects/demo/agents/v1/agents/trigger', async ({ request }) => {
     requests.push({ path: 'trigger', body: await request.json() })
     return HttpResponse.json({ run_id: 'run-abc-123', status: 'started' })
   }),
-  http.get('http://localhost:8083/v1/agents/runs', ({ request }) => {
+  http.get('*/api/projects/demo/agents/v1/agents/runs', ({ request }) => {
     const url = new URL(request.url)
     requests.push({ path: 'runs-list', body: Object.fromEntries(url.searchParams) })
     const runs = [
@@ -40,7 +43,7 @@ const server = setupServer(
     ].filter((run) => !url.searchParams.get('status') || run.status === url.searchParams.get('status'))
     return HttpResponse.json({ runs, count: runs.length })
   }),
-  http.get('http://localhost:8083/v1/agents/:runId/status', ({ params }) =>
+  http.get('*/api/projects/demo/agents/v1/agents/:runId/status', ({ params }) =>
     HttpResponse.json({
       run_id: String(params.runId),
       project_id: 'demo',
@@ -52,7 +55,7 @@ const server = setupServer(
       updated_at: '2026-06-10T12:01:00+00:00',
     }),
   ),
-  http.get('http://localhost:8083/v1/agents/:runId/results', () =>
+  http.get('*/api/projects/demo/agents/v1/agents/:runId/results', () =>
     HttpResponse.json({
       run_id: 'run-abc-123',
       insights: [{ title: 'Checkout drop-off', severity: 'high' }],
@@ -64,7 +67,7 @@ const server = setupServer(
       changesets: [],
     }),
   ),
-  http.get('http://localhost:8083/v1/agents/:runId/audit', () =>
+  http.get('*/api/projects/demo/agents/v1/agents/:runId/audit', () =>
     HttpResponse.json({
       run_id: 'run-abc-123',
       audit: [
@@ -84,7 +87,7 @@ const server = setupServer(
       count: 1,
     }),
   ),
-  http.post('http://localhost:8083/v1/agents/:runId/approve', async ({ request, params }) => {
+  http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', async ({ request, params }) => {
     requests.push({ path: 'approve', body: await request.json() })
     monitorStatus = 'approved'
     monitorPhase = 'resuming'
@@ -115,7 +118,7 @@ beforeEach(() => {
 function renderWithProviders(ui: React.ReactElement, initialPath: string) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[initialPath]}>{ui}</MemoryRouter>
@@ -175,8 +178,8 @@ describe('TriggerPage', () => {
     // Navigates to the new run — no client-side run tracking (the server
     // owns run history now).
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
-    // Default mode runs the full built-in loop (the definitions endpoint is
-    // unmocked here, so the built-in fallback list is what's selected).
+    // Default mode runs the full built-in loop when definition discovery is
+    // unavailable, so the built-in fallback list is selected.
     expect(requests[0]?.body).toEqual({
       project_id: 'demo',
       trigger_type: 'manual',

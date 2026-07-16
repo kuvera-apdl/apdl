@@ -17,7 +17,6 @@ export function useServiceHealthQuery(service: HealthServiceName) {
       checkService({
         service,
         baseUrl: serviceBaseUrl(active!, service),
-        apiKey: active!.apiKey,
       }),
   })
 }

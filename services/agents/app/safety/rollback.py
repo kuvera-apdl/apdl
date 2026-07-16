@@ -13,6 +13,8 @@ from urllib.parse import quote
 
 import httpx
 
+from app.service_auth import service_headers
+
 logger = logging.getLogger(__name__)
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
@@ -27,14 +29,16 @@ class RollbackThresholds:
     If any metric breaches its threshold compared to the pre-experiment
     baseline, the experiment is rolled back.
     """
-    error_rate_increase: float = 0.005     # +0.5 percentage points
-    p95_latency_increase: float = 0.20     # +20%
+
+    error_rate_increase: float = 0.005  # +0.5 percentage points
+    p95_latency_increase: float = 0.20  # +20%
     primary_metric_decrease: float = 0.02  # -2 percentage points
 
 
 @dataclass
 class MetricSnapshot:
     """A point-in-time metric reading."""
+
     error_rate: float = 0.0
     p95_latency_ms: float = 0.0
     primary_metric_value: float = 0.0
@@ -43,6 +47,7 @@ class MetricSnapshot:
 @dataclass
 class RollbackDecision:
     """Result of a rollback evaluation."""
+
     should_rollback: bool
     reasons: list[str] = field(default_factory=list)
     baseline: MetricSnapshot | None = None
@@ -129,8 +134,8 @@ class ExperimentRollbackMonitor:
         # Check p95 latency
         if baseline.p95_latency_ms > 0:
             latency_increase = (
-                (current.p95_latency_ms - baseline.p95_latency_ms) / baseline.p95_latency_ms
-            )
+                current.p95_latency_ms - baseline.p95_latency_ms
+            ) / baseline.p95_latency_ms
             if latency_increase > self.thresholds.p95_latency_increase:
                 reasons.append(
                     f"p95 latency increased by {latency_increase:.1%} "
@@ -176,7 +181,9 @@ class ExperimentRollbackMonitor:
         """
         try:
             async with httpx.AsyncClient(
-                base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT
+                base_url=CONFIG_SERVICE_URL,
+                timeout=_TIMEOUT,
+                headers=service_headers(project_id),
             ) as client:
                 resp = await client.post(
                     f"/v1/admin/flags/{quote(flag_key, safe='')}/disable",
@@ -217,7 +224,9 @@ class ExperimentRollbackMonitor:
         """
         try:
             async with httpx.AsyncClient(
-                base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT
+                base_url=QUERY_SERVICE_URL,
+                timeout=_TIMEOUT,
+                headers=service_headers(project_id),
             ) as client:
                 resp = await client.get(
                     f"/v1/query/experiment/{quote(experiment_id, safe='')}",
@@ -233,7 +242,9 @@ class ExperimentRollbackMonitor:
             # Extract treatment variant metrics — "treatment" is any variant
             # other than the experiment's declared control.
             variants = data.get("variants", [])
-            treatment_variants = [v for v in variants if v.get("variant") != default_variant]
+            treatment_variants = [
+                v for v in variants if v.get("variant") != default_variant
+            ]
 
             if not treatment_variants:
                 # No exposure data yet — indistinguishable from a broken

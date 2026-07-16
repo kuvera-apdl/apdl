@@ -34,9 +34,9 @@ function SafetyResult({ safety }: { safety: Record<string, unknown> }) {
   return (
     <div className="space-y-1">
       {risk ? (
-        <p className="text-xs">
+        <div className="text-xs">
           Risk level: <Badge variant="secondary">{risk}</Badge>
-        </p>
+        </div>
       ) : null}
       {checks ? (
         <ul className="space-y-0.5 text-xs">

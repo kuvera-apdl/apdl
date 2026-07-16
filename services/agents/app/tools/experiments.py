@@ -8,6 +8,8 @@ from urllib.parse import quote
 
 import httpx
 
+from app.service_auth import service_headers
+
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 30.0
@@ -22,7 +24,11 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of active experiment configurations.
     """
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL,
+        timeout=_TIMEOUT,
+        headers=service_headers(project_id),
+    ) as client:
         resp = await client.get("/v1/admin/experiments", params={"project_id": project_id})
         resp.raise_for_status()
         data = resp.json()
@@ -161,7 +167,11 @@ async def create_experiment_config(
     if targeting_rules:
         payload["targeting_rules"] = targeting_rules
 
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL,
+        timeout=_TIMEOUT,
+        headers=service_headers(project_id),
+    ) as client:
         resp = await client.post(
             "/v1/admin/experiments",
             json=payload,
@@ -179,7 +189,11 @@ async def update_experiment_status(
     Allowed transitions are enforced server-side (running → completed|stopped;
     both terminal). Used by the evaluation agent to conclude experiments.
     """
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
+    async with httpx.AsyncClient(
+        base_url=CONFIG_SERVICE_URL,
+        timeout=_TIMEOUT,
+        headers=service_headers(project_id),
+    ) as client:
         resp = await client.put(
             f"/v1/admin/experiments/{quote(experiment_id, safe='')}",
             json={"status": status},
@@ -242,7 +256,11 @@ async def get_experiment_results(
     Returns:
         Full experiment analysis results.
     """
-    async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
+    async with httpx.AsyncClient(
+        base_url=QUERY_SERVICE_URL,
+        timeout=_TIMEOUT,
+        headers=service_headers(project_id),
+    ) as client:
         resp = await client.get(
             f"/v1/query/experiment/{quote(experiment_id, safe='')}",
             params={

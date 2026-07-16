@@ -19,6 +19,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, model_validator
 
+from app.auth import require_role
 from app.graphs.experiment_design import deploy_experiment, open_treatment_changeset
 from app.graphs.supervisor import run_supervisor
 from app.safety.audit import AuditLogger
@@ -228,13 +229,15 @@ async def approve_action(
     Rejected items are audited and skipped. The run always resumes so it
     continues the pipeline or finalizes — closing the old ``resuming`` wedge.
     """
+    principal = require_role(request, "agents:approve")
     pool: asyncpg.Pool = request.app.state.pg_pool
 
     async with pool.acquire() as conn:
         row: Any = await conn.fetchrow(
             "SELECT run_id, status, phase, project_id, autonomy_level, config "
-            "FROM agent_runs WHERE run_id = $1",
+            "FROM agent_runs WHERE run_id = $1 AND project_id = $2",
             run_id,
+            principal.project_id,
         )
     if row is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")

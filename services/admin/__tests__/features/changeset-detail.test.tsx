@@ -42,7 +42,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
 }
 
 const server = setupServer(
-  http.get('http://localhost:8084/v1/changesets/:id', () => HttpResponse.json(makeChangeset())),
+  http.get('*/api/projects/demo/codegen/v1/changesets/:id', () => HttpResponse.json(makeChangeset())),
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -57,7 +57,7 @@ beforeEach(() => {
 function renderDetail(path = '/codegen/cs_abc123') {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider>
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[path]}>
@@ -96,7 +96,7 @@ describe('ChangesetDetailPage', () => {
 
   test('renders the recorded prompt transcript with system and user prompts', async () => {
     server.use(
-      http.get('http://localhost:8084/v1/changesets/:id', () =>
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
         HttpResponse.json(
           makeChangeset({
             prompts: [
@@ -142,7 +142,7 @@ describe('ChangesetDetailPage', () => {
 
   test('shows a not-found state for an unknown changeset id', async () => {
     server.use(
-      http.get('http://localhost:8084/v1/changesets/:id', () => new HttpResponse(null, { status: 404 })),
+      http.get('*/api/projects/demo/codegen/v1/changesets/:id', () => new HttpResponse(null, { status: 404 })),
     )
     renderDetail('/codegen/cs_missing')
     expect(await screen.findByText('Changeset not found')).toBeInTheDocument()

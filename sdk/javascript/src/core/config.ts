@@ -70,7 +70,7 @@ const DEFAULT_BATCH_SIZE = 20;
 const MAX_BATCH_SIZE = 100;
 const DEFAULT_FLUSH_INTERVAL = 3000;
 const DEFAULT_MAX_QUEUE_SIZE = 1000;
-const CLIENT_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,})$/;
+const CLIENT_KEY_PATTERN = /^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$/;
 
 const SUPPORTED_CONFIG_FIELDS = new Set([
   'endpoint',

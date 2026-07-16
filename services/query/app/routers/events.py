@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import (
     build_event_breakdown_query,
@@ -37,6 +38,7 @@ def _get_client(request: Request) -> ClickHouseClient:
 @router.post("/count", response_model=EventCountResponse)
 async def event_counts(body: EventCountRequest, request: Request) -> EventCountResponse:
     """Aggregate event counts and unique-user counts for event selectors."""
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     params: dict[str, Any] = {
@@ -55,12 +57,17 @@ async def event_counts(body: EventCountRequest, request: Request) -> EventCountR
     # Here we return the sum-of-unique which is an upper bound.
     total_users = sum(r.get("unique_users", 0) for r in rows)
 
-    return EventCountResponse(results=rows, total_events=total_events, total_users=total_users)
+    return EventCountResponse(
+        results=rows, total_events=total_events, total_users=total_users
+    )
 
 
 @router.post("/timeseries", response_model=TimeseriesResponse)
-async def event_timeseries(body: TimeseriesRequest, request: Request) -> TimeseriesResponse:
+async def event_timeseries(
+    body: TimeseriesRequest, request: Request
+) -> TimeseriesResponse:
     """Time-bucketed event counts for one event selector."""
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     # The interval value (e.g. "1 DAY") is injected directly into the SQL
@@ -88,8 +95,11 @@ async def event_timeseries(body: TimeseriesRequest, request: Request) -> Timeser
 
 
 @router.post("/breakdown", response_model=BreakdownResponse)
-async def event_breakdown(body: BreakdownRequest, request: Request) -> BreakdownResponse:
+async def event_breakdown(
+    body: BreakdownRequest, request: Request
+) -> BreakdownResponse:
     """Break down a selector's matching events by a JSON property value."""
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     params: dict[str, Any] = {
@@ -110,11 +120,14 @@ async def event_breakdown(body: BreakdownRequest, request: Request) -> Breakdown
 
 
 @router.post("/names", response_model=EventCatalogResponse)
-async def event_names(body: EventCatalogRequest, request: Request) -> EventCatalogResponse:
+async def event_names(
+    body: EventCatalogRequest, request: Request
+) -> EventCatalogResponse:
     """List the event names present for a project, most frequent first.
 
     Powers agent event discovery so analysis plans target events that exist.
     """
+    require_project(request, body.project_id, "query:read")
     client = _get_client(request)
 
     params: dict[str, Any] = {

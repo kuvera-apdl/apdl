@@ -7,9 +7,10 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import redis.asyncio as aioredis
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import AuthIdentity, PostgresAuthenticator, Principal, authenticate_request
 from app.experiments import expiry
 from app.routers import admin, evaluate, flags, stream
 from app.sse.broadcaster import SSEBroadcaster
@@ -312,9 +313,7 @@ async def lifespan(application: FastAPI):
     )
     pg_pool_size = int(os.environ.get("PG_POOL_SIZE", "4"))
 
-    pg_pool = await asyncpg.create_pool(
-        dsn=pg_dsn, min_size=2, max_size=pg_pool_size
-    )
+    pg_pool = await asyncpg.create_pool(dsn=pg_dsn, min_size=2, max_size=pg_pool_size)
     logger.info("PostgreSQL connection pool initialized")
 
     # Initialize schema
@@ -348,6 +347,7 @@ async def lifespan(application: FastAPI):
 
     # Store in app state
     application.state.pg_pool = pg_pool
+    application.state.authenticator = PostgresAuthenticator(pg_pool)
     application.state.redis = redis_client
     application.state.broadcaster = broadcaster
     application.state.expiry_task = expiry_task
@@ -398,15 +398,28 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(flags.router)
-app.include_router(stream.router)
-app.include_router(evaluate.router)
-app.include_router(admin.router)
+auth_dependencies = [Depends(authenticate_request)]
+app.include_router(flags.router, dependencies=auth_dependencies)
+app.include_router(stream.router, dependencies=auth_dependencies)
+app.include_router(evaluate.router, dependencies=auth_dependencies)
+app.include_router(admin.router, dependencies=auth_dependencies)
+
+
+@app.get("/v1/auth/me", response_model=AuthIdentity)
+async def authenticated_identity(
+    principal: Principal = Depends(authenticate_request),
+) -> AuthIdentity:
+    """Return the project and roles attached to the verified API key."""
+    return AuthIdentity(
+        credential_id=principal.credential_id,
+        project_id=principal.project_id,
+        roles=sorted(principal.roles),
+    )
 
 
 @app.get("/health")

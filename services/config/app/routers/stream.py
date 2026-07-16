@@ -5,10 +5,11 @@ import json
 import logging
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
+from app.auth import authorized_project
 from app.store import postgres as pg_store
-from app.utils import extract_project_id, serialize_flag_collection
+from app.utils import serialize_flag_collection
 
 logger = logging.getLogger(__name__)
 
@@ -17,21 +18,15 @@ router = APIRouter()
 
 def _flags_to_json(project_id: str, flags: list[dict]) -> str:
     """Serialize flags to the canonical SDK bootstrap payload."""
-    return json.dumps(serialize_flag_collection(project_id, flags), separators=(",", ":"))
+    return json.dumps(
+        serialize_flag_collection(project_id, flags), separators=(",", ":")
+    )
 
 
 @router.get("/v1/stream")
 async def sse_stream(request: Request):
     """SSE endpoint for real-time flag configuration updates."""
-    project_id = extract_project_id(request)
-    if not project_id:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "error": "unauthorized",
-                "message": "API key or project_id required for SSE stream",
-            },
-        )
+    project_id = authorized_project(request, "config:read")
 
     pool = request.app.state.pg_pool
     broadcaster = request.app.state.broadcaster

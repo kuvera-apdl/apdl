@@ -1,10 +1,15 @@
-// EventSource lifecycle for GET /v1/stream (AD-5): exponential backoff with
+// EventSource lifecycle for the same-origin admin proxy: exponential backoff with
 // jitter (1s → 30s cap) and a heartbeat watchdog (server emits every 35s; no
-// event for 90s forces a reconnect). Auth must use the api_key query param —
-// EventSource cannot set headers.
+// event for 90s forces a reconnect). The browser sends its HttpOnly session
+// cookie; the proxy injects the service credential server-side.
 import { normalizeBaseUrl } from './http'
 
-export type StreamEventName = 'config' | 'flag_update' | 'experiment_update' | 'heartbeat'
+export type StreamEventName =
+  | 'config'
+  | 'flag_update'
+  | 'experiment_update'
+  | 'heartbeat'
+  | 'auth_expired'
 
 export type StreamStatus = 'idle' | 'connecting' | 'open' | 'reconnecting'
 
@@ -21,12 +26,18 @@ export interface FlagStreamHandlers {
 
 export type EventSourceFactory = (url: string) => EventSource
 
-const STREAM_EVENTS: StreamEventName[] = ['config', 'flag_update', 'experiment_update', 'heartbeat']
+const STREAM_EVENTS: StreamEventName[] = [
+  'config',
+  'flag_update',
+  'experiment_update',
+  'heartbeat',
+  'auth_expired',
+]
 const HEARTBEAT_TIMEOUT_MS = 90_000
 const WATCHDOG_INTERVAL_MS = 10_000
 
-export function streamUrl(configUrl: string, apiKey: string): string {
-  return `${normalizeBaseUrl(configUrl)}/v1/stream?api_key=${encodeURIComponent(apiKey)}`
+export function streamUrl(configUrl: string): string {
+  return `${normalizeBaseUrl(configUrl)}/v1/stream`
 }
 
 export function reconnectDelayMs(attempt: number): number {

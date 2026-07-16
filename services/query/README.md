@@ -17,6 +17,10 @@ against ClickHouse over FastAPI (port **8082**).
 
 ## API
 
+Every analytics route requires a registered `X-API-Key` credential with
+`query:read`. The requested `project_id` must match the project on the verified
+credential; health and readiness probes remain public.
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/query/events/count` | Event + unique-user counts for 1–20 selectors |
@@ -51,6 +55,7 @@ endpoints.
 
 ```bash
 curl -s http://localhost:8082/v1/query/events/count \
+  -H 'X-API-Key: proj_myproject_<secret>' \
   -H 'Content-Type: application/json' \
   -d '{
     "project_id": "my-project",
@@ -94,7 +99,9 @@ helpers (not yet exposed over HTTP).
 | `CLICKHOUSE_PASSWORD` | `""` | ClickHouse password |
 | `CLICKHOUSE_DB` | `apdl` | Database name |
 | `CLICKHOUSE_POOL_SIZE` | `10` | Connection pool size |
-| `DEFAULT_PROJECT_ID` | `default` | Fallback project for experiment queries |
+| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
+| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for guardrail automation |
+| `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 | `GUARDRAIL_MONITOR_ENABLED` | `false` | Enable the background guardrail monitor |
 | `GUARDRAIL_PROJECT_IDS` | `""` | Comma-separated projects to monitor |
 | `GUARDRAIL_MONITOR_INTERVAL_SECONDS` | `60` | Monitor poll interval |

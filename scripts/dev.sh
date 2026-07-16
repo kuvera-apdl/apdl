@@ -18,7 +18,12 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_VERSION="3.12"
 DEPS_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.deps.yml"
 FULL_COMPOSE="$ROOT_DIR/infra/docker/docker-compose.yml"
-SMOKE_API_KEY="${APDL_SMOKE_API_KEY:-proj_demo_0123456789abcdef}"
+env_file_value() {
+    local key="$1"
+    [ -f "$ROOT_DIR/.env" ] || return 0
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ROOT_DIR/.env"
+}
+SMOKE_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
 
 # Compose wrappers that load the repo-root .env. With `-f` pointing into
 # infra/docker/, Compose's project dir (and its default .env lookup) is that
@@ -119,12 +124,15 @@ cmd_setup() {
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"
     setup_python_package "Query Service"     "$ROOT_DIR/services/query"
     setup_python_package "Agents Service"    "$ROOT_DIR/services/agents"
+    setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
     setup_python_package "ETL Framework"     "$ROOT_DIR/pipeline/etl"
     setup_python_package "Python SDK"        "$ROOT_DIR/sdk/python"
 
     info "Setting up JavaScript SDK"
     (cd "$ROOT_DIR/sdk/javascript" && npm install --silent)
+    info "Setting up Admin Console"
+    (cd "$ROOT_DIR/services/admin" && npm install --silent)
     ok "Installed npm dependencies"
 
     cmd_up
@@ -157,6 +165,8 @@ cmd_up() {
     wait_healthy "$compose" 3
     CLICKHOUSE_COMPOSE_FILE="$compose" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
+    POSTGRES_COMPOSE_FILE="$compose" "$ROOT_DIR/scripts/init-postgres.sh"
+    ok "PostgreSQL schema initialized"
 }
 
 cmd_up_full() {
@@ -165,7 +175,9 @@ cmd_up_full() {
     wait_healthy "$FULL_COMPOSE" 3
     CLICKHOUSE_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-clickhouse.sh"
     ok "ClickHouse schema initialized"
-    dc_full up -d --build ingestion config query agents codegen clickhouse-writer
+    POSTGRES_COMPOSE_FILE="$FULL_COMPOSE" "$ROOT_DIR/scripts/init-postgres.sh"
+    ok "PostgreSQL schema initialized"
+    dc_full up -d --build ingestion config query agents codegen clickhouse-writer admin-api admin gateway
     ok "Application services starting"
     sleep 3
     cmd_status
@@ -221,11 +233,13 @@ cmd_status() {
     check_health "Config"    "http://localhost:8081/health" || failures=$((failures+1))
     check_health "Query"     "http://localhost:8082/health" || failures=$((failures+1))
     check_health "Agents"    "http://localhost:8083/health" optional || true
+    check_health "Admin API" "http://localhost:5173/api/health" optional || true
     [ "$failures" -eq 0 ] || warn "$failures service(s) unhealthy — are they running? (scripts/dev.sh up-full)"
 }
 
 cmd_smoke() {
-    info "Smoke test against http://localhost:{8080,8081,8082} (api key: $SMOKE_API_KEY)"
+    [ -n "$SMOKE_API_KEY" ] || die "APDL_DEV_API_KEY is required for the smoke test"
+    info "Smoke test against http://localhost:{8080,8081,8082}"
     local failures=0 code flag_key
     flag_key="smoke-test-$$"
 

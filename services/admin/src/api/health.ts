@@ -1,6 +1,6 @@
 // Health probes never throw — degraded bodies (e.g. ingestion's 503) are data,
 // not errors, so panels can render them.
-import { normalizeBaseUrl } from './http'
+import { normalizeBaseUrl, notifyUnauthorized } from './http'
 
 // The analytics services that the health grid + integration verification cover.
 // Distinct from the full ServiceName set (which also includes codegen — a
@@ -16,7 +16,6 @@ export interface ServiceDescriptor {
 export interface ServiceHealthTarget {
   service: HealthServiceName
   baseUrl: string
-  apiKey?: string
 }
 
 export const SERVICE_DESCRIPTORS: ServiceDescriptor[] = [
@@ -36,15 +35,14 @@ export interface ProbeResult {
 
 export async function probe(
   url: string,
-  options: { apiKey?: string; timeoutMs?: number } = {},
+  options: { timeoutMs?: number } = {},
 ): Promise<ProbeResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 5000)
   const startedAt = performance.now()
   try {
-    const headers: Record<string, string> = {}
-    if (options.apiKey) headers['X-API-Key'] = options.apiKey
-    const response = await fetch(url, { headers, signal: controller.signal })
+    const response = await fetch(url, { credentials: 'same-origin', signal: controller.signal })
+    notifyUnauthorized(response)
     let body: unknown = null
     try {
       body = await response.json()
@@ -81,9 +79,9 @@ export async function checkService(target: ServiceHealthTarget): Promise<Service
   const baseUrl = normalizeBaseUrl(target.baseUrl)
   const descriptor = SERVICE_DESCRIPTORS.find((entry) => entry.service === target.service)
   const [health, ready] = await Promise.all([
-    probe(`${baseUrl}/health`, { apiKey: target.apiKey }),
+    probe(`${baseUrl}/health`),
     descriptor?.hasReady
-      ? probe(`${baseUrl}/ready`, { apiKey: target.apiKey })
+      ? probe(`${baseUrl}/ready`)
       : Promise.resolve(null),
   ])
   return { service: target.service, health, ready }

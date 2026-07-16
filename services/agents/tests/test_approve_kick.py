@@ -7,8 +7,10 @@ import json
 from typing import Any
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import Principal, authenticate_request
 from app.main import app
 from app.routers import approvals
 
@@ -142,6 +144,29 @@ def _forks(kicked: list) -> list:
 
 def _resumes(kicked: list) -> list:
     return [k for k in kicked if k.get("resume")]
+
+
+@pytest.mark.asyncio
+async def test_approval_requires_agents_approve_role():
+    async def authenticate_runner(request: Request):
+        principal = Principal(
+            credential_id="runner",
+            project_id="demo",
+            roles=frozenset({"agents:run"}),
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_runner
+    store = {"run": _run_row(), "results": []}
+    async with _client(store) as client:
+        response = await client.post(
+            "/v1/agents/run-1/approve",
+            json={"approved": True},
+        )
+
+    assert response.status_code == 403
+    assert app.state.pg_pool.conn.executed == []
 
 
 @pytest.mark.asyncio

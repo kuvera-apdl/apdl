@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app.auth import Principal, authenticate_request
 from app.main import app
 
 PROJECT_ID = "apiasport"
@@ -33,6 +35,21 @@ def _setup_mock_ch():
     mock_client = AsyncMock()
     mock_client.execute = AsyncMock(return_value=[])
     app.state.ch_client = mock_client
+    auth_conn = AsyncMock()
+    auth_conn.fetchval = AsyncMock(return_value=1)
+
+    class Acquire:
+        async def __aenter__(self):
+            return auth_conn
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class AuthPool:
+        def acquire(self):
+            return Acquire()
+
+    app.state.auth_pool = AuthPool()
     yield
 
 
@@ -70,7 +87,7 @@ async def test_readiness_ok(client):
 async def test_readiness_fail(client):
     app.state.ch_client.execute = AsyncMock(side_effect=ConnectionError("down"))
     resp = await client.get("/ready")
-    assert resp.status_code == 200
+    assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
 
@@ -346,7 +363,7 @@ async def test_event_count_rejects_removed_event_names_field(client):
 
 
 @pytest.mark.asyncio
-async def test_event_count_coerces_legacy_numeric_project_id(client):
+async def test_event_count_denies_numeric_project_outside_authenticated_tenant(client):
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
     resp = await client.post("/v1/query/events/count", json={
@@ -356,9 +373,49 @@ async def test_event_count_coerces_legacy_numeric_project_id(client):
         "selectors": [{"event_name": "click", "filters": []}],
     })
 
-    assert resp.status_code == 200
-    _, params = app.state.ch_client.execute.await_args.args
-    assert params["project_id"] == "1"
+    assert resp.status_code == 403
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_event_count_denies_cross_tenant_project(client):
+    resp = await client.post("/v1/query/events/count", json={
+        "project_id": "other",
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+        "selectors": [{"event_name": "click", "filters": []}],
+    })
+
+    assert resp.status_code == 403
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_query_requires_read_role(client):
+    async def authenticate_without_query_role(request: Request):
+        principal = Principal(
+            credential_id="events-only",
+            project_id=PROJECT_ID,
+            roles=frozenset({"events:write"}),
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_without_query_role
+
+    resp = await client.post(
+        "/v1/query/events/count",
+        json={
+            "project_id": PROJECT_ID,
+            "start_date": "2025-01-01",
+            "end_date": "2025-01-31",
+            "selectors": [{"event_name": "click", "filters": []}],
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Credential requires role: query:read"
+    app.state.ch_client.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

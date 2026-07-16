@@ -1,9 +1,10 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 import { z } from 'zod'
 
 import { ApiError, buildUrl, normalizeBaseUrl, request } from '../../src/api/http'
+import { AUTH_UNAUTHORIZED_EVENT } from '../../src/core/auth-events'
 
 const server = setupServer()
 
@@ -13,9 +14,12 @@ afterAll(() => server.close())
 
 const conn = {
   baseUrl: 'http://config.test',
-  apiKey: 'proj_demo_0123456789abcdef',
   actor: 'tester',
 }
+
+beforeEach(() => {
+  document.cookie = 'apdl_admin_csrf=test-csrf; Path=/'
+})
 
 describe('buildUrl', () => {
   test('normalizes trailing slashes and skips undefined params', () => {
@@ -27,26 +31,28 @@ describe('buildUrl', () => {
 })
 
 describe('request', () => {
-  test('sends X-API-Key on GET and adds x-apdl-actor only on mutations', async () => {
+  test('uses the browser session and CSRF token without exposing a service key', async () => {
     const seen: Record<string, string | null> = {}
     server.use(
       http.get('http://config.test/v1/get', ({ request: req }) => {
         seen.getKey = req.headers.get('x-api-key')
-        seen.getActor = req.headers.get('x-apdl-actor')
         return HttpResponse.json({})
       }),
       http.post('http://config.test/v1/post', ({ request: req }) => {
         seen.postActor = req.headers.get('x-apdl-actor')
         seen.postContentType = req.headers.get('content-type')
+        seen.postCsrf = req.headers.get('x-csrf-token')
+        seen.credentials = req.credentials
         return HttpResponse.json({})
       }),
     )
     await request(conn, '/v1/get')
     await request(conn, '/v1/post', { method: 'POST', body: { a: 1 } })
-    expect(seen.getKey).toBe(conn.apiKey)
-    expect(seen.getActor).toBeNull()
-    expect(seen.postActor).toBe('tester')
+    expect(seen.getKey).toBeNull()
+    expect(seen.postActor).toBeNull()
     expect(seen.postContentType).toContain('application/json')
+    expect(seen.postCsrf).toBe('test-csrf')
+    expect(seen.credentials).toBe('same-origin')
   })
 
   test('normalizes the {error, message} envelope into ApiError', async () => {
@@ -67,6 +73,27 @@ describe('request', () => {
     expect(apiError.code).toBe('version_conflict')
     expect(apiError.message).toContain('version 7')
     expect((apiError.body as { current_version: number }).current_version).toBe(7)
+  })
+
+  test('notifies the auth boundary on 401 unless explicitly suppressed', async () => {
+    let unauthorizedEvents = 0
+    const onUnauthorized = () => {
+      unauthorizedEvents += 1
+    }
+    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, onUnauthorized)
+    server.use(
+      http.get('http://config.test/v1/protected', () =>
+        HttpResponse.json({ detail: 'Valid API key required' }, { status: 401 }),
+      ),
+    )
+
+    await expect(request(conn, '/v1/protected')).rejects.toMatchObject({ status: 401 })
+    await expect(
+      request(conn, '/v1/protected', { redirectOnUnauthorized: false }),
+    ).rejects.toMatchObject({ status: 401 })
+
+    window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, onUnauthorized)
+    expect(unauthorizedEvents).toBe(1)
   })
 
   test('maps FastAPI 422 validation detail to a field-path message', async () => {

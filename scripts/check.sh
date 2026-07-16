@@ -32,6 +32,7 @@ info() { echo -e "${BLUE}==>${NC} $*"; }
 PACKAGES=(
   "js-sdk|sdk/javascript|npm run lint|npm test -- --run"
   "admin|services/admin|npm run lint|npm test -- --run"
+  "admin-api|services/admin-api|.venv/bin/ruff check app/ scripts/ tests/|.venv/bin/python -m pytest -q"
   "python-sdk|sdk/python|.venv/bin/ruff check apdl/ tests/|.venv/bin/python -m pytest -q"
   "ingestion|services/ingestion|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "config|services/config|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"

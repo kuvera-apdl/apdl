@@ -26,6 +26,7 @@ def _sel(name: str) -> EventSelector:
 # which ClickHouse rejects (Code 403: Unsupported JOIN ON conditions).
 # ---------------------------------------------------------------------------
 
+
 def test_retention_day_query_is_clickhouse_compatible():
     sql = build_retention_query(_sel("page"), _sel("$click"), {}, period="day")
     assert "cohort_sizes" in sql
@@ -61,6 +62,7 @@ def test_event_count_qualifies_event_name_to_avoid_alias_shadow():
 # /v1/query/events/names endpoint
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _mock_ch():
     mock = AsyncMock()
@@ -71,7 +73,9 @@ def _mock_ch():
 
 @pytest_asyncio.fixture
 async def client():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
         yield ac
 
 
@@ -85,7 +89,11 @@ async def test_event_names_endpoint(client):
     )
     resp = await client.post(
         "/v1/query/events/names",
-        json={"project_id": "demo", "start_date": "2026-06-14", "end_date": "2026-06-21"},
+        json={
+            "project_id": "apiasport",
+            "start_date": "2026-06-14",
+            "end_date": "2026-06-21",
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -96,6 +104,10 @@ async def test_event_names_endpoint(client):
 async def test_event_names_rejects_bad_date_range(client):
     resp = await client.post(
         "/v1/query/events/names",
-        json={"project_id": "demo", "start_date": "2026-06-21", "end_date": "2026-06-14"},
+        json={
+            "project_id": "apiasport",
+            "start_date": "2026-06-21",
+            "end_date": "2026-06-14",
+        },
     )
     assert resp.status_code == 422
