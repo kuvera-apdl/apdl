@@ -68,7 +68,8 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
     assert insert[1][2] == "proj_demo_"
     assert insert[1][3] == hashlib.sha256(seen_key.encode()).hexdigest()
     assert insert[1][4] == sorted(admin_session.projects["demo"])
-    assert insert[1][5] == 300
+    assert insert[1][5] is None
+    assert insert[1][6] == 300
     assert "'confidential'" in insert[0]
     removal = next(
         statement
@@ -76,6 +77,50 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
         if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
     )
     assert removal[1] == (credential_id,)
+
+
+@pytest.mark.asyncio
+async def test_agents_mutation_uses_human_bound_ephemeral_credential(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(202, json={"status": "queued"})
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.post(
+            "/api/projects/demo/agents/v1/agents/run-1/approve",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"decisions": [{"item_id": "p1", "approved": True}]},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 202
+    assert seen_key != TEST_API_KEY
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_key)
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert str(insert[1][5]) == admin_session.user_id
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (insert[1][0],)
 
 
 @pytest.mark.asyncio
