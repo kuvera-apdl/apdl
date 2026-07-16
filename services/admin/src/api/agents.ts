@@ -1,5 +1,3 @@
-// Agents-service client. The query/agents services have no auth today (§1.4)
-// — the canonical headers are still sent for forward-compatibility (gap G9).
 import { apiCurl, request, type ServiceConnection } from './http'
 import {
   agentDefinitionsResponseSchema,
