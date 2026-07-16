@@ -543,6 +543,66 @@ async def test_reject_empty_events_array(client):
 
 
 @pytest.mark.asyncio
+async def test_reject_duplicate_message_ids_before_event_admission(client):
+    message_id = "message-duplicate-in-batch"
+    payload = {
+        "events": [
+            canonical_event("first", message_id=message_id),
+            canonical_event("second", message_id=message_id),
+        ],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "validation_failed",
+        "errors": [
+            {
+                "field": "events[1].message_id",
+                "message": (
+                    "Duplicate message_id; first occurrence at "
+                    "events[0].message_id"
+                ),
+            }
+        ],
+    }
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("byte")) == 1
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_unchanged_message_id_retry_is_admitted_across_requests(client):
+    event = canonical_event(
+        "retryable-event",
+        message_id="message-stable-across-retry",
+        timestamp="2026-07-15T18:00:00.000Z",
+        properties={"attempt_invariant": True},
+    )
+
+    first = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+    second = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+
+    assert first.status_code == 202
+    assert first.json() == {"accepted": 1}
+    assert second.status_code == 202
+    assert second.json() == {"accepted": 1}
+    calls = publisher_calls()
+    assert len(calls) == 2
+    retry_payloads = [json.loads(call.args[5]) for call in calls]
+    assert [payload["message_id"] for payload in retry_payloads] == [
+        event["message_id"],
+        event["message_id"],
+    ]
+    assert [payload["timestamp"] for payload in retry_payloads] == [
+        event["timestamp"],
+        event["timestamp"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reject_event_without_identifier(client):
     """RejectEventWithoutIdentifier"""
     payload = {

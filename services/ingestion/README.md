@@ -43,7 +43,8 @@ Each `POST /v1/events` request goes through six stages:
    containers over 100 entries, and events over 1000 JSON nodes. Reserved events
    (`$feature_flag_exposure`, `$frontend_error`, `$web_vital`) get strict
    envelope/property checks. Optional event/context fields use omission as the
-   only absent form; explicit `null` is rejected. Failures →
+   only absent form; explicit `null` is rejected. Every `message_id` must also
+   be unique within its request batch. Failures →
    `400 {"error": "validation_failed",
    "errors": [{"field", "message"}, ...]}` with every error collected, not
    just the first.
@@ -82,6 +83,25 @@ Each stage is one check-all/debit-all Redis operation: a rejection at any level
 does not debit its parent or siblings. Every quota rejection uses the same
 retryable `429` headers above; every Redis quota-authority error fails closed as
 `503`.
+
+## Event idempotency
+
+The idempotency identity is exactly `(authenticated project_id, message_id)`.
+A `message_id` belongs permanently to one logical event. When retrying an
+ambiguous or retryable failure, clients must resend that event unchanged,
+including its original event `timestamp`; they must not generate a new ID for
+the retry or reuse the old ID for different content.
+
+Ingestion rejects repeated IDs inside one batch, but intentionally does not
+reserve IDs across requests. Two requests carrying the same unchanged event may
+both return `202` and enqueue it. The ClickHouse writer provides at-least-once
+delivery, and supported Query Service reads use `FINAL` so rows with the same
+storage identity converge to one visible event. The event timestamp is part of
+ClickHouse partition placement, so changing it on a retry can place the same ID
+in another partition where replacement cannot converge. Reusing an ID for
+changed content or timestamps violates the contract and has undefined winner
+semantics. The `accepted` response count is the number admitted by that HTTP
+request, not a count of newly unique storage identities.
 
 ## API
 

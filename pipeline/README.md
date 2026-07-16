@@ -42,7 +42,10 @@ batch-inserts into the `events` table.
   trimming accepted data. A crash between insert and ACK may replay an insert,
   but the stable client
   `message_id` and `(project_id, message_id)` replacement key make supported
-  `FINAL` reads return that event exactly once.
+  `FINAL` reads return that event exactly once. Retries must preserve the
+  complete logical event, especially its original timestamp: ClickHouse does
+  not merge replacement keys across monthly partitions, so changing the
+  timestamp while reusing an ID violates the idempotency contract.
 - **Tenant authority:** the project is derived only from a validated
   `events:raw:{project_id}` stream key. Conflicting project assertions inside a
   Redis message or its event JSON are rejected.

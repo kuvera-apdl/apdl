@@ -8,7 +8,9 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
+from app.models.schemas import EventBatch
 from app.validation.schema import validate_event_batch, validate_single_event
 
 CONTRACT_FIXTURE = (
@@ -88,6 +90,105 @@ class TestBatchValidation:
         body = {"events": events}
         result = validate_event_batch(body)
         assert result["valid"] is True
+
+    def test_batch_rejects_every_later_duplicate_message_id(self):
+        body = {
+            "events": [
+                canonical_event(message_id="message-duplicate"),
+                canonical_event(message_id="message-duplicate"),
+                canonical_event(message_id="message-duplicate"),
+            ],
+        }
+
+        result = validate_event_batch(body)
+
+        assert result["valid"] is False
+        duplicate_errors = [
+            error
+            for error in result["errors"]
+            if error["message"].startswith("Duplicate message_id;")
+        ]
+        assert duplicate_errors == [
+            {
+                "field": "events[1].message_id",
+                "message": (
+                    "Duplicate message_id; first occurrence at "
+                    "events[0].message_id"
+                ),
+            },
+            {
+                "field": "events[2].message_id",
+                "message": (
+                    "Duplicate message_id; first occurrence at "
+                    "events[0].message_id"
+                ),
+            },
+        ]
+
+    def test_batch_accepts_distinct_message_ids(self):
+        body = {
+            "events": [
+                canonical_event(message_id="message-one"),
+                canonical_event(message_id="message-two"),
+                canonical_event(message_id="message-three"),
+            ],
+        }
+
+        result = validate_event_batch(body)
+
+        assert result == {"valid": True, "errors": []}
+
+    def test_duplicate_message_ids_do_not_hide_other_validation_errors(self):
+        duplicate = canonical_event(message_id="message-duplicate")
+        duplicate["unknown_field"] = True
+        body = {
+            "events": [
+                canonical_event(message_id="message-duplicate"),
+                duplicate,
+            ],
+        }
+
+        result = validate_event_batch(body)
+
+        assert result["valid"] is False
+        assert {
+            (error["field"], error["message"])
+            for error in result["errors"]
+        } >= {
+            ("events[1].unknown_field", "Extra inputs are not permitted"),
+            (
+                "events[1].message_id",
+                "Duplicate message_id; first occurrence at events[0].message_id",
+            ),
+        }
+
+    def test_event_batch_model_rejects_every_later_duplicate_message_id(self):
+        body = {
+            "events": [
+                canonical_event(message_id="message-duplicate"),
+                canonical_event(message_id="message-duplicate"),
+                canonical_event(message_id="message-duplicate"),
+            ],
+        }
+
+        with pytest.raises(PydanticValidationError) as exc_info:
+            EventBatch.model_validate(body, strict=True)
+
+        duplicate_errors = exc_info.value.errors()
+        assert [error["loc"] for error in duplicate_errors] == [
+            ("events", 1, "message_id"),
+            ("events", 2, "message_id"),
+        ]
+        assert [error["msg"] for error in duplicate_errors] == [
+            (
+                "Value error, Duplicate message_id; first occurrence at "
+                "events[0].message_id"
+            ),
+            (
+                "Value error, Duplicate message_id; first occurrence at "
+                "events[0].message_id"
+            ),
+        ]
 
     def test_non_object_body(self):
         """NonObjectBody -- a string is not a dict."""
