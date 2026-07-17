@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 22
-MIGRATION_NAME = "022_agents_durable_effects.sql"
+MIGRATION_VERSION = 27
+MIGRATION_NAME = "027_codegen_pr_publication_recovery.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -54,13 +54,33 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "review_verdict"),
         ("codegen_changesets", "publication_authorization"),
         ("codegen_changesets", "publication_authorization_legacy"),
+        (
+            "codegen_changesets",
+            "publication_authorization_segmentless_legacy",
+        ),
+        (
+            "codegen_changesets",
+            "publication_authorization_egress_unattested_legacy",
+        ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),
         ("codegen_changesets", "ci_retry_count"),
         ("codegen_changesets", "ci_remediation_status"),
         ("codegen_changesets", "retry_of_changeset_id"),
+        ("codegen_changesets", "control_metadata"),
         ("codegen_pull_request_observations", "github_updated_at"),
+        ("codegen_pull_request_publication_events", "event_id"),
+        ("codegen_pull_request_publication_events", "event_sequence"),
+        ("codegen_pull_request_publication_events", "changeset_id"),
+        ("codegen_pull_request_publication_events", "event_type"),
+        ("codegen_pull_request_publication_events", "intent_event_id"),
+        ("codegen_pull_request_publication_events", "cleanup_request_event_id"),
+        ("codegen_pull_request_publication_events", "pr_number"),
+        ("codegen_pull_request_publication_events", "github_url"),
+        ("codegen_pull_request_publication_events", "recorded_at"),
+        ("codegen_pull_request_publication_events", "inserted_at"),
+        ("codegen_pull_request_publication_events", "payload"),
         ("codegen_ci_verification_observations", "evidence_hash"),
         ("codegen_runtime_evidence_observations", "ci_observation_id"),
         ("codegen_runtime_collection_claims", "ci_observation_id"),

@@ -12,11 +12,14 @@ from app.requirements.models import (
     ImplementationStatus,
     RequirementLedger,
 )
+from app.safety.paths import canonical_changed_paths
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,}")
 
 
-def _validated_copy(ledger: RequirementLedger, requirements: list[dict]) -> RequirementLedger:
+def _validated_copy(
+    ledger: RequirementLedger, requirements: list[dict]
+) -> RequirementLedger:
     payload = ledger.model_dump(mode="json")
     payload["requirements"] = requirements
     return RequirementLedger.model_validate_json(json.dumps(payload))
@@ -62,7 +65,7 @@ def map_implementation_evidence(
     requirement has no unambiguous path-name match, the complete changed-file
     set is retained rather than silently claiming a narrower mapping.
     """
-    paths = sorted({path.strip().removeprefix("./") for path in changed_paths if path.strip()})
+    paths = sorted(canonical_changed_paths(changed_paths))
     if not paths:
         raise ValueError("implementation evidence requires at least one changed path")
 
@@ -85,8 +88,7 @@ def map_implementation_evidence(
         matched = [
             path
             for path in paths
-            if path in target_paths
-            or any(token in path.casefold() for token in tokens)
+            if path in target_paths or any(token in path.casefold() for token in tokens)
         ]
         selected = matched or paths
         payload["implementation_status"] = ImplementationStatus.implemented.value

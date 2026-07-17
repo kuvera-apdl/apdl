@@ -52,6 +52,7 @@ def _score_execution(
     case_id: str,
     harness,
     oracle: EvaluationOracle,
+    egress_attestation_sha256: str | None,
 ) -> EvaluationOutcome:
     recognized = [
         detection
@@ -101,6 +102,7 @@ def _score_execution(
         measurements=measurements,
         harness=harness,
         oracle_case_sha256=canonical_sha256(oracle),
+        egress_attestation_sha256=egress_attestation_sha256,
         notes=notes,
     )
 
@@ -110,6 +112,7 @@ def _unavailable_outcome(
     case_id: str,
     oracle: EvaluationOracle,
     reason: str,
+    egress_attestation_sha256: str | None,
 ) -> EvaluationOutcome:
     unavailable = lambda metric: MetricValue(  # noqa: E731 - compact strict record
         value=None,
@@ -135,8 +138,22 @@ def _unavailable_outcome(
         ),
         harness=None,
         oracle_case_sha256=canonical_sha256(oracle),
+        egress_attestation_sha256=egress_attestation_sha256,
         unavailable_reason=reason,
     )
+
+
+def _trusted_egress_attestation_sha256(
+    executor: EvaluationExecutor,
+    invocation_id: str,
+) -> str | None:
+    provider = getattr(executor, "egress_attestation_sha256", None)
+    if provider is None:
+        return None
+    value = provider(invocation_id)
+    if value is not None and not isinstance(value, str):
+        raise TypeError("executor egress attestation digest must be a string")
+    return value
 
 
 async def run_corpus(
@@ -191,6 +208,12 @@ async def run_corpus(
                         case_id=case.case_id,
                         oracle=oracle_by_case[case.case_id],
                         reason=f"evaluation executor failed ({type(exc).__name__})",
+                        egress_attestation_sha256=(
+                            _trusted_egress_attestation_sha256(
+                                executor,
+                                invocation_id,
+                            )
+                        ),
                     )
                 )
                 continue
@@ -203,6 +226,12 @@ async def run_corpus(
                     case_id=case.case_id,
                     harness=harness,
                     oracle=oracle_by_case[case.case_id],
+                    egress_attestation_sha256=(
+                        _trusted_egress_attestation_sha256(
+                            executor,
+                            invocation_id,
+                        )
+                    ),
                 )
             )
     return outcomes

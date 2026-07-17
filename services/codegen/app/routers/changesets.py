@@ -19,7 +19,9 @@ from app.evaluations.models import RolloutStage
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
     RETRYABLE_STATUSES,
+    AuthorizedRevertControl,
     Changeset,
+    ChangesetControlMetadata,
     ChangesetCreate,
     ChangesetStatus,
     InvalidTransition,
@@ -267,17 +269,10 @@ async def revert_changeset(
     new_id = f"cs_{uuid.uuid4().hex[:24]}"
     base = original.base_branch or "main"
     pr_ref = f"#{original.pr_number}" if original.pr_number else f"branch `{original.branch}`"
-    # ``revert_sha`` (recorded at merge time) makes the revert deterministic:
-    # the editor runs ``git revert <sha>`` instead of asking the agent to
-    # reconstruct the change from prose it cannot see in a shallow clone. A
-    # changeset merged before the SHA was recorded falls back to the prose path.
-    context: dict = {
-        "reverts_changeset": changeset_id,
-        "reverts_pr_number": original.pr_number,
-    }
+    # The merge SHA is service-owned control metadata. The public task remains
+    # descriptive data and cannot activate the editor's mechanical revert path.
     sha_note = ""
     if original.merge_sha:
-        context["revert_sha"] = original.merge_sha
         sha_note = f" The merge commit to revert is `{original.merge_sha}`."
     revert_task = {
         "title": f"Revert: {original.task.title}",
@@ -286,20 +281,28 @@ async def revert_changeset(
             f"merged into `{base}`.{sha_note} Produce a clean revert of all its "
             "changes and keep the test suite green."
         ),
-        "context": context,
+        "context": {},
         "constraints": ["All existing tests must pass."],
     }
+    controls = ChangesetControlMetadata(
+        revert=AuthorizedRevertControl(
+            source_changeset_id=changeset_id,
+            merge_sha=original.merge_sha,
+        )
+    )
     idempotency_key = _derived_idempotency_key("revert", changeset_id)
     request_sha256 = store.changeset_request_sha256(
         project_id=original.project_id,
         run_id=original.run_id,
         base_branch=base,
         task=revert_task,
+        controls=controls,
     )
     try:
-        existing = await store.get_idempotent_changeset(
+        existing = await store.get_idempotent_revert_changeset(
             pool,
             project_id=original.project_id,
+            source_changeset_id=changeset_id,
             idempotency_key=idempotency_key,
             idempotency_request_sha256=request_sha256,
         )
@@ -314,9 +317,10 @@ async def revert_changeset(
         request.app, connection
     )
     try:
-        new_changeset, created = await store.create_changeset(
+        new_changeset, created = await store.create_revert_changeset(
             pool,
             changeset_id=new_id,
+            source_changeset_id=changeset_id,
             project_id=original.project_id,
             idempotency_key=idempotency_key,
             idempotency_request_sha256=request_sha256,
@@ -327,7 +331,7 @@ async def revert_changeset(
             tenant_policy_snapshot=tenant_policy,
             effective_safety_policy_sha256=effective_policy_sha256,
         )
-    except store.ChangesetIdempotencyConflict as exc:
+    except (store.ChangesetIdempotencyConflict, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if created:
         _maybe_enqueue(request.app, background_tasks, new_changeset.changeset_id)
@@ -363,16 +367,16 @@ async def retry_changeset(
         )
 
     new_id = f"cs_{uuid.uuid4().hex[:24]}"
-    # Re-run the identical task; thread a retry_of marker through the task
-    # context so the new changeset's lineage back to the failed run is traceable.
+    # Re-run the identical public task. Retry lineage and execution controls
+    # remain service-owned columns/metadata rather than forgeable task context.
     task = original.task.model_dump()
-    task["context"] = {**task.get("context", {}), "retry_of": changeset_id}
     idempotency_key = _derived_idempotency_key("retry", changeset_id)
     request_sha256 = store.changeset_request_sha256(
         project_id=original.project_id,
         run_id=original.run_id,
         base_branch=original.base_branch,
         task=task,
+        controls=original.controls,
     )
     try:
         existing = await store.get_idempotent_retry_changeset(
@@ -403,6 +407,7 @@ async def retry_changeset(
             run_id=original.run_id,
             base_branch=original.base_branch,
             task=task,
+            controls=original.controls,
             repository_target=connection.target,
             tenant_policy_snapshot=tenant_policy,
             effective_safety_policy_sha256=effective_policy_sha256,

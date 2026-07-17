@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 
 from app.editor.llm import CompleteFn
+from app.inspection.repository import RepositoryInspector
 from app.profiling import RepoProfile, profile_repository, render_profile
 
 logger = logging.getLogger(__name__)
@@ -92,18 +93,16 @@ Rules:
 
 def build_repo_digest(repo_dir: Path, profile: RepoProfile | None = None) -> str:
     """Canonical repository profile plus a bounded README excerpt."""
+    contents = RepositoryInspector(repo_dir).text_view()
     sections = [
         "### Canonical repository profile\n"
         + render_profile(profile or profile_repository(repo_dir))
     ]
 
     for readme_name in ("README.md", "README.rst", "README"):
-        readme = repo_dir / readme_name
-        if readme.is_file():
-            try:
-                head = readme.read_text(encoding="utf-8", errors="ignore")[:2000]
-            except OSError:
-                break
+        inspected = contents.inspect(readme_name)
+        if inspected is not None:
+            head = inspected.text[:2000]
             sections.append(f"### README (head)\n{head}")
             break
 

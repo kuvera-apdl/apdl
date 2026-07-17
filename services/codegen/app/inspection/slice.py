@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict, deque
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from app.inspection.models import DependencySlice, EvidenceKind, EvidenceRef
 from app.inspection.repository import (
@@ -22,14 +22,11 @@ from app.inspection.tracing import (
     route_matches,
     trace_local_imports,
 )
+from app.safety.paths import canonical_changed_path
 
 
 def _normalize_changed_path(path: str) -> str:
-    value = path.replace("\\", "/").removeprefix("./")
-    pure = PurePosixPath(value)
-    if not value or pure.is_absolute() or ".." in pure.parts:
-        raise ValueError("changed paths must be repository-relative")
-    return pure.as_posix()
+    return canonical_changed_path(path)
 
 
 def _missing_text(path: str) -> InspectedText:

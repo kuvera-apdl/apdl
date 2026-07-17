@@ -180,6 +180,35 @@ async def test_no_signal_settles_unverified_without_leaving_pr_open_lifecycle():
 
 
 @pytest.mark.asyncio
+async def test_incomplete_paginated_evidence_downgrades_a_previous_pass():
+    pool = _pool()
+    pool.store["changesets"]["cs-open"]["external_ci_status"] = "passed"
+
+    async def get_pr(_repo, _number, _token):
+        return _live_pr()
+
+    async def get_ci(_repo, head_sha, _token):
+        return GitHubCIEvidence.incomplete(
+            head_sha,
+            "GitHub pagination exceeded max_pages=10 while another page remained",
+        )
+
+    observation = await sync_github_state(
+        pool,
+        "cs-open",
+        get_pull_request=get_pr,
+        get_ci_evidence=get_ci,
+        mint_token=_mint,
+    )
+
+    final = await store.get_changeset(pool, "cs-open")
+    assert observation is not None
+    assert observation.status is ExternalCIStatus.unverified_external_ci
+    assert observation.signals == []
+    assert final.external_ci_status is ExternalCIStatus.unverified_external_ci
+
+
+@pytest.mark.asyncio
 async def test_failed_exact_head_projects_failure_and_schedules_one_observation():
     pool = _pool()
     repaired = []

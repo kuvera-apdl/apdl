@@ -7,6 +7,7 @@ import asyncio
 import httpx
 import pytest
 
+from app.github import checks
 from app.github.checks import GitHubCIEvidence, get_ci_evidence
 
 
@@ -145,6 +146,108 @@ async def test_check_runs_are_collected_across_bounded_github_pages():
     evidence = await _evidence(httpx.MockTransport(handler))
 
     assert [run["id"] for run in evidence.check_runs] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_commit_statuses_are_collected_across_bounded_github_pages():
+    first = {
+        "id": 1,
+        "sha": "head-exact",
+        "context": "lint",
+        "state": "success",
+    }
+    second = {
+        "id": 2,
+        "sha": "head-exact",
+        "context": "tests",
+        "state": "success",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/check-runs"):
+            return httpx.Response(
+                200,
+                json={"total_count": 0, "check_runs": []},
+            )
+        if request.url.params.get("page") == "2":
+            return httpx.Response(
+                200,
+                json={
+                    "sha": "head-exact",
+                    "state": "success",
+                    "total_count": 2,
+                    "statuses": [second],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "sha": "head-exact",
+                "state": "success",
+                "total_count": 2,
+                "statuses": [first],
+            },
+            headers={
+                "Link": (
+                    "<https://api.github.com/repos/acme/widgets/commits/"
+                    'head-exact/status?per_page=100&page=2>; rel="next"'
+                )
+            },
+        )
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert evidence.complete is True
+    assert [status["id"] for status in evidence.combined_status["statuses"]] == [
+        1,
+        2,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capped_check_run_pagination_becomes_explicit_incomplete_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(checks, "_MAX_PAGES", 1)
+    visible_success = {
+        "id": 1,
+        "head_sha": "head-exact",
+        "name": "lint",
+        "status": "completed",
+        "conclusion": "success",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/status"):
+            return httpx.Response(
+                200,
+                json={
+                    "sha": "head-exact",
+                    "state": "success",
+                    "total_count": 0,
+                    "statuses": [],
+                },
+            )
+        if request.url.path.endswith("/check-runs"):
+            return httpx.Response(
+                200,
+                json={"total_count": 101, "check_runs": [visible_success]},
+                headers={
+                    "Link": (
+                        "<https://api.github.com/repos/acme/widgets/commits/"
+                        'head-exact/check-runs?per_page=100&page=2>; rel="next"'
+                    )
+                },
+            )
+        return httpx.Response(404)
+
+    evidence = await _evidence(httpx.MockTransport(handler))
+
+    assert evidence.complete is False
+    assert evidence.incomplete_reason is not None
+    assert "max_pages=1" in evidence.incomplete_reason
+    assert evidence.combined_status == {"sha": "head-exact", "statuses": []}
+    assert evidence.check_runs == []
 
 
 @pytest.mark.asyncio

@@ -14,18 +14,23 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
-from typing import Any
-
 import asyncpg
 
 from app.config import codegen_max_concurrent_jobs
 from app.editor.base import Editor, EditRequest
-from app.evaluations.models import RiskLevel
+from app.github.publisher import BranchPublisher
+from app.jobs.pr_publication import (
+    PRCloser,
+    PRFinder,
+    PROpener,
+    resume_pull_request_publication,
+)
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
-from app.models.observations import ExternalCIStatus, PullRequestObservation
+from app.models.observations import ExternalCIStatus
+from app.models.pr_publication import PublicationIntentRecorded
 from app.publication import (
     DevelopmentPublicationAuthorization,
     PublicationAuthorizationRecord,
@@ -45,12 +50,16 @@ from app.safety.policy import (
 from app.semantic_review.models import ReviewDecision, ReviewVerdict
 from app.store import changesets as store
 from app.store import connections as connections_store
-from app.verification.models import PlanDisposition, VerificationCoverage, VerificationPlan
+from app.store import pr_publication as publication_store
+from app.verification.models import (
+    PlanDisposition,
+    VerificationCoverage,
+    VerificationPlan,
+)
 
 logger = logging.getLogger(__name__)
 
 TokenMinter = Callable[[str], AbstractAsyncContextManager[str]]
-PROpener = Callable[..., Awaitable[Any]]
 
 #: Serializes changeset jobs to the configured concurrency (default 1). Created
 #: lazily so it binds to the running event loop; safe under a single-threaded
@@ -90,13 +99,17 @@ def _pr_body(
         checks = "- [ ] Implements the described change with passing tests"
     requirement_lines = []
     for requirement in ledger.requirements:
-        expected = ", ".join(
-            item.evidence_id for item in requirement.expected_ci_evidence
-        ) or "explicitly blocked/descoped"
+        expected = (
+            ", ".join(item.evidence_id for item in requirement.expected_ci_evidence)
+            or "explicitly blocked/descoped"
+        )
         marker = (
             "x"
             if requirement.implementation_status
-            in {ImplementationStatus.implemented, ImplementationStatus.confirmed_existing}
+            in {
+                ImplementationStatus.implemented,
+                ImplementationStatus.confirmed_existing,
+            }
             else " "
         )
         requirement_lines.append(
@@ -172,8 +185,13 @@ async def run_changeset_job(
     changeset_id: str,
     *,
     editor: Editor,
-    mint_token: TokenMinter,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    mint_pr_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
     open_pr: PROpener,
+    find_pr: PRFinder,
+    close_pr: PRCloser,
     publication_gate: PublicationGate,
     platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
 ) -> None:
@@ -187,8 +205,13 @@ async def run_changeset_job(
             pool,
             changeset_id,
             editor=editor,
-            mint_token=mint_token,
+            mint_read_token=mint_read_token,
+            mint_write_token=mint_write_token,
+            mint_pr_write_token=mint_pr_write_token,
+            branch_publisher=branch_publisher,
             open_pr=open_pr,
+            find_pr=find_pr,
+            close_pr=close_pr,
             publication_gate=publication_gate,
             platform_safety_policy=platform_safety_policy,
         )
@@ -199,12 +222,18 @@ async def _execute_changeset_job(
     changeset_id: str,
     *,
     editor: Editor,
-    mint_token: TokenMinter,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    mint_pr_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
     open_pr: PROpener,
+    find_pr: PRFinder,
+    close_pr: PRCloser,
     publication_gate: PublicationGate,
     platform_safety_policy: PlatformCodegenSafetyPolicy | None,
 ) -> None:
     """Execute one changeset end-to-end (edit → push → open draft PR)."""
+    publication_recovery_owned = False
     try:
         changeset = await store.get_changeset(pool, changeset_id)
         if changeset is None:
@@ -225,7 +254,9 @@ async def _execute_changeset_job(
         )
         if connection is None:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error,
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
                 error="Changeset repository grant is unavailable or revoked.",
             )
             return
@@ -243,7 +274,9 @@ async def _execute_changeset_job(
         # Losing the claim (a duplicate enqueue, a concurrent replica) is a
         # clean no-op, not an error that would corrupt the winner's run.
         try:
-            await store.transition_changeset(pool, changeset_id, ChangesetStatus.cloning)
+            await store.transition_changeset(
+                pool, changeset_id, ChangesetStatus.cloning
+            )
         except InvalidTransition:
             logger.info(
                 "Changeset %s is already claimed by another job; skipping.",
@@ -254,23 +287,14 @@ async def _execute_changeset_job(
             pool,
             changeset_id,
             tenant_policy_snapshot=tenant_policy,
-            effective_safety_policy_sha256=(
-                effective_safety_policy.canonical_digest()
-            ),
+            effective_safety_policy_sha256=(effective_safety_policy.canonical_digest()),
         )
-        try:
-            risk = RiskLevel(
-                str(changeset.task.context.get("risk_level") or "low").lower()
-            )
-        except ValueError as exc:
-            raise ValueError("task risk_level must be low, medium, or high") from exc
+        risk = changeset.controls.risk_level
         authorization = publication_gate.authorize(
             risk=risk,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
-        await store.set_publication_authorization(
-            pool, changeset_id, authorization
-        )
+        await store.set_publication_authorization(pool, changeset_id, authorization)
         if not authorization.decision.allowed:
             await store.transition_changeset(
                 pool,
@@ -291,9 +315,14 @@ async def _execute_changeset_job(
             )
 
         await store.transition_changeset(pool, changeset_id, ChangesetStatus.editing)
-        branch = f"apdl/{_slug(changeset.task.title)}-{changeset_id[-8:]}"
-        revert_sha = changeset.task.context.get("revert_sha")
-        async with mint_token(changeset_id) as token:
+        branch_identity = changeset_id.removeprefix("cs_")
+        branch = f"apdl/{_slug(changeset.task.title)}-{branch_identity}"
+        revert_sha = (
+            changeset.controls.revert.merge_sha
+            if changeset.controls.revert is not None
+            else None
+        )
+        async with mint_read_token(changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
                     repo=connection.repository_full_name,
@@ -307,7 +336,7 @@ async def _execute_changeset_job(
                     test_cmd=tenant_policy.test_cmd,
                     safety_policy=effective_safety_policy,
                     runtime_acceptance_policy=runtime_policy,
-                    revert_sha=revert_sha if isinstance(revert_sha, str) else None,
+                    revert_sha=revert_sha,
                     risk_level=risk.value,
                 )
             )
@@ -319,7 +348,7 @@ async def _execute_changeset_job(
                 title=changeset.task.title,
                 spec=changeset.task.spec,
                 constraints=changeset.task.constraints,
-                risk=str(changeset.task.context.get("risk_level") or "low").lower(),
+                risk=risk.value,
                 verification_command=tenant_policy.test_cmd,
             )
             if result.success:
@@ -334,14 +363,20 @@ async def _execute_changeset_job(
             await store.set_requirement_ledger(
                 pool, changeset_id, result.requirement_ledger
             )
-        if result.inspection_snapshot is not None or result.dependency_slice is not None:
+        if (
+            result.inspection_snapshot is not None
+            or result.dependency_slice is not None
+        ):
             await store.set_inspection_evidence(
                 pool,
                 changeset_id,
                 snapshot=result.inspection_snapshot,
                 dependency_slice=result.dependency_slice,
             )
-        if result.verification_plan is not None or result.verification_coverage is not None:
+        if (
+            result.verification_plan is not None
+            or result.verification_coverage is not None
+        ):
             await store.set_verification_evidence(
                 pool,
                 changeset_id,
@@ -370,7 +405,9 @@ async def _execute_changeset_job(
 
         if not result.success:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error,
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
                 error=result.error or "The edit attempt did not pass tests.",
             )
             return
@@ -404,8 +441,9 @@ async def _execute_changeset_job(
             return
 
         # Backstop only: the editor already ran these gates on the FULL diff
-        # before pushing. This re-check (on the possibly capped diff_text)
-        # guards editors that don't gate themselves (e.g. a fake/custom Editor).
+        # before returning its candidate. This re-check (on the possibly capped
+        # diff_text) guards editors that do not gate themselves (for example, a
+        # fake or custom Editor).
         verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
         if workflow_attestation_is_valid(
             result.generated_runtime_workflow,
@@ -436,16 +474,33 @@ async def _execute_changeset_job(
             )
             return
 
-        if not result.head_sha:
+        if not (
+            result.head_sha
+            and result.base_sha
+            and result.candidate_tree_sha
+            and result.patch_base64
+        ):
             await store.transition_changeset(
                 pool,
                 changeset_id,
                 ChangesetStatus.error,
-                error="Editor pushed a branch without returning its exact head SHA.",
+                error=(
+                    "Editor returned no complete base/tree-bound publication candidate."
+                ),
+            )
+            return
+        if result.branch is not None and result.branch != branch:
+            await store.transition_changeset(
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
+                error=(
+                    "Editor returned a branch identity that differs from the "
+                    "controller-owned canonical branch."
+                ),
             )
             return
 
-        await store.transition_changeset(pool, changeset_id, ChangesetStatus.pushing)
         lacks_external_ci = (
             result.verification_plan is not None
             and result.verification_plan.disposition
@@ -456,8 +511,7 @@ async def _execute_changeset_job(
             and result.review_verdict.overall_decision.value == "unverified"
         )
         runtime_unverified = bool(
-            result.runtime_acceptance_plan
-            and result.runtime_acceptance_plan.blockers
+            result.runtime_acceptance_plan and result.runtime_acceptance_plan.blockers
         )
         draft = (
             not authorization.decision.ready_for_review
@@ -474,63 +528,56 @@ async def _execute_changeset_job(
             result.review_verdict,
             authorization,
         )
-        # Use a new lease for PR creation so the repository grant is checked
-        # again after the potentially long editor run and its token is revoked.
-        async with mint_token(changeset_id) as token:
-            pr = await open_pr(
-                repo=connection.repository_full_name,
-                head=result.branch or branch,
-                base=base_branch,
-                title=changeset.task.title,
-                body=pr_body,
-                token=token,
-                draft=draft,
-            )
-            if not pr.head_sha or pr.head_sha != result.head_sha:
-                raise RuntimeError(
-                    "GitHub PR head does not match the exact branch head pushed "
-                    "by codegen."
-                )
-            external_ci_status = (
-                ExternalCIStatus.unverified_external_ci
-                if lacks_external_ci
-                else ExternalCIStatus.pending
-            )
-            observation = PullRequestObservation(
-                observation_id=f"probs_{uuid.uuid4().hex}",
-                changeset_id=changeset_id,
-                repository=connection.repository_full_name,
-                pr_number=pr.number,
-                head_sha=pr.head_sha,
-                status=pr.status,
-                action="opened",
-                github_url=pr.url,
-                github_updated_at=pr.github_updated_at,
-                observed_at=datetime.now(timezone.utc),
-            )
-            # GitHub has already accepted an irreversible external result. A
-            # deploy cancellation must not leave the database in `pushing`
-            # with no way to associate the PR. Shield the atomic journal +
-            # projection and, if cancellation arrives, finish it before the
-            # token lease unwinds and propagates cancellation.
-            persist_pr = asyncio.create_task(
-                store.mark_pr_open(
-                    pool,
-                    changeset_id,
-                    branch=result.branch or branch,
-                    observation=observation,
-                    external_ci_status=external_ci_status,
-                    diff_stat=result.diff_stat,
-                )
-            )
-            try:
-                await asyncio.shield(persist_pr)
-            except asyncio.CancelledError:
-                await persist_pr
-                raise
-        logger.info("Changeset %s opened GitHub PR %s", changeset_id, pr.url)
+        external_ci_status = (
+            ExternalCIStatus.unverified_external_ci
+            if lacks_external_ci
+            else ExternalCIStatus.pending
+        )
+        await store.transition_changeset(pool, changeset_id, ChangesetStatus.pushing)
+        intent = PublicationIntentRecorded(
+            event_id=f"cpub_{uuid.uuid4().hex}",
+            changeset_id=changeset_id,
+            recorded_at=datetime.now(timezone.utc),
+            repository=connection.repository_full_name,
+            repository_id=connection.repository_id,
+            installation_id=connection.target.installation_id,
+            branch=branch,
+            base_branch=base_branch,
+            candidate_base_sha=result.base_sha,
+            candidate_head_sha=result.head_sha,
+            candidate_tree_sha=result.candidate_tree_sha,
+            patch_base64=result.patch_base64,
+            commit_title=changeset.task.title,
+            pull_request_title=changeset.task.title,
+            pull_request_body=pr_body,
+            draft=draft,
+            external_ci_status=external_ci_status,
+            diff_stat=result.diff_stat,
+        )
+        # From this point the intent write may have committed even if the
+        # caller observes a connection error. Never let the generic job error
+        # path strand a possibly accepted GitHub mutation outside recovery.
+        publication_recovery_owned = True
+        await publication_store.record_intent(pool, intent)
+        await resume_pull_request_publication(
+            pool,
+            changeset_id,
+            mint_read_token=mint_read_token,
+            mint_write_token=mint_write_token,
+            mint_pr_write_token=mint_pr_write_token,
+            branch_publisher=branch_publisher,
+            open_pr=open_pr,
+            find_pr=find_pr,
+            close_pr=close_pr,
+        )
     except Exception as exc:
         logger.exception("Changeset job %s failed", changeset_id)
+        if publication_recovery_owned:
+            logger.warning(
+                "Changeset %s remains pushing for durable publication recovery",
+                changeset_id,
+            )
+            return
         try:
             await store.transition_changeset(
                 pool, changeset_id, ChangesetStatus.error, error=str(exc)
@@ -545,14 +592,21 @@ async def run_stale_sweeper(
     interval_seconds: int,
     older_than_seconds: int,
     error: str,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    mint_pr_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
+    open_pr: PROpener,
+    find_pr: PRFinder,
+    close_pr: PRCloser,
 ) -> None:
     """Periodically fail active-state changesets that stopped moving.
 
     The startup sweep only catches orphans that are already old enough when the
     process boots; a changeset orphaned shortly *before* a restart would
     otherwise sit in ``cloning``/``editing``/… until some much later restart.
-    This loop re-runs the same sweep forever so any row past the deadline is
-    surfaced within one interval of aging out. A live job never trips it as long
+    This loop first resumes stale rows that have a durable publication intent,
+    then fails only non-resumable active rows. A live job never trips it as long
     as ``older_than_seconds`` exceeds the per-job pipeline budget.
     """
     logger.info(
@@ -564,6 +618,22 @@ async def run_stale_sweeper(
         while True:
             await asyncio.sleep(interval_seconds)
             try:
+                recoverable = await publication_store.list_recoverable_ids(
+                    pool,
+                    older_than_seconds=older_than_seconds,
+                )
+                for changeset_id in recoverable:
+                    await resume_pull_request_publication(
+                        pool,
+                        changeset_id,
+                        mint_read_token=mint_read_token,
+                        mint_write_token=mint_write_token,
+                        mint_pr_write_token=mint_pr_write_token,
+                        branch_publisher=branch_publisher,
+                        open_pr=open_pr,
+                        find_pr=find_pr,
+                        close_pr=close_pr,
+                    )
                 swept = await store.fail_stale_changesets(
                     pool, older_than_seconds=older_than_seconds, error=error
                 )

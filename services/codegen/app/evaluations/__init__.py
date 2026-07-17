@@ -30,6 +30,7 @@ from app.evaluations.segments import (
     SegmentedEvaluationReport,
     SegmentDimension,
     build_segmented_report,
+    validate_segmented_report,
 )
 from app.evaluations.subprocess_executor import (
     PublicEvaluationInvocation,
@@ -70,4 +71,5 @@ __all__ = [
     "load_publication_authorizer",
     "load_publication_bundle",
     "load_rollout_policy",
+    "validate_segmented_report",
 ]

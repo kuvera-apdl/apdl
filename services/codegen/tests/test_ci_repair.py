@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from app.editor.prompts import (
     PROMPT_TRANSCRIPT_MAX_BYTES,
     serialized_prompt_bytes,
 )
+from app.evaluations.models import RiskLevel
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
 from app.models.observations import (
@@ -59,6 +61,7 @@ from app.store.observations import (
 )
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
+from tests.publisher_fakes import FakeBranchPublisher
 from tests.publication_fakes import (
     allowing_publication_gate,
     denying_publication_gate,
@@ -67,6 +70,11 @@ from tests.publication_fakes import (
 
 async def repair_failed_ci(*args, publication_gate=None, **kwargs):
     """Exercise repair with an explicit trusted publication gate."""
+    legacy_minter = kwargs.pop("mint_token", None)
+    if legacy_minter is not None:
+        kwargs.setdefault("mint_read_token", legacy_minter)
+        kwargs.setdefault("mint_write_token", legacy_minter)
+    kwargs.setdefault("branch_publisher", FakeBranchPublisher())
     return await _repair_failed_ci(
         *args,
         publication_gate=publication_gate or allowing_publication_gate(),
@@ -297,8 +305,15 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
             ],
         )
     )
+    gate = allowing_publication_gate()
 
-    await repair_failed_ci(pool, failed, editor=editor, mint_token=_mint)
+    await repair_failed_ci(
+        pool,
+        failed,
+        editor=editor,
+        mint_token=_mint,
+        publication_gate=gate,
+    )
 
     final = await changeset_store.get_changeset(pool, "cs-repair")
     assert editor.last_request is not None
@@ -306,6 +321,8 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
     assert editor.last_request.branch == "apdl/existing"
     assert editor.last_request.expected_head_sha == "head-failed"
     assert failed.failure_summary in editor.last_request.spec
+    assert editor.last_request.risk_level == "high"
+    assert gate.calls == [(RiskLevel.high, "demo:10")]
     assert final.status is ChangesetStatus.pr_open
     assert final.head_sha == "head-repaired"
     assert final.external_ci_status is ExternalCIStatus.pending
@@ -379,11 +396,9 @@ async def test_repair_reuses_changeset_tenant_policy_snapshot(monkeypatch):
     pool.store["changesets"]["cs-repair"]["tenant_policy_snapshot"] = (
         strict_snapshot.model_dump_json()
     )
-    pool.store["connections"]["demo"]["tenant_policy"] = (
-        TenantCodegenConnectionPolicy(
-            gates=TenantCodegenGatesPolicy(max_files=50)
-        ).model_dump_json()
-    )
+    pool.store["connections"]["demo"]["tenant_policy"] = TenantCodegenConnectionPolicy(
+        gates=TenantCodegenGatesPolicy(max_files=50)
+    ).model_dump_json()
     editor = FakeEditor(
         EditResult(
             success=True,
@@ -445,14 +460,12 @@ async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
     monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
     pool, failed = await _seed_failed()
     workflow = ".github/workflows/apdl-runtime-acceptance.yml"
-    pool.store["connections"]["demo"]["tenant_policy"] = (
-        TenantCodegenConnectionPolicy(
-            runtime_acceptance=RuntimeAcceptanceRequest(enabled=True)
-        ).model_dump_json()
-    )
+    pool.store["connections"]["demo"]["tenant_policy"] = TenantCodegenConnectionPolicy(
+        runtime_acceptance=RuntimeAcceptanceRequest(enabled=True)
+    ).model_dump_json()
     plan = _workflow_bound_repair_plan()
-    pool.store["changesets"]["cs-repair"]["runtime_acceptance_plan"] = (
-        plan.model_dump(mode="json")
+    pool.store["changesets"]["cs-repair"]["runtime_acceptance_plan"] = plan.model_dump(
+        mode="json"
     )
     editor = _CountingEditor(
         EditResult(
@@ -485,9 +498,7 @@ async def test_forged_workflow_content_attestation_cannot_bypass_repair_gate(
     assert final.head_sha == "head-failed"
     assert final.ci_remediation_status is CIRemediationStatus.exhausted
     attempts = await list_ci_remediation_attempts(pool, "cs-repair")
-    assert any(
-        "protected path" in (attempt.error or "") for attempt in attempts
-    )
+    assert any("protected path" in (attempt.error or "") for attempt in attempts)
 
 
 @pytest.mark.asyncio
@@ -538,9 +549,7 @@ async def test_repair_uses_latest_exact_head_runtime_evidence_with_event_provena
     assert {event.runtime_evidence_observation_id for event in events} == {
         latest.observation_id
     }
-    assert {event.runtime_evidence_hash for event in events} == {
-        latest.evidence_hash()
-    }
+    assert {event.runtime_evidence_hash for event in events} == {latest.evidence_hash()}
 
 
 @pytest.mark.asyncio
@@ -764,7 +773,7 @@ async def test_repair_completion_cannot_overwrite_concurrent_github_merge(
     pool, failed = await _seed_failed()
 
     class _MergeRaceEditor:
-        async def implement(self, _request):
+        async def implement(self, request):
             row = pool.store["changesets"]["cs-repair"]
             row["status"] = "merged"
             row["github_pr_status"] = "merged"
@@ -775,6 +784,9 @@ async def test_repair_completion_cannot_overwrite_concurrent_github_merge(
                 changed_paths=["src/fix.py"],
                 diff_text="+fixed",
                 head_sha="head-too-late",
+                base_sha=request.expected_head_sha,
+                candidate_tree_sha="b" * 40,
+                patch_base64=base64.b64encode(b"candidate patch").decode("ascii"),
             )
 
     await repair_failed_ci(

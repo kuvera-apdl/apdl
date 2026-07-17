@@ -1,6 +1,7 @@
 """Endpoint tests for the changeset lifecycle."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -79,6 +80,15 @@ async def test_create_get_and_list_changeset():
         assert cs["status"] == "queued"
         assert cs["base_branch"] == "main"
         assert cs["changeset_id"].startswith("cs_")
+        assert "control_metadata" not in cs
+        controls = json.loads(
+            pool.store["changesets"][cs["changeset_id"]]["control_metadata"]
+        )
+        assert controls == {
+            "schema_version": "changeset_controls@1",
+            "risk_level": "high",
+            "revert": None,
+        }
 
         cid = cs["changeset_id"]
         got = await client.get(f"/v1/changesets/{cid}")
@@ -395,6 +405,41 @@ async def test_create_changeset_rejects_unknown_field():
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "reserved_key",
+    [
+        "risk_level",
+        "revert_sha",
+        "reverts_changeset",
+        "reverts_pr_number",
+        "retry_of",
+    ],
+)
+@pytest.mark.asyncio
+async def test_create_changeset_rejects_private_control_keys_in_context(
+    reserved_key,
+):
+    pool = FakePool()
+    pool.add_connection("demo")
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/changesets",
+            json={
+                "project_id": "demo",
+                "idempotency_key": f"test:reserved:{reserved_key}",
+                "task": {
+                    "title": "x",
+                    "spec": "do it",
+                    "context": {reserved_key: "attacker-controlled"},
+                },
+            },
+        )
+
+    assert response.status_code == 422
+    assert "reserved private control keys" in response.text
+    assert pool.store["changesets"] == {}
+
+
 @pytest.mark.asyncio
 async def test_revert_merged_changeset_enqueues_one_idempotent_revert(monkeypatch):
     pool = FakePool()
@@ -421,10 +466,20 @@ async def test_revert_merged_changeset_enqueues_one_idempotent_revert(monkeypatc
     assert body["status"] == "queued"
     assert body["task"]["title"].startswith("Revert:")
     assert "#7" in body["task"]["spec"]
-    assert body["task"]["context"]["reverts_changeset"] == "cs_orig"
-    # The recorded merge SHA rides along so the editor reverts deterministically.
-    assert body["task"]["context"]["revert_sha"] == "deadbeef123"
+    assert body["task"]["context"] == {}
     assert "deadbeef123" in body["task"]["spec"]
+    assert "control_metadata" not in body
+    controls = json.loads(
+        pool.store["changesets"][body["changeset_id"]]["control_metadata"]
+    )
+    assert controls == {
+        "schema_version": "changeset_controls@1",
+        "risk_level": "high",
+        "revert": {
+            "source_changeset_id": "cs_orig",
+            "merge_sha": "deadbeef123",
+        },
+    }
     assert enqueued == [body["changeset_id"]]
 
 
@@ -438,7 +493,15 @@ async def test_revert_without_recorded_sha_falls_back_to_prose():
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_old/revert")
     assert resp.status_code == 202
-    assert "revert_sha" not in resp.json()["task"]["context"]
+    body = resp.json()
+    assert body["task"]["context"] == {}
+    controls = json.loads(
+        pool.store["changesets"][body["changeset_id"]]["control_metadata"]
+    )
+    assert controls["revert"] == {
+        "source_changeset_id": "cs_old",
+        "merge_sha": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -469,12 +532,55 @@ async def test_retry_pre_pr_error_enqueues_same_task():
     assert body["changeset_id"].startswith("cs_")
     assert body["changeset_id"] != "cs_bad"
     assert body["status"] == "queued"
-    # Same task, same base branch — re-run verbatim, with a lineage marker.
+    # Same public task and base branch; lineage remains private and relational.
     assert body["task"]["title"] == "t"
     assert body["task"]["spec"] == "spec spec spec"
     assert body["base_branch"] == "develop"
-    assert body["task"]["context"]["retry_of"] == "cs_bad"
+    assert body["task"]["context"] == {}
     assert pool.store["changesets"][body["changeset_id"]]["retry_of_changeset_id"] == "cs_bad"
+    assert json.loads(
+        pool.store["changesets"][body["changeset_id"]]["control_metadata"]
+    ) == {
+        "schema_version": "changeset_controls@1",
+        "risk_level": "high",
+        "revert": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_preserves_authorized_revert_controls_privately():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset(
+        "cs_source",
+        "demo",
+        status="merged",
+        pr_number=8,
+        branch="apdl/source",
+        merge_sha="merge-sha-8",
+    )
+
+    async with _client(pool) as client:
+        revert_response = await client.post("/v1/changesets/cs_source/revert")
+        revert_id = revert_response.json()["changeset_id"]
+        pool.store["changesets"][revert_id]["status"] = "error"
+        retry_response = await client.post(f"/v1/changesets/{revert_id}/retry")
+
+    assert revert_response.status_code == 202
+    assert retry_response.status_code == 202
+    retry = retry_response.json()
+    assert retry["task"]["context"] == {}
+    assert "control_metadata" not in retry
+    retry_row = pool.store["changesets"][retry["changeset_id"]]
+    assert retry_row["retry_of_changeset_id"] == revert_id
+    assert json.loads(retry_row["control_metadata"]) == {
+        "schema_version": "changeset_controls@1",
+        "risk_level": "high",
+        "revert": {
+            "source_changeset_id": "cs_source",
+            "merge_sha": "merge-sha-8",
+        },
+    }
 
 
 @pytest.mark.asyncio

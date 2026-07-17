@@ -36,14 +36,13 @@ class FakePublicationGate:
             model="test-model@1",
             codegen_revision="test-revision",
             candidate_identity_sha256="a" * 64,
+            egress_policy_sha256="8" * 64,
             canary_identity=(
-                canary_identity
-                if self.stage is RolloutStage.low_risk_canary
-                else None
+                canary_identity if self.stage is RolloutStage.low_risk_canary else None
             ),
         )
         decision_payload = {
-            "schema_version": "rollout_decision@2",
+            "schema_version": "rollout_decision@3",
             "requested_stage": self.stage,
             "risk": risk,
             "allowed": self.allowed,
@@ -54,11 +53,10 @@ class FakePublicationGate:
             ),
             "reasons": [] if self.allowed else self.reasons,
             "evaluation_summary_sha256": "d" * 64,
+            "segmented_report_sha256": "9" * 64,
             "policy_sha256": "c" * 64,
             "canary_identity_sha256": (
-                "b" * 64
-                if self.stage is RolloutStage.low_risk_canary
-                else None
+                "b" * 64 if self.stage is RolloutStage.low_risk_canary else None
             ),
             "canary_bucket": (
                 0 if self.stage is RolloutStage.low_risk_canary else None
@@ -69,12 +67,14 @@ class FakePublicationGate:
             decision_sha256=canonical_sha256(decision_payload),
         )
         authorization_payload = {
-            "schema_version": "publication_authorization@2",
+            "schema_version": "publication_authorization@4",
             "request": request.model_dump(mode="python"),
             "expected_model": "test-model@1",
             "expected_codegen_revision": "test-revision",
             "expected_candidate_identity_sha256": "a" * 64,
+            "expected_egress_policy_sha256": "8" * 64,
             "report_sha256": "e" * 64,
+            "segmented_report_sha256": "9" * 64,
             "bundle_sha256": "f" * 64,
             "policy_sha256": "c" * 64,
             "decision": decision.model_dump(mode="python"),

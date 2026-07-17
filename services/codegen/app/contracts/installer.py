@@ -15,6 +15,7 @@ import selectors
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -27,14 +28,17 @@ from app.contracts.cache import sha256_file
 from app.contracts.models import (
     ContractCheckRequest,
     ContractCheckResult,
+    ContractCheckStatus,
     ContractInstallRequest,
     ContractInstallResult,
     ContractResolution,
 )
+from app.egress import inherited_proxy_environment
 
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _DEFAULT_OUTPUT_LIMIT = 32_000
+_TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _SECRET_MARKERS = (
     "ANTHROPIC",
     "APDL",
@@ -57,6 +61,7 @@ class CommandResult:
     output: str = ""
     timed_out: bool = False
     output_truncated: bool = False
+    started: bool = True
 
 
 class CommandExecutor(Protocol):
@@ -81,7 +86,7 @@ def sanitized_environment(
 ) -> dict[str, str]:
     """Build a fresh subprocess environment with no application/model secrets."""
     environment = {
-        "PATH": os.environ.get("PATH", os.defpath),
+        "PATH": _TRUSTED_SYSTEM_PATH,
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
         "HOME": home.as_posix(),
@@ -96,6 +101,7 @@ def sanitized_environment(
         "PIP_CONFIG_FILE": os.devnull,
         "PYTHONNOUSERSITE": "1",
     }
+    environment.update(inherited_proxy_environment())
     for name, value in (extra or {}).items():
         if _secret_name(name):
             raise ValueError(f"Refusing secret-like environment field: {name}")
@@ -130,7 +136,7 @@ class BoundedCommandExecutor:
                 start_new_session=True,
             )
         except OSError as exc:
-            return CommandResult(returncode=127, output=str(exc))
+            return CommandResult(returncode=127, output=str(exc), started=False)
         assert process.stdout is not None
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
@@ -459,6 +465,25 @@ def _safe_executable(installed_root: Path, relative: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _trusted_root_executable(name: str) -> Path | None:
+    candidate = shutil.which(name, path=_TRUSTED_SYSTEM_PATH)
+    if candidate is None:
+        return None
+    try:
+        resolved = Path(candidate).resolve(strict=True)
+    except OSError:
+        return None
+    return resolved if resolved.is_absolute() and resolved.is_file() else None
+
+
+def _root_python() -> Path | None:
+    try:
+        resolved = Path(sys.executable).resolve(strict=True)
+    except OSError:
+        return None
+    return resolved if resolved.is_absolute() and resolved.is_file() else None
+
+
 class SandboxedCheckRunner:
     """Compile/typecheck examples statically; zero exit is the only pass."""
 
@@ -479,10 +504,35 @@ class SandboxedCheckRunner:
 
     def _failure(self, command: str, output: str) -> ContractCheckResult:
         return ContractCheckResult(
-            passed=False,
+            status=ContractCheckStatus.unavailable,
             command=command,
             tool_version="unavailable",
             output=output,
+        )
+
+    @staticmethod
+    def _result(
+        *,
+        result: CommandResult,
+        command: str,
+        tool_version: str,
+    ) -> ContractCheckResult:
+        if (
+            not result.started
+            or result.timed_out
+            or result.returncode < 0
+            or result.returncode in {126, 127}
+        ):
+            status = ContractCheckStatus.unavailable
+        elif result.returncode == 0:
+            status = ContractCheckStatus.passed
+        else:
+            status = ContractCheckStatus.failed
+        return ContractCheckResult(
+            status=status,
+            command=command,
+            tool_version=tool_version,
+            output=result.output,
         )
 
     def __call__(self, request: ContractCheckRequest) -> ContractCheckResult:
@@ -517,11 +567,12 @@ class SandboxedCheckRunner:
         work: Path,
         home: Path,
     ) -> ContractCheckResult:
-        tsc = _safe_executable(installed_root, "node_modules/.bin/tsc")
+        node = _trusted_root_executable("node")
+        tsc = _safe_executable(installed_root, "node_modules/typescript/bin/tsc")
         metadata = _safe_repo_path(
             installed_root, "node_modules/typescript/package.json"
         )
-        if tsc is None or metadata is None or not metadata.is_file():
+        if node is None or tsc is None or metadata is None or not metadata.is_file():
             return self._failure(
                 "tsc --noEmit", "Installed TypeScript compiler unavailable."
             )
@@ -541,6 +592,7 @@ class SandboxedCheckRunner:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(request.snippet)
             argv = (
+                node.as_posix(),
                 tsc.as_posix(),
                 "--noEmit",
                 "--skipLibCheck",
@@ -566,11 +618,11 @@ class SandboxedCheckRunner:
                 )
         finally:
             example.unlink(missing_ok=True)
-        return ContractCheckResult(
-            passed=result.returncode == 0,
-            command=" ".join(argv),
+        command = " ".join(argv)
+        return self._result(
+            result=result,
+            command=command,
             tool_version=tool_version,
-            output=result.output,
         )
 
     def _check_python(
@@ -583,6 +635,9 @@ class SandboxedCheckRunner:
         site_packages = locate_python_site_packages(installed_root)
         if site_packages is None:
             return self._failure("typecheck", "Python site-packages unavailable.")
+        python = _root_python()
+        if python is None:
+            return self._failure("typecheck", "Root Python interpreter unavailable.")
         pyright = _safe_executable(installed_root, "bin/pyright")
         mypy = _safe_executable(installed_root, "bin/mypy")
         if pyright is not None:
@@ -602,7 +657,12 @@ class SandboxedCheckRunner:
             )
         example = work / "contract_example.py"
         example.write_text(request.snippet, encoding="utf-8")
-        argv = (executable.as_posix(), *argv_tail, example.as_posix())
+        argv = (
+            python.as_posix(),
+            executable.as_posix(),
+            *argv_tail,
+            example.as_posix(),
+        )
         try:
             result = self._executor(
                 argv,
@@ -615,11 +675,11 @@ class SandboxedCheckRunner:
             )
         except Exception as exc:
             return self._failure(" ".join(argv), f"Python checker failed: {exc}")
-        return ContractCheckResult(
-            passed=result.returncode == 0,
-            command=" ".join(argv),
+        command = " ".join(argv)
+        return self._result(
+            result=result,
+            command=command,
             tool_version=tool_version,
-            output=result.output,
         )
 
 

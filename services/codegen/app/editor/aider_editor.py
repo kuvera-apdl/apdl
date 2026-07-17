@@ -13,16 +13,18 @@ trusted local repositories while publication is disabled. The real isolated path
 still needs integration evidence with a model key and disposable live repository;
 the deterministic boundary and argv/env construction are unit-tested.
 
-Token custody (entirely ours now — there is no Anthropic git proxy): the GitHub
-installation token is used only by the orchestrator for clone/push, injected into
-git as a one-shot ``http.extraHeader`` via ``GIT_CONFIG_*`` environment variables.
-Going through the env (not ``-c`` on the command line) keeps the header — and the
-reversible base64 token inside it — off git's argv, so it can't leak through
-``ps`` / ``/proc/<pid>/cmdline``; it is likewise never written to ``.git/config``.
-It is never handed to Aider: that process runs with an isolated home, empty
-service-owned configuration, and only the required model-provider credentials —
-never the GitHub token or APDL service secrets. Repository-defined commands are
-disabled; GitHub CI is the execution authority.
+Token custody (entirely ours now — there is no Anthropic git proxy): this editor
+receives only a read-scoped GitHub token for its clone. The controller later
+reconstructs the gated patch and acquires a separate just-in-time write token for
+publication. Git credentials are injected as a one-shot ``http.extraHeader`` via
+``GIT_CONFIG_*`` environment variables. Going through the env (not ``-c`` on the
+command line) keeps the header — and the reversible base64 token inside it — off
+git's argv, so it cannot leak through ``ps`` / ``/proc/<pid>/cmdline``; it is
+likewise never written to ``.git/config``. The token is never handed to Aider:
+that process runs with an isolated home, empty service-owned configuration, and
+only the required model-provider credentials — never a GitHub token or APDL
+service secrets. Repository-defined commands are disabled; GitHub CI is the
+execution authority.
 """
 
 from __future__ import annotations
@@ -71,8 +73,10 @@ from app.editor.deadlines import (
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
 from app.editor.prompts import append_prompt, replace_latest_prompt
+from app.egress import EGRESS_PROXY_ENV
 from app.inspection import (
     DependencySlice,
+    InspectionPathError,
     InspectionSnapshot,
     RepositoryInspector,
     build_dependency_slice,
@@ -100,6 +104,11 @@ from app.runtime.models import (
 from app.runtime.planner import build_runtime_acceptance_plan
 from app.runtime.render import render_runtime_acceptance_plan
 from app.safety.gates import evaluate_pre_push
+from app.safety.paths import (
+    ChangedPathError,
+    parse_git_changed_paths,
+    parse_git_numstat,
+)
 from app.safety.policy import VerifiedProtectedPathExemption
 from app.semantic_review import (
     ModelResponseStatus,
@@ -125,6 +134,7 @@ from app.verification import (
 logger = logging.getLogger(__name__)
 
 _DIFF_TEXT_CAP = 1_000_000  # cap the diff text fed to the secret scan (chars)
+_PATCH_BYTES_CAP = 16 * 1024 * 1024
 _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 # Verification/test failures are the actionable ``tests_failed`` case an operator
 # reads to fix the change, so they get a much larger budget: a build/test log's
@@ -158,6 +168,7 @@ class _DeadlineCommandExecutor:
                 returncode=124,
                 output="[…Codegen job deadline exhausted before command start…]",
                 timed_out=True,
+                started=False,
             )
         return self._delegate(
             argv,
@@ -166,6 +177,7 @@ class _DeadlineCommandExecutor:
             timeout_seconds=timeout,
             output_limit=output_limit,
         )
+
 
 _PROFILE_INPUT_NAMES = {
     "package.json",
@@ -223,7 +235,9 @@ _ENV_PASSTHROUGH: tuple[str, ...] = (
     "AZURE_API_KEY",
     "AZURE_API_BASE",
     "AZURE_API_VERSION",
+    *EGRESS_PROXY_ENV,
 )
+
 
 def _basic_auth_header(token: str) -> str:
     """GitHub App token → a one-shot Basic auth header value (never persisted)."""
@@ -251,29 +265,25 @@ def _agent_env(home: Path) -> dict[str, str]:
 
 def _git_env() -> dict[str, str]:
     """Git environment: no credential prompts, no inherited app/LLM secrets."""
-    env = {k: os.environ[k] for k in ("PATH", "HOME", "LANG") if k in os.environ}
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "LANG", *EGRESS_PROXY_ENV)
+        if key in os.environ
+    }
     env.setdefault("PATH", os.defpath)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     return env
 
 
-def _parse_numstat(numstat: str) -> dict[str, int]:
-    """Parse ``git diff --numstat`` into a diff_stat dict.
+def _parse_numstat(numstat: bytes) -> tuple[dict[str, int], list[str]]:
+    """Parse strict NUL-delimited numstat bytes and retain their exact paths."""
+    return parse_git_numstat(numstat)
 
-    Returns ``{"files", "additions", "deletions"}``. Binary files render their
-    counts as ``-``; they count toward ``files`` but contribute zero lines.
-    """
-    files = additions = deletions = 0
-    for line in numstat.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        added, removed, _path = parts
-        files += 1
-        additions += int(added) if added.isdigit() else 0
-        deletions += int(removed) if removed.isdigit() else 0
-    return {"files": files, "additions": additions, "deletions": deletions}
+
+def _git_error(output: bytes) -> str:
+    """Decode diagnostic Git output without weakening strict path decoding."""
+    return _tail(output.decode("utf-8", "replace"))
 
 
 def _capability_preamble(has_test_runner: bool, verify_cmd: str | None) -> str:
@@ -662,9 +672,7 @@ class AiderEditor:
                 if scratch_base == repo_dir or repo_dir in scratch_base.parents:
                     continue
                 try:
-                    work = Path(
-                        tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base)
-                    )
+                    work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base))
                 except OSError:
                     continue
                 break
@@ -729,8 +737,23 @@ class AiderEditor:
                 profile,
                 policy=request.runtime_acceptance_policy,
             )
-            if workflow_path.exists():
-                current = workflow_path.read_text(encoding="utf-8")
+            try:
+                workflow_contents = RepositoryInspector(repo_dir).text_view()
+                workflow_present = workflow_contents.contains(workflow_relative)
+                inspected_workflow = workflow_contents.inspect(workflow_relative)
+            except InspectionPathError as exc:
+                return (
+                    False,
+                    "runtime workflow inspection refused: " + str(exc),
+                )
+            if workflow_present:
+                if inspected_workflow is None:
+                    return (
+                        False,
+                        "runtime workflow inspection refused: the reserved path "
+                        "does not contain inspectable UTF-8 text",
+                    )
+                current = inspected_workflow.text
                 if current == desired:
                     return False, None
                 if not workflow_content_is_apdl_owned(current):
@@ -746,8 +769,7 @@ class AiderEditor:
             if rc != 0:
                 return (
                     False,
-                    "could not stage the authorized runtime workflow: "
-                    + _tail(out),
+                    "could not stage the authorized runtime workflow: " + _tail(out),
                 )
             rc, out = await self._git(
                 repo_dir,
@@ -756,8 +778,7 @@ class AiderEditor:
             if rc != 0:
                 return (
                     False,
-                    "could not commit the authorized runtime workflow: "
-                    + _tail(out),
+                    "could not commit the authorized runtime workflow: " + _tail(out),
                 )
             return True, None
 
@@ -767,8 +788,28 @@ class AiderEditor:
             # 1. Production clones with one-shot auth.  Offline/shadow evaluation
             #    instead receives one clean, mutation-materialized checkout and
             #    must never gain a remote repository capability.
+            preflight = request.repository_preflight
+            source_branch = (
+                request.branch if request.existing_branch else request.base_branch
+            )
+            if not workspace_mode and config.codegen_isolated_worker() and preflight is None:
+                return fail(
+                    "Isolated repository editing requires credential-free preflight "
+                    "evidence."
+                )
+            if preflight is not None and (
+                preflight.repository != request.repo
+                or preflight.source_branch != source_branch
+            ):
+                return fail(
+                    "Repository preflight identity does not match the edit request."
+                )
             if workspace_mode:
-                if request.revert_sha or request.existing_branch or request.expected_head_sha:
+                if (
+                    request.revert_sha
+                    or request.existing_branch
+                    or request.expected_head_sha
+                ):
                     return fail(
                         "Workspace evaluation does not support remote revert or "
                         "existing-branch repair inputs."
@@ -804,9 +845,6 @@ class AiderEditor:
             else:
                 # Repairs clone the existing PR branch; initial runs clone base
                 # and cut a new branch exactly as before.
-                clone_branch = (
-                    request.branch if request.existing_branch else request.base_branch
-                )
                 rc, out = await self._git(
                     None,
                     [
@@ -814,7 +852,7 @@ class AiderEditor:
                         "--depth",
                         "1",
                         "--branch",
-                        clone_branch,
+                        source_branch,
                         clone_url,
                         str(repo_dir),
                     ],
@@ -826,6 +864,24 @@ class AiderEditor:
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
             baseline = baseline.strip()
+            if preflight is not None:
+                # Trust-promotion boundary: the provider-bearing process may not
+                # derive any repository prompt/profile input until its checkout is
+                # proven Git-object-for-Git-object to be the symlink-free tree
+                # inspected in the separate credential-free PID namespace. A
+                # branch race therefore exits before `_probe_repo`, brief
+                # construction, contract reads, or any model invocation.
+                if baseline != preflight.head_sha:
+                    return fail(
+                        "Repository source moved after credential-free preflight."
+                    )
+                rc, source_tree = await self._git(
+                    repo_dir, ["rev-parse", "HEAD^{tree}"]
+                )
+                if rc != 0 or source_tree.strip() != preflight.tree_sha:
+                    return fail(
+                        "Repository tree does not match credential-free preflight."
+                    )
             if request.expected_head_sha and baseline != request.expected_head_sha:
                 return fail(
                     "Repair refused because the PR head changed from "
@@ -868,9 +924,7 @@ class AiderEditor:
                     "request can be created."
                 )
 
-            inspection_snapshot = _inspection_for_ledger(
-                repo_dir, requirement_ledger
-            )
+            inspection_snapshot = _inspection_for_ledger(repo_dir, requirement_ledger)
             verification_plan = build_verification_plan(
                 requirement_ledger, repo_profile
             )
@@ -1213,11 +1267,23 @@ class AiderEditor:
                 agent_pending = True
 
                 # Compute the diff for the review + pre-push gates. No diff → no PR.
-                rc, names = await self._git(
-                    repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                rc, names = await self._git_bytes(
+                    repo_dir,
+                    [
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        "--no-renames",
+                        f"{base}..HEAD",
+                    ],
                 )
-                changed_paths = [p for p in names.splitlines() if p.strip()]
-                if rc != 0 or not changed_paths:
+                if rc != 0:
+                    return fail(f"could not inspect changed paths: {_git_error(names)}")
+                try:
+                    changed_paths = parse_git_changed_paths(names)
+                except ChangedPathError as exc:
+                    return fail(f"could not inspect changed paths safely: {exc}")
+                if not changed_paths:
                     # Surface aider's own output so a no-op edit (e.g. an unreachable
                     # or misnamed model) is diagnosable from the changeset error.
                     return fail(
@@ -1237,10 +1303,11 @@ class AiderEditor:
                         verification_plan,
                         policy=request.runtime_acceptance_policy,
                     )
-                    workflow_changed, workflow_error = (
-                        await synchronize_runtime_workflow(
-                            repo_profile, runtime_acceptance_plan
-                        )
+                    (
+                        workflow_changed,
+                        workflow_error,
+                    ) = await synchronize_runtime_workflow(
+                        repo_profile, runtime_acceptance_plan
                     )
                     if workflow_error:
                         return fail(workflow_error)
@@ -1259,14 +1326,28 @@ class AiderEditor:
                             verification_plan,
                             policy=request.runtime_acceptance_policy,
                         )
-                        rc, names = await self._git(
-                            repo_dir, ["diff", "--name-only", f"{base}..HEAD"]
+                        rc, names = await self._git_bytes(
+                            repo_dir,
+                            [
+                                "diff",
+                                "--name-only",
+                                "-z",
+                                "--no-renames",
+                                f"{base}..HEAD",
+                            ],
                         )
                         if rc != 0:
-                            return fail("could not inspect regenerated workflow diff")
-                        changed_paths = [
-                            path for path in names.splitlines() if path.strip()
-                        ]
+                            return fail(
+                                "could not inspect regenerated workflow diff: "
+                                + _git_error(names)
+                            )
+                        try:
+                            changed_paths = parse_git_changed_paths(names)
+                        except ChangedPathError as exc:
+                            return fail(
+                                "could not inspect regenerated workflow diff safely: "
+                                f"{exc}"
+                            )
                         _, diff_text = await self._git(
                             repo_dir, ["diff", f"{base}..HEAD"]
                         )
@@ -1279,8 +1360,7 @@ class AiderEditor:
                     policy_authorized_workflow_paths=(
                         [RUNTIME_ACCEPTANCE_WORKFLOW_PATH]
                         if request.runtime_acceptance_policy.enabled
-                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH
-                        in changed_paths
+                        and RUNTIME_ACCEPTANCE_WORKFLOW_PATH in changed_paths
                         else []
                     ),
                 )
@@ -1466,10 +1546,26 @@ class AiderEditor:
                     "map to changed or confirmed-existing code before PR creation."
                 )
 
-            _, numstat = await self._git(
-                repo_dir, ["diff", "--numstat", f"{base}..HEAD"]
+            rc, numstat = await self._git_bytes(
+                repo_dir,
+                [
+                    "diff",
+                    "--numstat",
+                    "-z",
+                    "--no-renames",
+                    f"{base}..HEAD",
+                ],
             )
-            diff_stat = _parse_numstat(numstat)
+            if rc != 0:
+                return fail(f"could not inspect diff statistics: {_git_error(numstat)}")
+            try:
+                diff_stat, numstat_paths = _parse_numstat(numstat)
+            except ChangedPathError as exc:
+                return fail(f"could not inspect diff statistics safely: {exc}")
+            if numstat_paths != changed_paths:
+                return fail(
+                    "Git changed-path and numstat records disagree; branch NOT pushed."
+                )
 
             # Contract evidence is valid only for the exact manifest/lockfile
             # hashes it was compiled from. A dependency edit must be resolved in
@@ -1496,19 +1592,24 @@ class AiderEditor:
                 and runtime_acceptance_plan is not None
                 and runtime_acceptance_plan.checks
             ):
-                workflow_path = (
-                    repo_dir
-                    / RUNTIME_ACCEPTANCE_WORKFLOW_PATH
-                )
                 expected_workflow = render_github_actions_workflow(
                     runtime_acceptance_plan,
                     repo_profile,
                     policy=request.runtime_acceptance_policy,
                 )
+                try:
+                    workflow_contents = RepositoryInspector(repo_dir).text_view()
+                    inspected_workflow = workflow_contents.inspect(
+                        RUNTIME_ACCEPTANCE_WORKFLOW_PATH
+                    )
+                except InspectionPathError as exc:
+                    return fail(
+                        "The policy-authorized runtime workflow could not be "
+                        f"inspected safely: {exc}"
+                    )
                 if (
-                    not workflow_path.is_file()
-                    or workflow_path.read_text(encoding="utf-8")
-                    != expected_workflow
+                    inspected_workflow is None
+                    or inspected_workflow.text != expected_workflow
                 ):
                     return fail(
                         "The policy-authorized runtime workflow does not match "
@@ -1549,29 +1650,32 @@ class AiderEditor:
                     + "; ".join(gate.violations)
                 )
 
-            # 6. Production publishes the gated branch.  Evaluation deliberately
-            #    leaves the resulting commit only in its materialized workspace;
-            #    the sealed outer harness inspects that tree after this returns.
-            if not workspace_mode:
-                push_args = ["push"]
-                if request.expected_head_sha:
-                    push_args.append(
-                        "--force-with-lease="
-                        f"refs/heads/{request.branch}:{request.expected_head_sha}"
-                    )
-                push_args += ["origin", f"{request.branch}:{request.branch}"]
-                assert header is not None
-                rc, out = await self._git(
-                    repo_dir,
-                    push_args,
-                    auth_header=header,
-                )
-                if rc != 0:
-                    return fail(f"push failed: {_tail(out)}")
+            # 6. Return a content-addressed binary patch. The model worker never
+            #    receives write authority and never pushes. The controller later
+            #    reconstructs this exact tree with read authority, verifies its
+            #    SHA, and acquires a just-in-time write token only for `git push`.
             rc, head_sha = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
-                label = "workspace" if workspace_mode else "pushed"
-                return fail(f"could not resolve {label} head: {_tail(head_sha)}")
+                return fail(f"could not resolve candidate head: {_tail(head_sha)}")
+            rc, tree_sha = await self._git(repo_dir, ["rev-parse", "HEAD^{tree}"])
+            if rc != 0:
+                return fail(f"could not resolve candidate tree: {_tail(tree_sha)}")
+            rc, patch = await self._git_bytes(
+                repo_dir,
+                [
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-renames",
+                    f"{base}..HEAD",
+                ],
+            )
+            if rc != 0:
+                return fail(f"could not render candidate patch: {_git_error(patch)}")
+            if not patch:
+                return fail("candidate patch is empty after successful gating")
+            if len(patch) > _PATCH_BYTES_CAP:
+                return fail(f"candidate patch exceeds {_PATCH_BYTES_CAP} bytes")
 
             return EditResult(
                 success=True,
@@ -1581,6 +1685,9 @@ class AiderEditor:
                 diff_text=diff_text[:_DIFF_TEXT_CAP],
                 prompts=prompts,
                 head_sha=head_sha.strip(),
+                base_sha=baseline,
+                candidate_tree_sha=tree_sha.strip(),
+                patch_base64=base64.b64encode(patch).decode("ascii"),
                 contract_bundle=contract_bundle,
                 requirement_ledger=requirement_ledger,
                 inspection_snapshot=inspection_snapshot,
@@ -1599,6 +1706,28 @@ class AiderEditor:
     async def _git(
         self, cwd: Path | None, args: list[str], *, auth_header: str | None = None
     ) -> tuple[int, str]:
+        argv, env = self._git_invocation(cwd, args, auth_header=auth_header)
+        return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
+
+    async def _git_bytes(
+        self, cwd: Path | None, args: list[str], *, auth_header: str | None = None
+    ) -> tuple[int, bytes]:
+        """Run Git without decoding security-sensitive path output."""
+        argv, env = self._git_invocation(cwd, args, auth_header=auth_header)
+        return await self._exec_bytes(
+            argv,
+            cwd=None,
+            env=env,
+            timeout=self._git_timeout,
+        )
+
+    @staticmethod
+    def _git_invocation(
+        cwd: Path | None,
+        args: list[str],
+        *,
+        auth_header: str | None,
+    ) -> tuple[list[str], dict[str, str]]:
         env = _git_env()
         if auth_header is not None:
             # Inject the one-shot ``http.extraHeader`` via GIT_CONFIG_* env vars
@@ -1614,7 +1743,7 @@ class AiderEditor:
         if cwd is not None:
             argv += ["-C", str(cwd)]
         argv += args
-        return await self._exec(argv, cwd=None, env=env, timeout=self._git_timeout)
+        return argv, env
 
     async def _revert_commit(
         self, repo_dir: Path, sha: str, auth_header: str
@@ -1661,6 +1790,23 @@ class AiderEditor:
         A non-zero exit is data, not an error — only spawn faults or a timeout
         surface as exceptions (caught by :meth:`implement`) or a synthetic 124.
         """
+        returncode, output = await self._exec_bytes(
+            argv,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+        )
+        return returncode, output.decode("utf-8", "replace")
+
+    async def _exec_bytes(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path | None,
+        env: dict[str, str],
+        timeout: int | float,
+    ) -> tuple[int, bytes]:
+        """Run a subprocess and return undecoded combined output bytes."""
         deadline = _RUN_DEADLINE.get()
         if deadline is not None:
             try:
@@ -1668,7 +1814,7 @@ class AiderEditor:
             except CodegenDeadlineExceeded:
                 return (
                     124,
-                    "Codegen job deadline exhausted before subprocess start",
+                    b"Codegen job deadline exhausted before subprocess start",
                 )
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -1682,5 +1828,5 @@ class AiderEditor:
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return 124, f"timed out after {timeout}s"
-        return proc.returncode or 0, (stdout or b"").decode("utf-8", "replace")
+            return 124, f"timed out after {timeout}s".encode()
+        return proc.returncode or 0, stdout or b""

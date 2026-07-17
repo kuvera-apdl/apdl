@@ -15,7 +15,15 @@ services:
       CODEGEN_ROLLOUT_AUTHORIZATION_PATH: /run/apdl/codegen/publication-bundle.json
       CODEGEN_SANDBOX: docker
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:?set the evaluated candidate image}
-      CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:?set an egress-filtered Docker network}
+      CODEGEN_SANDBOX_NETWORK: ""
+      CODEGEN_EGRESS_POLICY_SHA256: ${CODEGEN_EGRESS_POLICY_SHA256:?set the evaluated egress policy digest}
+      CODEGEN_EGRESS_PROXY_IMAGE_ID: ${CODEGEN_EGRESS_PROXY_IMAGE:?set the evaluated egress proxy image ID}
+      CODEGEN_EGRESS_SOCKET_VOLUME: ${CODEGEN_EGRESS_SOCKET_VOLUME:?set the controller-owned egress socket volume}
+      CODEGEN_EGRESS_PROXY_URL: http://127.0.0.1:3128
+      # Candidate identity binds this fixed reviewed concurrency. The socket
+      # proxy supports sequential workers only until a separately evaluated
+      # multi-tenant transport contract is introduced.
+      CODEGEN_MAX_CONCURRENT_JOBS: "1"
       DOCKER_HOST: unix:///var/run/docker.sock
       # Preserve every behavior-affecting setting admitted by the candidate's
       # canonical environment contract. Defaults mirror app.config; explicit
@@ -57,3 +65,6 @@ services:
         source: ${CODEGEN_ROLLOUT_BUNDLE_PATH:?set the absolute publication bundle path}
         target: /run/apdl/codegen/publication-bundle.json
         read_only: true
+    depends_on:
+      codegen-egress-proxy:
+        condition: service_healthy

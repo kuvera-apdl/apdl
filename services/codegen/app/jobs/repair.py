@@ -12,7 +12,7 @@ import asyncpg
 
 from app.config import codegen_ci_repair_budget_seconds, codegen_ci_repair_retries
 from app.editor.base import Editor, EditRequest, EditResult
-from app.evaluations.models import RiskLevel
+from app.github.publisher import BranchPublisher
 from app.models.observations import (
     CIRemediationAttempt,
     CIRemediationStatus,
@@ -141,9 +141,7 @@ def _render_runtime_evidence(
     if not diagnostics:
         values.append("\n- None.")
     for diagnostic in diagnostics:
-        values.append(
-            "\n- " + _bounded_utf8(diagnostic, _RUNTIME_DIAGNOSTIC_BYTES)
-        )
+        values.append("\n- " + _bounded_utf8(diagnostic, _RUNTIME_DIAGNOSTIC_BYTES))
     if len(observation.collection_errors) > len(diagnostics):
         values.append(
             f"\n- {len(observation.collection_errors) - len(diagnostics)} additional "
@@ -277,7 +275,9 @@ async def _persist_result_evidence(
     pool: asyncpg.Pool, changeset_id: str, result: EditResult, prior_prompts: list[dict]
 ) -> None:
     if result.contract_bundle is not None:
-        await changeset_store.set_contract_bundle(pool, changeset_id, result.contract_bundle)
+        await changeset_store.set_contract_bundle(
+            pool, changeset_id, result.contract_bundle
+        )
     if result.requirement_ledger is not None:
         await changeset_store.set_requirement_ledger(
             pool, changeset_id, result.requirement_ledger
@@ -361,7 +361,9 @@ async def repair_failed_ci(
     observation: CIVerificationObservation,
     *,
     editor: Editor,
-    mint_token: TokenMinter,
+    mint_read_token: TokenMinter,
+    mint_write_token: TokenMinter,
+    branch_publisher: BranchPublisher,
     publication_gate: PublicationGate,
     platform_safety_policy: PlatformCodegenSafetyPolicy | None = None,
 ) -> None:
@@ -396,9 +398,7 @@ async def repair_failed_ci(
         )
         runtime_evidence = None
     try:
-        changeset = await changeset_store.get_changeset(
-            pool, observation.changeset_id
-        )
+        changeset = await changeset_store.get_changeset(pool, observation.changeset_id)
     except Exception:
         logger.warning(
             "Could not read changeset while preparing CI repair %s",
@@ -502,9 +502,7 @@ async def repair_failed_ci(
         )
         return
     try:
-        risk = RiskLevel(
-            str(changeset.task.context.get("risk_level") or "low").lower()
-        )
+        risk = changeset.controls.risk_level
         authorization = publication_gate.authorize(
             risk=risk,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
@@ -573,11 +571,9 @@ async def repair_failed_ci(
             pool,
             observation.changeset_id,
             tenant_policy_snapshot=tenant_policy,
-            effective_safety_policy_sha256=(
-                effective_safety_policy.canonical_digest()
-            ),
+            effective_safety_policy_sha256=(effective_safety_policy.canonical_digest()),
         )
-        async with mint_token(observation.changeset_id) as token:
+        async with mint_read_token(observation.changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
                     repo=connection.repository_full_name,
@@ -655,12 +651,56 @@ async def repair_failed_ci(
         policy=effective_safety_policy,
         verified_exemptions=verified_exemptions,
     )
-    success = result.success and gate.passed and bool(result.head_sha)
+    has_candidate = bool(
+        result.head_sha
+        and result.base_sha
+        and result.candidate_tree_sha
+        and result.patch_base64
+    )
+    success = result.success and gate.passed and has_candidate
     error = result.error
     if result.success and not gate.passed:
         error = "CI repair pre-push gate failed: " + "; ".join(gate.violations)
-    if result.success and not result.head_sha:
-        error = "CI repair did not return the pushed head SHA."
+    if result.success and gate.passed and not has_candidate:
+        error = (
+            "CI repair did not return a complete base/tree-bound publication candidate."
+        )
+    if success:
+        try:
+            assert result.base_sha is not None
+            assert result.candidate_tree_sha is not None
+            assert result.patch_base64 is not None
+            async with mint_read_token(observation.changeset_id) as token:
+                async with branch_publisher.prepare(
+                    repository=connection.repository_full_name,
+                    branch=changeset.branch,
+                    base_branch=(
+                        changeset.base_branch or connection.default_base_branch
+                    ),
+                    expected_base_sha=result.base_sha,
+                    expected_remote_sha=observation.head_sha,
+                    candidate_head_sha=result.head_sha,
+                    candidate_tree_sha=result.candidate_tree_sha,
+                    patch_base64=result.patch_base64,
+                    commit_title=f"Repair CI: {changeset.task.title}",
+                    read_token=token,
+                ) as prepared:
+                    async with mint_write_token(
+                        observation.changeset_id
+                    ) as write_token:
+                        published = await branch_publisher.push(
+                            prepared,
+                            write_token=write_token,
+                        )
+            result.branch = published.branch
+            result.head_sha = published.head_sha
+        except Exception as exc:
+            logger.exception(
+                "Controller-owned CI repair publication failed for %s",
+                observation.changeset_id,
+            )
+            success = False
+            error = f"CI repair publication failed: {exc}"
     projected = await project_repair_result(
         pool,
         changeset_id=observation.changeset_id,
@@ -668,9 +708,7 @@ async def repair_failed_ci(
         resulting_head_sha=result.head_sha if success else None,
         exhausted=not success,
         error=error,
-        runtime_acceptance_plan=(
-            result.runtime_acceptance_plan if success else None
-        ),
+        runtime_acceptance_plan=(result.runtime_acceptance_plan if success else None),
     )
     finished_at = datetime.now(timezone.utc)
     disposition = (
@@ -693,7 +731,9 @@ async def repair_failed_ci(
             started_at=started_at,
             recorded_at=finished_at,
             finished_at=(
-                None if disposition is RemediationDisposition.awaiting_ci else finished_at
+                None
+                if disposition is RemediationDisposition.awaiting_ci
+                else finished_at
             ),
             result=result,
             error=error,

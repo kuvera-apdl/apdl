@@ -88,6 +88,12 @@ async def test_operator_activation_revokes_old_grant_and_preserves_tenant_policy
     assert connection.target.installation_id == 99
     assert "installation_id" not in connection.model_dump(mode="json")
     assert "target" not in connection.model_dump(mode="json")
+    assert pool.store["grant_notifications"] == [
+        {
+            "channel": "codegen_repository_grant_revoked",
+            "grant_id": "ghg_originalrepository",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -123,6 +129,12 @@ async def test_operator_revocation_immediately_hides_active_connection():
         grant_id="ghg_verifiedgrant",
     )
     assert await get_connection(pool, "demo") is None
+    assert pool.store["grant_notifications"] == [
+        {
+            "channel": "codegen_repository_grant_revoked",
+            "grant_id": "ghg_verifiedgrant",
+        }
+    ]
     assert not await revoke_repository_grant(
         pool,
         project_id="demo",

@@ -172,6 +172,7 @@ class ConfiguredPublicationGate:
     model: str
     codegen_revision: str
     candidate_identity_sha256: str | None = None
+    egress_policy_sha256: str | None = None
     provider: PublicationAuthorizationProvider | None = None
     development_mode: bool = False
 
@@ -195,6 +196,11 @@ class ConfiguredPublicationGate:
         ):
             raise ValueError(
                 "evaluated PR rollout stages require the evaluated candidate "
+                "identity; other stages must not receive one"
+            )
+        if evaluated_publication_stage != (self.egress_policy_sha256 is not None):
+            raise ValueError(
+                "evaluated PR rollout stages require the attested egress policy "
                 "identity; other stages must not receive one"
             )
         if development_publication_stage != self.development_mode:
@@ -229,12 +235,15 @@ class ConfiguredPublicationGate:
             raise PublicationGateError("no trusted publication evidence is configured")
         if self.candidate_identity_sha256 is None:  # guarded by __post_init__
             raise PublicationGateError("no evaluated candidate identity is configured")
+        if self.egress_policy_sha256 is None:  # guarded by __post_init__
+            raise PublicationGateError("no attested egress policy is configured")
         request = PublicationRequest(
             requested_stage=self.stage,
             risk=risk,
             model=self.model,
             codegen_revision=self.codegen_revision,
             candidate_identity_sha256=self.candidate_identity_sha256,
+            egress_policy_sha256=self.egress_policy_sha256,
             canary_identity=(
                 canary_identity
                 if self.stage is RolloutStage.low_risk_canary

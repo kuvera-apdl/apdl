@@ -27,7 +27,11 @@ from app.config import (
     codegen_controller_image_id,
     codegen_cors_origins,
     codegen_development_mode,
+    codegen_egress_policy_sha256,
+    codegen_egress_proxy_image_id,
+    codegen_egress_socket_volume,
     codegen_job_budget,
+    codegen_max_concurrent_jobs,
     codegen_model,
     codegen_revision,
     codegen_rollout_authorization_path,
@@ -47,9 +51,16 @@ from app.editor.environment import codegen_behavior_configuration_sha256
 from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
 from app.github.checks import get_ci_evidence
-from app.github.pulls import get_pull_request, open_pull_request
+from app.github.publisher import GitBranchPublisher
+from app.github.pulls import (
+    close_pull_request,
+    find_pull_request_by_branch,
+    get_pull_request,
+    open_pull_request,
+)
 from app.github.token_broker import GitHubTokenBroker
 from app.jobs.ci_poller import run_github_poller
+from app.jobs.pr_publication import resume_pull_request_publication
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
@@ -58,6 +69,7 @@ from app.routers import changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
+from app.store import pr_publication as publication_store
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
 _ORPHAN_ERROR = (
@@ -94,17 +106,23 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
                 "development_pr requires CODEGEN_SANDBOX_NETWORK to name a "
                 "dedicated local sandbox network"
             )
-        if publication_stage and invalid_network:
+        if (
+            resolved_stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}
+            and network
+        ):
             raise RuntimeError(
-                "PR rollout stages require CODEGEN_SANDBOX_NETWORK to name an "
-                "operator-managed egress-filtered network"
+                "evaluated PR rollout stages use Docker --network none; "
+                "CODEGEN_SANDBOX_NETWORK must be empty"
             )
-        logger.info("Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)")
+        logger.info(
+            "Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)"
+        )
         editor = ContainerAiderEditor()
         if resolved_stage is RolloutStage.development_pr:
             editor.assert_runtime_ready(
                 expected_revision=codegen_revision(),
                 require_immutable_image=False,
+                require_egress_policy=False,
             )
         elif publication_stage:
             editor.assert_runtime_ready(expected_revision=codegen_revision())
@@ -128,6 +146,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
     development_mode = codegen_development_mode()
     provider = None
     candidate_identity = None
+    egress_policy_sha256 = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
         raw_path = codegen_rollout_authorization_path()
         if not raw_path:
@@ -139,25 +158,44 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             raise RuntimeError(
                 "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
             )
+        egress_policy_sha256 = codegen_egress_policy_sha256()
+        if not egress_policy_sha256:
+            raise RuntimeError(
+                "CODEGEN_EGRESS_POLICY_SHA256 is required for PR rollout stages"
+            )
+        egress_proxy_image_id = codegen_egress_proxy_image_id()
+        if not egress_proxy_image_id:
+            raise RuntimeError(
+                "CODEGEN_EGRESS_PROXY_IMAGE_ID is required for PR rollout stages"
+            )
+        if not codegen_egress_socket_volume():
+            raise RuntimeError(
+                "CODEGEN_EGRESS_SOCKET_VOLUME is required for PR rollout stages"
+            )
+        reviewed_max_concurrent_jobs = codegen_max_concurrent_jobs()
+        if reviewed_max_concurrent_jobs != 1:
+            raise RuntimeError(
+                "evaluated PR rollout stages require CODEGEN_MAX_CONCURRENT_JOBS=1"
+            )
         candidate_identity = CodegenCandidateIdentity.build(
             controller_image_id=codegen_controller_image_id(),
             candidate_image_id=codegen_sandbox_image(),
             codegen_revision=revision,
-            behavior_configuration_sha256=(
-                codegen_behavior_configuration_sha256()
-            ),
+            behavior_configuration_sha256=(codegen_behavior_configuration_sha256()),
+            egress_policy_sha256=egress_policy_sha256,
+            egress_proxy_image_id=egress_proxy_image_id,
+            reviewed_max_concurrent_jobs=reviewed_max_concurrent_jobs,
         )
         provider = load_publication_authorizer(
             artifact_path,
             expected_model=model,
             expected_codegen_revision=revision,
             expected_candidate_identity_sha256=candidate_identity.identity_sha256,
+            expected_egress_policy_sha256=egress_policy_sha256,
         )
     elif stage is RolloutStage.development_pr:
         if not development_mode:
-            raise RuntimeError(
-                "development_pr requires CODEGEN_DEVELOPMENT_MODE=true"
-            )
+            raise RuntimeError("development_pr requires CODEGEN_DEVELOPMENT_MODE=true")
         if codegen_rollout_authorization_path():
             raise RuntimeError(
                 "development_pr must not receive an evaluated rollout bundle"
@@ -175,6 +213,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             if candidate_identity is not None
             else None
         ),
+        egress_policy_sha256=egress_policy_sha256,
         provider=provider,
         development_mode=development_mode,
     )
@@ -187,7 +226,18 @@ async def lifespan(application: FastAPI):
     application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
     application.state.codegen_rollout_stage = publication_gate.stage
-    pool = await asyncpg.create_pool(postgres_url(), min_size=2, max_size=10)
+    # Attest the exact evaluated worker/proxy topology before opening database
+    # or GitHub-token lifecycle resources.
+    editor = _make_editor(publication_gate.stage)
+    # A recovering publication owns one session-level advisory lock connection.
+    # Keep independent capacity for token minting, the broker listener, and API
+    # traffic even when every configured worker is inside publication recovery.
+    pool_max_size = max(10, codegen_max_concurrent_jobs() + 4)
+    pool = await asyncpg.create_pool(
+        postgres_url(),
+        min_size=2,
+        max_size=pool_max_size,
+    )
     application.state.pg_pool = pool
     application.state.authenticator = PostgresAuthenticator(pool)
     token_broker = GitHubTokenBroker(pool)
@@ -195,6 +245,17 @@ async def lifespan(application: FastAPI):
 
     async with pool.acquire() as conn:
         await assert_schema_ready(conn)
+    await token_broker.start()
+    branch_publisher = GitBranchPublisher()
+    publication_recovery_deps = {
+        "mint_read_token": token_broker.read_changeset,
+        "mint_write_token": token_broker.write_changeset,
+        "mint_pr_write_token": token_broker.pr_write_changeset,
+        "branch_publisher": branch_publisher,
+        "open_pr": open_pull_request,
+        "find_pr": find_pull_request_by_branch,
+        "close_pr": close_pull_request,
+    }
 
     # Recover orphans: in-process background jobs can't survive a restart, so any
     # changeset left in an active (post-claim, pre-PR) state from before this
@@ -202,9 +263,22 @@ async def lifespan(application: FastAPI):
     # status forever. The deadline (2× the full per-job pipeline budget) keeps a
     # concurrent replica's in-flight work safe on the shared database; rows
     # younger than that are caught by the periodic sweeper once they age out.
+    orphan_deadline = 2 * codegen_job_budget()
+    recoverable_publications = await publication_store.list_recoverable_ids(
+        pool,
+        # Every intent predates this fresh process. Recovery is idempotent and
+        # branch-scoped, so resume immediately instead of waiting a job budget.
+        older_than_seconds=0,
+    )
+    for changeset_id in recoverable_publications:
+        await resume_pull_request_publication(
+            pool,
+            changeset_id,
+            **publication_recovery_deps,
+        )
     swept = await changeset_store.fail_stale_changesets(
         pool,
-        older_than_seconds=2 * codegen_job_budget(),
+        older_than_seconds=orphan_deadline,
         error=_ORPHAN_ERROR,
     )
     if swept:
@@ -213,7 +287,6 @@ async def lifespan(application: FastAPI):
         )
 
     # Dependencies for the changeset job runner (editing engine + PR opener).
-    editor = _make_editor(publication_gate.stage)
     repair_jobs: set[asyncio.Task] = set()
 
     def _repair_finished(task: asyncio.Task) -> None:
@@ -234,7 +307,9 @@ async def lifespan(application: FastAPI):
                 pool,
                 observation,
                 editor=editor,
-                mint_token=token_broker.write_changeset,
+                mint_read_token=token_broker.read_changeset,
+                mint_write_token=token_broker.write_changeset,
+                branch_publisher=branch_publisher,
                 publication_gate=publication_gate,
                 platform_safety_policy=platform_safety_policy,
             )
@@ -245,8 +320,13 @@ async def lifespan(application: FastAPI):
     application.state.repair_jobs = repair_jobs
     application.state.job_deps = {
         "editor": editor,
-        "mint_token": token_broker.write_changeset,
+        "mint_read_token": token_broker.read_changeset,
+        "mint_write_token": token_broker.write_changeset,
+        "mint_pr_write_token": token_broker.pr_write_changeset,
+        "branch_publisher": branch_publisher,
         "open_pr": open_pull_request,
+        "find_pr": find_pull_request_by_branch,
+        "close_pr": close_pull_request,
         "publication_gate": publication_gate,
         "platform_safety_policy": platform_safety_policy,
     }
@@ -304,8 +384,9 @@ async def lifespan(application: FastAPI):
             run_stale_sweeper(
                 pool,
                 interval_seconds=sweep_interval,
-                older_than_seconds=2 * codegen_job_budget(),
+                older_than_seconds=orphan_deadline,
                 error=_ORPHAN_ERROR,
+                **publication_recovery_deps,
             )
         )
     else:
@@ -330,6 +411,7 @@ async def lifespan(application: FastAPI):
         # worker. Await cancellation while PostgreSQL and broker dependencies
         # are alive so its context manager can revoke the credential cleanly.
         await asyncio.gather(*requeued_jobs, return_exceptions=True)
+    await token_broker.close()
     await pool.close()
     logger.info("Codegen service shut down: PostgreSQL pool closed")
 

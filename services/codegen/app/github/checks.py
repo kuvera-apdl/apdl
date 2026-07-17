@@ -9,7 +9,12 @@ from dataclasses import dataclass
 import httpx
 
 from app.config import github_api_url
-from app.github.client import gh_client, gh_headers, github_paginated_items
+from app.github.client import (
+    GitHubPaginationIncompleteError,
+    gh_client,
+    gh_headers,
+    github_json_pages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,28 @@ _MAX_ANNOTATIONS_PER_RUN = 50
 class GitHubCIEvidence:
     combined_status: dict
     check_runs: list[dict]
+    complete: bool = True
+    incomplete_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.complete:
+            if self.incomplete_reason is not None:
+                raise ValueError("complete CI evidence cannot have an incomplete reason")
+            return
+        if not self.incomplete_reason:
+            raise ValueError("incomplete CI evidence requires a reason")
+        if self.check_runs or self.combined_status.get("statuses"):
+            raise ValueError("incomplete CI evidence cannot expose partial signals")
+
+    @classmethod
+    def incomplete(cls, head_sha: str, reason: str) -> GitHubCIEvidence:
+        """Return explicit fail-closed evidence with no authoritative signals."""
+        return cls(
+            combined_status={"sha": head_sha, "statuses": []},
+            check_runs=[],
+            complete=False,
+            incomplete_reason=reason,
+        )
 
 
 async def get_ci_evidence(
@@ -51,21 +78,29 @@ async def get_ci_evidence(
             _get_combined_status(c, repo, head_sha, token)
         )
         checks_task = asyncio.create_task(
-            github_paginated_items(
+            _get_check_runs(
                 c,
-                (
-                    f"{base}/repos/{repo}/commits/{head_sha}/check-runs"
-                    f"?per_page={_PER_PAGE}"
-                ),
+                repo,
+                head_sha,
                 token,
-                "check_runs",
-                max_pages=_MAX_PAGES,
             )
         )
         try:
             combined, raw_check_runs = await asyncio.gather(
                 status_task, checks_task
             )
+        except GitHubPaginationIncompleteError as exc:
+            for task in (status_task, checks_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(status_task, checks_task, return_exceptions=True)
+            logger.warning(
+                "GitHub returned incomplete CI evidence for %s at %s: %s",
+                repo,
+                head_sha,
+                exc,
+            )
+            return GitHubCIEvidence.incomplete(head_sha, str(exc))
         except BaseException:
             # asyncio.gather propagates the first exception but deliberately
             # leaves siblings running. Cancel and join both requests before the
@@ -111,12 +146,96 @@ async def _get_combined_status(
     head_sha: str,
     token: str,
 ) -> dict:
-    response = await client.get(
-        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/status",
-        headers=gh_headers(token),
+    url = (
+        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/status"
+        f"?per_page={_PER_PAGE}"
     )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
+    combined: dict | None = None
+    statuses: list[dict] = []
+    expected_total: int | None = None
+    expected_identity: tuple[object, object] | None = None
+    async for payload in github_json_pages(
+        client,
+        url,
+        token,
+        max_pages=_MAX_PAGES,
+    ):
+        page_statuses = payload.get("statuses", [])
+        if not isinstance(page_statuses, list):
+            raise ValueError("GitHub combined statuses must be a list")
+        if not all(isinstance(status, dict) for status in page_statuses):
+            raise ValueError("GitHub commit-status entries must be objects")
+        page_total = _total_count(payload, "combined status")
+        identity = (payload.get("sha"), payload.get("state"))
+        if combined is None:
+            combined = dict(payload)
+            expected_total = page_total
+            expected_identity = identity
+        elif page_total != expected_total or identity != expected_identity:
+            raise GitHubPaginationIncompleteError(
+                "GitHub combined status changed during pagination"
+            )
+        statuses.extend(page_statuses)
+    if combined is None:
         raise ValueError("GitHub combined status must be an object")
-    return payload
+    _assert_complete_count("combined statuses", statuses, expected_total)
+    combined["statuses"] = statuses
+    return combined
+
+
+async def _get_check_runs(
+    client: httpx.AsyncClient,
+    repo: str,
+    head_sha: str,
+    token: str,
+) -> list[dict]:
+    url = (
+        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/check-runs"
+        f"?per_page={_PER_PAGE}"
+    )
+    check_runs: list[dict] = []
+    expected_total: int | None = None
+    first_page = True
+    async for payload in github_json_pages(
+        client,
+        url,
+        token,
+        max_pages=_MAX_PAGES,
+    ):
+        page_runs = payload.get("check_runs", [])
+        if not isinstance(page_runs, list):
+            raise ValueError("GitHub check-runs response must contain a list")
+        if not all(isinstance(run, dict) for run in page_runs):
+            raise ValueError("GitHub check-run entries must be objects")
+        page_total = _total_count(payload, "check runs")
+        if first_page:
+            expected_total = page_total
+            first_page = False
+        elif page_total != expected_total:
+            raise GitHubPaginationIncompleteError(
+                "GitHub check-run total changed during pagination"
+            )
+        check_runs.extend(page_runs)
+    _assert_complete_count("check runs", check_runs, expected_total)
+    return check_runs
+
+
+def _total_count(payload: dict, source: str) -> int | None:
+    if "total_count" not in payload:
+        return None
+    value = payload["total_count"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"GitHub {source} total_count must be a non-negative integer")
+    return value
+
+
+def _assert_complete_count(
+    source: str,
+    items: list[dict],
+    expected_total: int | None,
+) -> None:
+    if expected_total is not None and len(items) != expected_total:
+        raise GitHubPaginationIncompleteError(
+            f"GitHub {source} reported {expected_total} items "
+            f"but returned {len(items)}"
+        )

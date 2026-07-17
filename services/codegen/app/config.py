@@ -16,6 +16,13 @@ from app.editor.deadlines import (
     CodegenDeadlinePlan,
     resolve_codegen_deadline_plan,
 )
+from app.egress import (
+    EGRESS_PROXY_URL,
+    validate_policy_sha256,
+    validate_proxy_image_id,
+    validate_proxy_url,
+    validate_socket_volume,
+)
 from app.evaluations.models import RolloutStage
 from app.safety.policy import (
     PlatformCodegenSafetyPolicy,
@@ -238,13 +245,39 @@ def codegen_sandbox_mode() -> str:
 
 
 def codegen_sandbox_network() -> str:
-    """Named network used by the isolated worker."""
+    """Named network used only by the explicit development worker."""
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
+
+
+def codegen_egress_policy_sha256() -> str:
+    """Content identity of the shipped, evaluated worker egress policy."""
+    raw = os.getenv("CODEGEN_EGRESS_POLICY_SHA256", "").strip()
+    return validate_policy_sha256(raw) if raw else ""
+
+
+def codegen_egress_proxy_image_id() -> str:
+    """Immutable proxy image ID bound into evaluated publication evidence."""
+    raw = os.getenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", "").strip()
+    return validate_proxy_image_id(raw) if raw else ""
+
+
+def codegen_egress_socket_volume() -> str:
+    """Controller-owned volume carrying the proxy Unix socket."""
+    raw = os.getenv("CODEGEN_EGRESS_SOCKET_VOLUME", "").strip()
+    return validate_socket_volume(raw) if raw else ""
+
+
+def codegen_egress_proxy_url() -> str:
+    """Canonical proxy URL injected into credential-minimal workers."""
+    return validate_proxy_url(
+        os.getenv("CODEGEN_EGRESS_PROXY_URL", EGRESS_PROXY_URL).strip()
+    )
 
 
 def codegen_controller_image_id() -> str:
     """Immutable controller image ID used by publication evidence binding."""
-    return os.getenv("CODEGEN_CONTROLLER_IMAGE_ID", "").strip()
+    raw = os.getenv("CODEGEN_CONTROLLER_IMAGE_ID", "").strip()
+    return validate_proxy_image_id(raw) if raw else ""
 
 
 def codegen_sandbox_image() -> str:

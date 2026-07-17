@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.editor.brief import _MIN_BRIEF_CHARS, build_repo_digest, compile_brief
+from app.inspection.repository import InspectionPathError
 
 VALID_BRIEF = (
     "## Goal\nDeliver the thing.\n\n"
@@ -68,6 +69,20 @@ def test_digest_marks_truncation(tmp_path, monkeypatch):
 
     assert "truncated" in digest
     assert "c.ts" not in digest
+
+
+def test_digest_rejects_proc_like_readme_symlink(tmp_path):
+    outside = tmp_path.parent / "proc-like-secret"
+    outside.write_text(
+        "OPENAI_API_KEY=provider-secret-that-must-not-enter-the-digest\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").symlink_to(outside)
+
+    with pytest.raises(
+        InspectionPathError, match="repository contains a symbolic link"
+    ):
+        build_repo_digest(tmp_path)
 
 
 @pytest.mark.asyncio

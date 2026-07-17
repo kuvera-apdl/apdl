@@ -5,10 +5,16 @@ states get swept to ``error`` and which are left alone. The ``older_than_seconds
 deadline itself is enforced by real SQL (``updated_at < now() - …``).
 """
 
+import base64
+from datetime import UTC, datetime
+
 import pytest
 
 from app.models.changeset import ChangesetStatus
+from app.models.observations import ExternalCIStatus
+from app.models.pr_publication import PublicationIntentRecorded
 from app.store import changesets as store
+from app.store import pr_publication as publication_store
 from tests.fakes import FakePool
 
 #: Active (post-claim) states a dead job leaves behind — these get swept.
@@ -68,6 +74,48 @@ async def test_sweep_is_a_noop_when_nothing_is_stuck():
 
     assert swept == []
     assert (await store.get_changeset(pool, "cs_done")).status == ChangesetStatus.merged
+
+
+@pytest.mark.asyncio
+async def test_sweep_preserves_pushing_row_with_durable_publication_intent():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_resume", "demo", status="pushing")
+    await publication_store.record_intent(
+        pool,
+        PublicationIntentRecorded(
+            event_id="cpub_" + "1" * 32,
+            changeset_id="cs_resume",
+            recorded_at=datetime(2026, 7, 16, tzinfo=UTC),
+            repository="acme/widgets",
+            repository_id=10,
+            installation_id=1,
+            branch="apdl/resume-cs_resume",
+            base_branch="main",
+            candidate_base_sha="a" * 40,
+            candidate_head_sha="c" * 40,
+            candidate_tree_sha="b" * 40,
+            patch_base64=base64.b64encode(b"patch").decode(),
+            commit_title="Resume",
+            pull_request_title="Resume",
+            pull_request_body="body",
+            draft=True,
+            external_ci_status=ExternalCIStatus.pending,
+            diff_stat={"files": 1},
+        ),
+    )
+
+    swept = await store.fail_stale_changesets(
+        pool, older_than_seconds=3600, error=_ERROR
+    )
+
+    assert swept == []
+    assert (
+        await store.get_changeset(pool, "cs_resume")
+    ).status is ChangesetStatus.pushing
+    assert await publication_store.list_recoverable_ids(
+        pool, older_than_seconds=3600
+    ) == ["cs_resume"]
 
 
 @pytest.mark.asyncio

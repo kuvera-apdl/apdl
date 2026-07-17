@@ -28,6 +28,9 @@ class GitHubPRStatus(str, Enum):
     closed = "closed"
 
 
+_POSTGRES_INTEGER_MAX = 2_147_483_647
+
+
 class ExternalCIStatus(str, Enum):
     pending = "pending"
     passed = "passed"
@@ -159,7 +162,7 @@ class CIVerificationObservation(StrictModel):
     observation_id: str = Field(min_length=1)
     changeset_id: str = Field(min_length=1)
     repository: str = Field(pattern=r"^[^/]+/[^/]+$")
-    pr_number: int = Field(ge=1)
+    pr_number: int = Field(ge=1, le=_POSTGRES_INTEGER_MAX)
     head_sha: str = Field(min_length=1)
     status: ExternalCIStatus
     signals: list[CISignal] = Field(default_factory=list)
@@ -266,7 +269,7 @@ class PullRequestObservation(StrictModel):
     delivery_id: str | None = Field(default=None, min_length=1)
     changeset_id: str = Field(min_length=1)
     repository: str = Field(pattern=r"^[^/]+/[^/]+$")
-    pr_number: int = Field(ge=1)
+    pr_number: int = Field(ge=1, le=_POSTGRES_INTEGER_MAX)
     head_sha: str = Field(min_length=1)
     status: GitHubPRStatus
     action: Literal[
@@ -328,7 +331,7 @@ class CIRemediationAttempt(StrictModel):
     event_id: str = Field(min_length=1)
     changeset_id: str = Field(min_length=1)
     repository: str = Field(pattern=r"^[^/]+/[^/]+$")
-    pr_number: int = Field(ge=1)
+    pr_number: int = Field(ge=1, le=_POSTGRES_INTEGER_MAX)
     failed_head_sha: str = Field(min_length=1)
     failure_observation_id: str = Field(min_length=1)
     attempt_number: int = Field(ge=1)

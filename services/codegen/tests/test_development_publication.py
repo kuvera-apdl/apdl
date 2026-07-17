@@ -91,10 +91,11 @@ def test_evaluated_publication_contracts_reject_development_stage():
             model="test-model@1",
             codegen_revision="test-revision",
             candidate_identity_sha256="a" * 64,
+            egress_policy_sha256="b" * 64,
         )
 
     decision_payload = {
-        "schema_version": "rollout_decision@2",
+        "schema_version": "rollout_decision@3",
         "requested_stage": RolloutStage.development_pr,
         "risk": RiskLevel.low,
         "allowed": True,
@@ -103,6 +104,7 @@ def test_evaluated_publication_contracts_reject_development_stage():
         "ready_for_review": False,
         "reasons": [],
         "evaluation_summary_sha256": "b" * 64,
+        "segmented_report_sha256": "d" * 64,
         "policy_sha256": "c" * 64,
         "canary_identity_sha256": None,
         "canary_bucket": None,

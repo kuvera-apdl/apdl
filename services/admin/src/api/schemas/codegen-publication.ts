@@ -13,12 +13,13 @@ export const rolloutStageSchema = z.enum([
 
 export const publicationRequestSchema = z
   .object({
-    schema_version: z.literal('publication_request@2'),
+    schema_version: z.literal('publication_request@3'),
     requested_stage: rolloutStageSchema,
     risk: codegenRiskLevelSchema,
     model: z.string().min(1),
     codegen_revision: z.string().min(1),
     candidate_identity_sha256: sha256Schema,
+    egress_policy_sha256: sha256Schema,
     canary_identity: z.string().min(1).max(500).nullable(),
   })
   .strict()
@@ -45,7 +46,7 @@ export const publicationRequestSchema = z
 
 export const rolloutDecisionSchema = z
   .object({
-    schema_version: z.literal('rollout_decision@2'),
+    schema_version: z.literal('rollout_decision@3'),
     requested_stage: rolloutStageSchema,
     risk: codegenRiskLevelSchema,
     allowed: z.boolean(),
@@ -54,6 +55,7 @@ export const rolloutDecisionSchema = z
     ready_for_review: z.boolean(),
     reasons: z.array(z.string()),
     evaluation_summary_sha256: sha256Schema.nullable(),
+    segmented_report_sha256: sha256Schema.nullable(),
     policy_sha256: sha256Schema,
     canary_identity_sha256: sha256Schema.nullable(),
     canary_bucket: z.number().int().min(0).max(99).nullable(),
@@ -123,17 +125,25 @@ export const rolloutDecisionSchema = z
           message: 'publication requires an evaluation summary digest',
         })
       }
+      if (decision.segmented_report_sha256 === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'publication requires a segmented report digest',
+        })
+      }
     }
   })
 
 const evaluatedPublicationAuthorizationSchema = z
   .object({
-    schema_version: z.literal('publication_authorization@2'),
+    schema_version: z.literal('publication_authorization@4'),
     request: publicationRequestSchema,
     expected_model: z.string().min(1),
     expected_codegen_revision: z.string().min(1),
     expected_candidate_identity_sha256: sha256Schema,
+    expected_egress_policy_sha256: sha256Schema,
     report_sha256: sha256Schema,
+    segmented_report_sha256: sha256Schema,
     bundle_sha256: sha256Schema,
     policy_sha256: sha256Schema,
     decision: rolloutDecisionSchema,
@@ -162,6 +172,15 @@ const evaluatedPublicationAuthorizationSchema = z
         message: 'publication request candidate identity does not match expected identity',
       })
     }
+    if (
+      authorization.request.egress_policy_sha256 !==
+      authorization.expected_egress_policy_sha256
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'publication request egress policy does not match expected policy',
+      })
+    }
     if (authorization.decision.requested_stage !== authorization.request.requested_stage) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -178,6 +197,15 @@ const evaluatedPublicationAuthorizationSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: 'publication decision does not use the bundled policy',
+      })
+    }
+    if (
+      authorization.decision.segmented_report_sha256 !==
+      authorization.segmented_report_sha256
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'publication decision does not use the bundled segmented report',
       })
     }
   })

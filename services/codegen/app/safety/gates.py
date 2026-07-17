@@ -20,6 +20,12 @@ from app.safety.policy import (
     EffectiveCodegenSafetyPolicy,
     VerifiedProtectedPathExemption,
 )
+from app.safety.paths import (
+    ChangedPathError,
+    canonical_changed_paths,
+    malformed_changed_paths_violation,
+    require_changed_path_list,
+)
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
@@ -41,7 +47,9 @@ def scan_secrets(diff_text: str) -> list[str]:
     findings: list[str] = []
     for pattern in _SECRET_PATTERNS:
         if pattern.search(diff_text):
-            findings.append(f"Possible secret matching /{pattern.pattern}/ in the diff.")
+            findings.append(
+                f"Possible secret matching /{pattern.pattern}/ in the diff."
+            )
     return findings
 
 
@@ -58,6 +66,7 @@ def protected_path_violations(
         raise TypeError(
             "protected-path exemptions must be VerifiedProtectedPathExemption values"
         )
+    paths = canonical_changed_paths(paths)
     exempt_paths = {exemption.path for exemption in verified_exemptions}
     out: list[str] = []
     for path in paths:
@@ -65,7 +74,9 @@ def protected_path_violations(
             continue
         for pattern in protected:
             if fnmatch(path, pattern) or fnmatch(path, f"*/{pattern}"):
-                out.append(f"Change touches protected path '{path}' (matches '{pattern}').")
+                out.append(
+                    f"Change touches protected path {path!r} (matches {pattern!r})."
+                )
                 break
     return out
 
@@ -79,15 +90,12 @@ def diff_too_large(
     required = ("files", "additions", "deletions")
     missing = [name for name in required if name not in diff_stat]
     if missing:
-        return (
-            "Diff statistics are malformed: missing " + ", ".join(missing) + "."
-        )
+        return "Diff statistics are malformed: missing " + ", ".join(missing) + "."
     for name in required:
         value = diff_stat[name]
         if type(value) is not int or value < 0:
             return (
-                "Diff statistics are malformed: "
-                f"{name} must be a non-negative integer."
+                f"Diff statistics are malformed: {name} must be a non-negative integer."
             )
 
     files = diff_stat["files"]
@@ -134,16 +142,14 @@ def evaluate_pre_push(
     if size:
         violations.append(size)
 
-    if not isinstance(changed_paths, list) or any(
-        not isinstance(path, str) for path in changed_paths
-    ):
-        violations.append(
-            "Changed paths are malformed: expected a list of path strings."
-        )
+    try:
+        canonical_paths = require_changed_path_list(changed_paths)
+    except ChangedPathError as exc:
+        violations.append(malformed_changed_paths_violation(exc))
     else:
         violations.extend(
             protected_path_violations(
-                changed_paths,
+                canonical_paths,
                 policy.protected_paths,
                 active_exemptions,
             )

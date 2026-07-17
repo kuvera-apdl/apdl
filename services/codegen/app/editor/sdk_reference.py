@@ -20,6 +20,8 @@ import json
 import re
 from pathlib import Path
 
+from app.inspection.repository import RepositoryInspector, RepositoryTextView
+
 # --- JS / TypeScript browser SDK -------------------------------------------
 
 JS_SDK_REFERENCE_MD = """\
@@ -112,16 +114,17 @@ _JS_SDK_PACKAGE = "@apdl-oss/sdk"
 #: standalone dependency token — ``apdl``, ``apdl==1.0``, ``apdl>=1``, ``"apdl"``,
 #: ``apdl[extra]`` — but NOT ``apdl-codegen`` / ``myapdl`` / ``apdlx``.
 _PY_APDL_RE = re.compile(r"""(?im)(?:^|[\s"',\[=])apdl(?=[\s"',\]<>=!~;\[]|$)""")
+_MAX_MANIFEST_BYTES = 1_000_000
 
 
-def _reads_js_sdk(repo_dir: Path) -> bool:
+def _reads_js_sdk(contents: RepositoryTextView) -> bool:
     """True when ``package.json`` declares a dependency on ``@apdl-oss/sdk``."""
-    package_json = repo_dir / "package.json"
-    if not package_json.is_file():
+    text = contents.text("package.json")
+    if text is None:
         return False
     try:
-        data = json.loads(package_json.read_text(encoding="utf-8", errors="ignore"))
-    except (OSError, ValueError):
+        data = json.loads(text)
+    except ValueError:
         return False
     for key in ("dependencies", "devDependencies", "peerDependencies"):
         section = data.get(key)
@@ -130,20 +133,22 @@ def _reads_js_sdk(repo_dir: Path) -> bool:
     return False
 
 
-def _reads_python_sdk(repo_dir: Path) -> bool:
+def _reads_python_sdk(contents: RepositoryTextView) -> bool:
     """True when a Python manifest declares a dependency on the ``apdl`` package.
 
     Scans ``pyproject.toml`` and any ``requirements*.txt`` as text (no TOML parse
     needed — we only need to spot the dependency token), matching ``apdl`` as a
     whole package name so sibling names like ``apdl-codegen`` don't false-match.
     """
-    candidates = [repo_dir / "pyproject.toml", *repo_dir.glob("requirements*.txt")]
+    candidates = [
+        path
+        for path in contents.paths
+        if path == "pyproject.toml"
+        or ("/" not in path and Path(path).match("requirements*.txt"))
+    ]
     for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        text = contents.text(path)
+        if text is None:
             continue
         if _PY_APDL_RE.search(text):
             return True
@@ -157,9 +162,13 @@ def detect_sdk_references(repo_dir: Path) -> list[tuple[str, str]]:
     an SDK actually present in the repo's manifests are returned, so the agent is
     never handed a reference for a language it isn't using.
     """
+    contents = RepositoryInspector(
+        repo_dir,
+        max_file_bytes=_MAX_MANIFEST_BYTES,
+    ).text_view()
     references: list[tuple[str, str]] = []
-    if _reads_js_sdk(repo_dir):
+    if _reads_js_sdk(contents):
         references.append(_JS_REFERENCE)
-    if _reads_python_sdk(repo_dir):
+    if _reads_python_sdk(contents):
         references.append(_PYTHON_REFERENCE)
     return references

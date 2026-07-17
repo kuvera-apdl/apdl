@@ -1,22 +1,25 @@
 # APDL codegen agent sandbox — the untrusted-code boundary (decision D4 / Option B).
 #
-# One ephemeral container per changeset: it clones the repo, runs the pinned OSS
-# coding agent (Aider), performs sanitized contract inspection, and pushes the
-# branch — all isolated
+# Two sequential ephemeral containers per changeset use this image. The first is
+# a provider-free, private-PID inspection preflight that rejects symlinks and
+# binds the exact source head/tree. Only then does the second run the pinned OSS
+# coding agent (Aider) and return a gated candidate patch — all isolated
 # from the codegen API container (which holds the GitHub App key, the Postgres
 # DSN, and the internal token). The orchestrator
 # (app.editor.container_editor.ContainerAiderEditor) launches it with `docker run`;
 # the ENTRYPOINT (run_changeset.py) reuses the SAME AiderEditor as the in-process
 # path, so the edit logic lives in exactly one place.
 #
-# Harden at deploy time (beyond the docker-run caps the orchestrator already sets
+# Hardened at deploy time (beyond the docker-run caps the orchestrator already sets
 # — --cap-drop ALL, no-new-privileges, pids/memory/cpu limits, non-root):
 #   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
-#   * egress allowlist: github.com + package registries only; block the APDL
-#     internal CIDR and the cloud metadata IP (169.254.169.254)
-# The install token arrives as GH_TOKEN; the runner drops it from the environment
-# before Aider starts. Repository-defined lint, test, hook, shell-suggestion, and
-# browser commands are disabled; GitHub CI remains the execution authority.
+#   * Docker --network none + a read-only attested proxy Unix socket; a sealed
+#     loopback relay preserves normal HTTP proxy clients without bridge access
+#   * direct public, APDL, private, link-local, metadata, and DNS egress probes
+# A read-only install token is consumed from stdin and never enters the container
+# environment. The controller owns reconstruction and push.
+# Repository-defined lint, test, hook, shell-suggestion, and browser commands are
+# disabled; GitHub CI remains the execution authority.
 ARG CODEGEN_REVISION
 
 # The evaluation controller contains sealed corpus/oracle material. The candidate
@@ -24,7 +27,7 @@ ARG CODEGEN_REVISION
 # in an intermediate stage, then copy only that pruned tree into the final image;
 # deleting them after a direct COPY would leave them recoverable from an image
 # layer.
-FROM python:3.14-slim AS candidate-source
+FROM python:3.12-slim AS candidate-source
 WORKDIR /candidate
 COPY pyproject.toml .
 COPY app/ app/
@@ -34,7 +37,7 @@ RUN rm -rf \
         app/evaluations/oracles_v1.json \
     && find app -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
-FROM python:3.14-slim
+FROM python:3.12-slim
 ARG CODEGEN_REVISION
 RUN test -n "$CODEGEN_REVISION" \
     && test "$CODEGEN_REVISION" != "development-unversioned"

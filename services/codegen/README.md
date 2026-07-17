@@ -179,7 +179,11 @@ CODEGEN_DEVELOPMENT_MODE=          # experimental internal marker; leave unset
 CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only bundle for experimental evaluated stages
 CODEGEN_PLATFORM_SAFETY_POLICY_PATH= # absolute path to operator safety-policy JSON
 CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
-CODEGEN_SANDBOX_NETWORK=           # required filtered network for evaluated PR stages
+CODEGEN_SANDBOX_NETWORK=           # development_pr only; evaluated stages require empty
+CODEGEN_EGRESS_POLICY_SHA256=      # digest of checked-in proxy policy sources
+CODEGEN_EGRESS_PROXY_IMAGE_ID=     # exact evaluated proxy image ID
+CODEGEN_EGRESS_SOCKET_VOLUME=      # controller-owned proxy Unix-socket volume
+CODEGEN_EGRESS_PROXY_URL=http://127.0.0.1:3128
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
 ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
@@ -190,7 +194,7 @@ CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /
-`CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + push) is
+`CODEGEN_GIT_TIMEOUT` second caps. A whole job (clone + retry rounds + publication) is
 bounded by `codegen_job_budget()`, which also caps the sandbox container and the orphan-sweep
 deadline. The derived budget is hard-capped at 3000 seconds so the
 credential-bearing container ends with at least a five-minute token-expiry
@@ -204,9 +208,12 @@ test-generation guidance. APDL does not execute it authoritatively; GitHub CI do
 The pre-push gates run inside the editor on the full diff (a violating branch
 never reaches GitHub), and the job runner re-checks the same resolved policy as
 a backstop before opening the PR. Orphan recovery: queued changesets are re-enqueued at
-startup (the queued → cloning transition is the dedup claim); active-state
-orphans are swept to `error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL`
-(default 300s) once older than twice the job budget.
+startup (the queued → cloning transition is the dedup claim). A `pushing`
+changeset with an append-only publication intent is resumed by its deterministic
+APDL branch before any PR create retry; raw accepted PR identities remain
+journaled for validation and cleanup. Other active-state orphans are swept to
+`error` at startup and every `CODEGEN_STALE_SWEEP_INTERVAL` (default 300s) once
+older than twice the job budget.
 
 Tenant connection preferences use one strict, versioned contract. Unknown
 fields are rejected. Tenant limits can only lower the operator limits, and
@@ -283,7 +290,7 @@ Rollout stages are strict capabilities:
 2. `shadow` runs generation without branch or PR capability.
 3. `reviewed_pr` requires a valid operator bundle and always opens a draft PR.
 4. `low_risk_canary` is reserved for promotion evidence from reviewed PRs.
-   `rollout_policy@3` deliberately denies it until real GitHub CI/review
+   `rollout_policy@4` deliberately denies it until real GitHub CI/review
    observations are represented by a later policy contract.
 
 `development_pr` is not a step in this evaluated progression. It remains an
@@ -305,8 +312,9 @@ export ANTHROPIC_API_KEY=... # use your secret manager or current shell
 # dirty tree must be committed or given a distinct tag-safe revision.
 export CODEGEN_REVISION="$(git rev-parse HEAD)"
 
-# Optional but recommended: a named network with operator-enforced egress rules.
-export CODEGEN_EVALUATION_NETWORK=codegen-egress-filtered
+# Optional name override. Otherwise the workflow creates a unique temporary
+# controller-owned proxy-socket volume and removes it after evaluation.
+export CODEGEN_EVALUATION_SOCKET_VOLUME=apdl-codegen-evaluation-egress
 
 make evaluate-codegen
 ```
@@ -316,16 +324,24 @@ This command:
 1. builds the API image as the sealed evaluation controller;
 2. builds `Dockerfile.worker` as the production candidate, labels it with the
    exact revision, and verifies that it contains no corpus/oracle assets;
-3. resolves both images to immutable local `sha256:...` image IDs and uses
+3. builds the checked-in Squid policy, exports it only through an attested Unix
+   socket volume, and actively probes metadata/private/direct bypasses from the
+   immutable controller image;
+4. resolves all three images to immutable local `sha256:...` image IDs and uses
    those IDs for the evaluation itself;
-4. gives only the controller the Docker socket and a host/container same-path
+5. gives only the controller the Docker socket and a host/container same-path
    temporary bind, so sibling candidate mounts resolve through the host daemon;
-5. forwards only an explicit model-provider and behavior-setting allowlist; and
-6. evaluates and builds the publication bundle in one trusted invocation using
-   the checked-in strict `rollout_policy_v3.json`.
+6. forwards only an explicit model-provider and behavior-setting allowlist; and
+7. evaluates and builds the publication bundle in one trusted invocation using
+   the checked-in strict `rollout_policy_v4.json`.
 
-The run and bundle content-address the exact controller image ID, candidate
-image ID, revision, and normalized non-secret behavior configuration. Provider
+Every candidate container runs with Docker `--network none`, mounts the proxy
+socket volume read-only, and starts a sealed loopback TCP-to-Unix relay so
+standard HTTP proxy clients continue to work. The run persists controller-made,
+launch-ID-bound attestation digests for every measured case. The run and bundle
+content-address the exact controller image ID, candidate image ID, proxy image
+ID, network-none socket transport, reviewed concurrency of one, egress-policy
+digest, revision, and normalized non-secret behavior configuration. Provider
 credentials are excluded, but model/helper routing, Aider path, prompt/review
 toggles, retries, contract settings, timeouts, and provider endpoints are bound.
 Changing any bound value makes the service reject the old bundle at startup.
@@ -340,6 +356,7 @@ Artifacts default to
 ```text
 controller-image-id.txt
 candidate-image-id.txt
+egress-proxy-image-id.txt
 rollout-policy.json
 evaluation-run.json
 evaluation-report.json
@@ -358,44 +375,67 @@ Use a new revision whenever source or behavior changes so artifacts remain
 separate and auditable. Even if an old revision is reused accidentally, the
 identity digest prevents its bundle from authorizing different behavior.
 
-The checked-in `rollout_policy@3` gates reviewed draft-PR publication only on
-metrics the sealed offline harness can honestly measure. GitHub CI, human
-review, merge, revert, and post-merge outcomes remain unavailable during this
-run and are never fabricated. Those external observations are required for
-later canary/expansion decisions, not for opening a mandatory-review draft.
+The checked-in `rollout_policy@4` gates reviewed draft-PR publication on the
+overall metrics and on every risk, ecosystem, and task-type segment produced by
+the sealed offline harness. Each segment must meet its minimum sample and
+eligible escaped-defect denominator, with zero escaped defects. The current
+eight-case corpus intentionally cannot satisfy the default two-sample segment
+floor for every slice, so operators must expand the sealed corpus before
+reviewed publication can be authorized. GitHub CI, human review, merge, revert,
+and post-merge outcomes remain unavailable during this run and are never
+fabricated. Those external observations are required for later
+canary/expansion decisions.
 
 ### Deploy the evaluated candidate
 
-Review the report and bundle, provision a genuinely egress-filtered Docker
-network, keep the model-provider and behavior variables identical to the
-evaluated values, then use the rollout Compose overlay:
+Review the report and bundle, keep the model-provider and behavior variables
+identical to the evaluated values, then use the shipped egress and rollout
+Compose overlays:
 
 ```bash
-export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
+unset CODEGEN_SANDBOX_NETWORK
+# Optional; Make otherwise derives a policy-addressed production volume name.
+export CODEGEN_EGRESS_SOCKET_VOLUME=apdl-codegen-reviewed-egress
 make migrate-postgres
 make codegen-reviewed-config
 make codegen-reviewed-up
 ```
 
-The Make target reads both image-ID files, verifies their revision and role
-labels, mounts `publication-bundle.json` read-only at
+The Make target reads all three image-ID files, verifies revision, role, and
+egress-policy labels, mounts `publication-bundle.json` read-only at
 `/run/apdl/codegen/publication-bundle.json`, and recreates Codegen with
 `reviewed_pr` without rebuilding or pulling. The exact evaluated controller ID
 runs the API and the exact evaluated candidate ID runs each production sandbox.
+The exact evaluated proxy ID attaches only to the Compose uplink and exports
+Squid through the controller-owned Unix socket volume. Workers have no Docker
+network, mount that volume read-only, and can reach only the loopback relay.
+Startup and pre-launch attestation verifies the exact proxy image, entrypoint,
+command, image-defined healthcheck, non-root user, read-only root,
+privilege/capability/security settings, tmpfs and socket mounts, volume labels,
+absence of host-published ports, and the public uplink. Before and after each
+active probe, the proxy must be the socket volume's only running consumer. The
+immutable controller probe verifies absolute-form HTTP denials for metadata and
+private port-80 URLs, CONNECT denials, an allowed public CONNECT control, and
+direct public, private/metadata, and external-DNS isolation. Refusal or reset is
+treated as reachability failure, not as proof of blocking.
 The overlay derives the current user's UID/GID and Docker socket group, which
 supports both Linux Docker hosts and Docker Desktop's user-owned socket.
 
-Migration `010_codegen_publication_identity.sql` archives any persisted v1
-authorization JSON and clears it from the active authority column; it never
-fabricates the image/config identity that old rows did not record. New writes
-are constrained to the strict v2 authorization contract.
+Migration `026_codegen_egress_publication.sql` archives active evaluated
+authorization JSON that predates egress attestation. New evaluated writes are
+constrained to `publication_authorization@4` /
+`publication_request@3`, where the requested and expected egress-policy digests
+must be canonical and equal.
 
 The overlay mounts a Docker control socket into the credential-bearing Codegen
 API. That is sufficient for a single-operator self-hosted machine but grants
 host-root-equivalent container authority. Production deployments should replace
 it with a dedicated rootless or policy-constrained worker launcher. Merely
-naming a bridge network `codegen-egress-filtered` does not filter traffic: the
-operator must enforce the allowlist and block APDL/private/metadata destinations.
+naming a Docker object is not treated as proof: evaluated startup and every
+worker launch revalidate the effective proxy/volume topology and run the
+controller-owned active deny probe.
+Destination policy lives in `infra/docker/codegen-egress/`; changing any policy
+source changes the digest and invalidates prior evaluation evidence.
 
 Two auxiliary LLM passes bracket the edit. Low-risk work may skip them when the
 model is unavailable; medium/high-risk work fails closed. `CODEGEN_BRIEF` compiles the
@@ -430,14 +470,33 @@ The editor sits behind the `Editor` interface; *how/where* it runs is config:
 
 - **Sandboxed container (`CODEGEN_SANDBOX=docker`, the default)** —
   `ContainerAiderEditor`
-  runs each changeset in an ephemeral container from `Dockerfile.worker`
+  runs each changeset in two sequential ephemeral containers from
+  `Dockerfile.worker`
   (read-only root, no-exec tmpfs workspaces, `--cap-drop ALL`,
-  `no-new-privileges`, pid/memory/cpu caps, non-root),
-  reusing the same `AiderEditor` inside it. Untrusted code never touches the API
-  container's secrets; the sandbox only gets the short-lived install token (which
-  the runner drops from the env before Aider starts) and the model key. Aider is
+  `no-new-privileges`, private PID namespaces, pid/memory/cpu caps, non-root).
+  The first container receives no model-provider or write credential. It clones
+  with read authority supplied over consumed stdin, exhaustively rejects
+  symlinks/non-regular entries through the no-follow inspector, and returns only
+  a strict repository/head/tree attestation. The second container receives the
+  model key only after cloning and verifying that exact attested head and tree,
+  before any repository-derived prompt input is built. The read token is also
+  supplied over stdin and never enters either container's environment. Aider is
   pinned, receives service-owned empty config/env files, and cannot auto-run
-  repository lint, test, shell-suggestion, hook, URL, or browser commands.
+  repository lint, test, shell-suggestion, hook, URL, or browser commands. The
+  editor returns a patch and exact Git object identities; the controller
+  reconstructs and pushes it with a short-lived contents-write token, then
+  uses a separate PR-write token with no contents mutation permission for
+  pull-request discovery, creation, and cleanup.
+
+  The separate inspection container is the only process allowed to establish
+  trust in an untrusted checkout. Later profiling in the editor is consumption
+  of that attested tree, not a second trust decision: the editor verifies both
+  `HEAD` and `HEAD^{tree}` before `_probe_repo`, brief/workflow/contract reads,
+  or any model call. A moved branch or different source Git tree aborts first.
+  The attested Git tree includes entry modes, so it cannot substitute a symlink;
+  every later focused read still uses the component-wise no-follow inspector,
+  and model-created symlinks are rejected before they can enter evidence or
+  persisted prompts.
 - **Trusted local in-process (`CODEGEN_SANDBOX=in-process`)** — available only
   with `CODEGEN_TRUSTED_REPOS_ONLY=true` while the rollout is `offline` or
   `shadow`. The service refuses this mode for every PR publication stage.
@@ -447,16 +506,21 @@ Enable the sandbox:
 ```bash
 make build-codegen-sandbox        # revision-labeled production candidate
 export CODEGEN_SANDBOX=docker
-export CODEGEN_SANDBOX_NETWORK=codegen-egress-filtered
+unset CODEGEN_SANDBOX_NETWORK
 # For Compose deployment use docker-compose.codegen-rollout.yml via
 # `make codegen-reviewed-up`; it mounts the host's explicit Docker socket path.
 ```
 
-Every PR stage fails startup unless `CODEGEN_SANDBOX_NETWORK` is a non-default
-named network. The local `development_pr` overlay creates an explicitly
-development-only bridge that is not egress-filtered. For evaluated PR stages,
-the operator must enforce a real egress policy: allow only the required
-GitHub/model endpoints and block APDL/private CIDRs plus `169.254.169.254`.
+The local `development_pr` overlay creates an explicitly development-only bridge
+that is not egress-filtered. Evaluated PR stages reject every configured sandbox
+network and require `--network none`, the shipped proxy image, exact policy
+digest, controller-owned socket volume, exact proxy runtime configuration, and
+successful controller probes. The allowlist
+covers only the checked-in GitHub, model-provider, and package-registry domains;
+private, link-local, metadata, reserved, and direct non-proxy egress are denied.
+The same topology and probes are re-attested immediately before every
+inspection, editor, and evaluation container. Reviewed deployment also
+hard-pins and content-binds `CODEGEN_MAX_CONCURRENT_JOBS=1`.
 Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
 `CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`. Mounting a
 Docker socket still grants the API process host-level Docker authority; deploy
@@ -502,8 +566,10 @@ The autonomous loop runs once these external pieces are set up:
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
 service) → `POST /v1/changesets` → the job recomputes and persists the rollout
 decision → only an allowed decision permits minting a repo token → the Aider
-editor in a sandboxed clone, runs deterministic pre-push gates,
-pushes a branch, and opens a PR (draft when policy or evidence requires it) →
+editor in a sandboxed clone returns a gated patch and exact tree identity → the
+controller reconstructs and publishes that tree with a just-in-time write
+credential, then recovers or opens one branch-bound PR (draft when policy or
+evidence requires it) →
 the repo's CI runs → the webhook or poller records GitHub's exact-head external
 CI status and feeds bounded logs/artifacts into same-branch repair → GitHub
 reviews/rulesets decide readiness and merge.

@@ -1,0 +1,31 @@
+services:
+  codegen-egress-proxy:
+    image: ${CODEGEN_EGRESS_PROXY_IMAGE:?set the evaluated egress proxy image ID}
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    labels:
+      dev.apdl.codegen.egress.role: proxy
+      dev.apdl.codegen.egress.policy-sha256: ${CODEGEN_EGRESS_POLICY_SHA256:?set the shipped egress policy digest}
+      dev.apdl.codegen.egress.socket-volume: ${CODEGEN_EGRESS_SOCKET_VOLUME:?set the controller-owned egress socket volume}
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+      - /var/log/squid:rw,nosuid,nodev,noexec,size=16m,uid=13,gid=13
+      - /var/spool/squid:rw,nosuid,nodev,noexec,size=16m,uid=13,gid=13
+    volumes:
+      - type: volume
+        source: codegen-egress-socket
+        target: /run/apdl-codegen-egress
+volumes:
+  codegen-egress-socket:
+    name: ${CODEGEN_EGRESS_SOCKET_VOLUME:?set the controller-owned egress socket volume}
+    labels:
+      dev.apdl.codegen.egress.role: socket
+      dev.apdl.codegen.egress.policy-sha256: ${CODEGEN_EGRESS_POLICY_SHA256:?set the shipped egress policy digest}

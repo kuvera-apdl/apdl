@@ -5,7 +5,10 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.github.client import github_paginated_items
+from app.github.client import (
+    GitHubPaginationIncompleteError,
+    github_paginated_items,
+)
 
 
 @pytest.mark.asyncio
@@ -87,3 +90,34 @@ async def test_paginated_items_rejects_an_off_origin_initial_url_without_a_reque
             )
 
     assert requests == 0
+
+
+@pytest.mark.asyncio
+async def test_paginated_items_fail_closed_when_the_page_cap_truncates_results():
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={"items": [{"id": 1}]},
+            headers={
+                "Link": '<https://api.github.com/resource?page=2>; rel="next"'
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(
+            GitHubPaginationIncompleteError,
+            match=r"max_pages=1.*another page remained",
+        ):
+            await github_paginated_items(
+                client,
+                "https://api.github.com/resource?page=1",
+                "tok",
+                "items",
+                max_pages=1,
+            )
+
+    assert requests == 1

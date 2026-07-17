@@ -1,0 +1,18 @@
+{
+  "schema_version": "codegen_egress_policy@2",
+  "transport": "network_none_unix_socket@1",
+  "proxy_url": "http://127.0.0.1:3128",
+  "proxy_socket": "/run/apdl-codegen-egress/proxy.sock",
+  "worker_network_mode": "none",
+  "worker_socket_mount": "read_only",
+  "metadata_private_http_probe": "absolute_form_port_80",
+  "metadata_private_connect_probe": "port_443",
+  "public_allow_control": "api.github.com:443",
+  "direct_public_egress": "denied",
+  "metadata_and_private_ranges": "denied",
+  "allowed_destination_classes": [
+    "github",
+    "model-providers",
+    "package-registries"
+  ]
+}

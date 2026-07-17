@@ -7,6 +7,7 @@ from app.contracts.inspectors import inspect_node_package, inspect_python_packag
 from app.contracts.models import (
     BlockerCode,
     ContractCheckResult,
+    ContractCheckStatus,
     ContractRequest,
     RuntimeFingerprint,
 )
@@ -43,7 +44,7 @@ def _identity(repo, request, runtime):
 def _passing_check(command: str, version: str):
     def run(_request):
         return ContractCheckResult(
-            passed=True,
+            status=ContractCheckStatus.passed,
             command=command,
             tool_version=version,
             output="ok",
@@ -141,7 +142,7 @@ def test_failed_node_example_is_not_emitted(tmp_path):
 
     def failed(_request):
         return ContractCheckResult(
-            passed=False,
+            status=ContractCheckStatus.failed,
             command="tsc --noEmit",
             tool_version="5.7.2",
             output="not exported",

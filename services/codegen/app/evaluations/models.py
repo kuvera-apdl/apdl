@@ -127,7 +127,9 @@ class EvaluationCorpus(StrictModel):
         if len(ids) != len(set(ids)):
             raise ValueError("evaluation case ids must be unique")
         if len(fixtures) != len(set(fixtures)):
-            raise ValueError("each evaluation case requires a distinct fixture repository")
+            raise ValueError(
+                "each evaluation case requires a distinct fixture repository"
+            )
         return self
 
     def evidence_sha256(self) -> str:
@@ -179,7 +181,9 @@ class MetricValue(StrictModel):
             if not self.unavailable_reason:
                 raise ValueError("a missing metric value requires unavailable_reason")
             if self.evidence:
-                raise ValueError("an unavailable metric cannot claim measurement evidence")
+                raise ValueError(
+                    "an unavailable metric cannot claim measurement evidence"
+                )
             return self
         if not math.isfinite(self.value):
             raise ValueError("metric values must be finite")
@@ -331,7 +335,7 @@ class OutcomeStatus(str, Enum):
 
 
 class EvaluationOutcome(StrictModel):
-    schema_version: Literal["evaluation_outcome@2"] = "evaluation_outcome@2"
+    schema_version: Literal["evaluation_outcome@3"] = "evaluation_outcome@3"
     case_id: CaseId
     status: OutcomeStatus
     detections: list[DetectionObservation] = Field(default_factory=list)
@@ -339,6 +343,7 @@ class EvaluationOutcome(StrictModel):
     measurements: OutcomeMeasurements
     harness: HarnessObservation | None
     oracle_case_sha256: Sha256
+    egress_attestation_sha256: Sha256 | None = None
     unavailable_reason: str | None = Field(default=None, min_length=1)
     notes: list[EvaluationNote] = Field(default_factory=list, max_length=51)
 
@@ -346,7 +351,9 @@ class EvaluationOutcome(StrictModel):
     def validate_status_evidence(self) -> EvaluationOutcome:
         if self.status is OutcomeStatus.unavailable:
             if self.harness is not None or not self.unavailable_reason:
-                raise ValueError("unavailable outcomes require a reason and no harness result")
+                raise ValueError(
+                    "unavailable outcomes require a reason and no harness result"
+                )
             return self
         if self.harness is None:
             raise ValueError("measured outcomes require a harness result")
@@ -365,15 +372,19 @@ class EvaluationOutcome(StrictModel):
 
 
 class CodegenCandidateIdentity(StrictModel):
-    """Content identity of the controller, candidate, and effective behavior."""
+    """Content identity of code, behavior, and enforced worker egress."""
 
-    schema_version: Literal["codegen_candidate_identity@1"] = (
-        "codegen_candidate_identity@1"
+    schema_version: Literal["codegen_candidate_identity@3"] = (
+        "codegen_candidate_identity@3"
     )
     controller_image_id: DockerImageId
     candidate_image_id: DockerImageId
     codegen_revision: str = Field(min_length=1)
     behavior_configuration_sha256: Sha256
+    egress_policy_sha256: Sha256
+    egress_proxy_image_id: DockerImageId
+    egress_transport: Literal["network_none_unix_socket@1"]
+    reviewed_max_concurrent_jobs: Literal[1]
     identity_sha256: Sha256
 
     @classmethod
@@ -384,13 +395,20 @@ class CodegenCandidateIdentity(StrictModel):
         candidate_image_id: str,
         codegen_revision: str,
         behavior_configuration_sha256: str,
+        egress_policy_sha256: str,
+        egress_proxy_image_id: str,
+        reviewed_max_concurrent_jobs: int,
     ) -> CodegenCandidateIdentity:
         payload = {
-            "schema_version": "codegen_candidate_identity@1",
+            "schema_version": "codegen_candidate_identity@3",
             "controller_image_id": controller_image_id,
             "candidate_image_id": candidate_image_id,
             "codegen_revision": codegen_revision,
             "behavior_configuration_sha256": behavior_configuration_sha256,
+            "egress_policy_sha256": egress_policy_sha256,
+            "egress_proxy_image_id": egress_proxy_image_id,
+            "egress_transport": "network_none_unix_socket@1",
+            "reviewed_max_concurrent_jobs": reviewed_max_concurrent_jobs,
         }
         return cls.model_validate(
             {**payload, "identity_sha256": canonical_sha256(payload)}
@@ -409,7 +427,7 @@ class CodegenCandidateIdentity(StrictModel):
 
 
 class EvaluationRun(StrictModel):
-    schema_version: Literal["evaluation_run@3"] = "evaluation_run@3"
+    schema_version: Literal["evaluation_run@5"] = "evaluation_run@5"
     run_id: str = Field(min_length=1)
     corpus_id: str = Field(min_length=1)
     corpus_sha256: Sha256
@@ -438,11 +456,28 @@ class EvaluationRun(StrictModel):
         if len(outcome_ids) != len(set(outcome_ids)):
             raise ValueError("evaluation run outcome case ids must be unique")
         if set(self.fixture_sha256_by_case) != set(outcome_ids):
-            raise ValueError("fixture provenance must match evaluation outcome case ids exactly")
+            raise ValueError(
+                "fixture provenance must match evaluation outcome case ids exactly"
+            )
         for outcome in self.outcomes:
             fixture_sha = self.fixture_sha256_by_case[outcome.case_id]
-            if outcome.harness is not None and outcome.harness.fixture_sha256 != fixture_sha:
+            if (
+                outcome.harness is not None
+                and outcome.harness.fixture_sha256 != fixture_sha
+            ):
                 raise ValueError("harness fixture digest does not match run provenance")
+            if self.candidate_identity is None:
+                if outcome.egress_attestation_sha256 is not None:
+                    raise ValueError(
+                        "custom evaluation outcomes cannot claim Docker egress evidence"
+                    )
+            elif (
+                outcome.status is not OutcomeStatus.unavailable
+                and outcome.egress_attestation_sha256 is None
+            ):
+                raise ValueError(
+                    "measured Docker outcomes require trusted egress attestation"
+                )
         return self
 
     def evidence_sha256(self) -> str:
@@ -520,7 +555,9 @@ class AggregateMetric(StrictModel):
             if self.value is not None or self.numerator is not None:
                 raise ValueError("a zero-denominator metric cannot have a value")
             if not self.unavailable_reason:
-                raise ValueError("a zero-denominator metric requires unavailable_reason")
+                raise ValueError(
+                    "a zero-denominator metric requires unavailable_reason"
+                )
             return self
         if self.value is None or self.numerator is None:
             raise ValueError("a measured aggregate requires value and numerator")
@@ -530,7 +567,9 @@ class AggregateMetric(StrictModel):
             raise ValueError("a measured aggregate cannot have unavailable_reason")
         expected = self.numerator / self.denominator
         if not math.isclose(self.value, expected, rel_tol=1e-12, abs_tol=1e-12):
-            raise ValueError("aggregate value must equal numerator divided by denominator")
+            raise ValueError(
+                "aggregate value must equal numerator divided by denominator"
+            )
         if self.unit is MetricUnit.ratio and not 0 <= self.value <= 1:
             raise ValueError("ratio aggregates must be between zero and one")
         if self.numerator < 0:
@@ -576,7 +615,9 @@ class EvaluationSummary(StrictModel):
                 metric.provenance.run_id != self.run_id
                 or metric.provenance.run_sha256 != self.run_sha256
             ):
-                raise ValueError("all metric provenance must identify the summarized run")
+                raise ValueError(
+                    "all metric provenance must identify the summarized run"
+                )
             represented = len(metric.provenance.included_case_ids) + len(
                 metric.provenance.exclusions
             )
@@ -589,7 +630,7 @@ class EvaluationSummary(StrictModel):
 
 
 class EvaluationReport(StrictModel):
-    schema_version: Literal["evaluation_report@2"] = "evaluation_report@2"
+    schema_version: Literal["evaluation_report@4"] = "evaluation_report@4"
     run: EvaluationRun
     summary: EvaluationSummary
     report_sha256: Sha256
@@ -621,9 +662,12 @@ class RolloutPolicy(StrictModel):
     before the first draft PR exists.
     """
 
-    schema_version: Literal["rollout_policy@3"] = "rollout_policy@3"
+    schema_version: Literal["rollout_policy@4"] = "rollout_policy@4"
     minimum_sample_size: int = Field(default=8, ge=1)
     minimum_metric_denominator: int = Field(default=8, ge=1)
+    minimum_risk_segment_sample_size: int = Field(default=2, ge=1)
+    minimum_ecosystem_segment_sample_size: int = Field(default=2, ge=1)
+    minimum_task_type_segment_sample_size: int = Field(default=2, ge=1)
     maximum_escaped_defect_rate: float = Field(
         default=0.0, ge=0, le=1, allow_inf_nan=False
     )
@@ -637,7 +681,7 @@ class RolloutPolicy(StrictModel):
 
 
 class RolloutDecision(StrictModel):
-    schema_version: Literal["rollout_decision@2"] = "rollout_decision@2"
+    schema_version: Literal["rollout_decision@3"] = "rollout_decision@3"
     requested_stage: RolloutStage
     risk: RiskLevel
     allowed: bool
@@ -646,6 +690,7 @@ class RolloutDecision(StrictModel):
     ready_for_review: bool
     reasons: list[str] = Field(default_factory=list)
     evaluation_summary_sha256: Sha256 | None = None
+    segmented_report_sha256: Sha256 | None = None
     policy_sha256: Sha256
     canary_identity_sha256: Sha256 | None = None
     canary_bucket: int | None = Field(default=None, ge=0, le=99)
@@ -657,7 +702,9 @@ class RolloutDecision(StrictModel):
             raise ValueError(
                 "development_pr uses the separate development publication contract"
             )
-        publishing = self.publish_branch or self.create_pull_request or self.ready_for_review
+        publishing = (
+            self.publish_branch or self.create_pull_request or self.ready_for_review
+        )
         if not self.allowed and publishing:
             raise ValueError("a denied rollout cannot grant publication capabilities")
         if self.allowed and self.reasons:
@@ -671,12 +718,18 @@ class RolloutDecision(StrictModel):
                 raise ValueError("offline and shadow execution is always allowed")
         elif self.allowed:
             if not self.publish_branch or not self.create_pull_request:
-                raise ValueError("an allowed PR stage must grant branch and PR publication")
+                raise ValueError(
+                    "an allowed PR stage must grant branch and PR publication"
+                )
             expected_ready = self.requested_stage is RolloutStage.low_risk_canary
             if self.ready_for_review is not expected_ready:
-                raise ValueError("ready-for-review is granted only to an allowed canary")
+                raise ValueError(
+                    "ready-for-review is granted only to an allowed canary"
+                )
             if self.evaluation_summary_sha256 is None:
                 raise ValueError("publication requires an evaluation summary digest")
+            if self.segmented_report_sha256 is None:
+                raise ValueError("publication requires a segmented report digest")
         expected_sha = canonical_sha256(
             self.model_dump(mode="json", exclude={"decision_sha256"})
         )

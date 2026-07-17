@@ -37,6 +37,19 @@ _CONNECTION_SELECT = """
       AND grant_record.verified_at IS NOT NULL
       AND grant_record.revoked_at IS NULL
 """
+_GRANT_REVOCATION_CHANNEL = "codegen_repository_grant_revoked"
+
+
+async def _notify_grant_revoked(
+    conn: asyncpg.Connection,
+    grant_id: str,
+) -> None:
+    """Publish only after the surrounding transaction commits."""
+    await conn.execute(
+        "SELECT pg_notify($1, $2)",
+        _GRANT_REVOCATION_CHANNEL,
+        grant_id,
+    )
 
 
 def _row_to_connection(row: asyncpg.Record | dict[str, Any]) -> Connection:
@@ -75,7 +88,9 @@ async def _fetch_active_connection(
     return _row_to_connection(row) if row else None
 
 
-async def upsert_connection(pool: asyncpg.Pool, payload: ConnectionCreate) -> Connection:
+async def upsert_connection(
+    pool: asyncpg.Pool, payload: ConnectionCreate
+) -> Connection:
     """Bind a project to an already active, same-project repository grant.
 
     The strict input contains no GitHub coordinates.  Tenant policy has a
@@ -137,14 +152,17 @@ async def activate_operator_grant(
     default_policy = TenantCodegenConnectionPolicy().model_dump(mode="json")
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute(
+            revoked = await conn.fetch(
                 """
                 UPDATE github_repository_grants
                 SET status = 'revoked', revoked_at = now(), updated_at = now()
                 WHERE project_id = $1 AND status = 'active'
+                RETURNING grant_id
                 """,
                 project_id,
             )
+            for row in revoked:
+                await _notify_grant_revoked(conn, row["grant_id"])
             await conn.fetchrow(
                 """
                 INSERT INTO github_repository_grants
@@ -235,16 +253,19 @@ async def revoke_repository_grant(
 ) -> bool:
     """Irreversibly revoke an active repository grant."""
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            UPDATE github_repository_grants
-            SET status = 'revoked', revoked_at = now(), updated_at = now()
-            WHERE project_id = $1 AND grant_id = $2 AND status = 'active'
-            RETURNING grant_id
-            """,
-            project_id,
-            grant_id,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                UPDATE github_repository_grants
+                SET status = 'revoked', revoked_at = now(), updated_at = now()
+                WHERE project_id = $1 AND grant_id = $2 AND status = 'active'
+                RETURNING grant_id
+                """,
+                project_id,
+                grant_id,
+            )
+            if row is not None:
+                await _notify_grant_revoked(conn, row["grant_id"])
     return row is not None
 
 

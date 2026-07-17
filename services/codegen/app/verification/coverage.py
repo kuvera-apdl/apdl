@@ -14,6 +14,7 @@ from app.verification.models import (
     VerificationCoverageItem,
     VerificationPlan,
 )
+from app.safety.paths import canonical_changed_paths
 
 _TEST_FILE = re.compile(
     r"(?:^test_.+|.+_test|.+\.(?:test|spec))\.(?:py|js|jsx|ts|tsx|go|rs|java|kt|cs)$",
@@ -22,14 +23,7 @@ _TEST_FILE = re.compile(
 
 
 def _normalized_paths(paths: Sequence[str]) -> list[str]:
-    normalized: set[str] = set()
-    for raw in paths:
-        value = raw.strip().replace("\\", "/")
-        path = PurePosixPath(value)
-        if not value or path.is_absolute() or ".." in path.parts:
-            raise ValueError(f"Changed path must be repository-relative: {raw!r}")
-        normalized.add(path.as_posix())
-    return sorted(normalized)
+    return sorted(canonical_changed_paths(paths))
 
 
 def is_test_path(path: str) -> bool:
@@ -67,7 +61,9 @@ def evaluate_verification_coverage(
     if not set(authorized).issubset(workflows):
         raise ValueError("Policy-authorized workflow paths must be changed workflows")
     changed_protected = sorted(
-        set(workflows).intersection(plan.protected_workflow_paths).difference(authorized)
+        set(workflows)
+        .intersection(plan.protected_workflow_paths)
+        .difference(authorized)
     )
 
     if relaxed:
@@ -96,7 +92,9 @@ def evaluate_verification_coverage(
         reason = "No existing or newly added GitHub workflow can execute the coverage."
     elif any(item.requires_changed_test_for_pr for item in plan.items) and not tests:
         disposition = CoverageDisposition.missing_required_coverage
-        reason = "Medium/high-risk requirements need a changed test path before PR creation."
+        reason = (
+            "Medium/high-risk requirements need a changed test path before PR creation."
+        )
     else:
         disposition = CoverageDisposition.ready_for_github_ci
         reason = (

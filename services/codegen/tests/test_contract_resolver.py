@@ -3,6 +3,8 @@
 from app.contracts.cache import MemoryContractCache
 from app.contracts.models import (
     BlockerCode,
+    ContractCheckResult,
+    ContractCheckStatus,
     ContractInstallResult,
     ContractRequest,
     RuntimeFingerprint,
@@ -44,6 +46,14 @@ def _resolve(repo, request, installer):
         request=request,
         runtime=_runtime(),
         install_runner=installer,
+    )
+
+
+def _passing_check(_request):
+    return ContractCheckResult(
+        status=ContractCheckStatus.passed,
+        command="/usr/bin/node /workspace/tsc --noEmit",
+        tool_version="5.7.2",
     )
 
 
@@ -115,6 +125,7 @@ def test_ready_resolution_is_reused_by_exact_cache_identity(tmp_path):
         request=_request(),
         runtime=_runtime(),
         install_runner=installer,
+        check_runner=_passing_check,
         cache=cache,
     )
     second = resolve_contract_request(
@@ -126,6 +137,7 @@ def test_ready_resolution_is_reused_by_exact_cache_identity(tmp_path):
         install_runner=lambda _request: (_ for _ in ()).throw(
             AssertionError("cache hit must skip installation")
         ),
+        check_runner=_passing_check,
         cache=cache,
     )
 
@@ -154,3 +166,40 @@ def test_malformed_installed_metadata_is_an_inspection_blocker(tmp_path):
 
     assert resolution.disposition == "blocked"
     assert resolution.blockers[0].code is BlockerCode.inspection_failed
+
+
+def test_unavailable_compile_check_blocks_contract_resolution(tmp_path):
+    repo = tmp_path / "repo"
+    installed = tmp_path / "installed"
+    _write(repo, "package.json", "{}")
+    _write(repo, "package-lock.json", "{}")
+    _write(
+        installed,
+        "node_modules/pkg/package.json",
+        '{"name":"pkg","version":"1.0.0","types":"index.d.ts"}',
+    )
+    _write(installed, "node_modules/pkg/index.d.ts", "export const value: string;")
+
+    def unavailable(_request):
+        return ContractCheckResult(
+            status=ContractCheckStatus.unavailable,
+            command="/usr/bin/node /workspace/tsc --noEmit",
+            tool_version="unavailable",
+            output="permission denied",
+        )
+
+    resolution = resolve_contract_request(
+        repo,
+        project_scope="project-a",
+        repository="acme/app",
+        request=_request(),
+        runtime=_runtime(),
+        install_runner=lambda _request: ContractInstallResult(
+            status="installed", installed_root=installed.as_posix()
+        ),
+        check_runner=unavailable,
+    )
+
+    assert resolution.disposition == "blocked"
+    assert resolution.evidence is None
+    assert resolution.blockers[0].code is BlockerCode.compile_check_unavailable

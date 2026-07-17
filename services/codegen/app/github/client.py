@@ -20,6 +20,10 @@ from app.config import github_api_url
 _TIMEOUT = 30.0
 
 
+class GitHubPaginationIncompleteError(ValueError):
+    """Raised when a bounded GitHub pagination walk has unread pages."""
+
+
 def _validate_github_api_url(
     url: str,
     *,
@@ -92,7 +96,12 @@ async def github_json_pages(
     max_pages: int,
     error_type: type[ValueError] = ValueError,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Yield bounded object-shaped GitHub JSON pages from one same-origin walk."""
+    """Yield one complete bounded same-origin walk of object-shaped JSON pages.
+
+    A page cap is a resource bound, not evidence that the collection is
+    complete. If GitHub still advertises ``rel=next`` after the final permitted
+    page, fail closed instead of silently returning a truncated collection.
+    """
     if max_pages <= 0:
         raise ValueError("max_pages must be positive")
     next_url: str | None = _validate_github_api_url(url, error_type=error_type)
@@ -106,6 +115,14 @@ async def github_json_pages(
             raise error_type("GitHub paginated response must be an object")
         yield payload
         next_url = github_next_page(response, error_type=error_type)
+    if next_url is not None:
+        message = (
+            f"GitHub pagination exceeded max_pages={max_pages} "
+            "while another page remained"
+        )
+        if error_type is ValueError:
+            raise GitHubPaginationIncompleteError(message)
+        raise error_type(message)
 
 
 async def github_paginated_items(
