@@ -38,6 +38,13 @@ FLUSH_RETRY_BASE_SECONDS = 1.0
 FLUSH_RETRY_MAX_SECONDS = 30.0
 PENDING_CLAIM_IDLE_MS = 60_000
 PENDING_CLAIM_INTERVAL_SECONDS = 30.0
+EVENT_STREAM_MAX_ENTRIES = 1_000_000
+EVENT_STREAM_ALERT_ENTRIES = 750_000
+EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
+REDIS_MEMORY_ALERT_RATIO = 0.75
+
+if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
+    raise RuntimeError("Event stream alert threshold must be below capacity")
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 RFC3339_UTC_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
@@ -134,6 +141,7 @@ class ClickHouseWriter:
             "flushed": 0,
             "rejected": 0,
             "dead_lettered": 0,
+            "lost_or_deleted_pending": 0,
             "errors": 0,
         }
         self._flush_retry_count = 0
@@ -141,6 +149,8 @@ class ClickHouseWriter:
         self._flush_lock = asyncio.Lock()
         self._new_stream_cursor = 0
         self._pending_stream_cursor = 0
+        self._known_stream_keys: set[str] = set()
+        self._last_stream_pressure_log: dict[str, float] = {}
 
     async def start(self, project_ids: list[str] | None = None):
         """Start consuming from all project streams.
@@ -152,14 +162,38 @@ class ClickHouseWriter:
         self.running = True
         logger.info("ClickHouseWriter starting, consumer=%s", self.consumer_name)
 
-        # Ensure consumer groups exist for known streams
-        await self._ensure_consumer_groups(project_ids)
+        # Reclaim legacy acknowledged history before any group-creation write.
+        # Redis rejects XGROUP CREATE while memory is already above maxmemory,
+        # but permits XTRIM. Existing groups can therefore recover first.
+        existing_stream_keys = await self._discover_streams()
+        if project_ids is not None:
+            configured_stream_keys = {
+                self._stream_key_for_project(project_id)
+                for project_id in project_ids
+            }
+            existing_stream_keys = [
+                stream_key
+                for stream_key in existing_stream_keys
+                if stream_key in configured_stream_keys
+            ]
+        await self._reconcile_acknowledged_history(
+            existing_stream_keys,
+            require_group=False,
+        )
 
-        # Run consumer and periodic flusher concurrently
+        # Ensure consumer groups exist for known streams.
+        await self._ensure_consumer_groups(project_ids)
+        stream_keys = await self._get_stream_keys(project_ids)
+        await self._reconcile_acknowledged_history(stream_keys)
+        await self._log_due_stream_pressure(stream_keys)
+        await self._log_redis_memory_pressure()
+
+        # Run consumption, flushing, and bounded observability concurrently.
         try:
             await asyncio.gather(
                 self._consume_loop(project_ids),
                 self._flush_loop(),
+                self._monitor_loop(project_ids),
             )
         except asyncio.CancelledError:
             logger.info("Tasks cancelled, performing final flush")
@@ -209,28 +243,44 @@ class ClickHouseWriter:
             stream_keys = await self._discover_streams()
 
         for stream_key in stream_keys:
-            try:
-                await self.redis_client.xgroup_create(
-                    name=stream_key,
-                    groupname=CONSUMER_GROUP,
-                    id=CONSUMER_GROUP_START_ID,
-                    mkstream=True,
-                )
-                logger.info(
-                    "Created consumer group '%s' on stream '%s'",
-                    CONSUMER_GROUP,
-                    stream_key,
-                )
-            except redis.ResponseError as e:
-                # BUSYGROUP means the group already exists -- that is fine
-                if "BUSYGROUP" in str(e):
-                    logger.debug(
-                        "Consumer group '%s' already exists on '%s'",
-                        CONSUMER_GROUP,
-                        stream_key,
-                    )
-                else:
-                    raise
+            await self._ensure_consumer_group(stream_key)
+
+    async def _ensure_consumer_group(self, stream_key: str) -> None:
+        """Create the required group without an unnecessary DENYOOM write."""
+        try:
+            groups = await self.redis_client.xinfo_groups(stream_key)
+        except redis.ResponseError as exc:
+            if "no such key" not in str(exc).lower():
+                raise
+            groups = []
+
+        if any(
+            self._redis_info_value(group, "name") == CONSUMER_GROUP
+            for group in groups
+        ):
+            logger.debug(
+                "Consumer group '%s' already exists on '%s'",
+                CONSUMER_GROUP,
+                stream_key,
+            )
+            return
+
+        try:
+            await self.redis_client.xgroup_create(
+                name=stream_key,
+                groupname=CONSUMER_GROUP,
+                id=CONSUMER_GROUP_START_ID,
+                mkstream=True,
+            )
+            logger.info(
+                "Created consumer group '%s' on stream '%s'",
+                CONSUMER_GROUP,
+                stream_key,
+            )
+        except redis.ResponseError as exc:
+            # Another writer may create the group after the read above.
+            if "BUSYGROUP" not in str(exc):
+                raise
 
     async def _consume_loop(self, project_ids: list[str] | None):
         """Main consume loop reading from Redis Streams.
@@ -324,7 +374,23 @@ class ClickHouseWriter:
                         start_id=start_id,
                         count=remaining,
                     )
-                    next_start_id, messages = self._claimed_messages(claimed)
+                    next_start_id, messages, deleted_ids = self._claimed_messages(
+                        claimed
+                    )
+                    if deleted_ids:
+                        self.stats["lost_or_deleted_pending"] += len(deleted_ids)
+                        logger.critical(
+                            "Redis XAUTOCLAIM reported %d lost or deleted pending "
+                            "messages from '%s': %s",
+                            len(deleted_ids),
+                            stream_key,
+                            ", ".join(deleted_ids),
+                            extra={
+                                "event": "lost_or_deleted_pending",
+                                "stream_key": stream_key,
+                                "deleted_pending_count": len(deleted_ids),
+                            },
+                        )
                     if not messages and next_start_id in {"0-0", start_id}:
                         break
                     if messages:
@@ -356,12 +422,43 @@ class ClickHouseWriter:
                     break
         self._last_pending_claim = time.monotonic()
 
+    async def _monitor_loop(self, project_ids: list[str] | None) -> None:
+        """Monitor stream backlog and shared Redis memory off the consume path."""
+        while self.running:
+            remaining = EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS
+            while self.running and remaining > 0:
+                interval = min(remaining, 1.0)
+                await asyncio.sleep(interval)
+                remaining -= interval
+            if not self.running:
+                return
+            try:
+                stream_keys = await self._get_stream_keys(project_ids)
+                await self._reconcile_acknowledged_history(stream_keys)
+                await self._log_due_stream_pressure(stream_keys)
+                await self._log_redis_memory_pressure()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.stats["errors"] += 1
+                logger.warning("Event stream monitor failed: %s", exc)
+
     @staticmethod
-    def _claimed_messages(claimed) -> tuple[str, list[tuple[str, dict]]]:
+    def _claimed_messages(
+        claimed,
+    ) -> tuple[str, list[tuple[str, dict]], list[str]]:
         """Normalize Redis 6.2/7 XAUTOCLAIM response variants."""
         if not claimed or len(claimed) < 2:
-            return "0-0", []
-        return str(claimed[0]), list(claimed[1])
+            return "0-0", [], []
+        deleted_ids = (
+            []
+            if len(claimed) < 3
+            else [
+                item.decode() if isinstance(item, bytes) else str(item)
+                for item in claimed[2] or []
+            ]
+        )
+        return str(claimed[0]), list(claimed[1]), deleted_ids
 
     def _rotated_stream_keys(
         self, stream_keys: list[str], *, pending: bool
@@ -393,20 +490,212 @@ class ClickHouseWriter:
         else:
             stream_keys = await self._discover_streams()
 
-        # Ensure consumer groups exist for any new streams
+        # Ensure consumer groups exist for any new streams.
         for stream_key in stream_keys:
-            try:
-                await self.redis_client.xgroup_create(
-                    name=stream_key,
-                    groupname=CONSUMER_GROUP,
-                    id=CONSUMER_GROUP_START_ID,
-                    mkstream=True,
-                )
-            except redis.ResponseError as e:
-                if "BUSYGROUP" not in str(e):
-                    raise
+            await self._ensure_consumer_group(stream_key)
 
+        self._known_stream_keys = set(stream_keys)
+        self._last_stream_pressure_log = {
+            stream_key: logged_at
+            for stream_key, logged_at in self._last_stream_pressure_log.items()
+            if stream_key in self._known_stream_keys
+        }
         return stream_keys
+
+    async def _log_due_stream_pressure(self, stream_keys) -> None:
+        """Rate-limit exact outstanding-entry and consumer pressure logs."""
+        now = time.monotonic()
+        for stream_key in sorted(set(stream_keys)):
+            last_logged = self._last_stream_pressure_log.get(stream_key)
+            if (
+                last_logged is not None
+                and now - last_logged
+                < EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS
+            ):
+                continue
+
+            # Mark the attempt before I/O so an unavailable Redis instance does
+            # not turn observability into a tight retry loop.
+            self._last_stream_pressure_log[stream_key] = now
+            try:
+                stream_length, groups = await asyncio.gather(
+                    self.redis_client.xlen(stream_key),
+                    self.redis_client.xinfo_groups(stream_key),
+                )
+                group = next(
+                    item
+                    for item in groups
+                    if self._redis_info_value(item, "name") == CONSUMER_GROUP
+                )
+                pending = self._redis_info_value(group, "pending")
+                lag = self._redis_info_value(group, "lag")
+            except Exception as exc:
+                logger.warning(
+                    "Could not read Redis stream pressure for '%s': %s",
+                    stream_key,
+                    exc,
+                )
+                continue
+
+            lag_unknown = lag is None
+            log_level = (
+                logging.WARNING
+                if stream_length >= EVENT_STREAM_ALERT_ENTRIES
+                else logging.INFO
+            )
+            log_context = {
+                "event": "event_stream_pressure",
+                "stream_key": stream_key,
+                "outstanding_entries": stream_length,
+                "pending": pending,
+                "lag": lag,
+                "lag_unknown": lag_unknown,
+                "alert_entries": EVENT_STREAM_ALERT_ENTRIES,
+                "max_entries": EVENT_STREAM_MAX_ENTRIES,
+            }
+            logger.log(
+                log_level,
+                "event_stream_pressure stream=%s outstanding_entries=%d "
+                "pending=%s lag=%s lag_unknown=%s alert_entries=%d max_entries=%d",
+                stream_key,
+                stream_length,
+                pending,
+                lag,
+                str(lag_unknown).lower(),
+                EVENT_STREAM_ALERT_ENTRIES,
+                EVENT_STREAM_MAX_ENTRIES,
+                extra=log_context,
+            )
+
+    async def _log_redis_memory_pressure(self) -> None:
+        """Emit aggregate Redis memory pressure for the shared dependency."""
+        try:
+            memory = await self.redis_client.info("memory")
+            used_memory = int(self._redis_info_value(memory, "used_memory") or 0)
+            max_memory = int(self._redis_info_value(memory, "maxmemory") or 0)
+        except Exception as exc:
+            logger.warning("Could not read Redis memory pressure: %s", exc)
+            return
+
+        utilization = used_memory / max_memory if max_memory > 0 else None
+        pressured = utilization is not None and utilization >= REDIS_MEMORY_ALERT_RATIO
+        log_context = {
+            "event": "redis_memory_pressure",
+            "used_memory_bytes": used_memory,
+            "max_memory_bytes": max_memory,
+            "utilization": utilization,
+            "alert_ratio": REDIS_MEMORY_ALERT_RATIO,
+            "maxmemory_configured": max_memory > 0,
+        }
+        logger.log(
+            logging.WARNING if pressured else logging.INFO,
+            "redis_memory_pressure used_memory_bytes=%d max_memory_bytes=%d "
+            "utilization=%s alert_ratio=%.2f maxmemory_configured=%s",
+            used_memory,
+            max_memory,
+            f"{utilization:.4f}" if utilization is not None else "unbounded",
+            REDIS_MEMORY_ALERT_RATIO,
+            str(max_memory > 0).lower(),
+            extra=log_context,
+        )
+
+    async def _reconcile_acknowledged_history(
+        self,
+        stream_keys: list[str],
+        *,
+        require_group: bool = True,
+    ) -> None:
+        """Remove pre-upgrade history proven durable by the sole group.
+
+        Legacy writers XACKed durable entries but retained them in the stream.
+        Entries below the earliest pending ID are therefore acknowledged; when
+        no entries are pending, every ID through ``last-delivered-id`` is safe.
+        Unread and pending entries are never crossed by the exact MINID trim.
+        """
+        for stream_key in stream_keys:
+            groups = await self.redis_client.xinfo_groups(stream_key)
+            group = next(
+                (
+                    item
+                    for item in groups
+                    if self._redis_info_value(item, "name") == CONSUMER_GROUP
+                ),
+                None,
+            )
+            if group is None:
+                if not require_group:
+                    continue
+                raise RuntimeError(
+                    f"Required consumer group {CONSUMER_GROUP!r} is missing "
+                    f"from {stream_key!r}"
+                )
+
+            last_delivered = self._redis_info_value(group, "last-delivered-id")
+            if not last_delivered or last_delivered == "0-0":
+                continue
+
+            pending = int(self._redis_info_value(group, "pending") or 0)
+            if pending > 0:
+                summary = await self.redis_client.xpending(
+                    stream_key,
+                    CONSUMER_GROUP,
+                )
+                minimum_pending = self._redis_info_value(summary, "min")
+                if not minimum_pending:
+                    logger.warning(
+                        "Skipping acknowledged-history reconciliation for %s: "
+                        "pending summary has no minimum ID",
+                        stream_key,
+                    )
+                    continue
+                trim_before = str(minimum_pending)
+            else:
+                trim_before = self._next_stream_id(str(last_delivered))
+
+            removed = await self.redis_client.xtrim(
+                stream_key,
+                minid=trim_before,
+                approximate=False,
+            )
+            if removed:
+                logger.info(
+                    "event_stream_history_reconciled stream=%s removed_entries=%d "
+                    "trim_before=%s pending=%d",
+                    stream_key,
+                    removed,
+                    trim_before,
+                    pending,
+                    extra={
+                        "event": "event_stream_history_reconciled",
+                        "stream_key": stream_key,
+                        "removed_entries": removed,
+                        "trim_before": trim_before,
+                        "pending": pending,
+                    },
+                )
+
+    @staticmethod
+    def _next_stream_id(stream_id: str) -> str:
+        """Return the exclusive MINID boundary immediately after one ID."""
+        try:
+            milliseconds_text, sequence_text = stream_id.split("-", 1)
+            milliseconds = int(milliseconds_text)
+            sequence = int(sequence_text)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid Redis stream ID: {stream_id!r}") from exc
+        if milliseconds < 0 or sequence < 0:
+            raise ValueError(f"Invalid Redis stream ID: {stream_id!r}")
+        if sequence >= 2**64 - 1:
+            return f"{milliseconds + 1}-0"
+        return f"{milliseconds}-{sequence + 1}"
+
+    @staticmethod
+    def _redis_info_value(info: dict, field: str):
+        """Read redis-py XINFO mappings with decoded or byte keys/values."""
+        value = info.get(field, info.get(field.encode()))
+        if isinstance(value, bytes):
+            return value.decode()
+        return value
 
     async def _process_messages(
         self, results: list[tuple[str, list[tuple[str, dict]]]]
@@ -598,19 +887,22 @@ class ClickHouseWriter:
                 message_ids.append(event.message_id)
 
     async def _ack_durable_messages(self) -> bool:
-        """ACK rows already inserted into ClickHouse, grouped by Redis stream."""
+        """Atomically ACK and delete durable rows, grouped by Redis stream."""
         for stream_key, message_ids in list(self._durable_pending_ack.items()):
             try:
-                await self.redis_client.xack(
-                    stream_key,
-                    CONSUMER_GROUP,
-                    *message_ids,
-                )
+                async with self.redis_client.pipeline(transaction=True) as transaction:
+                    transaction.xack(
+                        stream_key,
+                        CONSUMER_GROUP,
+                        *message_ids,
+                    )
+                    transaction.xdel(stream_key, *message_ids)
+                    await transaction.execute()
             except Exception as exc:
                 delay = self._record_flush_failure()
                 self.stats["errors"] += 1
                 logger.error(
-                    "Redis ACK failed for %d durable events from %s "
+                    "Redis ACK/delete transaction failed for %d durable events from %s "
                     "(retrying in %.1fs): %s",
                     len(message_ids),
                     stream_key,
@@ -618,6 +910,9 @@ class ClickHouseWriter:
                     exc,
                 )
                 return False
+            # EXEC is the commit boundary. If the connection fails before its
+            # result is known, retain these IDs and safely retry the idempotent
+            # XACK/XDEL pair rather than risking an unfinalized delivery.
             del self._durable_pending_ack[stream_key]
 
         return True
@@ -683,7 +978,8 @@ class ClickHouseWriter:
     async def _flush(self) -> bool:
         """Batch insert buffered events into ClickHouse.
 
-        Redis deliveries are ACKed only after ClickHouse accepts their rows.
+        Redis deliveries are ACKed and deleted only after ClickHouse or the DLQ
+        accepts them.
         Failed inserts remain buffered and apply backpressure to consumption;
         they are never silently dropped. A crash between ClickHouse insertion
         and Redis ACK can replay a row, so this is at-least-once delivery rather

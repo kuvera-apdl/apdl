@@ -10,7 +10,7 @@ import math
 
 from pydantic import ValidationError
 
-from app.models.schemas import MAX_BATCH_SIZE, Event
+from app.models.schemas import DUPLICATE_MESSAGE_ID_ERROR, MAX_BATCH_SIZE, Event
 
 FEATURE_FLAG_EXPOSURE_EVENT = "$feature_flag_exposure"
 FRONTEND_ERROR_EVENT = "$frontend_error"
@@ -128,6 +128,7 @@ def validate_event_batch(body: object) -> dict:
     all_errors: list[dict] = []
     for i, ev in enumerate(events):
         all_errors.extend(_validate_event(ev, prefix=f"events[{i}]"))
+    all_errors.extend(_validate_unique_message_ids(events))
 
     if all_errors:
         return {"valid": False, "errors": all_errors}
@@ -140,6 +141,32 @@ def validate_single_event(event: object) -> dict:
     if errors:
         return {"valid": False, "errors": errors}
     return {"valid": True, "errors": []}
+
+
+def _validate_unique_message_ids(events: list[object]) -> list[dict]:
+    first_indexes: dict[str, int] = {}
+    errors: list[dict] = []
+
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+
+        message_id = event.get("message_id")
+        if not isinstance(message_id, str):
+            continue
+
+        first_index = first_indexes.setdefault(message_id, index)
+        if first_index == index:
+            continue
+
+        errors.append({
+            "field": f"events[{index}].message_id",
+            "message": DUPLICATE_MESSAGE_ID_ERROR.format(
+                first_index=first_index
+            ),
+        })
+
+    return errors
 
 
 def _validate_event(event: object, prefix: str) -> list[dict]:

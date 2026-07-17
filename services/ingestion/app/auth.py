@@ -76,6 +76,8 @@ class Principal:
     credential_id: str
     project_id: str
     roles: frozenset[str]
+    # Missing provenance must never grant the larger confidential-key quota.
+    credential_kind: CredentialKind = CredentialKind.BROWSER
 
 
 class PostgresAuthenticator:
@@ -137,6 +139,7 @@ class PostgresAuthenticator:
             credential_id=str(row["credential_id"]),
             project_id=stored_project,
             roles=roles,
+            credential_kind=descriptor.kind,
         )
 
 

@@ -1,8 +1,7 @@
 import json
 
 import pytest
-
-from app.middleware.rate_limit import request_cost
+from app.middleware.rate_limit import byte_cost
 from app.validation.json_contract import (
     MAX_CONTAINER_ITEMS,
     MAX_EVENT_BYTES,
@@ -49,10 +48,11 @@ def test_bounds_reject_lone_surrogate_that_cannot_encode_as_utf8():
         validate_event_json_bounds({"value": "\ud800"})
 
 
-def test_rate_cost_charges_events_and_rounded_kibibytes():
-    assert request_cost(3, 1) == 4
-    assert request_cost(3, 1024) == 4
-    assert request_cost(3, 1025) == 5
+def test_byte_cost_charges_each_started_kibibyte():
+    assert byte_cost(0) == 1
+    assert byte_cost(1) == 1
+    assert byte_cost(1024) == 1
+    assert byte_cost(1025) == 2
 
 
 def test_canonical_payload_round_trips_without_changes():

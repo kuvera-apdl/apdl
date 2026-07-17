@@ -6,7 +6,7 @@ services:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory ${APDL_REDIS_MAXMEMORY:-1gb} --maxmemory-policy noeviction
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -72,6 +72,9 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      # Docker's default bridge address pool. Production deployments should
+      # narrow this to the exact public-edge proxy network.
+      INGESTION_TRUSTED_PROXY_CIDRS: ${INGESTION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
       LOG_LEVEL: info
     healthcheck:
       test:

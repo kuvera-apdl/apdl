@@ -36,10 +36,16 @@ batch-inserts into the `events` table.
   groups start at `0-0`, so a stream's
   existing backlog is consumed on first discovery. The writer periodically uses
   `XAUTOCLAIM` to take over stale Pending Entries List deliveries from prior
-  consumers. Messages are XACKed only after ClickHouse accepts their rows. A
-  crash between insert and ACK may replay an insert, but the stable client
+  consumers. Messages are atomically XACKed and XDEL'd only after ClickHouse or
+  the DLQ accepts their rows. This keeps `XLEN` equal to outstanding work so
+  both event producers can enforce the shared 1,000,000-entry capacity without
+  trimming accepted data. A crash between insert and ACK may replay an insert,
+  but the stable client
   `message_id` and `(project_id, message_id)` replacement key make supported
-  `FINAL` reads return that event exactly once.
+  `FINAL` reads return that event exactly once. Retries must preserve the
+  complete logical event, especially its original timestamp: ClickHouse does
+  not merge replacement keys across monthly partitions, so changing the
+  timestamp while reusing an ID violates the idempotency contract.
 - **Tenant authority:** the project is derived only from a validated
   `events:raw:{project_id}` stream key. Conflicting project assertions inside a
   Redis message or its event JSON are rejected.
@@ -55,6 +61,36 @@ batch-inserts into the `events` table.
   after an arbitrary retry count. Only narrow client-side row serialization
   errors are terminal—server/schema failures retain the batch.
 - **Shutdown:** SIGINT/SIGTERM trigger a final flush and stats log.
+
+The deletion contract permits any number of consumers in the one required
+`clickhouse-writer` group, but no second durable consumer group. Adding another
+group requires all-group acknowledgement tracking before entries can be
+deleted. Redis must use non-evicting memory policy plus durable persistence;
+the supported Compose stack uses AOF (`appendfsync everysec`) and
+an explicit aggregate memory ceiling with `maxmemory-policy noeviction`. Route
+`event_stream_pressure`,
+`event_stream_overloaded`, `redis_memory_pressure`, and
+`lost_or_deleted_pending` logs to alerts and monitor Redis memory/disk capacity.
+Logging is only the checked-in signal; it does not become an operational alert
+until the deployment routes it.
+
+Persistent pre-policy streams are reconciled by the writer before consumption:
+an exact `XTRIM MINID` removes only legacy entries proven acknowledged before
+the earliest pending delivery. This makes old acknowledged history stop
+consuming the new outstanding-entry capacity. The writer performs this trim
+before attempting consumer-group creation and avoids group-creation writes for
+groups that already exist, so an existing group can recover when Redis starts
+above its new memory ceiling. Before the first rollout of `maxmemory`, verify
+that the configured ceiling exceeds current `used_memory` plus operating
+headroom. If it does not, temporarily start above current usage, confirm writer
+reconciliation has completed, and only then lower the ceiling; a stream with no
+consumer group cannot be trimmed safely to manufacture that headroom.
+
+An upgrade must be coordinated:
+stop every Ingestion and Config outbox producer that can still issue legacy
+`XADD MAXLEN`, start the new writer and confirm reconciliation, then start only
+bounded producers. Mixed old/new producers are unsupported because one legacy
+producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
 `CLICKHOUSE_URL` (default `clickhouse://localhost:9000/apdl`), `BUFFER_SIZE`,

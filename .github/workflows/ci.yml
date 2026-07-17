@@ -90,6 +90,18 @@ jobs:
   ingestion-service:
     name: Ingestion Service
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      APDL_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6

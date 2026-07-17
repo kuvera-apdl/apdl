@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ValidationError as PydanticValidationError
 
 MAX_BATCH_SIZE = 100
 MAX_EVENT_NAME_LENGTH = 256
@@ -16,6 +17,9 @@ CANONICAL_EVENT_NAMES = {
     "group": "group",
     "page": "page",
 }
+DUPLICATE_MESSAGE_ID_ERROR = (
+    "Duplicate message_id; first occurrence at events[{first_index}].message_id"
+)
 RFC3339_UTC_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
 )
@@ -211,3 +215,27 @@ class EventBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     events: list[Event] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_message_ids(self) -> "EventBatch":
+        first_indexes: dict[str, int] = {}
+        errors: list[dict[str, Any]] = []
+
+        for index, event in enumerate(self.events):
+            first_index = first_indexes.setdefault(event.message_id, index)
+            if first_index == index:
+                continue
+
+            message = DUPLICATE_MESSAGE_ID_ERROR.format(first_index=first_index)
+            errors.append({
+                "type": "value_error",
+                "loc": ("events", index, "message_id"),
+                "input": event.message_id,
+                "ctx": {"error": ValueError(message)},
+            })
+
+        if errors:
+            raise PydanticValidationError.from_exception_data(
+                self.__class__.__name__, errors
+            )
+        return self

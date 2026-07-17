@@ -42,11 +42,14 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 - Ingestion verifies API keys against the hashed credential registry, derives
   project/role authority server-side, applies a shared Redis token bucket
   charged by event count and bytes, validates bounded strict JSON batches
-  (1–100 canonical events), and atomically appends each complete batch to
-  `events:raw:{project_id}` (`MAXLEN ~1M`).
+  (1–100 canonical events), and atomically admits each complete batch to
+  `events:raw:{project_id}` only while the exact outstanding depth remains at
+  or below one million. Producers never trim accepted events and warn at
+  750,000 outstanding entries.
 - The ClickHouse writer consumes via a consumer group and flushes batches of
   1000 events or every 5 s. Redis deliveries are acknowledged only after a
-  durable ClickHouse insert or bounded DLQ record. Stable client message IDs
+  durable ClickHouse insert or bounded DLQ record, then deleted atomically so
+  stream depth remains the admission backlog. Stable client message IDs
   and `ReplacingMergeTree` keys make supported `FINAL` reads idempotent after
   an insert-before-ACK replay.
 - The standalone [ETL framework](../pipeline/etl/docs/etl-framework.md) and its

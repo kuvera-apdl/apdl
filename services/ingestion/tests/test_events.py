@@ -12,8 +12,24 @@ import pytest_asyncio
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
-from app.auth import Principal, authenticate_request
+from app.auth import CredentialKind, Principal, authenticate_request
 from app.main import app
+from app.middleware.rate_limit import (
+    BROWSER_BYTE_LIMIT,
+    BROWSER_EVENT_LIMIT,
+    PROJECT_BYTE_LIMIT,
+    PROJECT_EVENT_LIMIT,
+    BucketDebit,
+    BucketLimit,
+    _HIERARCHICAL_TOKEN_BUCKET_LUA,
+    _admit,
+)
+from app.routers import events as events_router
+from app.streaming.redis_producer import (
+    EVENT_STREAM_MAX_ENTRIES,
+    _BOUNDED_XADD_LUA,
+)
+from app.validation.json_contract import MAX_REQUEST_BYTES
 
 API_KEY = "proj_testproj_abcdefghijklmnop"
 HEADERS = {"X-API-Key": API_KEY}
@@ -37,21 +53,107 @@ def canonical_event(
     return value
 
 
+def publisher_calls():
+    return [
+        call
+        for call in app.state.redis.eval.await_args_list
+        if call.args[0] == _BOUNDED_XADD_LUA
+    ]
+
+
+def quota_calls(stage: str | None = None):
+    calls = [
+        call
+        for call in app.state.redis.eval.await_args_list
+        if call.args[0] == _HIERARCHICAL_TOKEN_BUCKET_LUA
+    ]
+    if stage is None:
+        return calls
+    return [
+        call
+        for call in calls
+        if any(
+            key.startswith(f"apdl:rate:{stage}:")
+            for key in quota_keys(call)
+        )
+    ]
+
+
+def quota_keys(call) -> tuple[str, ...]:
+    key_count = int(call.args[1])
+    return call.args[2 : 2 + key_count]
+
+
+def quota_debits(call) -> list[tuple[str, tuple[int, ...]]]:
+    keys = quota_keys(call)
+    arguments = call.args[2 + len(keys) :]
+    return [
+        (key, arguments[index * 4 : (index + 1) * 4])
+        for index, key in enumerate(keys)
+    ]
+
+
+class StatefulQuotaEvaluator:
+    """Stateful reference double for the Lua check-all/debit-all contract."""
+
+    def __init__(self) -> None:
+        self.tokens: dict[str, int] = {}
+
+    async def evaluate(self, script, key_count, *args):
+        assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
+        keys = args[:key_count]
+        raw_limits = args[key_count:]
+        candidates = []
+        for index, key in enumerate(keys):
+            capacity, _refill, cost, _ttl = raw_limits[
+                index * 4 : (index + 1) * 4
+            ]
+            tokens = self.tokens.get(key, capacity)
+            candidates.append((key, capacity, cost, tokens))
+
+        rejected = next(
+            (candidate for candidate in candidates if candidate[3] < candidate[2]),
+            None,
+        )
+        if rejected is not None:
+            _key, capacity, _cost, tokens = rejected
+            return [0, capacity, tokens, 1]
+
+        for key, _capacity, cost, tokens in candidates:
+            self.tokens[key] = tokens - cost
+        minimum = min(self.tokens[key] for key in keys)
+        return [1, 0, minimum, 0]
+
+
+def published_events() -> list[dict]:
+    calls = publisher_calls()
+    assert len(calls) == 1
+    return [json.loads(value) for value in calls[0].args[5:]]
+
+
 @pytest.fixture(autouse=True)
 def _setup_mock_redis():
     """Inject a mock Redis into app.state before each test."""
     mock_redis = AsyncMock()
     mock_redis.ping = AsyncMock(return_value=True)
-    mock_redis.eval = AsyncMock(return_value=[1, 999, 0])
+
+    async def evaluate(script, _numkeys, *args):
+        if script == _BOUNDED_XADD_LUA:
+            count = int(args[1])
+            return [
+                1,
+                count,
+                *(f"1234567890-{index}".encode() for index in range(count)),
+            ]
+        if script == _HIERARCHICAL_TOKEN_BUCKET_LUA:
+            return [1, 999, 999, 0]
+        raise AssertionError("Unexpected Redis script")
+
+    mock_redis.eval = AsyncMock(side_effect=evaluate)
     pipeline = MagicMock()
-    pipeline.xadd.return_value = pipeline
-
-    async def execute(**_kwargs):
-        return [b"1234567890-0"] * pipeline.xadd.call_count
-
-    pipeline.execute = AsyncMock(side_effect=execute)
     mock_redis.pipeline = MagicMock(return_value=pipeline)
     app.state.redis = mock_redis
+    app.state.trusted_proxy_networks = ()
     yield
 
 
@@ -103,18 +205,15 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
 
     assert resp.status_code == 202
     assert resp.json()["accepted"] == 1
-    app.state.redis.pipeline.assert_called_once_with(transaction=True)
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.xadd.assert_called_once()
-    pipeline.execute.assert_awaited_once_with(raise_on_error=True)
+    calls = publisher_calls()
+    assert len(calls) == 1
+    args = calls[0].args
+    assert args[2] == "events:raw:testproj"
+    assert args[3] == 1
+    assert args[4] == EVENT_STREAM_MAX_ENTRIES
+    assert "MAXLEN" not in args[0]
 
-    args, kwargs = pipeline.xadd.call_args
-    stream_key, fields = args
-    assert stream_key == "events:raw:testproj"
-    assert kwargs["maxlen"] == 1000000
-    assert kwargs["approximate"] is True
-
-    published = json.loads(fields["event_json"])
+    published = published_events()[0]
     assert published["event"] == "sdk_aligned_probe"
     assert published["type"] == "track"
     assert published["anonymous_id"] == "anon-sdk-1"
@@ -129,6 +228,23 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
     assert "anonymousId" not in published
     assert "sessionId" not in published
     assert "messageId" not in published
+
+
+@pytest.mark.asyncio
+async def test_untrusted_forwarding_headers_do_not_reach_persisted_identity(client):
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("spoof-attempt")]},
+        headers={
+            **HEADERS,
+            "X-Forwarded-For": "203.0.113.99",
+            "X-Real-IP": "203.0.113.98",
+        },
+    )
+
+    assert resp.status_code == 202
+    published = published_events()[0]
+    assert published["ip"] == "127.0.0.1"
 
 
 @pytest.mark.asyncio
@@ -222,13 +338,8 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
 
     assert resp.status_code == 202
     assert resp.json() == {"accepted": 4}
-    pipeline = app.state.redis.pipeline.return_value
-    assert pipeline.xadd.call_count == 4
-
-    published = [
-        json.loads(call.args[1]["event_json"])
-        for call in pipeline.xadd.call_args_list
-    ]
+    published = published_events()
+    assert len(published) == 4
     assert published[0]["properties"] == {"tag": "input", "x": 12, "y": 34}
     assert published[0]["context"] == {
         "browser": {"name": "Firefox", "version": "128"}
@@ -246,9 +357,7 @@ async def test_click_auto_capture_is_sanitized_before_redis_publish(client):
         "text": "ordinary event text",
         "source": "test",
     }
-    serialized = "".join(
-        call.args[1]["event_json"] for call in pipeline.xadd.call_args_list
-    )
+    serialized = json.dumps(published)
     assert legacy_sentinel not in serialized
     assert over_limit_sentinel not in serialized
     for sentinel in (
@@ -295,12 +404,7 @@ async def test_feature_flag_exposure_payload_is_published(client):
 
     assert resp.status_code == 202
     assert resp.json()["accepted"] == 1
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.xadd.assert_called_once()
-
-    args, _ = pipeline.xadd.call_args
-    _, fields = args
-    published = json.loads(fields["event_json"])
+    published = published_events()[0]
     assert published["event"] == "$feature_flag_exposure"
     assert published["type"] == "track"
     assert published["properties"] == payload["events"][0]["properties"]
@@ -439,6 +543,66 @@ async def test_reject_empty_events_array(client):
 
 
 @pytest.mark.asyncio
+async def test_reject_duplicate_message_ids_before_event_admission(client):
+    message_id = "message-duplicate-in-batch"
+    payload = {
+        "events": [
+            canonical_event("first", message_id=message_id),
+            canonical_event("second", message_id=message_id),
+        ],
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 400
+    assert resp.json() == {
+        "error": "validation_failed",
+        "errors": [
+            {
+                "field": "events[1].message_id",
+                "message": (
+                    "Duplicate message_id; first occurrence at "
+                    "events[0].message_id"
+                ),
+            }
+        ],
+    }
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("byte")) == 1
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_unchanged_message_id_retry_is_admitted_across_requests(client):
+    event = canonical_event(
+        "retryable-event",
+        message_id="message-stable-across-retry",
+        timestamp="2026-07-15T18:00:00.000Z",
+        properties={"attempt_invariant": True},
+    )
+
+    first = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+    second = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+
+    assert first.status_code == 202
+    assert first.json() == {"accepted": 1}
+    assert second.status_code == 202
+    assert second.json() == {"accepted": 1}
+    calls = publisher_calls()
+    assert len(calls) == 2
+    retry_payloads = [json.loads(call.args[5]) for call in calls]
+    assert [payload["message_id"] for payload in retry_payloads] == [
+        event["message_id"],
+        event["message_id"],
+    ]
+    assert [payload["timestamp"] for payload in retry_payloads] == [
+        event["timestamp"],
+        event["timestamp"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_reject_event_without_identifier(client):
     """RejectEventWithoutIdentifier"""
     payload = {
@@ -560,40 +724,437 @@ async def test_reject_non_utf8_json_string_before_enqueue(client):
 
 @pytest.mark.asyncio
 async def test_reject_oversized_request_before_json_parse(client):
-    from app.validation.json_contract import MAX_REQUEST_BYTES
-
     resp = await client.post(
         URL,
         content=b"x" * (MAX_REQUEST_BYTES + 1),
         headers={**HEADERS, "Content-Type": "application/json"},
     )
+
     assert resp.status_code == 413
     assert resp.json()["error"] == "payload_too_large"
-    app.state.redis.pipeline.assert_not_called()
+    assert len(quota_calls("request")) == 1
+    assert quota_calls("byte") == []
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_is_shared_and_charged_by_event_bytes(client):
+async def test_chunked_body_stops_at_bound_before_downstream_stages(monkeypatch):
+    messages = iter([
+        {
+            "type": "http.request",
+            "body": b"x" * MAX_REQUEST_BYTES,
+            "more_body": True,
+        },
+        {"type": "http.request", "body": b"y", "more_body": True},
+        {
+            "type": "http.request",
+            "body": b"must-not-be-read",
+            "more_body": False,
+        },
+    ])
+    receive_count = 0
+
+    async def receive():
+        nonlocal receive_count
+        receive_count += 1
+        return next(messages)
+
+    request = Request(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": URL,
+            "raw_path": URL.encode(),
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("test", 80),
+            "app": app,
+        },
+        receive,
+    )
+    request.state.principal = Principal(
+        credential_id="chunked-test",
+        project_id="testproj",
+        roles=frozenset({"events:write"}),
+    )
+    request_admission = AsyncMock(return_value=None)
+    byte_admission = AsyncMock(return_value=None)
+    event_admission = AsyncMock(return_value=None)
+    publisher = AsyncMock()
+    monkeypatch.setattr(events_router, "admit_request", request_admission)
+    monkeypatch.setattr(events_router, "admit_bytes", byte_admission)
+    monkeypatch.setattr(events_router, "admit_events", event_admission)
+    monkeypatch.setattr(events_router, "publish_batch", publisher)
+
+    resp = await events_router.ingest_events(request)
+
+    assert request.headers.get("content-length") is None
+    assert resp.status_code == 413
+    assert json.loads(resp.body) == {
+        "error": "payload_too_large",
+        "message": f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+    }
+    assert receive_count == 2
+    request_admission.assert_awaited_once()
+    byte_admission.assert_not_awaited()
+    event_admission.assert_not_awaited()
+    publisher.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_valid_request_uses_one_atomic_quota_call_per_stage(client):
     payload = {"events": [canonical_event("quota-test")]}
-    resp = await client.post(URL, json=payload, headers=HEADERS)
-    assert resp.status_code == 202
 
-    args = app.state.redis.eval.await_args.args
-    assert args[2] == "apdl:rate:project:testproj"
-    assert args[5] > len(payload["events"])
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 202
+    request_calls = quota_calls("request")
+    byte_calls = quota_calls("byte")
+    event_calls = quota_calls("event")
+    assert len(request_calls) == 1
+    assert len(byte_calls) == 1
+    assert len(event_calls) == 1
+    assert len(quota_keys(request_calls[0])) == 4
+    assert len(quota_keys(byte_calls[0])) == 4
+    assert len(quota_keys(event_calls[0])) == 5
+
+    byte_debits = dict(quota_debits(byte_calls[0]))
+    byte_project_key = "apdl:rate:byte:project:testproj"
+    byte_credential_key = next(
+        key for key in byte_debits if ":credential:" in key
+    )
+    assert byte_debits[byte_project_key][:2] == (
+        PROJECT_BYTE_LIMIT.capacity,
+        PROJECT_BYTE_LIMIT.refill_per_second,
+    )
+    assert byte_debits[byte_credential_key][:2] == (
+        BROWSER_BYTE_LIMIT.capacity,
+        BROWSER_BYTE_LIMIT.refill_per_second,
+    )
+    assert BROWSER_BYTE_LIMIT.capacity < PROJECT_BYTE_LIMIT.capacity
+    assert (
+        BROWSER_BYTE_LIMIT.refill_per_second
+        < PROJECT_BYTE_LIMIT.refill_per_second
+    )
+
+    event_debits = dict(quota_debits(event_calls[0]))
+    project_key = "apdl:rate:event:project:testproj"
+    credential_key = next(
+        key for key in event_debits if ":credential:" in key
+    )
+    assert event_debits[project_key][:3] == (
+        PROJECT_EVENT_LIMIT.capacity,
+        PROJECT_EVENT_LIMIT.refill_per_second,
+        1,
+    )
+    assert event_debits[credential_key][:3] == (
+        BROWSER_EVENT_LIMIT.capacity,
+        BROWSER_EVENT_LIMIT.refill_per_second,
+        1,
+    )
+    serialized_keys = " ".join(
+        (
+            *quota_keys(request_calls[0]),
+            *byte_debits,
+            *event_debits,
+        )
+    )
+    assert API_KEY not in serialized_keys
+    assert "test-ingestion" not in serialized_keys
+    assert "127.0.0.1" not in serialized_keys
+    assert "anon-test" not in serialized_keys
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_rejection_does_not_start_redis_transaction(client):
-    app.state.redis.eval = AsyncMock(return_value=[0, 0, 3])
+async def test_malformed_payload_is_charged_by_request_and_byte_before_parsing(
+    client,
+):
+    resp = await client.post(
+        URL,
+        content=b'{"events": [',
+        headers={**HEADERS, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 400
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("byte")) == 1
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
+
+    byte_debits = quota_debits(quota_calls("byte")[0])
+    assert {debit[2] for _key, debit in byte_debits} == {1}
+
+
+@pytest.mark.asyncio
+async def test_maximum_sized_browser_body_fits_subordinate_byte_bucket(client):
+    resp = await client.post(
+        URL,
+        content=b"x" * MAX_REQUEST_BYTES,
+        headers={**HEADERS, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 400
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("byte")) == 1
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
+
+    byte_debits = dict(quota_debits(quota_calls("byte")[0]))
+    project_key = "apdl:rate:byte:project:testproj"
+    credential_key = next(
+        key for key in byte_debits if ":credential:" in key
+    )
+    assert byte_debits[project_key][:3] == (
+        PROJECT_BYTE_LIMIT.capacity,
+        PROJECT_BYTE_LIMIT.refill_per_second,
+        512,
+    )
+    assert byte_debits[credential_key][:3] == (
+        BROWSER_BYTE_LIMIT.capacity,
+        BROWSER_BYTE_LIMIT.refill_per_second,
+        BROWSER_BYTE_LIMIT.capacity,
+    )
+
+
+@pytest.mark.asyncio
+async def test_distinct_credentials_have_distinct_opaque_buckets(client):
+    async def authenticate_credential_a(request: Request):
+        principal = Principal(
+            credential_id="credential-a",
+            project_id="testproj",
+            roles=frozenset({"events:write"}),
+            credential_kind=CredentialKind.BROWSER,
+        )
+        request.state.principal = principal
+        return principal
+
+    async def authenticate_credential_b(request: Request):
+        principal = Principal(
+            credential_id="credential-b",
+            project_id="testproj",
+            roles=frozenset({"events:write"}),
+            credential_kind=CredentialKind.BROWSER,
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = authenticate_credential_a
+    first = await client.post(URL, content=b"{", headers=HEADERS)
+    app.dependency_overrides[authenticate_request] = authenticate_credential_b
+    second = await client.post(URL, content=b"{", headers=HEADERS)
+
+    assert first.status_code == 400
+    assert second.status_code == 400
+    request_calls = quota_calls("request")
+    credential_keys = [
+        next(key for key in quota_keys(call) if ":credential:" in key)
+        for call in request_calls
+    ]
+    assert len(set(credential_keys)) == 2
+    assert all("credential-a" not in key for key in credential_keys)
+    assert all("credential-b" not in key for key in credential_keys)
+
+
+@pytest.mark.asyncio
+async def test_event_quota_aggregates_repeated_batch_identities(client):
+    payload = {
+        "events": [
+            canonical_event("one", message_id="message-one"),
+            canonical_event("two", message_id="message-two"),
+            canonical_event(
+                "three",
+                anonymous_id=None,
+                user_id="user-three",
+                message_id="message-three",
+            ),
+        ],
+    }
+    payload["events"][2].pop("anonymous_id")
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 202
+    event_call = quota_calls("event")[0]
+    debits = quota_debits(event_call)
+    common_debits = [debit for key, debit in debits if ":identity:" not in key]
+    identity_debits = [debit for key, debit in debits if ":identity:" in key]
+    assert len(common_debits) == 4
+    assert {debit[2] for debit in common_debits} == {3}
+    assert len(identity_debits) == 2
+    assert sorted(debit[2] for debit in identity_debits) == [1, 2]
+    assert "anon-test" not in " ".join(quota_keys(event_call))
+    assert "user-three" not in " ".join(quota_keys(event_call))
+
+
+@pytest.mark.asyncio
+async def test_same_identity_has_isolated_buckets_across_projects(client):
+    async def authenticate_project_a(request: Request):
+        principal = Principal(
+            credential_id="cross-project-fixture",
+            project_id="projecta",
+            roles=frozenset({"events:write"}),
+            credential_kind=CredentialKind.BROWSER,
+        )
+        request.state.principal = principal
+        return principal
+
+    async def authenticate_project_b(request: Request):
+        principal = Principal(
+            credential_id="cross-project-fixture",
+            project_id="projectb",
+            roles=frozenset({"events:write"}),
+            credential_kind=CredentialKind.BROWSER,
+        )
+        request.state.principal = principal
+        return principal
+
+    identity = "same-anonymous-id"
+    app.dependency_overrides[authenticate_request] = authenticate_project_a
+    first = await client.post(
+        URL,
+        json={
+            "events": [
+                canonical_event(
+                    "project-a",
+                    anonymous_id=identity,
+                    message_id="project-a-message",
+                )
+            ]
+        },
+        headers=HEADERS,
+    )
+    app.dependency_overrides[authenticate_request] = authenticate_project_b
+    second = await client.post(
+        URL,
+        json={
+            "events": [
+                canonical_event(
+                    "project-b",
+                    anonymous_id=identity,
+                    message_id="project-b-message",
+                )
+            ]
+        },
+        headers=HEADERS,
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    identity_keys = [
+        next(key for key in quota_keys(call) if ":identity:" in key)
+        for call in quota_calls("event")
+    ]
+    assert len(identity_keys) == 2
+    assert len(set(identity_keys)) == 2
+    assert all(identity not in key for key in identity_keys)
+
+
+def test_rejected_child_bucket_cannot_debit_parent_in_lua_contract():
+    check_phase, marker, debit_phase = _HIERARCHICAL_TOKEN_BUCKET_LUA.partition(
+        "if rejected_retry_after > 0 then"
+    )
+
+    assert marker
+    assert "HMGET" in check_phase
+    assert "HSET" not in check_phase
+    assert debit_phase.index("return {0") < debit_phase.index("HSET")
+
+
+@pytest.mark.asyncio
+async def test_stateful_child_rejection_preserves_parent_balance():
+    evaluator = StatefulQuotaEvaluator()
+    redis = MagicMock()
+    redis.eval = AsyncMock(side_effect=evaluator.evaluate)
+    buckets = [
+        BucketDebit("parent", BucketLimit(4, 1), 1),
+        BucketDebit("child", BucketLimit(1, 1), 1),
+    ]
+
+    first = await _admit(redis, buckets, quota_name="Test")
+    assert first is None
+    assert evaluator.tokens == {"parent": 3, "child": 0}
+
+    before_rejection = dict(evaluator.tokens)
+    second = await _admit(redis, buckets, quota_name="Test")
+
+    assert second is not None
+    assert second.status_code == 429
+    assert evaluator.tokens == before_rejection
+    assert redis.eval.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_request_quota_rejection_has_retry_headers_and_no_publish(client):
+    async def reject_rate(script, _numkeys, *_args):
+        assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
+        return [0, BROWSER_EVENT_LIMIT.capacity, 0, 3]
+
+    app.state.redis.eval = AsyncMock(side_effect=reject_rate)
     resp = await client.post(
         URL,
         json={"events": [canonical_event("quota-test")]},
         headers=HEADERS,
     )
+
     assert resp.status_code == 429
     assert resp.headers["Retry-After"] == "3"
-    app.state.redis.pipeline.assert_not_called()
+    assert resp.headers["X-RateLimit-Limit"] == str(
+        BROWSER_EVENT_LIMIT.capacity
+    )
+    assert resp.headers["X-RateLimit-Remaining"] == "0"
+    assert publisher_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_byte_quota_rejection_never_parses_or_publishes(client):
+    async def reject_bytes(script, numkeys, *args):
+        assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
+        keys = args[:numkeys]
+        if any(key.startswith("apdl:rate:byte:") for key in keys):
+            return [0, BROWSER_BYTE_LIMIT.capacity, 0, 4]
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=reject_bytes)
+    resp = await client.post(
+        URL,
+        content=b"this is not json",
+        headers={**HEADERS, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "4"
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("byte")) == 1
+    assert quota_calls("event") == []
+    assert publisher_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_event_quota_rejection_never_publishes(client):
+    async def reject_events(script, numkeys, *args):
+        assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
+        keys = args[:numkeys]
+        if any(key.startswith("apdl:rate:event:") for key in keys):
+            return [0, BROWSER_EVENT_LIMIT.capacity, 0, 2]
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=reject_events)
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("quota-test")]},
+        headers=HEADERS,
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "2"
+    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("event")) == 1
+    assert publisher_calls() == []
 
 
 @pytest.mark.asyncio
@@ -604,9 +1165,10 @@ async def test_rate_limit_authority_failure_fails_closed(client):
         json={"events": [canonical_event("quota-test")]},
         headers=HEADERS,
     )
+
     assert resp.status_code == 503
     assert resp.json()["error"] == "service_unavailable"
-    app.state.redis.pipeline.assert_not_called()
+    assert publisher_calls() == []
 
 
 @pytest.mark.asyncio
@@ -733,8 +1295,12 @@ async def test_events_require_write_role(client):
 @pytest.mark.asyncio
 async def test_redis_failure_returns_503(client):
     """When Redis publish fails, endpoint returns 503."""
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(side_effect=ConnectionError("Redis down"))
+    async def fail_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            raise ConnectionError("Redis down")
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=fail_publish)
     payload = {"events": [canonical_event("test", user_id="u1")]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 503
@@ -744,9 +1310,13 @@ async def test_redis_failure_returns_503(client):
 
 @pytest.mark.asyncio
 async def test_ambiguous_redis_failure_never_reports_partial_acceptance(client):
-    """An EXEC failure returns one retryable batch failure, never partial 202."""
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(side_effect=ConnectionError("Redis blip"))
+    """A script failure returns one retryable batch failure, never partial 202."""
+    async def fail_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            raise ConnectionError("Redis blip")
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=fail_publish)
     payload = {
         "events": [
             canonical_event("e1", user_id="u1", message_id="message-1"),
@@ -759,13 +1329,19 @@ async def test_ambiguous_redis_failure_never_reports_partial_acceptance(client):
     body = resp.json()
     assert body["error"] == "service_unavailable"
     assert "accepted" not in body and "failed" not in body
-    assert pipeline.xadd.call_count == 3
+    calls = publisher_calls()
+    assert len(calls) == 1
+    assert calls[0].args[3] == 3
 
 
 @pytest.mark.asyncio
 async def test_incomplete_redis_transaction_result_returns_503(client):
-    pipeline = app.state.redis.pipeline.return_value
-    pipeline.execute = AsyncMock(return_value=[])
+    async def incomplete_publish(script, _numkeys, *args):
+        if script == _BOUNDED_XADD_LUA:
+            return [1, int(args[1])]
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=incomplete_publish)
 
     resp = await client.post(
         URL,
@@ -775,3 +1351,28 @@ async def test_incomplete_redis_transaction_result_returns_503(client):
 
     assert resp.status_code == 503
     assert resp.json()["error"] == "service_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stream_capacity_rejection_is_retryable_and_never_partial(client):
+    async def overloaded_publish(script, _numkeys, *_args):
+        if script == _BOUNDED_XADD_LUA:
+            return [0, EVENT_STREAM_MAX_ENTRIES]
+        return [1, 999, 999, 0]
+
+    app.state.redis.eval = AsyncMock(side_effect=overloaded_publish)
+    payload = {
+        "events": [
+            canonical_event("one", message_id="message-one"),
+            canonical_event("two", message_id="message-two"),
+        ]
+    }
+
+    resp = await client.post(URL, json=payload, headers=HEADERS)
+
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "5"
+    assert resp.json() == {
+        "error": "service_overloaded",
+        "message": "Event persistence backlog is at capacity",
+    }
