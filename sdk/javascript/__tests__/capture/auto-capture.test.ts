@@ -244,3 +244,58 @@ describe('AutoCapture click privacy', () => {
     ]);
   });
 });
+
+describe('AutoCapture form privacy', () => {
+  let autoCapture: AutoCapture;
+  let trackEvent: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    trackEvent = vi.fn();
+    const capture = {
+      trackEvent,
+      pageView: vi.fn(),
+    } as unknown as ManualCapture;
+    autoCapture = new AutoCapture({
+      ...config,
+      clicks: false,
+      rage_clicks: false,
+      formSubmissions: true,
+      inputChanges: true,
+    }, capture);
+    autoCapture.start();
+  });
+
+  afterEach(() => {
+    autoCapture.stop();
+    document.body.replaceChildren();
+  });
+
+  it('captures only structural allowlisted form and input metadata', () => {
+    const form = document.createElement('form');
+    form.id = 'password-reset-token';
+    form.name = 'secret-reset-form';
+    form.action = '/reset?token=form-action-secret#fragment';
+    form.method = 'post';
+    const input = document.createElement('input');
+    input.type = 'email';
+    input.id = 'private-email-id';
+    input.name = 'private-email-name';
+    input.value = 'alice@example.com';
+    form.append(input);
+    document.body.append(form);
+
+    form.dispatchEvent(new SubmitEvent('submit', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(trackEvent.mock.calls).toEqual([
+      ['$form_submit', { formMethod: 'post' }],
+      ['$input_change', {
+        tag: 'input',
+        inputType: 'email',
+        hasValue: true,
+      }],
+    ]);
+    expect(JSON.stringify(trackEvent.mock.calls)).not.toContain('secret');
+    expect(JSON.stringify(trackEvent.mock.calls)).not.toContain('alice@example.com');
+  });
+});

@@ -454,6 +454,16 @@ export class EventQueue {
       }
 
       if (outcome === 'retryable') {
+        if (this.config.persistence === 'memory') {
+          // Memory mode has no durable retry store. Keep ownership in the
+          // public pending queue so callers can retry or inspect every event.
+          if (this.config.debug) {
+            console.warn('APDL: Retryable event send failure remains pending');
+          }
+          this.queue.unshift(...prepared.events);
+          this.inFlightEventCount = 0;
+          break;
+        }
         if (this.config.debug) {
           console.warn(
             'APDL: Retryable event send failure, persisting to offline storage'

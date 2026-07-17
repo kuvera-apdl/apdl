@@ -6,7 +6,7 @@ import type { FlagConfig } from '../../src/flags/types';
 describe('SSEHandlers', () => {
   it('loads canonical flags from config events', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -33,7 +33,7 @@ describe('SSEHandlers', () => {
 
   it('merges full flag_update payloads', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -68,7 +68,7 @@ describe('SSEHandlers', () => {
 
   it('removes cached flags on canonical removal events', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -93,7 +93,7 @@ describe('SSEHandlers', () => {
 
   it('rejects legacy flag payloads', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -117,7 +117,7 @@ describe('SSEHandlers', () => {
 
   it('does not clear existing flags when a malformed config payload arrives', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -153,7 +153,7 @@ describe('SSEHandlers', () => {
 
   it('ignores enabled-only compatibility deltas', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -179,7 +179,7 @@ describe('SSEHandlers', () => {
 
   it('ignores stale and duplicate updates without notifying listeners', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -225,7 +225,7 @@ describe('SSEHandlers', () => {
 
   it('ignores stale removals and prevents old creates from resurrecting tombstones', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'config',
@@ -279,7 +279,7 @@ describe('SSEHandlers', () => {
 
   it('records removals for unknown keys before any older create arrives', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'flag_update',
@@ -304,7 +304,7 @@ describe('SSEHandlers', () => {
 
   it('rejects update envelopes whose version disagrees with the flag', () => {
     const cache = new FlagCache();
-    const handlers = new SSEHandlers(cache, null);
+    const handlers = new SSEHandlers(cache);
 
     handlers.handle({
       type: 'flag_update',

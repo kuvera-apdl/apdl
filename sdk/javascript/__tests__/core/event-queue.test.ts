@@ -326,6 +326,102 @@ describe('EventQueue', () => {
       });
     });
 
+    it.each([
+      [
+        'page',
+        {
+          url: 'https://example.test/search?q=private#fragment',
+          title: 'Private search title',
+          path: '/search?q=private#fragment',
+          search: '?q=private',
+          referrer: 'https://referrer.test/private',
+          extra: 'private',
+        },
+        { url: 'https://example.test/search', path: '/search' },
+      ],
+      [
+        '$form_submit',
+        {
+          formId: 'private-id',
+          formName: 'private-name',
+          formAction: 'https://example.test/reset?token=private',
+          formMethod: 'POST',
+        },
+        { formMethod: 'post' },
+      ],
+      [
+        '$input_change',
+        {
+          tag: 'input',
+          inputType: 'email',
+          inputName: 'private-name',
+          inputId: 'private-id',
+          hasValue: true,
+        },
+        { tag: 'input', inputType: 'email', hasValue: true },
+      ],
+      [
+        '$scroll_depth',
+        { threshold: 50, percent: 67, url: 'https://example.test/?secret=1' },
+        { threshold: 50, percent: 67 },
+      ],
+    ])('should enforce the property allowlist for %s auto-capture', (
+      eventName,
+      properties,
+      expected
+    ) => {
+      queue.enqueue(createEvent({
+        event: eventName,
+        type: eventName === 'page' ? 'page' : 'track',
+        properties,
+      }));
+
+      expect(queue.getQueue()[0].properties).toEqual(expected);
+      expect(JSON.stringify(queue.getQueue()[0].properties)).not.toContain('private');
+      expect(JSON.stringify(queue.getQueue()[0].properties)).not.toContain('secret');
+    });
+
+    it('should strip sensitive context before and after custom scrubbers for every event', () => {
+      scrubber.addScrubber((event) => ({
+        ...event,
+        context: {
+          ...event.context,
+          referrer: 'https://referrer.test/reset?token=reintroduced',
+          page: {
+            url: 'https://example.test/account?token=reintroduced#fragment',
+            title: 'Reintroduced private title',
+            path: '/account?token=reintroduced#fragment',
+            search: '?token=reintroduced',
+          },
+        },
+      }));
+
+      queue.enqueue(createEvent({
+        event: 'custom_event',
+        context: {
+          referrer: 'https://referrer.test/?token=initial',
+          page: {
+            url: 'https://example.test/account?token=initial#fragment',
+            title: 'Initial private title',
+            path: '/account?token=initial#fragment',
+            search: '?token=initial',
+          },
+        },
+      }));
+
+      expect(queue.getQueue()[0].context).toEqual({
+        page: {
+          url: 'https://example.test/account',
+          title: '',
+          path: '/account',
+          search: '',
+        },
+      });
+      expect(JSON.stringify(queue.getQueue()[0].context)).not.toContain('token');
+      expect(JSON.stringify(queue.getQueue()[0].context)).not.toContain('private');
+      expect(queue.getQueue()[0].context).not.toHaveProperty('referrer');
+    });
+
     it('should keep only canonical structural properties on reserved events', () => {
       queue.enqueue(createEvent({
         event: '$click',
@@ -523,7 +619,11 @@ describe('EventQueue', () => {
 
     it('should requeue once and report immutable pending events if persistence fails', async () => {
       const boundedQueue = new EventQueue(
-        createConfig({ batchSize: 1, maxQueueSize: 2 }),
+        createConfig({
+          batchSize: 1,
+          maxQueueSize: 2,
+          persistence: 'localStorage',
+        }),
         transport,
         storage,
         scrubber,
@@ -586,10 +686,17 @@ describe('EventQueue', () => {
     });
 
     it('should re-apply reserved-event safety before transport and offline storage', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
       const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue('retryable');
       const storeSpy = vi.spyOn(storage, 'store').mockResolvedValue();
 
-      queue.enqueue(createEvent({
+      persistentQueue.enqueue(createEvent({
         event: '$click',
         properties: { tag: 'input', x: 1, y: 2 },
         context: {
@@ -597,7 +704,7 @@ describe('EventQueue', () => {
           library: { name: 'apdl-js', version: 'test' },
         },
       }));
-      const queued = queue.getQueue()[0];
+      const queued = persistentQueue.getQueue()[0];
       queued.properties = {
         ...queued.properties,
         text: 'reintroduced-password',
@@ -617,7 +724,7 @@ describe('EventQueue', () => {
         },
       };
 
-      await queue.flush();
+      await persistentQueue.flush();
 
       const payload = sendSpy.mock.calls[0][1] as {
         events: Array<{
@@ -643,6 +750,7 @@ describe('EventQueue', () => {
       });
       expect(JSON.stringify(payload)).not.toContain('reintroduced');
       expect(JSON.stringify(storeSpy.mock.calls[0][0])).not.toContain('reintroduced');
+      persistentQueue.stop();
     });
 
     it('should normalize SDK camelCase event fields for ingestion', async () => {
@@ -792,19 +900,44 @@ describe('EventQueue', () => {
 
   describe('offline fallback', () => {
     it('should persist events to offline storage on send failure', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
       vi.spyOn(transport, 'send').mockResolvedValue('retryable');
       const storeSpy = vi
         .spyOn(storage, 'store')
         .mockResolvedValue(undefined);
 
-      queue.enqueue(createEvent());
-      queue.enqueue(createEvent({ messageId: 'retry-message-2' }));
-      await queue.flush();
+      persistentQueue.enqueue(createEvent());
+      persistentQueue.enqueue(createEvent({ messageId: 'retry-message-2' }));
+      await persistentQueue.flush();
 
       expect(storeSpy).toHaveBeenCalledTimes(1);
       const storedEvents = storeSpy.mock.calls[0][0] as TrackEvent[];
       expect(storedEvents).toHaveLength(2);
       expect(storedEvents[1].messageId).toBe('retry-message-2');
+      persistentQueue.stop();
+    });
+
+    it('should report retryable deliveries as pending in memory mode', async () => {
+      const storeSpy = vi.spyOn(storage, 'store');
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      queue.enqueue(createEvent({ event: 'memory_pending' }));
+
+      const report = await queue.flush();
+
+      expect(storeSpy).not.toHaveBeenCalled();
+      expect(report.persisted).toBe(0);
+      expect(report.pending.map((event) => event.event)).toEqual([
+        'memory_pending',
+      ]);
+      expect(queue.getQueue().map((event) => event.event)).toEqual([
+        'memory_pending',
+      ]);
     });
   });
 
@@ -864,15 +997,23 @@ describe('EventQueue', () => {
     });
 
     it('should try offline storage if the keepalive request fails', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
       vi.spyOn(transport, 'sendKeepalive').mockResolvedValue('retryable');
       const storeSpy = vi
         .spyOn(storage, 'store')
         .mockResolvedValue(undefined);
 
-      queue.enqueue(createEvent());
-      await queue.flushOnUnload();
+      persistentQueue.enqueue(createEvent());
+      await persistentQueue.flushOnUnload();
 
       expect(storeSpy).toHaveBeenCalled();
+      persistentQueue.stop();
     });
   });
 

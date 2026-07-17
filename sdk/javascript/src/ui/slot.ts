@@ -86,15 +86,6 @@ export class SlotManager {
     return Array.from(this.slots.keys());
   }
 
-  /**
-   * Forces a re-scan of the document for slots.
-   * Called when UI config is updated via SSE.
-   */
-  refresh(): void {
-    if (typeof document === 'undefined') return;
-    this.scanDocument();
-  }
-
   private scanDocument(): void {
     const elements = document.querySelectorAll(`[${SLOT_ATTRIBUTE}]`);
     elements.forEach((el) => {

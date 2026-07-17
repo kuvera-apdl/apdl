@@ -7,7 +7,6 @@ import {
   parseFlagConfigs,
 } from '../flags/schema';
 import { isIdentifier } from '../flags/targeting-contract';
-import type { SlotManager } from '../ui/slot';
 
 interface SSEMessage {
   type: string;
@@ -15,25 +14,16 @@ interface SSEMessage {
   id?: string;
 }
 
-type UIConfigUpdateCallback = (config: unknown) => void;
-
 /**
  * Routes SSE messages to the appropriate subsystems.
- * Handles flag updates, UI config pushes, and heartbeats.
+ * Handles flag updates and heartbeats.
  */
 export class SSEHandlers {
   private flagCache: FlagCache;
-  private slotManager: SlotManager | null;
-  private uiConfigCallback: UIConfigUpdateCallback | null = null;
   private debug: boolean;
 
-  constructor(
-    flagCache: FlagCache,
-    slotManager: SlotManager | null,
-    debug = false
-  ) {
+  constructor(flagCache: FlagCache, debug = false) {
     this.flagCache = flagCache;
-    this.slotManager = slotManager;
     this.debug = debug;
   }
 
@@ -48,10 +38,6 @@ export class SSEHandlers {
 
       case 'flag_update':
         this.handleFlagUpdate(message.data);
-        break;
-
-      case 'ui_config':
-        this.handleUIConfig(message.data);
         break;
 
       case 'heartbeat':
@@ -72,13 +58,6 @@ export class SSEHandlers {
           console.debug(`APDL: Unknown SSE message type: ${message.type}`);
         }
     }
-  }
-
-  /**
-   * Registers a callback for UI config updates.
-   */
-  onUIConfigUpdate(callback: UIConfigUpdateCallback): void {
-    this.uiConfigCallback = callback;
   }
 
   private handleFlagsUpdate(data: string): void {
@@ -143,25 +122,6 @@ export class SSEHandlers {
     } catch (err) {
       if (this.debug) {
         console.error('APDL: Failed to parse flag_update:', err);
-      }
-    }
-  }
-
-  private handleUIConfig(data: string): void {
-    try {
-      const parsed = JSON.parse(data) as unknown;
-      if (this.uiConfigCallback) {
-        this.uiConfigCallback(parsed);
-      }
-      if (this.slotManager) {
-        this.slotManager.refresh();
-      }
-      if (this.debug) {
-        console.debug('APDL: UI config updated from SSE');
-      }
-    } catch (err) {
-      if (this.debug) {
-        console.error('APDL: Failed to parse ui_config:', err);
       }
     }
   }

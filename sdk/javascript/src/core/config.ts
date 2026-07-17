@@ -1,14 +1,17 @@
 import { clientKeyFromEnv, endpointFromEnv } from './env';
 
+export type PrivacyMode = 'standard' | 'cookieless';
+export type PersistenceMode = 'localStorage' | 'memory';
+
 export interface APDLConfig {
   endpoint: string;
   auth: APDLAuthConfig;
   autoCapture?: boolean | AutoCaptureConfig;
   batchSize?: number;
   flushInterval?: number;
-  privacyMode?: 'standard' | 'cookieless' | 'strict';
+  privacyMode?: PrivacyMode;
   consent?: ConsentState;
-  persistence?: 'localStorage' | 'cookie' | 'memory';
+  persistence?: PersistenceMode;
   maxQueueSize?: number;
   debug?: boolean;
 }
@@ -59,9 +62,9 @@ export interface ResolvedConfig {
   autoCapture: AutoCaptureConfig;
   batchSize: number;
   flushInterval: number;
-  privacyMode: 'standard' | 'cookieless' | 'strict';
+  privacyMode: PrivacyMode;
   consent: ConsentState;
-  persistence: 'localStorage' | 'cookie' | 'memory';
+  persistence: PersistenceMode;
   maxQueueSize: number;
   debug: boolean;
 }
@@ -69,8 +72,19 @@ export interface ResolvedConfig {
 const DEFAULT_BATCH_SIZE = 20;
 const MAX_BATCH_SIZE = 100;
 const DEFAULT_FLUSH_INTERVAL = 3000;
+const MIN_FLUSH_INTERVAL = 100;
+const MAX_FLUSH_INTERVAL = 3_600_000;
 const DEFAULT_MAX_QUEUE_SIZE = 1000;
+const MAX_QUEUE_SIZE = 100_000;
 const CLIENT_KEY_PATTERN = /^client_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$/;
+const SUPPORTED_PRIVACY_MODES = new Set<PrivacyMode>([
+  'standard',
+  'cookieless',
+]);
+const SUPPORTED_PERSISTENCE_MODES = new Set<PersistenceMode>([
+  'localStorage',
+  'memory',
+]);
 
 const SUPPORTED_CONFIG_FIELDS = new Set([
   'endpoint',
@@ -141,38 +155,47 @@ export function resolveConfig(
   options?: ResolveConfigOptions
 ): ResolvedConfig | null {
   const strict = options?.strict !== false;
-  rejectUnsupportedTopLevelFields(assertObject(config, 'config'));
+  const configInput = assertObject(config, 'config');
+  rejectUnsupportedTopLevelFields(configInput);
 
-  // Credentials may come from the config object or from env conventions.
-  // Unsupported nested `auth` fields are still rejected eagerly below.
-  const endpointValue = coalesceNonEmpty(config.endpoint, endpointFromEnv());
-  let clientKeyValue: string | undefined;
+  let authInput: Record<string, unknown> | undefined;
   if (config.auth !== undefined) {
-    const authInput = assertObject(config.auth, 'auth');
+    authInput = assertObject(config.auth, 'auth');
     assertSupportedNestedFields(authInput, ['clientKey'], 'auth');
-    clientKeyValue = coalesceNonEmpty(authInput.clientKey, clientKeyFromEnv());
-  } else {
-    clientKeyValue = clientKeyFromEnv();
   }
 
-  if (endpointValue === undefined || clientKeyValue === undefined) {
+  const endpointInput = Object.prototype.hasOwnProperty.call(configInput, 'endpoint')
+    ? configInput.endpoint
+    : endpointFromEnv();
+  const clientKeyInput = authInput
+    && Object.prototype.hasOwnProperty.call(authInput, 'clientKey')
+    ? authInput.clientKey
+    : clientKeyFromEnv();
+
+  // Validate every present value before applying fail-soft missing-credential
+  // behavior. JavaScript callers and parsed JSON must never hide malformed
+  // explicit values behind environment fallbacks.
+  const endpoint = endpointInput === undefined
+    ? undefined
+    : requireHttpOrigin(endpointInput, 'endpoint');
+  const clientKey = clientKeyInput === undefined
+    ? undefined
+    : requireNonEmptyString(clientKeyInput, 'auth.clientKey');
+
+  if (endpoint === undefined || clientKey === undefined) {
     if (!strict) {
       return null;
     }
-    // Strict mode: re-run the original validators to throw the exact,
-    // field-specific error messages consumers rely on.
-    requireNonEmptyString(config.endpoint, 'endpoint');
-    const auth = assertObject(config.auth, 'auth');
-    requireNonEmptyString(auth.clientKey, 'auth.clientKey');
+
+    if (endpoint === undefined) {
+      requireNonEmptyString(undefined, 'endpoint');
+    }
+    if (clientKey === undefined) {
+      requireNonEmptyString(undefined, 'auth.clientKey');
+    }
     throw new Error('APDL: endpoint and auth.clientKey are required');
   }
 
-  // Single front-door URL: a gateway routes /v1/events to the ingestion service
-  // and /v1/flags + /v1/stream to the config service behind one origin. Trailing
-  // slashes are stripped so `${endpoint}/v1/...` never double-slashes.
-  const endpoint = endpointValue.replace(/\/+$/, '');
-
-  const clientKey = clientKeyValue;
   const keyMatch = CLIENT_KEY_PATTERN.exec(clientKey);
   if (!keyMatch) {
     throw new Error(
@@ -183,13 +206,43 @@ export function resolveConfig(
 
   const autoCapture = resolveAutoCapture(config.autoCapture);
 
-  let batchSize = config.batchSize ?? DEFAULT_BATCH_SIZE;
-  if (batchSize < 1) batchSize = 1;
-  if (batchSize > MAX_BATCH_SIZE) batchSize = MAX_BATCH_SIZE;
-
-  const flushInterval = config.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
-  const maxQueueSize = config.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
+  const batchSize = config.batchSize === undefined
+    ? DEFAULT_BATCH_SIZE
+    : requireIntegerInRange(config.batchSize, 'batchSize', 1, MAX_BATCH_SIZE);
+  const flushInterval = config.flushInterval === undefined
+    ? DEFAULT_FLUSH_INTERVAL
+    : requireIntegerInRange(
+        config.flushInterval,
+        'flushInterval',
+        MIN_FLUSH_INTERVAL,
+        MAX_FLUSH_INTERVAL
+      );
+  const maxQueueSize = config.maxQueueSize === undefined
+    ? DEFAULT_MAX_QUEUE_SIZE
+    : requireIntegerInRange(
+        config.maxQueueSize,
+        'maxQueueSize',
+        1,
+        MAX_QUEUE_SIZE
+      );
   const consent = resolveConsent(config.consent);
+  const privacyMode = config.privacyMode === undefined
+    ? 'standard'
+    : requireEnum(
+        config.privacyMode,
+        'privacyMode',
+        SUPPORTED_PRIVACY_MODES
+      );
+  const persistence = config.persistence === undefined
+    ? 'localStorage'
+    : requireEnum(
+        config.persistence,
+        'persistence',
+        SUPPORTED_PERSISTENCE_MODES
+      );
+  const debug = config.debug === undefined
+    ? false
+    : requireBoolean(config.debug, 'debug');
 
   return {
     projectId,
@@ -200,11 +253,11 @@ export function resolveConfig(
     autoCapture,
     batchSize,
     flushInterval,
-    privacyMode: config.privacyMode ?? 'standard',
+    privacyMode,
     consent,
-    persistence: config.persistence ?? 'localStorage',
+    persistence,
     maxQueueSize,
-    debug: config.debug ?? false,
+    debug,
   };
 }
 
@@ -294,16 +347,6 @@ function assertSupportedNestedFields(
   }
 }
 
-/** Returns the first non-empty string among the given values, else undefined. */
-function coalesceNonEmpty(...values: unknown[]): string | undefined {
-  for (const value of values) {
-    if (typeof value === 'string' && value.trim() !== '') {
-      return value;
-    }
-  }
-  return undefined;
-}
-
 function requireNonEmptyString(value: unknown, path: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(
@@ -312,6 +355,64 @@ function requireNonEmptyString(value: unknown, path: string): string {
   }
 
   return value;
+}
+
+function requireHttpOrigin(value: unknown, path: string): string {
+  const raw = requireNonEmptyString(value, path);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`APDL: ${path} must be an absolute HTTP(S) origin`);
+  }
+
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    || parsed.username !== ''
+    || parsed.password !== ''
+    || parsed.pathname !== '/'
+    || parsed.search !== ''
+    || parsed.hash !== ''
+  ) {
+    throw new Error(`APDL: ${path} must be an absolute HTTP(S) origin`);
+  }
+
+  return parsed.origin;
+}
+
+function requireIntegerInRange(
+  value: unknown,
+  path: string,
+  min: number,
+  max: number
+): number {
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || !Number.isInteger(value)
+    || value < min
+    || value > max
+  ) {
+    throw new Error(
+      `APDL: ${path} must be an integer between ${min} and ${max}`
+    );
+  }
+
+  return value;
+}
+
+function requireEnum<T extends string>(
+  value: unknown,
+  path: string,
+  supported: ReadonlySet<T>
+): T {
+  if (typeof value !== 'string' || !supported.has(value as T)) {
+    throw new Error(
+      `APDL: ${path} must be one of: ${Array.from(supported).join(', ')}`
+    );
+  }
+
+  return value as T;
 }
 
 function requireBoolean(value: unknown, path: string): boolean {

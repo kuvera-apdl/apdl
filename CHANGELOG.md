@@ -8,6 +8,17 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ## [Unreleased]
 
+### Fixed
+
+- Replaced permissive JavaScript SDK configuration with one strict runtime
+  contract and removed unsupported cookie persistence and strict privacy modes;
+  memory persistence now avoids all browser storage, including IndexedDB, and
+  reports retryable delivery failures as pending rather than persisted.
+- Reduced default browser context and every reserved auto-capture signal to
+  query-free, fragment-free property allowlists enforced outside custom hooks.
+- Removed the disconnected JavaScript `ui_config` SSE handler; UI rendering is
+  local-only until Config owns a canonical storage and distribution contract.
+
 ## [0.3.0] - 2026-07-13
 
 This is the first release with an explicit OSS developer-preview contract. The

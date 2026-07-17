@@ -100,6 +100,21 @@ describe('OfflineStorage', () => {
     vi.unstubAllGlobals();
   });
 
+  it('keeps offline retries in memory without opening IndexedDB in memory mode', async () => {
+    const open = vi.spyOn(indexedDB, 'open');
+    const storage = new OfflineStorage({
+      projectId: 'projectA',
+      persistence: 'memory',
+    });
+    const event = createEvent('memory_only_event');
+
+    await storage.store([event]);
+
+    expect(open).not.toHaveBeenCalled();
+    expect(await storage.count()).toBe(1);
+    expect(await storage.drain()).toEqual([event]);
+  });
+
   it('isolates offline events for same-origin clients with different project keys', async () => {
     const projectA = storageForKey(PROJECT_A_KEY);
     const projectB = storageForKey(PROJECT_B_KEY);

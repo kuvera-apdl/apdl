@@ -107,9 +107,6 @@ export class AutoCapture {
         if (!form || !shouldCapture(form)) return;
 
         this.capture.trackEvent('$form_submit', {
-          formId: form.id || undefined,
-          formName: form.name || undefined,
-          formAction: form.action || undefined,
           formMethod: form.method || undefined,
         });
       };
@@ -131,8 +128,6 @@ export class AutoCapture {
         this.capture.trackEvent('$input_change', {
           tag: tagName,
           inputType: target.type || undefined,
-          inputName: target.name || undefined,
-          inputId: target.id || undefined,
           hasValue: !!target.value,
         });
       };

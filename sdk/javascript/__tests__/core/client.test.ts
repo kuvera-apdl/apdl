@@ -121,6 +121,41 @@ describe('APDLClient', () => {
     });
 
     it.each([
+      'api.example.com',
+      'ftp://api.example.com',
+      'https://user:secret@api.example.com',
+      'https://api.example.com/v1',
+      'https://api.example.com?tenant=secret',
+      'https://api.example.com/#fragment',
+    ])('should reject endpoint values that are not an HTTP(S) origin: %s', (endpoint) => {
+      expect(() => resolveConfig(createTestConfig({ endpoint })))
+        .toThrow('endpoint must be an absolute HTTP(S) origin');
+    });
+
+    it.each([
+      ['batchSize', 0, 'between 1 and 100'],
+      ['batchSize', 101, 'between 1 and 100'],
+      ['batchSize', 1.5, 'between 1 and 100'],
+      ['batchSize', Number.NaN, 'between 1 and 100'],
+      ['flushInterval', 99, 'between 100 and 3600000'],
+      ['flushInterval', 3_600_001, 'between 100 and 3600000'],
+      ['maxQueueSize', 0, 'between 1 and 100000'],
+      ['maxQueueSize', Number.POSITIVE_INFINITY, 'between 1 and 100000'],
+    ])('should reject invalid numeric config %s=%s', (field, value, message) => {
+      const config = { ...createTestConfig(), [field]: value };
+      expect(() => resolveConfig(config as unknown as APDLConfig)).toThrow(message);
+    });
+
+    it.each([
+      ['privacyMode', 'strict', 'privacyMode must be one of: standard, cookieless'],
+      ['persistence', 'cookie', 'persistence must be one of: localStorage, memory'],
+      ['debug', 'true', 'debug is required and must be a boolean'],
+    ])('should reject unsupported config %s=%s', (field, value, message) => {
+      const config = { ...createTestConfig(), [field]: value };
+      expect(() => resolveConfig(config as unknown as APDLConfig)).toThrow(message);
+    });
+
+    it.each([
       ['apiKey', CLIENT_KEY],
       ['host', ENDPOINT],
       ['configHost', ENDPOINT],
@@ -354,14 +389,29 @@ describe('APDLClient', () => {
       });
     });
 
-    it('should include page URL context', () => {
+    it('should include only query-free allowlisted page metadata', () => {
+      window.history.pushState({}, '', '/account/reset?token=query-secret#fragment-secret');
+      document.title = 'Password reset for Alice';
       client.page();
 
       const queue = client.debug.getQueue();
-      const event = queue[0] as Record<string, unknown>;
-      const props = event.properties as Record<string, unknown>;
-      expect(props).toHaveProperty('url');
-      expect(props).toHaveProperty('title');
+      const event = queue[0] as TrackEvent;
+      expect(event.properties).toEqual({
+        url: `${window.location.origin}/account/reset`,
+        path: '/account/reset',
+      });
+      expect(event.context).toMatchObject({
+        page: {
+          url: `${window.location.origin}/account/reset`,
+          title: '',
+          path: '/account/reset',
+          search: '',
+        },
+      });
+      expect(event.context).not.toHaveProperty('referrer');
+      expect(JSON.stringify(event)).not.toContain('query-secret');
+      expect(JSON.stringify(event)).not.toContain('fragment-secret');
+      expect(JSON.stringify(event)).not.toContain('Password reset for Alice');
     });
   });
 
@@ -738,28 +788,6 @@ describe('APDLClient', () => {
       warn.mockRestore();
     });
 
-    it('should not restore cached flags in strict privacy mode', () => {
-      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
-        schema_version: 3,
-        project_id: 'local_storage',
-        flags: [makeFlag('cached-flag')],
-        versions: { 'cached-flag': 1 },
-      }));
-      fetchMock.mockRejectedValueOnce(new Error('offline'));
-
-      const strictClient = new APDLClient(createTestConfig({
-        persistence: 'localStorage',
-        privacyMode: 'strict',
-      }));
-      strictClient.identify('user_123');
-
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect(strictClient.getVariant('cached-flag')).toBeNull();
-      expect(strictClient.getVariantDetails('cached-flag').reason).toBe('not_found');
-      expect(warn).toHaveBeenCalledTimes(1);
-      warn.mockRestore();
-    });
-
     it('should log one deduplicated exposure for repeated variant checks', async () => {
       window.history.pushState({}, '', '/checkout');
       fetchMock.mockResolvedValueOnce({
@@ -832,6 +860,14 @@ describe('APDLClient', () => {
 
       await flaggedClient.debug.flush();
       expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('control');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
+
+      warn.mockImplementation(() => {
+        throw new Error('diagnostic logger failed');
+      });
+      expect(() => flaggedClient.getVariant('queue-pressure-flag', {
+        component: 'logger-failure',
+      })).not.toThrow();
       expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
 
       warn.mockRestore();
@@ -1328,6 +1364,35 @@ describe('APDLClient', () => {
       await experimentClient.shutdown();
     });
 
+    it('should abort an in-flight flag fetch when experiment consent is revoked', async () => {
+      let resolveRequest!: (value: unknown) => void;
+      fetchMock.mockImplementationOnce(() => new Promise((resolve) => {
+        resolveRequest = resolve;
+      }));
+      const experimentClient = new APDLClient(createTestConfig());
+      const [, request] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+
+      expect(request.signal?.aborted).toBe(false);
+      experimentClient.consent.update({ experiments: false });
+      expect(request.signal?.aborted).toBe(true);
+
+      resolveRequest({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('late-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      await flushAsync();
+
+      expect(experimentClient.getVariantDetails('late-flag'))
+        .toMatchObject({ variant: null, reason: 'consent_denied', source: null });
+      await experimentClient.shutdown();
+    });
+
     it('should not retain experiment context while experiment consent is denied', async () => {
       await flushAsync();
       const existingStreamCount = MockEventSource.instances.length;
@@ -1425,6 +1490,21 @@ describe('APDLClient', () => {
       expect(projectB.consent.get().analytics).toBe(true);
 
       await Promise.all([projectA.shutdown(), projectB.shutdown()]);
+    });
+
+    it('should keep identity, session, consent, flags, and offline storage in memory mode', async () => {
+      localStorage.clear();
+      const memoryClient = new APDLClient(createTestConfig({
+        persistence: 'memory',
+      }));
+      memoryClient.identify('memory-user');
+      memoryClient.consent.update({ analytics: false });
+      memoryClient.reset();
+
+      expect(Object.keys(localStorage).filter((key) => key.startsWith('apdl_')))
+        .toEqual([]);
+
+      await memoryClient.shutdown();
     });
   });
 

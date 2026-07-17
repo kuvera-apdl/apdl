@@ -15,6 +15,8 @@ import {
   init,
   NoopClient,
   type PartialAPDLConfig,
+  type PersistenceMode,
+  type PrivacyMode,
 } from '@apdl-oss/sdk';
 
 const noopClient: APDLApi = new NoopClient();
@@ -33,9 +35,9 @@ export interface APDLProviderProps {
   autoCapture?: boolean | AutoCaptureConfig;
   batchSize?: number;
   flushInterval?: number;
-  privacyMode?: 'standard' | 'cookieless' | 'strict';
+  privacyMode?: PrivacyMode;
   consent?: ConsentState;
-  persistence?: 'localStorage' | 'cookie' | 'memory';
+  persistence?: PersistenceMode;
   maxQueueSize?: number;
   debug?: boolean;
   /**
