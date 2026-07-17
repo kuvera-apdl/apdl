@@ -1,0 +1,2 @@
+-- Migration 008: reserved tombstone for removed prototype schema history.
+-- Supported releases never create the disconnected event-envelope tables.

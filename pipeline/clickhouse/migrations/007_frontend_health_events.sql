@@ -1,5 +1,10 @@
--- Migration 007: Frontend health event projection
-CREATE TABLE IF NOT EXISTS frontend_health_events (
+-- Migration 007: rebuild the canonical frontend health projection.
+-- The table is derived entirely from events, so rebuilding is deterministic
+-- and converges older schemas that lack message_id or use the legacy engine.
+DROP TABLE IF EXISTS frontend_health_events_mv;
+DROP TABLE IF EXISTS frontend_health_events;
+
+CREATE TABLE frontend_health_events (
     project_id             String,
     message_id             String,
     event_name             LowCardinality(String),
@@ -25,7 +30,33 @@ CREATE TABLE IF NOT EXISTS frontend_health_events (
 PARTITION BY (project_id, toYYYYMM(event_date))
 ORDER BY (project_id, message_id);
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS frontend_health_events_mv
+INSERT INTO frontend_health_events
+SELECT
+    project_id,
+    message_id,
+    event_name,
+    user_id,
+    anonymous_id,
+    session_id,
+    timestamp,
+    JSONExtractString(properties, 'page') AS page,
+    JSONExtractString(properties, 'error_type') AS error_type,
+    JSONExtractString(properties, 'component') AS component,
+    JSONExtractString(properties, 'slot_id') AS slot_id,
+    JSONExtractString(properties, 'source') AS source,
+    JSONExtractString(properties, 'message') AS message,
+    JSONExtractString(properties, 'metric') AS metric,
+    JSONExtract(properties, 'value', 'Nullable(Float64)') AS metric_value,
+    JSONExtract(properties, 'delta', 'Nullable(Float64)') AS metric_delta,
+    JSONExtractString(properties, 'rating') AS rating,
+    JSONExtractString(properties, 'navigation_type') AS navigation_type,
+    JSONExtractRaw(properties, 'active_flags') AS active_flags,
+    JSONExtractRaw(properties, 'active_flag_versions') AS active_flag_versions,
+    toDate(timestamp) AS event_date
+FROM events FINAL
+WHERE event_name IN ('$frontend_error', '$web_vital');
+
+CREATE MATERIALIZED VIEW frontend_health_events_mv
 TO frontend_health_events
 AS SELECT
     project_id,

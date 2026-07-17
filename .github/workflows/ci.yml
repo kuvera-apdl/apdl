@@ -314,3 +314,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: make smoke-experiment-fresh
+
+  clickhouse-upgrade-smoke:
+    name: ClickHouse Upgrade Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-clickhouse-upgrade
