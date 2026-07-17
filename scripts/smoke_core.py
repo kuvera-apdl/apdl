@@ -289,11 +289,16 @@ def _check_health(args: argparse.Namespace) -> None:
         )
         expected = {
             "status": "ready",
-            "checks": {
+            "degraded": True,
+            "core": {
                 "postgres": "ready",
                 "ingestion": "ready",
                 "config": "ready",
                 "query": "ready",
+            },
+            "capabilities": {
+                "agents": "not_ready",
+                "codegen": "not_ready",
             },
         }
         if decoded != expected:
