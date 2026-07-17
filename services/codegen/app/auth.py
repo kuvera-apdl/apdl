@@ -19,6 +19,8 @@ _DUMMY_KEY_HASH = "0" * 64
 
 logger = logging.getLogger(__name__)
 
+_EXECUTION_ROLES = frozenset({"agents:run", "agents:manage", "agents:approve"})
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -27,6 +29,7 @@ class Principal:
     credential_id: str
     project_id: str
     roles: frozenset[str]
+    execution_authorized: bool
 
 
 class PostgresAuthenticator:
@@ -44,10 +47,18 @@ class PostgresAuthenticator:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT credential_id, project_id, key_hash, roles,
-                           active, expires_at
-                    FROM auth_credentials
-                    WHERE key_hash = $1
+                    SELECT credential.credential_id, credential.project_id,
+                           credential.key_hash, credential.roles,
+                           credential.active, credential.expires_at,
+                           EXISTS (
+                               SELECT 1
+                               FROM admin_project_execution_authorizations
+                                   AS execution_authority
+                               WHERE execution_authority.project_id =
+                                   credential.project_id
+                           ) AS execution_authorized
+                    FROM auth_credentials AS credential
+                    WHERE credential.key_hash = $1
                     """,
                     provided_hash,
                 )
@@ -72,6 +83,7 @@ class PostgresAuthenticator:
             credential_id=str(row["credential_id"]),
             project_id=stored_project,
             roles=frozenset(str(role) for role in row["roles"]),
+            execution_authorized=bool(row["execution_authorized"]),
         )
 
 
@@ -99,6 +111,11 @@ async def authenticate_request(request: Request) -> Principal:
 
 def require_role(request: Request, role: str) -> Principal:
     principal: Principal = request.state.principal
+    if not principal.execution_authorized and role in _EXECUTION_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Codegen execution requires operator project authorization",
+        )
     if role not in principal.roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

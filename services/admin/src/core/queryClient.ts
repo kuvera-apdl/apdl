@@ -30,6 +30,7 @@ export const queryKeys = {
   experiments: (wsId: string) => [wsId, 'experiments'] as const,
   changesets: (wsId: string) => [wsId, 'changesets'] as const,
   repoConnection: (wsId: string) => [wsId, 'repo-connection'] as const,
+  credentials: (wsId: string) => [wsId, 'credentials'] as const,
   accessibleRepos: (wsId: string) => [wsId, 'github-repos'] as const,
   changeset: (wsId: string, id: string) => [wsId, 'changeset', id] as const,
   changesetObservations: (wsId: string, id: string) =>

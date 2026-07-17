@@ -1,5 +1,5 @@
 import { Loader2, LockKeyhole } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { z } from 'zod'
 
@@ -31,11 +31,24 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (retryAfterSeconds === null) return
+    const timer = window.setTimeout(() => {
+      setRetryAfterSeconds((current) => {
+        if (current === null || current <= 1) return null
+        return current - 1
+      })
+    }, 1_000)
+    return () => window.clearTimeout(timer)
+  }, [retryAfterSeconds])
 
   if (!initializing && authenticated) return <Navigate to="/" replace />
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault()
+    if (retryAfterSeconds !== null) return
     const parsed = loginSchema.safeParse({ email, password })
     if (!parsed.success) {
       setError(parsed.error.issues[0]?.message ?? 'Invalid login')
@@ -50,6 +63,13 @@ export function LoginPage() {
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
         setError('Invalid email or password.')
+      } else if (
+        caught instanceof ApiError &&
+        caught.status === 429 &&
+        caught.code === 'auth_throttled' &&
+        caught.retryAfterSeconds !== null
+      ) {
+        setRetryAfterSeconds(caught.retryAfterSeconds)
       } else {
         setError('The admin service is unavailable. Try again shortly.')
       }
@@ -102,8 +122,19 @@ export function LoginPage() {
                 disabled={submitting}
               />
             </div>
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
-            <Button className="w-full" type="submit" disabled={submitting || initializing}>
+            {retryAfterSeconds !== null ? (
+              <p className="text-sm text-destructive" role="alert">
+                Too many attempts from this browser or network. Try again in{' '}
+                {retryAfterSeconds} {retryAfterSeconds === 1 ? 'second' : 'seconds'}.
+              </p>
+            ) : error ? (
+              <p className="text-sm text-destructive">{error}</p>
+            ) : null}
+            <Button
+              className="w-full"
+              type="submit"
+              disabled={submitting || initializing || retryAfterSeconds !== null}
+            >
               {submitting ? <Loader2 className="animate-spin" /> : null}
               Sign in
             </Button>

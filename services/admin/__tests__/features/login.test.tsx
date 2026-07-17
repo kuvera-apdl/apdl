@@ -85,3 +85,48 @@ test('shows a generic authentication error without creating browser credentials'
   expect(await screen.findByText('Invalid email or password.')).toBeInTheDocument()
   expect(sessionStorage.getItem('apdl-admin:session')).toBeNull()
 })
+
+test('shows the canonical throttle countdown and prevents early resubmission', async () => {
+  let attempts = 0
+  server.use(
+    http.post('*/api/auth/login', () => {
+      attempts += 1
+      return HttpResponse.json(
+        {
+          error: 'auth_throttled',
+          message: 'Too many attempts. Try again later.',
+          retry_after_seconds: 2,
+        },
+        {
+          status: 429,
+          headers: { 'Retry-After': '2' },
+        },
+      )
+    }),
+  )
+  renderLogin()
+
+  await userEvent.type(screen.getByLabelText('Email'), 'admin@example.com')
+  await userEvent.type(screen.getByLabelText('Password'), 'wrong-password')
+  const submit = screen.getByRole('button', { name: 'Sign in' })
+  await waitFor(() => expect(submit).toBeEnabled())
+  await userEvent.click(submit)
+
+  expect(
+    await screen.findByText(
+      'Too many attempts from this browser or network. Try again in 2 seconds.',
+    ),
+  ).toBeInTheDocument()
+  expect(submit).toBeDisabled()
+  await userEvent.click(submit)
+  expect(attempts).toBe(1)
+
+  expect(
+    await screen.findByText(
+      'Too many attempts from this browser or network. Try again in 1 second.',
+      {},
+      { timeout: 1_500 },
+    ),
+  ).toBeInTheDocument()
+  await waitFor(() => expect(submit).toBeEnabled(), { timeout: 1_500 })
+})

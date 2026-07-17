@@ -5,11 +5,18 @@ from __future__ import annotations
 import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from app.auth import PostgresAuthenticator, authenticate_request
+from app.auth import (
+    Principal,
+    PostgresAuthenticator,
+    authenticate_request,
+    require_role,
+)
 from app.main import app
 from tests.fakes import FakePool
 
@@ -42,6 +49,7 @@ def _row(
     roles: tuple[str, ...] = ("agents:read", "agents:manage"),
     active: bool = True,
     expires_at: datetime | None = None,
+    execution_authorized: bool = True,
 ) -> dict:
     return {
         "credential_id": "codegen-test",
@@ -50,6 +58,7 @@ def _row(
         "roles": roles,
         "active": active,
         "expires_at": expires_at,
+        "execution_authorized": execution_authorized,
     }
 
 
@@ -77,6 +86,24 @@ async def test_api_key_is_required_and_internal_token_has_no_authority(
     assert missing.status_code == 401
     assert obsolete.status_code == 401
     assert valid.status_code == 404
+
+
+def test_execution_role_requires_operator_project_authorization():
+    principal = Principal(
+        credential_id="codegen-test",
+        project_id="demo",
+        roles=frozenset({"agents:manage"}),
+        execution_authorized=False,
+    )
+    request = SimpleNamespace(state=SimpleNamespace(principal=principal))
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_role(request, "agents:manage")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == (
+        "Codegen execution requires operator project authorization"
+    )
 
 
 @pytest.mark.asyncio

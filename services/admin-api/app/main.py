@@ -2,15 +2,70 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import asyncpg
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app import auth, projects, proxy
+from app import auth, credentials, projects, proxy
 from app.config import Settings
+
+ReadinessState = Literal["ready", "not_ready"]
+_CORE_UPSTREAMS = {
+    "ingestion": ("/health", "ok"),
+    "config": ("/ready", "ready"),
+    "query": ("/ready", "ready"),
+}
+_CAPABILITY_UPSTREAMS = {
+    "agents": ("/ready", "ready"),
+    "codegen": ("/ready", "ready"),
+}
+
+
+def _upstream_timeout(settings: Settings) -> httpx.Timeout:
+    return httpx.Timeout(
+        30.0,
+        connect=5.0,
+        read=settings.upstream_read_timeout_seconds,
+    )
+
+
+async def _probe_postgres(pool) -> ReadinessState:
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+    except Exception:
+        return "not_ready"
+    return "ready"
+
+
+async def _probe_upstream(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    service: str,
+    path: str,
+    expected_status: str,
+) -> ReadinessState:
+    try:
+        response = await client.get(
+            f"{settings.service_urls[service]}{path}",
+            timeout=settings.readiness_probe_timeout_seconds,
+        )
+        body = response.json()
+    except (httpx.HTTPError, ValueError, TypeError):
+        return "not_ready"
+    if (
+        response.status_code == 200
+        and isinstance(body, dict)
+        and "status" in body
+        and body["status"] == expected_status
+    ):
+        return "ready"
+    return "not_ready"
 
 
 @asynccontextmanager
@@ -18,7 +73,7 @@ async def lifespan(application: FastAPI):
     settings = Settings.from_env()
     pool = await asyncpg.create_pool(settings.postgres_url, min_size=2, max_size=10)
     client = httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=False
+        timeout=_upstream_timeout(settings), follow_redirects=False
     )
     application.state.settings = settings
     application.state.pg_pool = pool
@@ -52,6 +107,7 @@ async def security_headers(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(projects.router)
+app.include_router(credentials.router)
 app.include_router(proxy.router)
 
 
@@ -62,42 +118,43 @@ async def health() -> dict[str, str]:
 
 @app.get("/api/ready")
 async def ready(request: Request):
-    checks = {
+    core: dict[str, ReadinessState] = {
         "postgres": "not_ready",
-        "ingestion": "not_ready",
-        "config": "not_ready",
-        "query": "not_ready",
+        **dict.fromkeys(_CORE_UPSTREAMS, "not_ready"),
     }
-    try:
-        async with request.app.state.pg_pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        checks["postgres"] = "ready"
-    except Exception:
-        pass
-
-    settings = request.app.state.settings
-    upstreams = (
-        ("ingestion", "/health", "ok"),
-        ("config", "/ready", "ready"),
-        ("query", "/ready", "ready"),
+    capabilities: dict[str, ReadinessState] = dict.fromkeys(
+        _CAPABILITY_UPSTREAMS, "not_ready"
     )
-    for service, path, expected_status in upstreams:
-        try:
-            response = await request.app.state.http_client.get(
-                f"{settings.service_urls[service]}{path}"
+    settings = request.app.state.settings
+    upstreams = {**_CORE_UPSTREAMS, **_CAPABILITY_UPSTREAMS}
+    postgres_result, *results = await asyncio.gather(
+        _probe_postgres(request.app.state.pg_pool),
+        *(
+            _probe_upstream(
+                request.app.state.http_client,
+                settings,
+                service,
+                path,
+                expected_status,
             )
-            body = response.json()
-            if (
-                response.status_code == 200
-                and isinstance(body, dict)
-                and body.get("status") == expected_status
-            ):
-                checks[service] = "ready"
-        except (httpx.HTTPError, ValueError, TypeError):
-            pass
+            for service, (path, expected_status) in upstreams.items()
+        ),
+    )
+    core["postgres"] = postgres_result
+    for service, result in zip(upstreams, results, strict=True):
+        if service in core:
+            core[service] = result
+        else:
+            capabilities[service] = result
 
-    payload = {"status": "ready", "checks": checks}
-    if any(value != "ready" for value in checks.values()):
+    degraded = any(value != "ready" for value in capabilities.values())
+    payload = {
+        "status": "ready",
+        "degraded": degraded,
+        "core": core,
+        "capabilities": capabilities,
+    }
+    if any(value != "ready" for value in core.values()):
         payload["status"] = "not_ready"
         return JSONResponse(status_code=503, content=payload)
     return payload

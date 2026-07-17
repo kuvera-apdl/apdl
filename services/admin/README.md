@@ -3,7 +3,10 @@
 Single-page admin console for the APDL platform. The browser talks only to the
 same-origin [Admin API](../admin-api/README.md), which authenticates human
 users, enforces project roles, and injects service credentials server-side.
-Project API keys never enter frontend JavaScript.
+Project API keys enter frontend JavaScript only inside the deliberate
+reveal-once credential dialog after creation or rotation. They are held in
+component state, never placed in storage or the query cache, and cleared when
+the dialog closes.
 
 Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan.md`
 (vault). This package implements **all plan phases (0–7)**:
@@ -15,7 +18,10 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   cookie; any later API 401 clears cached data and redirects back to login.
 - Project access (`/settings/workspace`): lists only the projects and roles
   assigned to the authenticated user and switches the active project without
-  storing credentials locally.
+  storing credentials locally. Members with `credentials:manage` can create,
+  rotate, revoke, and inspect immutable lifecycle audit for restricted SDK
+  credentials. Browser keys have the fixed public scope; confidential keys
+  expose only an explicit subset of core read/evaluation roles.
 - Overview (`/`): service health strip (10s poll), flag state summary, realtime
   stream status.
 - Feature flags, full lifecycle: list with search/state/archived filters
@@ -95,9 +101,10 @@ Open `/register` to create an email/password account. New accounts have zero
 projects and zero roles; project access must be granted separately by an
 operator or created from `/settings/workspace`. Creating a project associates
 it with the current profile and grants core analytics roles plus
-`agents:read`. The console preserves the returned role set: self-created
-projects can inspect Agents history, while trigger, approval, and custom-agent
-mutation controls remain unavailable.
+`agents:read` and human-only credential management. The console preserves the
+returned role set: self-created projects can create a least-privilege SDK key
+and inspect Agents history, while trigger, approval, and custom-agent mutation
+controls remain unavailable.
 
 `scripts/dev.sh up-core` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the
@@ -121,11 +128,19 @@ __tests__/        # vitest + Testing Library + MSW (pattern mirrors sdk/javascri
 
 ## Security posture
 
-The browser stores only non-secret preferences and the active project ID.
-Passwords are Argon2id hashes; opaque session and CSRF tokens are stored as
-SHA-256 digests in PostgreSQL. Unsafe requests require both an allowed `Origin`
-and a session-bound double-submit CSRF token. The Admin API selects the
-project-scoped service key from server environment configuration, strips
-caller-supplied credentials, checks the user's project role, and then proxies
-the request. Production deployments must use HTTPS, secure cookies, and a
-least-privilege `APDL_SERVICE_API_KEYS` map.
+The browser persistently stores only non-secret preferences and the active
+project ID. A newly created or rotated SDK key exists transiently in the open
+reveal dialog and is cleared on close or unmount; it is never written to
+localStorage, sessionStorage, TanStack Query, URLs, or logs.
+Passwords are Argon2id hashes; PostgreSQL stores only SHA-256 digests of opaque
+session and CSRF tokens, while the browser receives them as cookies rather than
+browser-storage values. Authentication throttles use one canonical
+`auth_throttled` response; the login form displays its server-provided retry
+countdown and prevents early resubmission. Account-wide risk signals appear as
+an acknowledgeable console warning but never replace password verification.
+Unsafe requests require both an
+allowed `Origin` and a session-bound double-submit CSRF token. The Admin API
+selects the project-scoped service key from server environment configuration,
+strips caller-supplied credentials, checks the user's project role, and then
+proxies the request. Production deployments must use HTTPS, secure cookies,
+and a least-privilege `APDL_SERVICE_API_KEYS` map.

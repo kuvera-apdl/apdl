@@ -7,10 +7,11 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, status
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
-from app.auth import authorized_project
+from app.auth import Principal, authorized_project, credential_has_current_role
 from app.client_ip import client_ip
 from app.sse.broadcaster import (
     ConnectionQuotaExceeded,
+    CloseReason,
     ProjectEvent,
     SSEBroadcaster,
     SSESubscription,
@@ -85,6 +86,9 @@ async def sse_stream(request: Request):
         _event_generator(
             broadcaster,
             subscription,
+            pg_pool=request.app.state.pg_pool,
+            principal=principal,
+            credential_check_interval_seconds=settings.credential_check_interval_seconds,
             initial_data=initial_data,
             snapshot_version=snapshot_version,
         ),
@@ -106,6 +110,9 @@ async def _event_generator(
     broadcaster: SSEBroadcaster,
     subscription: SSESubscription,
     *,
+    pg_pool,
+    principal: Principal,
+    credential_check_interval_seconds: float,
     initial_data: str,
     snapshot_version: int,
 ):
@@ -115,26 +122,95 @@ async def _event_generator(
     also the project-wide reconciliation barrier for non-flag consumers, which
     must refetch their current state when they observe it.
     """
+    update_task: asyncio.Task | None = None
+    authority_timer: asyncio.Task | None = None
+    terminal_reason: CloseReason | None = None
     try:
+        try:
+            authorized = await credential_has_current_role(
+                pg_pool,
+                principal,
+                "config:read",
+            )
+        except Exception:
+            logger.exception(
+                "SSE credential revalidation failed for credential %s",
+                principal.credential_id,
+            )
+            terminal_reason = "credential_authority_unavailable"
+            yield stream_close_event(terminal_reason)
+            return
+        if not authorized:
+            terminal_reason = "credential_revoked"
+            yield stream_close_event(terminal_reason)
+            return
+
         yield ServerSentEvent(
             event="config",
             data=initial_data,
             id=str(snapshot_version),
         )
+        update_task = asyncio.create_task(_next_update(subscription))
+        authority_timer = asyncio.create_task(
+            asyncio.sleep(credential_check_interval_seconds)
+        )
         while True:
-            update = await _next_update(subscription)
-            if update is None:
-                yield stream_close_event(
-                    subscription.close_reason or "client_disconnect"
+            done, _ = await asyncio.wait(
+                {update_task, authority_timer},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Credential authority wins a same-tick race with queued updates.
+            if authority_timer in done:
+                try:
+                    authorized = await credential_has_current_role(
+                        pg_pool,
+                        principal,
+                        "config:read",
+                    )
+                except Exception:
+                    logger.exception(
+                        "SSE credential revalidation failed for credential %s",
+                        principal.credential_id,
+                    )
+                    terminal_reason = "credential_authority_unavailable"
+                    yield stream_close_event(terminal_reason)
+                    return
+                if not authorized:
+                    terminal_reason = "credential_revoked"
+                    yield stream_close_event(terminal_reason)
+                    return
+                authority_timer = asyncio.create_task(
+                    asyncio.sleep(credential_check_interval_seconds)
                 )
-                return
-            if update.project_version <= snapshot_version:
-                continue
-            yield update.event
+
+            if update_task in done:
+                update = update_task.result()
+                if update is None:
+                    yield stream_close_event(
+                        subscription.close_reason or "client_disconnect"
+                    )
+                    return
+                update_task = asyncio.create_task(_next_update(subscription))
+                if update.project_version <= snapshot_version:
+                    continue
+                yield update.event
     except asyncio.CancelledError:
         raise
     finally:
-        await broadcaster.remove_connection(subscription)
+        pending = [
+            task
+            for task in (update_task, authority_timer)
+            if task is not None and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await broadcaster.remove_connection(
+            subscription,
+            reason=terminal_reason or "client_disconnect",
+        )
         logger.debug(
             "SSE connection %s disconnected for project %s",
             subscription.connection_id,

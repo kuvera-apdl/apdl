@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from app.config import Settings
+from app.login_security import (
+    GENERIC_LOGIN_ERROR,
+    THROTTLED_LOGIN_ERROR,
+    LoginSource,
+    build_login_source,
+    clear_login_source_risk,
+    preflight_login,
+    record_failed_login,
+    set_device_cookie,
+)
 from app.models import (
     LoginRequest,
     ProjectAccess,
     RegistrationRequest,
+    SecurityNotification,
     UserIdentity,
 )
 from app.security import (
@@ -165,85 +178,182 @@ def require_csrf(request: Request, session: AdminSession) -> None:
         )
 
 
+def _failed_login_response(
+    source: LoginSource,
+    settings: Settings,
+    retry_after_seconds: int,
+) -> JSONResponse:
+    if retry_after_seconds > 0:
+        response = JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "error": "auth_throttled",
+                "message": THROTTLED_LOGIN_ERROR,
+                "retry_after_seconds": retry_after_seconds,
+            },
+            headers={"Retry-After": str(retry_after_seconds)},
+        )
+    else:
+        response = JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": GENERIC_LOGIN_ERROR},
+        )
+    set_device_cookie(response, source, settings)
+    return response
+
+
+@router.get(
+    "/security-notifications",
+    response_model=list[SecurityNotification],
+)
+async def list_security_notifications(
+    request: Request,
+    session: AdminSession = Depends(require_session),
+) -> list[SecurityNotification]:
+    async with request.app.state.pg_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                notification_id,
+                kind,
+                status,
+                observed_failures,
+                window_started_at,
+                last_detected_at,
+                created_at
+            FROM admin_security_notifications
+            WHERE user_id = $1
+              AND status = 'unread'
+            ORDER BY created_at DESC, notification_id DESC
+            """,
+            uuid.UUID(session.user_id),
+        )
+    return [SecurityNotification(**dict(row)) for row in rows]
+
+
+@router.post(
+    "/security-notifications/{notification_id}/acknowledge",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def acknowledge_security_notification(
+    notification_id: uuid.UUID,
+    request: Request,
+    session: AdminSession = Depends(require_session),
+) -> Response:
+    require_allowed_origin(request, request.app.state.settings)
+    require_csrf(request, session)
+    async with request.app.state.pg_pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE admin_security_notifications
+            SET status = 'acknowledged',
+                acknowledged_at = NOW()
+            WHERE notification_id = $1
+              AND user_id = $2
+              AND status = 'unread'
+            """,
+            notification_id,
+            uuid.UUID(session.user_id),
+        )
+    if result != "UPDATE 1":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Security notification not found",
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/login", response_model=UserIdentity)
 async def login(
     body: LoginRequest, request: Request, response: Response
-) -> UserIdentity:
+) -> UserIdentity | Response:
     settings: Settings = request.app.state.settings
     require_allowed_origin(request, settings)
     email = str(body.email).strip().lower()
     now = datetime.now(timezone.utc)
+    source = build_login_source(request, email, settings)
+
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            retry_after = await preflight_login(conn, source, settings, now)
+            candidate = await conn.fetchrow(
+                """
+                SELECT user_id, email, password_hash, active
+                FROM admin_users
+                WHERE email = $1
+                """,
+                email,
+            )
+    if retry_after > 0:
+        return _failed_login_response(source, settings, retry_after)
+
+    candidate_hash = (
+        str(candidate["password_hash"])
+        if candidate is not None
+        else DUMMY_PASSWORD_HASH
+    )
+    password_valid = await asyncio.to_thread(
+        verify_password,
+        candidate_hash,
+        body.password,
+    )
     login_result = None
+    failure_delay = 0
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
             user = await conn.fetchrow(
                 """
-                SELECT user_id, email, password_hash, active,
-                       failed_login_attempts, locked_until
+                SELECT user_id, email, password_hash, active
                 FROM admin_users
                 WHERE email = $1
                 FOR UPDATE
                 """,
                 email,
             )
-            password_hash = (
-                str(user["password_hash"]) if user is not None else DUMMY_PASSWORD_HASH
-            )
-            password_valid = verify_password(password_hash, body.password)
-            locked = bool(
-                user is not None
-                and user["locked_until"] is not None
-                and user["locked_until"] > now
+            candidate_is_current = bool(
+                candidate is not None
+                and user is not None
+                and secrets.compare_digest(
+                    str(candidate["password_hash"]),
+                    str(user["password_hash"]),
+                )
             )
             valid = bool(
-                user is not None and user["active"] and not locked and password_valid
+                user is not None
+                and user["active"]
+                and candidate_is_current
+                and password_valid
             )
-            if not valid:
-                if user is not None and user["active"] and not locked:
-                    failures = int(user["failed_login_attempts"]) + 1
-                    lock_until = (
-                        now + timedelta(seconds=settings.login_lock_seconds)
-                        if failures >= settings.login_failure_limit
-                        else None
-                    )
-                    await conn.execute(
-                        """
-                        UPDATE admin_users
-                        SET failed_login_attempts = $2,
-                            locked_until = $3,
-                            updated_at = NOW()
-                        WHERE user_id = $1
-                        """,
-                        user["user_id"],
-                        failures,
-                        lock_until,
-                    )
-            else:
+            if valid:
                 user_id = str(user["user_id"])
                 projects = await _project_access(conn, user_id)
-
-                await conn.execute(
-                    """
-                    UPDATE admin_users
-                    SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW()
-                    WHERE user_id = $1
-                    """,
-                    user["user_id"],
-                )
+                await clear_login_source_risk(conn, source)
                 session_token, csrf_token = await _start_session(
-                    conn, user["user_id"], settings, now
+                    conn,
+                    user["user_id"],
+                    settings,
+                    now,
                 )
                 login_result = (user_id, projects, session_token, csrf_token)
+            else:
+                failure_delay = await record_failed_login(
+                    conn,
+                    source=source,
+                    user_id=(
+                        user["user_id"]
+                        if user is not None and user["active"]
+                        else None
+                    ),
+                    settings=settings,
+                    now=now,
+                )
 
     if login_result is None:
-        # Raise only after the transaction commits the failed-attempt update.
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
+        return _failed_login_response(source, settings, failure_delay)
 
     user_id, projects, session_token, csrf_token = login_result
+    set_device_cookie(response, source, settings)
     set_session_cookies(response, session_token, csrf_token, settings)
     return UserIdentity(
         user_id=user_id,

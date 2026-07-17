@@ -32,6 +32,7 @@ class Principal:
     project_id: str
     roles: frozenset[str]
     self_registered_project: bool
+    execution_authorized: bool
     actor_user_id: str | None = None
 
 
@@ -55,7 +56,14 @@ class PostgresAuthenticator:
                            credential.active, credential.expires_at,
                            credential.actor_user_id,
                            (project.created_by IS NOT NULL)
-                               AS self_registered_project
+                               AS self_registered_project,
+                           EXISTS (
+                               SELECT 1
+                               FROM admin_project_execution_authorizations
+                                   AS execution_authority
+                               WHERE execution_authority.project_id =
+                                   credential.project_id
+                           ) AS execution_authorized
                     FROM auth_credentials AS credential
                     JOIN admin_projects AS project
                       ON project.project_id = credential.project_id
@@ -85,6 +93,7 @@ class PostgresAuthenticator:
             project_id=stored_project,
             roles=frozenset(str(role) for role in row["roles"]),
             self_registered_project=bool(row["self_registered_project"]),
+            execution_authorized=bool(row["execution_authorized"]),
             actor_user_id=(
                 str(row["actor_user_id"])
                 if row["actor_user_id"] is not None
@@ -117,10 +126,10 @@ async def authenticate_request(request: Request) -> Principal:
 
 def require_role(request: Request, role: str) -> Principal:
     principal: Principal = request.state.principal
-    if principal.self_registered_project and role in _SELF_REGISTERED_DENIED_ROLES:
+    if not principal.execution_authorized and role in _SELF_REGISTERED_DENIED_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agents execution is unavailable for self-registered projects",
+            detail="Agents execution requires operator project authorization",
         )
     if role not in principal.roles:
         raise HTTPException(

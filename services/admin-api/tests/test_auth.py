@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -9,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import auth
-from app.security import hash_password
+from app.security import hash_password, token_hash
 from conftest import make_settings
 
 
@@ -17,20 +18,69 @@ class FakeConnection:
     def __init__(self) -> None:
         self.user_id = uuid.UUID("20000000-0000-4000-8000-000000000002")
         self.password_hash = hash_password("a-correct-horse-battery-staple")
-        self.failed_login_attempts = 0
-        self.locked_until: datetime | None = None
+        self.active = True
+        self.rate_buckets: dict[tuple[str, str], tuple[datetime, int]] = {}
+        self.source_risks: dict[tuple[str, str, str], tuple[int, datetime]] = {}
+        self.account_failures = 0
+        self.account_window_started_at: datetime | None = None
+        self.notifications: list[dict[str, object]] = []
         self.executions: list[tuple[str, tuple[object, ...]]] = []
 
     @asynccontextmanager
     async def transaction(self):
-        snapshot = (self.failed_login_attempts, self.locked_until)
+        snapshot = deepcopy(
+            (
+                self.rate_buckets,
+                self.source_risks,
+                self.account_failures,
+                self.account_window_started_at,
+                self.notifications,
+            )
+        )
         try:
             yield
         except Exception:
-            self.failed_login_attempts, self.locked_until = snapshot
+            (
+                self.rate_buckets,
+                self.source_risks,
+                self.account_failures,
+                self.account_window_started_at,
+                self.notifications,
+            ) = snapshot
             raise
 
     async def fetchrow(self, query: str, *args):
+        if "INSERT INTO admin_login_rate_buckets" in query:
+            scope, key_hash, window_seconds, now = args
+            key = (str(scope), str(key_hash))
+            previous = self.rate_buckets.get(key)
+            if (
+                previous is None
+                or previous[0] <= now - timedelta(seconds=int(window_seconds))
+            ):
+                value = (now, 1)
+            else:
+                value = (previous[0], previous[1] + 1)
+            self.rate_buckets[key] = value
+            return {
+                "window_started_at": value[0],
+                "attempt_count": value[1],
+            }
+        if "INSERT INTO admin_login_account_risk" in query:
+            _, _, now, window_seconds = args
+            if (
+                self.account_window_started_at is None
+                or self.account_window_started_at
+                <= now - timedelta(seconds=int(window_seconds))
+            ):
+                self.account_window_started_at = now
+                self.account_failures = 1
+            else:
+                self.account_failures += 1
+            return {
+                "window_started_at": self.account_window_started_at,
+                "failure_count": self.account_failures,
+            }
         if "FROM admin_users" in query:
             if args[0] != "admin@example.com":
                 return None
@@ -38,11 +88,25 @@ class FakeConnection:
                 "user_id": self.user_id,
                 "email": "admin@example.com",
                 "password_hash": self.password_hash,
-                "active": True,
-                "failed_login_attempts": self.failed_login_attempts,
-                "locked_until": self.locked_until,
+                "active": self.active,
             }
         raise AssertionError(f"Unexpected fetchrow: {query}")
+
+    async def fetchval(self, query: str, *args):
+        if "SELECT next_allowed_at" in query:
+            risk = self.source_risks.get(
+                (str(args[0]), str(args[1]), str(args[2]))
+            )
+            return risk[1] if risk is not None else None
+        if "INSERT INTO admin_login_source_risk" in query:
+            key = (str(args[0]), str(args[1]), str(args[2]))
+            now = args[3]
+            previous = self.source_risks.get(key)
+            failures = 1 if previous is None else previous[0] + 1
+            next_allowed_at = now if previous is None else previous[1]
+            self.source_risks[key] = (failures, next_allowed_at)
+            return failures
+        raise AssertionError(f"Unexpected fetchval: {query}")
 
     async def fetch(self, query: str, *args):
         assert "FROM admin_user_projects" in query
@@ -51,12 +115,42 @@ class FakeConnection:
 
     async def execute(self, query: str, *args):
         self.executions.append((query, args))
-        if "SET failed_login_attempts = $2" in query:
-            self.failed_login_attempts = int(args[1])
-            self.locked_until = args[2]
-        elif "SET failed_login_attempts = 0" in query:
-            self.failed_login_attempts = 0
-            self.locked_until = None
+        if (
+            "DELETE FROM admin_login_source_risk" in query
+            and "WHERE email_hash = $1" in query
+        ):
+            email_hash, network_hash, device_hash = (str(arg) for arg in args)
+            self.source_risks.pop(("network", network_hash, email_hash), None)
+            self.source_risks.pop(("device", device_hash, email_hash), None)
+        elif "UPDATE admin_login_source_risk" in query:
+            key = (str(args[0]), str(args[1]), str(args[2]))
+            failures, next_allowed_at = self.source_risks[key]
+            proposed = args[3] + timedelta(seconds=int(args[4]))
+            self.source_risks[key] = (failures, max(next_allowed_at, proposed))
+        elif "UPDATE admin_security_notifications" in query:
+            unread = next(
+                (
+                    notification
+                    for notification in self.notifications
+                    if notification["status"] == "unread"
+                ),
+                None,
+            )
+            if unread is None:
+                return "UPDATE 0"
+            unread["observed_failures"] = max(
+                int(unread["observed_failures"]),
+                int(args[1]),
+            )
+            return "UPDATE 1"
+        elif "INSERT INTO admin_security_notifications" in query:
+            self.notifications.append(
+                {
+                    "notification_id": args[0],
+                    "status": "unread",
+                    "observed_failures": args[2],
+                }
+            )
         return "OK"
 
 
@@ -69,12 +163,12 @@ class FakePool:
         yield self.connection
 
 
-def make_client(connection) -> TestClient:
+def make_client(connection, *, settings=None) -> TestClient:
     app = FastAPI()
-    app.state.settings = make_settings()
+    app.state.settings = settings or make_settings()
     app.state.pg_pool = FakePool(connection)
     app.include_router(auth.router)
-    return TestClient(app)
+    return TestClient(app, client=("127.0.0.1", 50000))
 
 
 def test_login_sets_opaque_httponly_session_and_returns_no_service_secret() -> None:
@@ -108,6 +202,12 @@ def test_login_sets_opaque_httponly_session_and_returns_no_service_secret() -> N
     assert "Path=/api" in session_cookie
     assert "HttpOnly" not in csrf_cookie
     assert "Path=/" in csrf_cookie
+    device_cookie = next(
+        value for value in cookies if value.startswith("apdl_admin_device=")
+    )
+    assert "HttpOnly" in device_cookie
+    assert "SameSite=strict" in device_cookie
+    assert "Path=/api/auth/login" in device_cookie
 
     insert = next(
         item
@@ -133,10 +233,10 @@ def test_login_uses_a_generic_error_for_unknown_users() -> None:
     assert response.json() == {"detail": "Invalid email or password"}
 
 
-def test_failed_login_attempts_commit_and_lock_the_account() -> None:
+def test_failed_logins_receive_a_source_scoped_progressive_delay() -> None:
     connection = FakeConnection()
     with make_client(connection) as client:
-        for expected_failures in range(1, 6):
+        for expected_failures in range(1, 4):
             response = client.post(
                 "/api/auth/login",
                 headers={"Origin": "http://admin.test"},
@@ -146,16 +246,19 @@ def test_failed_login_attempts_commit_and_lock_the_account() -> None:
                 },
             )
 
-            assert response.status_code == 401
-            assert response.json() == {"detail": "Invalid email or password"}
-            assert connection.failed_login_attempts == expected_failures
-            if expected_failures < 5:
-                assert connection.locked_until is None
+            if expected_failures < 3:
+                assert response.status_code == 401
+                assert response.json() == {"detail": "Invalid email or password"}
+            else:
+                assert response.status_code == 429
+                assert response.json() == {
+                    "error": "auth_throttled",
+                    "message": "Too many attempts. Try again later.",
+                    "retry_after_seconds": 1,
+                }
+                assert response.headers["retry-after"] == "1"
 
-        assert connection.locked_until is not None
-        assert connection.locked_until > datetime.now(timezone.utc)
-
-        locked_response = client.post(
+        throttled = client.post(
             "/api/auth/login",
             headers={"Origin": "http://admin.test"},
             json={
@@ -164,17 +267,16 @@ def test_failed_login_attempts_commit_and_lock_the_account() -> None:
             },
         )
 
-    assert locked_response.status_code == 401
-    assert connection.failed_login_attempts == 5
+    assert throttled.status_code == 429
     assert not any(
         "INSERT INTO admin_sessions" in query for query, _ in connection.executions
     )
 
 
-def test_successful_login_after_lock_expiry_resets_failure_state() -> None:
+def test_account_risk_never_blocks_a_correct_password_from_a_clean_source() -> None:
     connection = FakeConnection()
-    connection.failed_login_attempts = 5
-    connection.locked_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+    connection.account_failures = 100
+    connection.account_window_started_at = datetime.now(timezone.utc)
 
     with make_client(connection) as client:
         response = client.post(
@@ -187,8 +289,155 @@ def test_successful_login_after_lock_expiry_resets_failure_state() -> None:
         )
 
     assert response.status_code == 200
-    assert connection.failed_login_attempts == 0
-    assert connection.locked_until is None
+    assert any(
+        "INSERT INTO admin_sessions" in query for query, _ in connection.executions
+    )
+
+
+def test_rotating_a_device_does_not_bypass_the_network_progressive_delay() -> None:
+    connection = FakeConnection()
+    with make_client(connection) as attacker:
+        for _ in range(3):
+            delayed = attacker.post(
+                "/api/auth/login",
+                headers={
+                    "Origin": "http://admin.test",
+                    "X-Forwarded-For": "203.0.113.10",
+                },
+                json={"email": "admin@example.com", "password": "wrong-password"},
+            )
+    assert delayed.status_code == 429
+
+    with make_client(connection) as clean_device:
+        response = clean_device.post(
+            "/api/auth/login",
+            headers={
+                "Origin": "http://admin.test",
+                "X-Forwarded-For": "203.0.113.10",
+            },
+            json={"email": "admin@example.com", "password": "wrong-password"},
+        )
+
+    assert response.status_code == 429
+
+
+def test_correct_password_recovers_from_a_different_network_after_an_attack() -> None:
+    connection = FakeConnection()
+    with make_client(connection) as attacker:
+        for _ in range(3):
+            attacker.post(
+                "/api/auth/login",
+                headers={
+                    "Origin": "http://admin.test",
+                    "X-Forwarded-For": "203.0.113.10",
+                },
+                json={"email": "admin@example.com", "password": "wrong-password"},
+            )
+
+    with make_client(connection) as account_owner:
+        response = account_owner.post(
+            "/api/auth/login",
+            headers={
+                "Origin": "http://admin.test",
+                "X-Forwarded-For": "198.51.100.20",
+            },
+            json={
+                "email": "admin@example.com",
+                "password": "a-correct-horse-battery-staple",
+            },
+        )
+
+    assert response.status_code == 200
+
+
+def test_account_threshold_creates_one_durable_security_notification() -> None:
+    connection = FakeConnection()
+    settings = make_settings(login_account_notice_threshold=3)
+    with make_client(connection, settings=settings) as client:
+        for _ in range(3):
+            client.post(
+                "/api/auth/login",
+                headers={"Origin": "http://admin.test"},
+                json={"email": "admin@example.com", "password": "wrong-password"},
+            )
+
+    assert connection.account_failures == 3
+    assert len(connection.notifications) == 1
+    assert connection.notifications[0]["observed_failures"] == 3
+
+
+class SecurityNotificationConnection:
+    def __init__(self) -> None:
+        self.notification_id = uuid.UUID("70000000-0000-4000-8000-000000000007")
+        self.user_id = uuid.UUID("20000000-0000-4000-8000-000000000002")
+        self.acknowledged = False
+        self.now = datetime.now(timezone.utc)
+
+    async def fetch(self, query: str, *args):
+        assert "FROM admin_security_notifications" in query
+        assert args == (self.user_id,)
+        if self.acknowledged:
+            return []
+        return [
+            {
+                "notification_id": self.notification_id,
+                "kind": "suspicious_login_activity",
+                "status": "unread",
+                "observed_failures": 50,
+                "window_started_at": self.now - timedelta(hours=1),
+                "last_detected_at": self.now,
+                "created_at": self.now,
+            }
+        ]
+
+    async def execute(self, query: str, *args):
+        assert "UPDATE admin_security_notifications" in query
+        if args != (self.notification_id, self.user_id) or self.acknowledged:
+            return "UPDATE 0"
+        self.acknowledged = True
+        return "UPDATE 1"
+
+
+def make_security_notification_client(
+    connection: SecurityNotificationConnection,
+) -> tuple[TestClient, str]:
+    csrf = "notification-csrf-token"
+    session = auth.AdminSession(
+        session_id="10000000-0000-4000-8000-000000000001",
+        token_hash="a" * 64,
+        csrf_hash=token_hash(csrf),
+        user_id=str(connection.user_id),
+        email="admin@example.com",
+        projects={},
+    )
+    app = FastAPI()
+    app.state.settings = make_settings()
+    app.state.pg_pool = FakePool(connection)
+    app.include_router(auth.router)
+    app.dependency_overrides[auth.require_session] = lambda: session
+    return TestClient(app), csrf
+
+
+def test_security_notification_can_be_read_and_acknowledged() -> None:
+    connection = SecurityNotificationConnection()
+    client, csrf = make_security_notification_client(connection)
+    with client:
+        listed = client.get("/api/auth/security-notifications")
+        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+        acknowledged = client.post(
+            f"/api/auth/security-notifications/{connection.notification_id}/acknowledge",
+            headers={
+                "Origin": "http://admin.test",
+                "X-CSRF-Token": csrf,
+            },
+        )
+        empty = client.get("/api/auth/security-notifications")
+
+    assert listed.status_code == 200
+    assert listed.json()[0]["kind"] == "suspicious_login_activity"
+    assert listed.json()[0]["observed_failures"] == 50
+    assert acknowledged.status_code == 204
+    assert empty.json() == []
 
 
 def test_login_rejects_cross_site_origins_before_checking_credentials() -> None:

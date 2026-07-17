@@ -1,6 +1,7 @@
 """SSE route interleaving, slow-consumer, and admission integration tests."""
 
 import asyncio
+from contextlib import asynccontextmanager
 
 from unittest.mock import AsyncMock
 
@@ -12,6 +13,28 @@ from app.auth import Principal
 from app.main import app
 from app.routers import stream
 from app.sse.broadcaster import SSEBroadcaster, SSESettings
+
+
+class CredentialConnection:
+    def __init__(self, results: bool | list[object] = True) -> None:
+        self.results = list(results) if isinstance(results, list) else [results]
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchval(self, query: str, *args):
+        self.calls.append((query, args))
+        result = self.results.pop(0) if len(self.results) > 1 else self.results[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class CredentialPool:
+    def __init__(self, results: bool | list[object] = True) -> None:
+        self.connection = CredentialConnection(results)
+
+    @asynccontextmanager
+    async def acquire(self):
+        yield self.connection
 
 
 def make_request() -> Request:
@@ -75,7 +98,7 @@ def encoded(event) -> str:
 @pytest.fixture
 def route_state():
     original = dict(app.state._state)
-    app.state.pg_pool = object()
+    app.state.pg_pool = CredentialPool()
     app.state.trusted_proxy_networks = ()
     yield
     app.state._state.clear()
@@ -150,6 +173,89 @@ async def test_snapshot_version_suppresses_already_included_queue_event(
     assert "id: 3" in encoded(next_event)
     assert 'data: {"version":3}' in encoded(next_event)
     await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_closes_when_credential_loses_config_read(
+    monkeypatch,
+    route_state,
+):
+    broadcaster = SSEBroadcaster(SSESettings(credential_check_interval_seconds=0.01))
+    app.state.broadcaster = broadcaster
+    app.state.pg_pool = CredentialPool([True, False])
+    monkeypatch.setattr(
+        stream.pg_store,
+        "get_flag_snapshot",
+        AsyncMock(return_value=([make_flag(version=1)], 1)),
+    )
+
+    response = await stream.sse_stream(make_request())
+    iterator = response.body_iterator
+    assert "event: config" in encoded(await anext(iterator))
+
+    terminal = encoded(await asyncio.wait_for(anext(iterator), timeout=0.2))
+    await iterator.aclose()
+
+    assert "event: stream_error" in terminal
+    assert '"reason":"credential_revoked"' in terminal
+    query, args = app.state.pg_pool.connection.calls[-1]
+    assert "FROM auth_credentials" in query
+    assert "$3::TEXT = ANY(roles)" in query
+    assert args == ("credential-1", "apdl", "config:read")
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "credential_revoked": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_fails_closed_when_credential_registry_becomes_unavailable(
+    monkeypatch,
+    route_state,
+):
+    broadcaster = SSEBroadcaster(SSESettings(credential_check_interval_seconds=0.01))
+    app.state.broadcaster = broadcaster
+    app.state.pg_pool = CredentialPool([True, ConnectionError("postgres down")])
+    monkeypatch.setattr(
+        stream.pg_store,
+        "get_flag_snapshot",
+        AsyncMock(return_value=([make_flag(version=1)], 1)),
+    )
+
+    response = await stream.sse_stream(make_request())
+    iterator = response.body_iterator
+    assert "event: config" in encoded(await anext(iterator))
+
+    terminal = encoded(await asyncio.wait_for(anext(iterator), timeout=0.2))
+    await iterator.aclose()
+
+    assert "event: stream_error" in terminal
+    assert '"reason":"credential_authority_unavailable"' in terminal
+    assert (await broadcaster.metrics_snapshot())["closed_total"] == {
+        "credential_authority_unavailable": 1
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_rechecks_credential_before_emitting_the_snapshot(
+    monkeypatch,
+    route_state,
+):
+    broadcaster = SSEBroadcaster()
+    app.state.broadcaster = broadcaster
+    app.state.pg_pool = CredentialPool(False)
+    monkeypatch.setattr(
+        stream.pg_store,
+        "get_flag_snapshot",
+        AsyncMock(return_value=([make_flag(version=1)], 1)),
+    )
+
+    response = await stream.sse_stream(make_request())
+    iterator = response.body_iterator
+    first = encoded(await anext(iterator))
+    await iterator.aclose()
+
+    assert "event: config" not in first
+    assert '"reason":"credential_revoked"' in first
 
 
 @pytest.mark.asyncio

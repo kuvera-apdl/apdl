@@ -25,6 +25,7 @@ def authorized_codegen_request() -> Iterable[
                 credential_id="test-credential",
                 project_id=project_id,
                 roles=resolved_roles,
+                execution_authorized=True,
             )
             request.state.principal = principal
             return principal

@@ -108,8 +108,9 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
   local `gemma4` at `http://localhost:11434/v1`, zero paid spend, and no
   cross-vendor retry. Agent memory is embedded into a pgvector table for
   retrieval across runs.
-- Agents execution is available only to operator-provisioned projects;
-  self-created projects retain read-only history and definitions. Experiment
+- Agents execution is available only to operator-provisioned or explicitly
+  operator-authorized projects; self-created projects retain read-only history
+  and definitions by default. Experiment
   proposals receive static shape/blast-radius validation and are audit-logged,
   but every experiment design requires human approval regardless of its stored
   autonomy level. Approval creates a disabled draft; it does not deploy a

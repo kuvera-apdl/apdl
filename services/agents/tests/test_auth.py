@@ -56,6 +56,7 @@ def credential_row(**overrides):
         "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
         "actor_user_id": None,
         "self_registered_project": False,
+        "execution_authorized": True,
     }
     row.update(overrides)
     return row
@@ -71,10 +72,12 @@ async def test_authentication_derives_authority_from_stored_record():
     assert principal.credential_id == "credential-1"
     assert principal.roles == frozenset({"query:read", "events:write"})
     assert principal.self_registered_project is False
+    assert principal.execution_authorized is True
     assert principal.actor_user_id is None
     query, args = pool.connection.calls[0]
     assert "JOIN admin_projects AS project" in query
     assert "project.created_by IS NOT NULL" in query
+    assert "admin_project_execution_authorizations" in query
     assert "WHERE credential.key_hash = $1" in query
     assert args == (hashlib.sha256(API_KEY.encode()).hexdigest(),)
 
@@ -107,7 +110,7 @@ def _request_for(principal: Principal):
 
 
 @pytest.mark.parametrize("role", ["agents:run", "agents:manage", "agents:approve"])
-def test_self_registered_project_cannot_use_agent_execution_roles(role):
+def test_project_without_execution_authorization_cannot_use_execution_roles(role):
     principal = Principal(
         credential_id="overprivileged",
         project_id="verifiedproject",
@@ -115,6 +118,7 @@ def test_self_registered_project_cannot_use_agent_execution_roles(role):
             {"agents:read", "agents:run", "agents:manage", "agents:approve"}
         ),
         self_registered_project=True,
+        execution_authorized=False,
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -122,7 +126,7 @@ def test_self_registered_project_cannot_use_agent_execution_roles(role):
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail == (
-        "Agents execution is unavailable for self-registered projects"
+        "Agents execution requires operator project authorization"
     )
 
 
@@ -132,17 +136,20 @@ def test_self_registered_project_keeps_read_access():
         project_id="verifiedproject",
         roles=frozenset({"agents:read"}),
         self_registered_project=True,
+        execution_authorized=False,
     )
 
     assert require_role(_request_for(principal), "agents:read") is principal
 
 
-def test_operator_project_keeps_agent_execution_roles():
+@pytest.mark.parametrize("self_registered", [False, True])
+def test_authorized_project_keeps_agent_execution_roles(self_registered):
     principal = Principal(
         credential_id="operator",
         project_id="verifiedproject",
         roles=frozenset({"agents:run", "agents:manage", "agents:approve"}),
-        self_registered_project=False,
+        self_registered_project=self_registered,
+        execution_authorized=True,
     )
 
     assert require_role(_request_for(principal), "agents:run") is principal

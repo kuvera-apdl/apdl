@@ -151,6 +151,34 @@ class PostgresAuthenticator:
         )
 
 
+async def credential_has_current_role(
+    pool: Any,
+    principal: Principal,
+    role: str,
+) -> bool:
+    """Revalidate one established principal against the credential registry."""
+    async with pool.acquire() as conn:
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM auth_credentials
+                    WHERE credential_id = $1
+                      AND project_id = $2
+                      AND active
+                      AND revoked_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                      AND $3::TEXT = ANY(roles)
+                )
+                """,
+                principal.credential_id,
+                principal.project_id,
+                role,
+            )
+        )
+
+
 async def authenticate_request(request: Request) -> Principal:
     """Authenticate the canonical X-API-Key header and attach its principal."""
     if "api_key" in request.query_params:

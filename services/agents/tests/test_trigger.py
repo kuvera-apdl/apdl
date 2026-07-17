@@ -97,6 +97,7 @@ async def test_trigger_requires_agents_run_role():
             project_id="demo",
             roles=frozenset({"agents:read"}),
             self_registered_project=False,
+            execution_authorized=True,
         )
         request.state.principal = principal
         return principal
@@ -123,6 +124,7 @@ async def test_self_registered_overprivileged_project_cannot_start_run():
                 {"agents:read", "agents:run", "agents:manage", "agents:approve"}
             ),
             self_registered_project=True,
+            execution_authorized=False,
         )
         request.state.principal = principal
         return principal
@@ -138,7 +140,7 @@ async def test_self_registered_overprivileged_project_cannot_start_run():
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Agents execution is unavailable for self-registered projects"
+        "Agents execution requires operator project authorization"
     )
     assert pool.conn.executed == []
 

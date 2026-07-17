@@ -95,6 +95,25 @@ describe('FlagStream', () => {
     stream.stop()
   })
 
+  test('delivers project-scoped authority revocation separately', () => {
+    const events: { name: string; data: unknown }[] = []
+    const stream = createStream(events, [])
+    stream.start()
+
+    FakeEventSource.instances[0]!.emit('project_access_revoked', {
+      project_id: 'demo',
+      required_role: 'config:read',
+    })
+
+    expect(events).toEqual([
+      {
+        name: 'project_access_revoked',
+        data: { project_id: 'demo', required_role: 'config:read' },
+      },
+    ])
+    stream.stop()
+  })
+
   test('reconnects with backoff after errors', () => {
     const stream = createStream([], [])
     stream.start()

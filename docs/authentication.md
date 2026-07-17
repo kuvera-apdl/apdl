@@ -84,6 +84,75 @@ project IDs introduced by operator membership or service-credential
 provisioning. Those operator projects have no creator, while a self-created
 project permanently retains its creator provenance; deleting the creator is
 rejected instead of silently converting the project into an operator project.
+The creator also receives `credentials:manage`, a human-membership-only role
+that is never accepted by `auth_credentials` and is removed before the Admin
+API mints a downstream proxy credential.
+
+## Human-managed SDK credentials
+
+A current project member with `credentials:manage` can create and operate
+durable SDK credentials from `/settings/workspace`. Every route re-reads and
+locks the live `admin_user_projects` row in its transaction, so removing the
+role takes effect without waiting for the human session to expire.
+
+The create request has one strict shape:
+
+```json
+{
+  "credential_kind": "browser",
+  "roles": ["events:write", "config:read"]
+}
+```
+
+Browser credentials require that exact ordered role pair. Confidential
+credentials accept a non-empty canonical-order subset of `events:write`,
+`config:read`, `config:evaluate`, and `query:read`. In both cases the roles must
+also be present on the human actor's current membership. Managed credentials
+cannot carry Config mutation or Agents/Codegen execution roles.
+
+Create and rotate return the plaintext `api_key` once. The Admin Console keeps
+it only in the open dialog's component state and clears it when the dialog
+closes or unmounts. PostgreSQL receives only its SHA-256 hash. List, revoke, and
+audit responses contain metadata only. Operator-provisioned credentials and
+five-minute `adminproxy-` credentials have no managed metadata row and are
+therefore invisible to these routes.
+
+Rotation creates one active successor with the same project, kind, and roles.
+The predecessor deliberately remains active so applications can cut over
+without downtime; revoke it explicitly after the new key is deployed. Managed
+metadata and create/rotate/revoke audit records are immutable. Audit rows retain
+the human UUID, email snapshot, credential kind, roles, and successor link but
+never contain a plaintext key or hash. The persistent SDK credential itself
+keeps `actor_user_id` null; only short-lived Admin proxy credentials may carry
+human command attribution.
+
+## Human login abuse controls
+
+Admin login does not use an email-wide account lock. Before Argon2 verification,
+the Admin API atomically consumes short-window global, canonical-network, and
+opaque-device budgets. Invalid credentials then increase two independent
+per-email progressive-delay records: one for the network and one for the
+device. The first two failures remain the generic `401`; the third and later
+failures return the strict `auth_throttled` envelope and matching
+`Retry-After`.
+
+The Admin edge overwrites `X-Forwarded-For` with its direct peer and clears
+other forwarding headers. Uvicorn preserves the socket peer, and the
+application accepts one forwarded address only when that peer belongs to the
+explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. Direct peers, malformed
+addresses, and forwarded chains cannot select a different risk identity.
+
+The `apdl_admin_device` cookie is a random HttpOnly, SameSite Strict risk
+signal; it is not an authentication factor. PostgreSQL receives only
+deployment-HMAC digests of the normalized email, client address, and device
+token. A correct password from an unthrottled source creates a session even
+when the account-wide failure score is high, so knowing an email address is not
+enough to deterministically lock out its owner.
+
+Fifty failures for one active account within 24 hours create one unread
+`suspicious_login_activity` record. The Admin Console displays the count and
+lets the user acknowledge it. This durable notification preserves the risk
+signal without turning it into an authorization decision.
 
 For projects without an operator-configured key in `APDL_SERVICE_API_KEYS`, the
 Admin API mints a random five-minute credential for each proxied request. Only
@@ -92,12 +161,15 @@ for the upstream call and the row is deleted after the response or SSE stream
 closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
 
-Agents execution is available only to operator-provisioned projects whose
-canonical `admin_projects.created_by` is null. Self-created projects retain
-`agents:read`, but the Admin proxy will not mint an execution credential for
-them and the Agents service independently rejects execution roles even if a
-long-lived credential was manually overprivileged. PostgreSQL also rejects new
-`agent_runs` rows for self-created or unknown projects.
+Agents and Codegen execution requires a canonical
+`admin_project_execution_authorizations` row. Migration 028 backfills and
+automatically records `operator_provisioned` authority only for projects whose
+immutable `admin_projects.created_by` is null. Self-created projects retain
+`agents:read` by default. An operator may authorize one deliberately with the
+`self_registered_override` source, a non-empty actor, reason, and timestamp.
+Agents and Codegen independently load that record, while PostgreSQL rejects
+execution roles and inserts into registered execution-bearing tables when it
+is absent.
 
 Experiment analysis uses synchronous credential delegation: after Query has
 authenticated a confidential `X-API-Key` and enforced `query:read` for its
@@ -109,7 +181,22 @@ Query-to-Config request and outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
-sessions.
+sessions. An execution role on a previously unauthorized self-created project
+requires all three explicit options:
+
+```bash
+make create-admin-user ARGS="\
+  --email operator@example.com \
+  --project-id acme \
+  --roles agents:manage \
+  --allow-self-registered-execution \
+  --override-actor operator@example.com \
+  --override-reason 'Approved production automation boundary'"
+```
+
+The authorization and role grant commit together. The authorization record is
+immutable audit evidence; operational access is stopped by removing execution
+roles and revoking credentials.
 
 ## Roles
 
@@ -124,16 +211,20 @@ sessions.
 | `agents:run` | Trigger agent runs |
 | `agents:manage` | Create, test, update, and archive custom agents |
 | `agents:approve` | Approve or reject gated agent actions |
+| `credentials:manage` | Human-only creation, rotation, revocation, and audit of restricted SDK credentials |
 
-The three Agents execution roles are valid only for operator-provisioned
-projects. Self-created projects are restricted to `agents:read` at membership,
-credential, service-authorization, and run-storage boundaries.
+The three Agents execution roles are valid only for operator-provisioned or
+explicitly authorized self-created projects. Unauthorized self-created
+projects are restricted to `agents:read` at membership, credential,
+service-authorization, and execution-storage boundaries.
 
-## Provision credentials
+## Operator provision credentials
 
 Apply the PostgreSQL migrations first with `make migrate-postgres`. Generate a
-key, hash the full key, and insert only the hash. A confidential service
-credential declares its kind and non-secret prefix explicitly:
+key, hash the full key, and insert only the hash. This direct SQL path is for
+operator-owned infrastructure credentials; normal project members should use
+the audited Admin Console workflow above. A confidential service credential
+declares its kind and non-secret prefix explicitly:
 
 ```bash
 api_key="proj_acme_$(openssl rand -hex 24)"
@@ -198,8 +289,10 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 
 ## Rotation, revocation, and expiry
 
-- Rotate by inserting a second active credential for the same project, moving
-  clients to it, then revoking the old record.
+- Managed credentials rotate through the Admin Console/API. The successor is
+  revealed once; move clients to it, then explicitly revoke the predecessor.
+- Operator credentials rotate by inserting a second active credential for the
+  same project, moving clients to it, then revoking the old record.
 - Revoke immediately with
   `UPDATE auth_credentials SET active = FALSE, revoked_at = NOW() WHERE credential_id = ...`.
 - Set `expires_at` for short-lived credentials. Expired records are rejected.

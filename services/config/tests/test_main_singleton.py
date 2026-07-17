@@ -81,12 +81,25 @@ def test_lifecycle_environment_rejects_invalid_interval_before_task_creation(
         main._start_lifecycle_monitor(object())
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["SSE_SEND_TIMEOUT_SECONDS", "SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS"],
+)
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1"])
 def test_sse_environment_rejects_non_finite_or_non_positive_durations(
     monkeypatch,
+    name,
     value,
 ):
-    monkeypatch.setenv("SSE_SEND_TIMEOUT_SECONDS", value)
+    monkeypatch.setenv(name, value)
 
-    with pytest.raises(ValueError, match="SSE_SEND_TIMEOUT_SECONDS"):
+    with pytest.raises(ValueError, match=name):
         main._sse_settings_from_environment()
+
+
+def test_sse_credential_revalidation_defaults_to_five_seconds(monkeypatch):
+    monkeypatch.delenv("SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS", raising=False)
+
+    settings = main._sse_settings_from_environment()
+
+    assert settings.credential_check_interval_seconds == 5.0

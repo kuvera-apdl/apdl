@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
+import { ProjectCredentialsCard } from '@/features/settings/ProjectCredentialsCard'
 
 export function WorkspaceSettingsPage() {
   const { identity, createProject } = useAuth()
@@ -50,8 +51,8 @@ export function WorkspaceSettingsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Project access"
-        description="Projects and roles granted to your server-side administrator account."
+        title="Workspace settings"
+        description="Project access, roles, and reveal-once SDK credentials."
       />
 
       <Card>
@@ -62,7 +63,8 @@ export function WorkspaceSettingsPage() {
           </CardTitle>
           <CardDescription>
             Signed in as {identity?.email}. Authentication uses an HttpOnly session cookie; no API
-            keys or internal service tokens are stored in this browser.
+            keys or internal service tokens are stored persistently in this browser. Reveal-once
+            keys exist only while their dialog is open.
           </CardDescription>
         </CardHeader>
       </Card>
@@ -141,6 +143,8 @@ export function WorkspaceSettingsPage() {
           </Card>
         ))}
       </div>
+
+      <ProjectCredentialsCard />
     </div>
   )
 }

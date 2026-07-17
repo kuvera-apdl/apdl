@@ -11,7 +11,10 @@ import { toast } from 'sonner'
 import { flagCollectionSchema, flagUpdatePayloadSchema } from '@/api/schemas/flags'
 import type { ClientFlagConfig } from '@/api/types/flags'
 import { FlagStream, streamUrl, type StreamState } from '@/api/sse'
-import { AUTH_UNAUTHORIZED_EVENT } from '@/core/auth-events'
+import {
+  AUTH_UNAUTHORIZED_EVENT,
+  PROJECT_ACCESS_REVOKED_EVENT,
+} from '@/core/auth-events'
 import { useAuth } from '@/core/auth'
 import { wasRecentlyWrittenLocally } from '@/core/localWrites'
 import { queryKeys } from '@/core/queryClient'
@@ -37,10 +40,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
   const wsId = authenticated ? (active?.id ?? null) : null
   const configUrl = authenticated && active ? serviceBaseUrl(active, 'config') : null
+  const canReadConfig = active?.roles.includes('config:read') ?? false
 
   useEffect(() => {
     setServedFlags(null)
-    if (!wsId || !configUrl || typeof EventSource === 'undefined') {
+    if (!wsId || !configUrl || !canReadConfig || typeof EventSource === 'undefined') {
       setState(IDLE_STATE)
       return
     }
@@ -48,7 +52,13 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       onState: setState,
       onEvent: (name, data) => {
         if (name === 'auth_expired') {
+          stream.stop()
           window.dispatchEvent(new Event(AUTH_UNAUTHORIZED_EVENT))
+          return
+        }
+        if (name === 'project_access_revoked') {
+          stream.stop()
+          window.dispatchEvent(new Event(PROJECT_ACCESS_REVOKED_EVENT))
           return
         }
         if (name === 'config') {
@@ -93,7 +103,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     })
     stream.start()
     return () => stream.stop()
-  }, [wsId, configUrl, queryClient])
+  }, [wsId, configUrl, canReadConfig, queryClient])
 
   const value = useMemo(() => ({ state, servedFlags }), [state, servedFlags])
   return <LiveContext.Provider value={value}>{children}</LiveContext.Provider>

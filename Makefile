@@ -161,7 +161,7 @@ clean-admin:
 # ─── Admin API (Python) ─────────────────────────────────────
 
 run-admin-api:
-	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/python -m uvicorn app.main:app --reload --port 8085 $(SERVICE_ENV_FILE)
+	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/python -m uvicorn app.main:app --reload --port 8085 --no-proxy-headers $(SERVICE_ENV_FILE)
 
 test-admin-api:
 	cd services/admin-api && .venv/bin/python -m pytest -v

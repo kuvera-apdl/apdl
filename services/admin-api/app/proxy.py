@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -9,6 +10,7 @@ import re
 import secrets
 import uuid
 from collections.abc import Mapping
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -36,6 +38,24 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 )
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
+_SERVICE_CREDENTIAL_ROLES = frozenset(
+    {
+        "events:write",
+        "config:read",
+        "config:write",
+        "config:evaluate",
+        "query:read",
+        "agents:read",
+        "agents:run",
+        "agents:manage",
+        "agents:approve",
+    }
+)
+StreamAuthorityState = Literal[
+    "authorized",
+    "session_expired",
+    "project_access_revoked",
+]
 
 
 async def _service_credential(
@@ -50,6 +70,13 @@ async def _service_credential(
     configured = settings.service_api_keys.get(project_id)
     if configured is not None and not force_ephemeral:
         return configured, None
+
+    service_roles = sorted(roles & _SERVICE_CREDENTIAL_ROLES)
+    if not service_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No service roles available",
+        )
 
     raw_key = f"proj_{project_id}_{secrets.token_hex(24)}"
     credential_id = f"adminproxy-{uuid.uuid4().hex}"
@@ -77,7 +104,7 @@ async def _service_credential(
                 project_id,
                 f"proj_{project_id}_",
                 digest,
-                sorted(roles),
+                service_roles,
                 uuid.UUID(actor_user_id) if actor_user_id is not None else None,
                 _EPHEMERAL_CREDENTIAL_TTL_SECONDS,
             )
@@ -158,40 +185,161 @@ async def _finish_mutation_audit(
         logger.exception("Failed to complete admin proxy audit %s", audit_id)
 
 
-async def _session_is_active(
-    request: Request, session: AdminSession, settings: Settings
-) -> bool:
+async def _stream_authority_state(
+    request: Request,
+    session: AdminSession,
+    settings: Settings,
+    project_id: str,
+    required_role: str | None,
+) -> StreamAuthorityState:
     async with request.app.state.pg_pool.acquire() as conn:
-        return bool(
-            await conn.fetchval(
-                """
-                SELECT EXISTS (
+        row = await conn.fetchrow(
+            """
+            SELECT
+                EXISTS (
                     SELECT 1
                     FROM admin_sessions AS s
                     JOIN admin_users AS u ON u.user_id = s.user_id
                     WHERE s.session_id = $1
+                      AND s.user_id = $2
                       AND s.revoked_at IS NULL
                       AND s.expires_at > NOW()
-                      AND s.last_seen_at > NOW() - ($2 * INTERVAL '1 second')
+                      AND s.last_seen_at > NOW() - ($3 * INTERVAL '1 second')
                       AND u.active
-                )
-                """,
-                uuid.UUID(session.session_id),
-                settings.session_idle_seconds,
-            )
+                ) AS session_active,
+                EXISTS (
+                    SELECT 1
+                    FROM admin_user_projects AS membership
+                    WHERE membership.user_id = $2
+                      AND membership.project_id = $4
+                      AND (
+                          $5::TEXT IS NULL
+                          OR $5::TEXT = ANY(membership.roles)
+                      )
+                ) AS project_authorized
+            """,
+            uuid.UUID(session.session_id),
+            uuid.UUID(session.user_id),
+            settings.session_idle_seconds,
+            project_id,
+            required_role,
         )
+    if not bool(row["session_active"]):
+        return "session_expired"
+    if not bool(row["project_authorized"]):
+        return "project_access_revoked"
+    return "authorized"
+
+
+def _stream_terminal_event(
+    state: StreamAuthorityState | Literal["authorization_unavailable"],
+    project_id: str,
+    required_role: str | None,
+) -> bytes:
+    if state == "session_expired":
+        return b"event: auth_expired\ndata: {}\n\n"
+    if state == "project_access_revoked":
+        payload: dict[str, str] = {"project_id": project_id}
+        if required_role is not None:
+            payload["required_role"] = required_role
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return b"event: project_access_revoked\ndata: " + data + b"\n\n"
+    data = json.dumps(
+        {"reason": "authorization_unavailable", "retryable": True},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return b"event: stream_error\ndata: " + data + b"\n\n"
 
 
 async def _authorized_sse(
-    response, request, session, settings, credential_id: str | None
+    response,
+    request: Request,
+    session: AdminSession,
+    settings: Settings,
+    project_id: str,
+    required_role: str | None,
+    credential_id: str | None,
 ):
+    chunk_task: asyncio.Task | None = None
+    authority_timer: asyncio.Task | None = None
     try:
-        async for chunk in response.aiter_raw():
-            if not await _session_is_active(request, session, settings):
-                yield b"event: auth_expired\ndata: {}\n\n"
-                return
-            yield chunk
+        try:
+            authority = await _stream_authority_state(
+                request,
+                session,
+                settings,
+                project_id,
+                required_role,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to revalidate stream authority for user %s project %s",
+                session.user_id,
+                project_id,
+            )
+            yield _stream_terminal_event(
+                "authorization_unavailable", project_id, required_role
+            )
+            return
+        if authority != "authorized":
+            yield _stream_terminal_event(authority, project_id, required_role)
+            return
+
+        iterator = response.aiter_raw()
+        chunk_task = asyncio.create_task(anext(iterator))
+        authority_timer = asyncio.create_task(
+            asyncio.sleep(settings.stream_authority_check_seconds)
+        )
+        while True:
+            done, _ = await asyncio.wait(
+                {chunk_task, authority_timer},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Authority wins a same-tick race with buffered upstream data.
+            if authority_timer in done:
+                try:
+                    authority = await _stream_authority_state(
+                        request,
+                        session,
+                        settings,
+                        project_id,
+                        required_role,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to revalidate stream authority for user %s project %s",
+                        session.user_id,
+                        project_id,
+                    )
+                    yield _stream_terminal_event(
+                        "authorization_unavailable", project_id, required_role
+                    )
+                    return
+                if authority != "authorized":
+                    yield _stream_terminal_event(authority, project_id, required_role)
+                    return
+                authority_timer = asyncio.create_task(
+                    asyncio.sleep(settings.stream_authority_check_seconds)
+                )
+
+            if chunk_task in done:
+                try:
+                    chunk = chunk_task.result()
+                except StopAsyncIteration:
+                    return
+                yield chunk
+                chunk_task = asyncio.create_task(anext(iterator))
     finally:
+        pending = [
+            task
+            for task in (chunk_task, authority_timer)
+            if task is not None and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await response.aclose()
         await _remove_ephemeral_credential(request, credential_id)
 
@@ -451,6 +599,8 @@ async def proxy_service(
                 request,
                 session,
                 settings,
+                project_id,
+                role,
                 ephemeral_credential_id,
             ),
             status_code=response.status_code,

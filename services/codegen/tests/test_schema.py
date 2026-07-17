@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.db import MIGRATION_NAME, REQUIRED_COLUMNS, assert_schema_ready
+from app.db import MIGRATION_NAME, MIGRATION_VERSION, REQUIRED_COLUMNS, assert_schema_ready
 
 
 class FakeConn:
@@ -39,6 +39,15 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
+def test_startup_requires_execution_authority_migration():
+    assert MIGRATION_VERSION == 28
+    assert MIGRATION_NAME == "028_admin_execution_authority.sql"
+    assert (
+        "admin_project_execution_authorizations",
+        "authorization_source",
+    ) in REQUIRED_COLUMNS
+
+
 @pytest.mark.asyncio
 async def test_rejects_missing_migration_ledger():
     with pytest.raises(RuntimeError, match="migration ledger is missing"):
@@ -46,10 +55,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_pr_publication_recovery_migration():
-    with pytest.raises(RuntimeError, match="027_codegen_pr_publication_recovery.sql"):
+async def test_rejects_database_without_execution_authority_migration():
+    with pytest.raises(RuntimeError, match="028_admin_execution_authority.sql"):
         await assert_schema_ready(
-            FakeConn(migration_name="026_codegen_egress_publication.sql")
+            FakeConn(migration_name="027_codegen_pr_publication_recovery.sql")
         )
 
 
@@ -57,6 +66,18 @@ async def test_rejects_database_without_pr_publication_recovery_migration():
 async def test_rejects_incomplete_schema_at_startup():
     columns = REQUIRED_COLUMNS - {("github_repository_grants", "repository_id")}
     with pytest.raises(RuntimeError, match="github_repository_grants.repository_id"):
+        await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_execution_authorization_contract_at_startup():
+    columns = REQUIRED_COLUMNS - {
+        ("admin_project_execution_authorizations", "actor")
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="admin_project_execution_authorizations.actor",
+    ):
         await assert_schema_ready(FakeConn(columns=columns))
 
 

@@ -18,7 +18,10 @@ import {
   type AuthIdentity,
 } from '@/api/auth'
 import { ApiError } from '@/api/http'
-import { AUTH_UNAUTHORIZED_EVENT } from '@/core/auth-events'
+import {
+  AUTH_UNAUTHORIZED_EVENT,
+  PROJECT_ACCESS_REVOKED_EVENT,
+} from '@/core/auth-events'
 
 type LogoutReason = 'unauthorized' | null
 
@@ -82,6 +85,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized)
     return () => window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, handleUnauthorized)
   }, [endSession])
+
+  useEffect(() => {
+    let active = true
+    const refreshProjectAccess = () => {
+      void getAdminSession()
+        .then((session) => {
+          if (!active) return
+          queryClient.clear()
+          setIdentity(session)
+          setLogoutReason(null)
+        })
+        .catch(() => {
+          if (active) endSession('unauthorized')
+        })
+    }
+    window.addEventListener(PROJECT_ACCESS_REVOKED_EVENT, refreshProjectAccess)
+    return () => {
+      active = false
+      window.removeEventListener(PROJECT_ACCESS_REVOKED_EVENT, refreshProjectAccess)
+    }
+  }, [endSession, queryClient])
 
   const value = useMemo<AuthContextValue>(
     () => ({
