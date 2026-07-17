@@ -30,6 +30,7 @@ import { TimeseriesChart } from './charts'
 import { DateRangePicker } from './DateRangePicker'
 import { ResultActions } from './ResultActions'
 import { SavedViews } from './SavedViews'
+import { eventsViewSchema, type EventsView } from './savedViewSchemas'
 import { SelectorBuilder } from './SelectorBuilder'
 import {
   emptySelector,
@@ -44,16 +45,6 @@ import { useAnalyticsQuery } from './useAnalyticsQuery'
 
 const MODES = ['counts', 'timeseries', 'breakdown'] as const
 type Mode = (typeof MODES)[number]
-
-interface EventsView {
-  range: DateRange
-  countSelectors: SelectorFormValues[]
-  tsSelector: SelectorFormValues
-  interval: TimeInterval
-  bdSelector: SelectorFormValues
-  property: string
-  limit: number
-}
 
 const ZERO_DATA_HINT =
   'No events matched. Event names are exact-match — check spelling, the date range, and that your integration is sending events.'
@@ -142,7 +133,14 @@ export function EventsExplorerPage() {
       <PageHeader
         title="Events explorer"
         description="Counts, timeseries, and property breakdowns over raw events."
-        actions={<SavedViews screen="events" current={view} onLoad={loadView} />}
+        actions={
+          <SavedViews
+            screen="events"
+            current={view}
+            viewSchema={eventsViewSchema}
+            onLoad={loadView}
+          />
+        }
       />
       <DateRangePicker value={range} onChange={setRange} />
 

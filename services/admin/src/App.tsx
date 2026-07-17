@@ -22,7 +22,19 @@ export function App() {
           <WorkspaceProvider>
             <LiveProvider>
               <TooltipProvider delayDuration={300}>
-                <RouterProvider router={router} future={{ v7_startTransition: true }} />
+                <RouterProvider
+                  router={router}
+                  future={{ v7_startTransition: true }}
+                  fallbackElement={
+                    <div
+                      className="flex min-h-screen items-center justify-center text-sm text-muted-foreground"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      Loading APDL Admin…
+                    </div>
+                  }
+                />
               </TooltipProvider>
               <Toaster />
             </LiveProvider>

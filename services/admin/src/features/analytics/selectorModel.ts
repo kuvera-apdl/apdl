@@ -1,22 +1,32 @@
 // Editor model for event selectors (plan §5.5.1 SelectorBuilder) and the
 // conversion to wire EventSelector payloads. Same value-key rule as flag
 // conditions: exists/not_exists omit `value` entirely.
-import { eventSelectorSchema } from '@/api/schemas/query'
+import { z } from 'zod'
+
+import { eventFilterOperatorSchema, eventSelectorSchema } from '@/api/schemas/query'
 import type { EventFilterOperator, EventPropertyFilter, EventSelector } from '@/api/types/query'
 
-export interface FilterFormValues {
-  property: string
-  operator: EventFilterOperator
-  /** Raw text for scalar operators. */
-  value: string
-  /** Chip list for in / not_in. */
-  values: string[]
-}
+export const filterFormValuesSchema = z
+  .object({
+    property: z.string(),
+    operator: eventFilterOperatorSchema,
+    /** Raw text for scalar operators. */
+    value: z.string(),
+    /** Chip list for in / not_in. */
+    values: z.array(z.string()),
+  })
+  .strict()
 
-export interface SelectorFormValues {
-  event_name: string
-  filters: FilterFormValues[]
-}
+export type FilterFormValues = z.infer<typeof filterFormValuesSchema>
+
+export const selectorFormValuesSchema = z
+  .object({
+    event_name: z.string(),
+    filters: z.array(filterFormValuesSchema).max(25),
+  })
+  .strict()
+
+export type SelectorFormValues = z.infer<typeof selectorFormValuesSchema>
 
 export const EXISTENCE_FILTER_OPERATORS: ReadonlySet<EventFilterOperator> = new Set([
   'exists',
@@ -92,10 +102,20 @@ export function todayIso(): string {
   return `${now.getFullYear()}-${month}-${day}`
 }
 
-export interface DateRange {
-  start_date: string
-  end_date: string
-}
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+
+export const dateRangeSchema = z
+  .object({
+    start_date: dateSchema,
+    end_date: dateSchema,
+  })
+  .strict()
+  .refine((range) => range.end_date >= range.start_date, {
+    path: ['end_date'],
+    message: 'end_date must be on or after start_date',
+  })
+
+export type DateRange = z.infer<typeof dateRangeSchema>
 
 /** Last N days, inclusive of today. */
 export function lastDays(days: number): DateRange {

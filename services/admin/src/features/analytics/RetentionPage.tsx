@@ -19,6 +19,7 @@ import { SimpleLineChart } from './charts'
 import { DateRangePicker } from './DateRangePicker'
 import { ResultActions } from './ResultActions'
 import { SavedViews } from './SavedViews'
+import { retentionViewSchema, type RetentionView } from './savedViewSchemas'
 import { SelectorBuilder } from './SelectorBuilder'
 import {
   emptySelector,
@@ -29,13 +30,6 @@ import {
   type SelectorFormValues,
 } from './selectorModel'
 import { useAnalyticsQuery } from './useAnalyticsQuery'
-
-interface RetentionView {
-  range: DateRange
-  cohortSelector: SelectorFormValues
-  returnSelector: SelectorFormValues
-  period: 'day' | 'week'
-}
 
 function heatColor(pct: number): string {
   return `rgba(16, 185, 129, ${Math.min(0.92, (pct / 100) * 0.92)})`
@@ -153,6 +147,7 @@ export function RetentionPage() {
           <SavedViews
             screen="retention"
             current={view}
+            viewSchema={retentionViewSchema}
             onLoad={(loaded) => {
               setRange(loaded.range)
               setCohortSelector(loaded.cohortSelector)
