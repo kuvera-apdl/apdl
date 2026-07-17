@@ -1,7 +1,7 @@
 services:
   # ─── Dependencies ────────────────────────────────────────
   redis:
-    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_REDIS_HOST_PORT:-6379}:6379"
     volumes:
@@ -14,7 +14,7 @@ services:
       retries: 5
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.1@sha256:44caeed7c81f7934c28a8ffa3a422a4ca96cf3bccc486d21311e5133ce88d49f
+    image: clickhouse/clickhouse-server:26.6@sha256:1d1f6508eba2dccce2cee9913907c5f7766327debc57a6b1991f2c9e3176c163
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CLICKHOUSE_HTTP_HOST_PORT:-8123}:8123"
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CLICKHOUSE_NATIVE_HOST_PORT:-9000}:9000"
@@ -392,7 +392,7 @@ services:
   # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
   # URL (http://<host>:8000) instead of separate ingestion + config URLs.
   gateway:
-    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    image: nginx:1.31-alpine@sha256:7068961d45b07b2af510ac002e9daa63a1d3eba2111202d6768798690800fffd
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_GATEWAY_HOST_PORT:-8000}:80"
     volumes:
