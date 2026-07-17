@@ -76,17 +76,21 @@ matching `make test-<area>` target when the change is non-trivial:
 | `services/query/` | `make lint-query` | `make test-query` |
 | `services/agents/` | `make lint-agents` | `make test-agents` |
 | `services/codegen/` | `make lint-codegen` | `make test-codegen` |
+| `services/admin-api/` | `make lint-admin-api` | `make test-admin-api` |
 | `services/admin/` | `make lint-admin` | `make test-admin` |
 | `sdk/javascript/` | `make lint-sdk` | `make test-sdk` |
 | `sdk/python/` | `make lint-sdk-python` | `make test-sdk-python` |
+| `pipeline/redis/` | `make lint-writer` | `make test-writer` |
 | `pipeline/etl/` | `make lint-etl` | `make test-etl` |
 
-CI on push/PR to `main` lints `ingestion`, `config`, `query`, and `agents` with
-`ruff`; lints and tests the Python SDK and `pipeline/etl`; and lints, tests, and
-builds the JS SDK and the Admin Console. `codegen` is not yet wired into CI, so
-lint it locally before committing. Fix lint/test failures before proceeding. Do
-not open a PR with a red diff unless the user explicitly instructs you to and the
-failure is documented in the PR.
+CI on push/PR to `main` lints (`ruff`) and tests (`pytest`) all six Python
+services — `ingestion`, `config`, `query`, `agents`, `codegen` (source-only
+checks), and `admin-api` — plus the Python SDK, the ClickHouse writer, and the
+experimental ETL framework; lints, tests, and builds the JS SDK and the Admin
+Console; and runs release package contracts, a Python dependency audit, and
+hermetic fresh-install core/experiment smokes. Fix lint/test failures before
+proceeding. Do not open a PR with a red diff unless the user explicitly
+instructs you to and the failure is documented in the PR.
 
 ## Phase 2 - Branch
 
