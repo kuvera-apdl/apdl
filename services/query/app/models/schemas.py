@@ -18,21 +18,26 @@ from pydantic import (
 )
 
 
-def _coerce_project_id(value: Any) -> str:
-    if value is None:
-        raise ValueError("project_id is required")
-    return str(value)
-
-
-ProjectId = Annotated[str, BeforeValidator(_coerce_project_id)]
+PROJECT_ID_PATTERN = r"^[A-Za-z0-9]{1,64}$"
+ProjectId = Annotated[
+    str,
+    Field(
+        strict=True,
+        min_length=1,
+        max_length=64,
+        pattern=PROJECT_ID_PATTERN,
+    ),
+]
 
 
 class StrictModel(BaseModel):
     """Base model for strict public request contracts."""
 
     model_config = ConfigDict(extra="forbid")
-    
+
+
 _PROPERTY_NAME_RE = re.compile(r"^[A-Za-z0-9_$][A-Za-z0-9_.$:-]{0,127}$")
+
 
 def _validate_property_name(value: Any) -> str:
     if not isinstance(value, str):
@@ -52,6 +57,7 @@ PropertyName = Annotated[str, BeforeValidator(_validate_property_name)]
 # Shared enums
 # ---------------------------------------------------------------------------
 
+
 class TimeInterval(str, Enum):
     """Supported time-bucket intervals for timeseries queries."""
     hour = "1 HOUR"
@@ -70,6 +76,8 @@ class GuardrailThreshold(str, Enum):
     """Supported feature-flag guardrail thresholds."""
     two_x_baseline = "2x_baseline"
     at_least_one = "at_least_one"
+
+
 class EventFilterOperator(str, Enum):
     """Supported property filter operators for event selectors."""
     eq = "eq"
@@ -88,6 +96,7 @@ class EventFilterOperator(str, Enum):
 # ---------------------------------------------------------------------------
 # Shared base with date-range validation
 # ---------------------------------------------------------------------------
+
 
 class DateRangeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -328,10 +337,22 @@ class BreakdownRequest(DateRangeRequest):
     limit: int = Field(default=20, ge=1, le=100)
 
 
-class BreakdownResponse(BaseModel):
+class BreakdownResult(StrictModel):
+    """One canonical typed scalar bucket returned by a breakdown query."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    selector: str
+    property_type: Literal["string", "integer", "float", "boolean"]
+    property_value: str
+    event_count: int = Field(..., ge=0)
+    unique_users: int = Field(..., ge=0)
+
+
+class BreakdownResponse(StrictModel):
     selector: str
     property: str
-    results: list[dict[str, Any]]
+    results: list[BreakdownResult]
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +422,7 @@ class RetentionRequest(DateRangeRequest):
                         "event_name": "$click",
                         "filters": [{"property": "href", "operator": "eq", "value": "/signup"}],
                     },
+                    "cohort_mode": "first_match_in_window",
                     "start_date": "2025-01-01",
                     "end_date": "2025-01-31",
                     "period": "day",
@@ -412,6 +434,7 @@ class RetentionRequest(DateRangeRequest):
     project_id: ProjectId
     cohort_selector: EventSelector
     return_selector: EventSelector
+    cohort_mode: Literal["first_match_in_window"]
     period: Literal["day", "week"] = "day"
 
 
@@ -422,6 +445,7 @@ class RetentionCohort(BaseModel):
 
 
 class RetentionResponse(BaseModel):
+    cohort_mode: Literal["first_match_in_window"]
     cohort_selector: str
     return_selector: str
     cohorts: list[RetentionCohort]
@@ -546,6 +570,18 @@ class ExperimentArmResult(_FiniteExperimentModel):
     conversion_rate: float = Field(..., ge=0.0, le=1.0)
 
 
+class ExperimentStatisticalPlan(_FiniteExperimentModel):
+    protocol: Literal["fixed_horizon_fisher_newcombe_cc_plan_v1"]
+    baseline_conversion_rate: float = Field(..., ge=0.0, le=1.0, strict=True)
+    minimum_detectable_effect: float = Field(..., ge=1e-6, le=1.0, strict=True)
+    significance_level: float = Field(..., ge=1e-6, le=0.5, strict=True)
+    nominal_power: float = Field(..., gt=0.5, le=0.9999, strict=True)
+    required_sample_size_per_arm: int = Field(
+        ..., ge=2, le=10_000_000, strict=True
+    )
+    data_settlement_seconds: int = Field(..., ge=1, le=86_400, strict=True)
+
+
 class ExperimentComparison(_FiniteExperimentModel):
     control_variant: str
     treatment_variant: str
@@ -555,7 +591,7 @@ class ExperimentComparison(_FiniteExperimentModel):
     confidence_interval: tuple[float, float]
     raw_p_value: float = Field(..., ge=0.0, le=1.0)
     adjusted_p_value: float = Field(..., ge=0.0, le=1.0)
-    is_significant: bool
+    is_statistically_significant: bool
 
 
 class _ExperimentAnalysisBase(_FiniteExperimentModel):
@@ -564,34 +600,45 @@ class _ExperimentAnalysisBase(_FiniteExperimentModel):
     experiment_status: Literal["scheduled", "running", "completed", "stopped"]
     control_variant: str
     metric_event: str
+    metric_direction: Literal["increase", "decrease"]
+    statistical_plan: ExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime
     config_version: int = Field(..., ge=1)
     arms: list[ExperimentArmResult]
     crossover_actors: int = Field(..., ge=0)
     unknown_variant_actors: int = Field(..., ge=0)
+    identity_conflict_actors: int = Field(..., ge=0)
+    identity_quality: Literal["degraded", "unambiguous"]
+    data_completeness: Literal["not_verified"] = "not_verified"
+    deployment_readiness: Literal["not_assessed"] = "not_assessed"
 
 
-class ExperimentAnalysisReady(_ExperimentAnalysisBase):
-    analysis_status: Literal["ready"] = "ready"
-    significance_level: float = Field(default=0.05, gt=0.0, lt=1.0)
+class ExperimentAnalysisDecisionSnapshot(_ExperimentAnalysisBase):
+    analysis_status: Literal["decision_snapshot"] = "decision_snapshot"
+    inference_method: Literal["fisher_exact_two_sided"] = "fisher_exact_two_sided"
+    interval_method: Literal["newcombe_wilson"] = "newcombe_wilson"
     correction: Literal["bonferroni"] = "bonferroni"
     comparisons: list[ExperimentComparison]
 
 
-class ExperimentAnalysisInsufficient(_ExperimentAnalysisBase):
-    analysis_status: Literal["insufficient_data"] = "insufficient_data"
+class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
+    analysis_status: Literal["non_final"] = "non_final"
     reason: Literal[
         "experiment_not_started",
+        "experiment_window_open",
+        "awaiting_data_settlement",
+        "experiment_running",
+        "experiment_stopped",
         "no_exposures",
         "underpowered_arms",
         "non_finite_statistics",
+        "identity_alias_conflicts",
     ]
-    minimum_sample_size_per_arm: int = Field(default=2, ge=2)
     underpowered_variants: list[str]
 
 
 ExperimentAnalysisResponse = Annotated[
-    ExperimentAnalysisReady | ExperimentAnalysisInsufficient,
+    ExperimentAnalysisDecisionSnapshot | ExperimentAnalysisNonFinal,
     Field(discriminator="analysis_status"),
 ]

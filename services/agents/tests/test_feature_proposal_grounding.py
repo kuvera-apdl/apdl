@@ -79,7 +79,7 @@ def test_render_existing_work_empty():
     assert _render_existing_work([], []) == "(none)"
 
 
-def test_build_prompt_carries_repo_context_and_existing_work():
+def test_build_prompt_refuses_legacy_ship_verdict_even_with_grounding():
     agent = FeatureProposalAgent()
     working = {
         "ship_verdicts": [
@@ -101,13 +101,7 @@ def test_build_prompt_carries_repo_context_and_existing_work():
 
     prompt = agent.build_prompt(None, {}, working)
 
-    assert "exp_cta" in prompt
-    assert "Make the sticky CTA permanent." in prompt
-    assert "Next.js" in prompt
-    assert "app/page.tsx" in prompt
-    assert "- Bot filter (proposal, implemented)" in prompt
-    # The old placeholder must never reach the model again.
-    assert "(determined from project configuration)" not in prompt
+    assert prompt is None
 
 
 def test_build_prompt_none_without_winning_experiments():

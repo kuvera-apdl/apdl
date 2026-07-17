@@ -186,7 +186,7 @@ function PresetParamsForm({
         <div className="space-y-3">
           <LabeledSelector
             label="Cohort event"
-            hint="Users who did this enter the cohort."
+            hint="Actors enter on their first match in the selected dates; existing actors may re-enter."
             value={draft.selector}
             onChange={(selector) => onPatch({ selector })}
           />

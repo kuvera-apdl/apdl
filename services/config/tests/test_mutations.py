@@ -110,6 +110,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "variants_json": '[{"key":"control","weight":1}]',
         "targeting_rules_json": "[]",
         "primary_metric_json": "{}",
+        "statistical_plan": None,
         "traffic_percentage": 100.0,
         "start_date": None,
         "end_date": None,
@@ -458,6 +459,25 @@ def test_terminal_transition_never_extends_planned_analysis_end():
     assert desired["end_date"] == planned_end
 
 
+def test_fixed_horizon_rejects_early_completed_transition():
+    start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    planned_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    existing = make_experiment(
+        {
+            "status": "running",
+            "start_date": start.isoformat(),
+            "end_date": planned_end.isoformat(),
+        }
+    )
+
+    with pytest.raises(mutations.IntegrityError, match="cannot complete before"):
+        mutations.finalize_terminal_analysis_window(
+            existing,
+            {**existing, "status": "completed"},
+            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        )
+
+
 @pytest.mark.parametrize("status", ["draft", "scheduled"])
 def test_stopped_never_started_experiment_persists_no_analysis_window(status):
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
@@ -515,6 +535,28 @@ async def test_due_lifecycle_transition_is_one_atomic_bundle(
     experiment = make_experiment(
         {"status": status, "start_date": start, "end_date": end}
     )
+    if expected == "running":
+        experiment.update(
+            {
+                "variants_json": (
+                    '[{"key":"control","weight":1},'
+                    '{"key":"treatment","weight":1}]'
+                ),
+                "primary_metric_json": (
+                    '{"event":"purchase","type":"conversion",'
+                    '"direction":"increase"}'
+                ),
+                "statistical_plan": {
+                    "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+                    "baseline_conversion_rate": 0.5,
+                    "minimum_detectable_effect": 0.5,
+                    "significance_level": 0.05,
+                    "nominal_power": 0.8,
+                    "required_sample_size_per_arm": 20,
+                    "data_settlement_seconds": 5,
+                },
+            }
+        )
     monkeypatch.setattr(
         mutations,
         "_locked_experiment",
@@ -533,6 +575,38 @@ async def test_due_lifecycle_transition_is_one_atomic_bundle(
 
     assert update_bundle.await_args.kwargs["desired"]["status"] == expected
     assert update_bundle.await_args.kwargs["origin"] == "scheduler"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_refuses_to_start_legacy_experiment_without_plan(monkeypatch):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    experiment = make_experiment(
+        {
+            "status": "scheduled",
+            "start_date": "2026-06-01T00:00:00+00:00",
+            "end_date": "2026-07-01T00:00:00+00:00",
+            "statistical_plan": None,
+        }
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=experiment),
+    )
+    update_bundle = AsyncMock()
+    monkeypatch.setattr(mutations, "_update_experiment_bundle", update_bundle)
+
+    with pytest.raises(mutations.IntegrityError, match="predeclared statistical plan"):
+        await mutations.transition_due_experiment(
+            pool,
+            project_id="apdl",
+            key="checkout_exp",
+            expected_version=1,
+            now=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        )
+
+    update_bundle.assert_not_awaited()
 
 
 def test_exposure_retry_ignores_only_generated_timestamp():

@@ -20,16 +20,17 @@ against ClickHouse over FastAPI (port **8082**).
 
 Every analytics route requires a registered `X-API-Key` credential with
 `query:read`. The requested `project_id` must match the project on the verified
-credential; health and readiness probes remain public.
+credential and must be a 1–64 character ASCII alphanumeric string; values are
+never coerced. Health and readiness probes remain public.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/query/events/count` | Event + unique-user counts for 1–20 selectors |
 | `POST` | `/v1/query/events/timeseries` | Time-bucketed counts (`1 HOUR`/`1 DAY`/`1 WEEK`/`1 MONTH`) |
-| `POST` | `/v1/query/events/breakdown` | Top property values for a selector |
+| `POST` | `/v1/query/events/breakdown` | Top typed scalar property values for a selector |
 | `POST` | `/v1/query/funnel` | N-step funnel (2–20 steps, 1–90 day window) |
 | `POST` | `/v1/query/cohort` | Compare a metric across values of a user property |
-| `POST` | `/v1/query/retention` | Day/week retention from a cohort selector to a return selector |
+| `POST` | `/v1/query/retention` | Window-relative day/week retention (`first_match_in_window`) |
 | `GET`  | `/v1/query/experiment/{key}` | Config-owned conversion experiment analysis |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate a feature-flag guardrail on demand |
 | `GET`  | `/health` / `/ready` | Liveness / ClickHouse readiness probes |
@@ -52,14 +53,28 @@ plus up to 25 property filters, AND-combined. Supported operators: `eq`, `neq`,
 See the [main README](../../README.md) for more selector examples across
 endpoints.
 
+## Typed property breakdowns
+
+Property breakdowns preserve JSON scalar types instead of coercing every value
+through a string extractor. Each result includes a required `property_type` of
+`string`, `integer`, `float`, or `boolean`, and a canonical string
+`property_value`. Strings retain their contents, signed and unsigned integers
+use their decimal representation, floats use ClickHouse's canonical decimal
+representation, and booleans are `true` or `false`. Rows are grouped by both
+fields, so an integer `1`, a floating-point `1`, and a string `"1"` remain
+distinct. Missing properties, JSON nulls, arrays, and objects are omitted.
+
 ## Actor identity and totals
 
-All user-counting queries use one namespaced actor identity: `u:<user_id>`
-when `user_id` is present, otherwise `a:<anonymous_id>`. Events with neither
-identity do not contribute to unique-user counts. The namespace prevents the
-same raw text in the two identity domains from being collapsed accidentally.
-Range-wide totals are computed directly with `uniqExact`; they are never
-derived by summing per-bucket unique counts.
+All user-counting queries use the tenant-bound canonical actor contract. A
+direct `user_id` wins; otherwise an anonymous identity with one unambiguous,
+writer-durable alias resolves to that user; otherwise the namespaced anonymous
+identity remains separate. Alias assertions are irreversible and apply
+retroactively across retained history. Conflicting aliases are never guessed
+or merged: the actors remain split, and experiment responses report degraded
+identity quality instead of a decision snapshot. Events with neither identity
+do not contribute to unique-user counts. Range-wide totals use `uniqExact`
+directly and are never derived by summing per-bucket unique counts.
 
 ### Example: event counts
 
@@ -68,7 +83,7 @@ curl -s http://localhost:8082/v1/query/events/count \
   -H 'X-API-Key: proj_myproject_<secret>' \
   -H 'Content-Type: application/json' \
   -d '{
-    "project_id": "my-project",
+    "project_id": "myproject",
     "start_date": "2026-05-01",
     "end_date": "2026-05-31",
     "selectors": [
@@ -80,25 +95,51 @@ curl -s http://localhost:8082/v1/query/events/count \
   }'
 ```
 
+## Window-relative retention
+
+`POST /v1/query/retention` requires the canonical
+`"cohort_mode": "first_match_in_window"` in both its request and response.
+An actor enters a cohort on their first matching cohort event inside the
+selected start and end dates. Earlier history is not consulted, so an existing
+actor may re-enter on their first matching event in the selected dates. Treat
+this as window-relative engagement retention, not lifetime acquisition
+retention.
+
 ## Experiment statistics
 
 `GET /v1/query/experiment/{key}` accepts only the experiment key and optional
 tenant-matching `project_id`. Query obtains the flag key, declared variants,
 control, conversion metric, lifecycle state, immutable analysis window, and
-version from Config; caller-supplied analysis metadata is rejected.
+version and immutable statistical plan from Config; caller-supplied analysis
+metadata is rejected. Scheduled/running traffic requires a strict
+`fixed_horizon_fisher_newcombe_cc_plan_v1` plan with baseline conversion,
+MDE, significance level, nominal power, required actors per arm, and an
+explicit post-horizon settlement hold. The continuity-corrected planner is a
+prospective nominal target, not a guarantee of exact achieved Fisher power.
 
 The query assigns each namespaced actor to its first exposure, counts only
 post-exposure conversions inside the authoritative window, zero-fills exposed
 non-converters, reports crossover and unknown-variant actors, and compares
-every treatment with the declared control. Responses are a strict
-`analysis_status` union: `ready` contains finite two-proportion statistics with
-Bonferroni correction; `insufficient_data` contains a machine-readable reason.
+every treatment with the declared control. Two-sided Fisher exact tests are
+used for every treatment, p-values are Bonferroni-adjusted, and effect
+intervals use simultaneous Newcombe/Wilson bounds. Running, stopped,
+underpowered, identity-conflicted, pre-horizon, and pre-settlement results are
+strict `non_final` responses with no comparisons. A completed experiment whose
+horizon, settlement hold, and arm targets have elapsed returns a
+`decision_snapshot`, never a winner verdict.
+
+The pipeline has no durable processed-through watermark. Therefore every
+snapshot explicitly reports `data_completeness: not_verified`, and late
+durable events can change a later snapshot. It also reports
+`deployment_readiness: not_assessed`; statistical significance is evidence,
+not authorization or a rollout recommendation.
 Config timestamps are converted to explicit UTC epoch-millisecond boundaries
 before querying ClickHouse's `DateTime64(3)` columns, preserving the declared
 half-open `[start, end)` window across offsets and fractional seconds.
-Scheduled experiments do not query ClickHouse. Draft or malformed experiments
-are rejected by Config. Automatic stopping, shipping, and rollback are not
-supported in the OSS developer preview.
+Scheduled and pre-settlement experiments do not query ClickHouse. Draft,
+legacy no-plan, or malformed experiments are rejected by Config. Automatic
+stopping, shipping, proposal generation, and rollback are not supported in the
+OSS developer preview.
 
 ## Configuration
 

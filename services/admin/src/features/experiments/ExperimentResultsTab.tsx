@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 
 import { experimentResultsCurl } from '@/api/experiments'
 import type {
-  ExperimentAnalysisInsufficient,
+  ExperimentAnalysisNonFinal,
   ExperimentArmResult,
   ExperimentComparison,
 } from '@/api/types/experiments'
@@ -21,13 +21,29 @@ import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 import { formatDateTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-const INSUFFICIENT_COPY: Record<
-  ExperimentAnalysisInsufficient['reason'],
+const NON_FINAL_COPY: Record<
+  ExperimentAnalysisNonFinal['reason'],
   { title: string; description: string }
 > = {
   experiment_not_started: {
     title: 'Experiment has not started',
     description: 'The configured analysis window has not begun, so there is no attributable traffic yet.',
+  },
+  experiment_window_open: {
+    title: 'Declared experiment window is still open',
+    description: 'A completed status before the predeclared end time cannot produce a decision snapshot.',
+  },
+  awaiting_data_settlement: {
+    title: 'Waiting for the predeclared settlement hold',
+    description: 'The horizon ended, but the configured post-window hold has not elapsed.',
+  },
+  experiment_running: {
+    title: 'Experiment is still running',
+    description: 'Arm summaries are provisional; fixed-horizon comparisons are withheld until completion.',
+  },
+  experiment_stopped: {
+    title: 'Experiment stopped without a decision snapshot',
+    description: 'Stopped experiments are not treated as completed fixed-horizon snapshots.',
   },
   no_exposures: {
     title: 'No attributable exposures',
@@ -39,7 +55,11 @@ const INSUFFICIENT_COPY: Record<
   },
   non_finite_statistics: {
     title: 'Statistics could not be represented safely',
-    description: 'The service returned a typed insufficient-data result instead of non-finite statistics.',
+    description: 'The service returned a typed non-final result instead of non-finite statistics.',
+  },
+  identity_alias_conflicts: {
+    title: 'Identity aliases are ambiguous',
+    description: 'Conflicting tenant-bound aliases prevent an authoritative actor-level snapshot.',
   },
 }
 
@@ -127,7 +147,13 @@ function ArmsTable({ arms, controlVariant }: { arms: ExperimentArmResult[]; cont
   )
 }
 
-function ComparisonsTable({ comparisons }: { comparisons: ExperimentComparison[] }) {
+function ComparisonsTable({
+  comparisons,
+  metricDirection,
+}: {
+  comparisons: ExperimentComparison[]
+  metricDirection: 'increase' | 'decrease'
+}) {
   return (
     <Card>
       <CardHeader>
@@ -161,9 +187,10 @@ function ComparisonsTable({ comparisons }: { comparisons: ExperimentComparison[]
                 <TableCell
                   className={cn(
                     'text-right font-medium tabular-nums',
-                    comparison.rate_difference > 0
+                    (metricDirection === 'increase' && comparison.rate_difference > 0) ||
+                      (metricDirection === 'decrease' && comparison.rate_difference < 0)
                       ? 'text-emerald-600'
-                      : comparison.rate_difference < 0
+                      : comparison.rate_difference !== 0
                         ? 'text-red-600'
                         : '',
                   )}
@@ -180,8 +207,8 @@ function ComparisonsTable({ comparisons }: { comparisons: ExperimentComparison[]
                   {formatPValue(comparison.adjusted_p_value)}
                 </TableCell>
                 <TableCell>
-                  <Badge variant={comparison.is_significant ? 'default' : 'outline'}>
-                    {comparison.is_significant ? 'significant' : 'not significant'}
+                  <Badge variant={comparison.is_statistically_significant ? 'default' : 'outline'}>
+                    {comparison.is_statistically_significant ? 'significant' : 'not significant'}
                   </Badge>
                 </TableCell>
               </TableRow>
@@ -204,8 +231,8 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
   }
   if (!result) return null
 
-  const insufficient = result.analysis_status === 'insufficient_data'
-    ? INSUFFICIENT_COPY[result.reason]
+  const nonFinal = result.analysis_status === 'non_final'
+    ? NON_FINAL_COPY[result.reason]
     : null
 
   return (
@@ -249,13 +276,14 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
               <ExperimentStatusPill status={result.experiment_status} />
             </MetadataItem>
             <MetadataItem label="Analysis state">
-              <Badge variant={result.analysis_status === 'ready' ? 'default' : 'secondary'}>
+              <Badge variant={result.analysis_status === 'decision_snapshot' ? 'default' : 'secondary'}>
                 {result.analysis_status}
               </Badge>
             </MetadataItem>
             <MetadataItem label="Metric event">
               <code>{result.metric_event}</code>
             </MetadataItem>
+            <MetadataItem label="Metric direction">{result.metric_direction}</MetadataItem>
             <MetadataItem label="Control variant">
               <code>{result.control_variant}</code>
             </MetadataItem>
@@ -263,6 +291,9 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
               {formatDateTime(result.start_date)} – {formatDateTime(result.end_date)}
             </MetadataItem>
             <MetadataItem label="Config version">v{result.config_version}</MetadataItem>
+            <MetadataItem label="Deployment readiness">{result.deployment_readiness}</MetadataItem>
+            <MetadataItem label="Data completeness">{result.data_completeness}</MetadataItem>
+            <MetadataItem label="Identity quality">{result.identity_quality}</MetadataItem>
           </dl>
           <p className="text-xs text-muted-foreground">
             Fetched <RelativeTime value={new Date(resultsQuery.dataUpdatedAt).toISOString()} />.
@@ -271,16 +302,18 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
         </CardContent>
       </Card>
 
-      {insufficient && result.analysis_status === 'insufficient_data' ? (
+      {nonFinal && result.analysis_status === 'non_final' ? (
         <Card className="border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30">
           <CardHeader>
-            <CardTitle>Insufficient data — {insufficient.title}</CardTitle>
-            <CardDescription>{insufficient.description}</CardDescription>
+            <CardTitle>Non-final analysis — {nonFinal.title}</CardTitle>
+            <CardDescription>{nonFinal.description}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
             <p>
-              Minimum sample size per arm:{' '}
-              <span className="font-medium tabular-nums">{result.minimum_sample_size_per_arm}</span>
+              Predeclared sample target per arm:{' '}
+              <span className="font-medium tabular-nums">
+                {result.statistical_plan.required_sample_size_per_arm}
+              </span>
             </p>
             {result.underpowered_variants.length > 0 ? (
               <p>
@@ -294,13 +327,19 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
 
       <ArmsTable arms={result.arms} controlVariant={result.control_variant} />
 
-      {result.analysis_status === 'ready' ? (
+      {result.analysis_status === 'decision_snapshot' ? (
         <>
           <Card>
             <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm">
               <span>
                 Significance level:{' '}
-                <strong className="tabular-nums">{result.significance_level}</strong>
+                <strong className="tabular-nums">{result.statistical_plan.significance_level}</strong>
+              </span>
+              <span>
+                Inference: <strong>{result.inference_method}</strong>
+              </span>
+              <span>
+                Interval: <strong>{result.interval_method}</strong>
               </span>
               <span>
                 Multiple-comparison correction: <strong>{result.correction}</strong>
@@ -310,7 +349,10 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
               </span>
             </CardContent>
           </Card>
-          <ComparisonsTable comparisons={result.comparisons} />
+          <ComparisonsTable
+            comparisons={result.comparisons}
+            metricDirection={result.metric_direction}
+          />
         </>
       ) : null}
 
@@ -325,6 +367,9 @@ export function ExperimentResultsTab({ experimentKey }: { experimentKey: string 
           </MetadataItem>
           <MetadataItem label="Unknown-variant actors">
             {result.unknown_variant_actors.toLocaleString()}
+          </MetadataItem>
+          <MetadataItem label="Identity-conflict actors">
+            {result.identity_conflict_actors.toLocaleString()}
           </MetadataItem>
         </CardContent>
       </Card>

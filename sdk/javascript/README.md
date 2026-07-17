@@ -233,6 +233,20 @@ apdl.reset();
 
 Identified user traits participate in feature flag evaluation.
 
+`identify(userId)` keeps the current project-scoped anonymous ID on the
+canonical `identify` event and on later events. An `identify` event containing
+both IDs is the only anonymous-to-user alias assertion; there is no separate
+alias event or `previous_id` field. `reset()` clears the user, rotates the
+anonymous ID, and does not undo the historical relationship for the old ID.
+Accepted assertions are irreversible; the wire contract has no unmerge event.
+
+Alias-backed analytics converge asynchronously: the relationship becomes
+query-visible after the ingestion writer durably stores the identify event, at
+which point earlier retained events with that project and anonymous ID resolve
+to the identified user. Calls made without analytics consent do not emit an
+alias assertion. Conflicting user claims for one anonymous ID fail closed and
+remain separate actors until an operator rebuilds the alias state.
+
 ## Feature Flags
 
 ```typescript

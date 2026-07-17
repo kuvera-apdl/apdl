@@ -31,6 +31,16 @@ import { ExperimentListPage } from '../../src/features/experiments/ExperimentLis
 import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
+const STATISTICAL_PLAN = {
+  protocol: 'fixed_horizon_fisher_newcombe_cc_plan_v1',
+  baseline_conversion_rate: 0.5,
+  minimum_detectable_effect: 0.5,
+  significance_level: 0.05,
+  nominal_power: 0.8,
+  required_sample_size_per_arm: 20,
+  data_settlement_seconds: 300,
+} as const
+
 const EXPERIMENT = {
   key: 'checkout-test',
   flag_key: 'checkout-test',
@@ -44,6 +54,7 @@ const EXPERIMENT = {
   ],
   targeting_rules: [],
   primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
+  statistical_plan: STATISTICAL_PLAN,
   start_date: '2026-06-01T00:00:00+00:00',
   end_date: '2026-07-01T00:00:00+00:00',
   version: 2,
@@ -189,13 +200,15 @@ describe('experiment schemas', () => {
     expect(new URL(deleteRequestUrl).searchParams.get('version')).toBe('2')
   })
 
-  test('experiment results discriminate ready and finite insufficient-data responses', () => {
+  test('experiment results discriminate decision snapshots and finite non-final responses', () => {
     const common = {
       experiment_key: 'checkout-test',
       flag_key: 'checkout-cta',
-      experiment_status: 'running',
+      experiment_status: 'completed',
       control_variant: 'control',
       metric_event: 'purchase',
+      metric_direction: 'increase',
+      statistical_plan: STATISTICAL_PLAN,
       start_date: '2026-06-01T00:00:00+00:00',
       end_date: '2026-06-15T00:00:00+00:00',
       config_version: 3,
@@ -205,11 +218,16 @@ describe('experiment schemas', () => {
       ],
       crossover_actors: 1,
       unknown_variant_actors: 0,
+      identity_conflict_actors: 0,
+      identity_quality: 'unambiguous',
+      data_completeness: 'not_verified',
+      deployment_readiness: 'not_assessed',
     }
-    const ready = {
-      analysis_status: 'ready',
+    const snapshot = {
+      analysis_status: 'decision_snapshot',
       ...common,
-      significance_level: 0.05,
+      inference_method: 'fisher_exact_two_sided',
+      interval_method: 'newcombe_wilson',
       correction: 'bonferroni',
       comparisons: [
         {
@@ -221,31 +239,30 @@ describe('experiment schemas', () => {
           confidence_interval: [0.02, 0.18],
           raw_p_value: 0.01,
           adjusted_p_value: 0.01,
-          is_significant: true,
+          is_statistically_significant: true,
         },
       ],
     }
-    const insufficient = {
-      analysis_status: 'insufficient_data',
+    const nonFinal = {
+      analysis_status: 'non_final',
       ...common,
       reason: 'underpowered_arms',
-      minimum_sample_size_per_arm: 2,
       underpowered_variants: ['treatment'],
     }
 
-    expect(experimentResultSchema.safeParse(ready).success).toBe(true)
-    expect(experimentResultSchema.safeParse(insufficient).success).toBe(true)
+    expect(experimentResultSchema.safeParse(snapshot).success).toBe(true)
+    expect(experimentResultSchema.safeParse(nonFinal).success).toBe(true)
     expect(
       experimentResultSchema.safeParse({
-        ...ready,
-        comparisons: [{ ...ready.comparisons[0], raw_p_value: Number.POSITIVE_INFINITY }],
+        ...snapshot,
+        comparisons: [{ ...snapshot.comparisons[0], raw_p_value: Number.POSITIVE_INFINITY }],
       }).success,
     ).toBe(false)
     expect(
-      experimentResultSchema.safeParse({ ...insufficient, reason: 'not_enough_data' }).success,
+      experimentResultSchema.safeParse({ ...nonFinal, reason: 'not_enough_data' }).success,
     ).toBe(false)
     expect(
-      experimentResultSchema.safeParse({ ...ready, recommendation: 'Ship it' }).success,
+      experimentResultSchema.safeParse({ ...snapshot, recommendation: 'Ship it' }).success,
     ).toBe(false)
     expect(
       experimentResultSchema.safeParse({
@@ -293,6 +310,12 @@ describe('experiment form model', () => {
       default_variant: 'control',
       metricEvent: 'purchase',
       metricDirection: 'increase',
+      baselineConversionRate: 0.5,
+      minimumDetectableEffect: 0.5,
+      significanceLevel: 0.05,
+      nominalPower: 0.8,
+      requiredSampleSizePerArm: 20,
+      dataSettlementSeconds: 300,
       targetingRulesJson: '',
     }
     expect(buildCreate(values)).toEqual({
@@ -309,6 +332,7 @@ describe('experiment form model', () => {
       ],
       default_variant: 'control',
       primary_metric: { event: 'purchase', type: 'conversion', direction: 'increase' },
+      statistical_plan: STATISTICAL_PLAN,
       targeting_rules: [],
     })
 
@@ -319,6 +343,7 @@ describe('experiment form model', () => {
       ...EXPERIMENT,
       status: 'draft',
       primary_metric: null,
+      statistical_plan: null,
       start_date: null,
       end_date: null,
     })
@@ -474,6 +499,7 @@ describe('ExperimentDetailPage', () => {
       'variants',
       'default_variant',
       'primary_metric',
+      'statistical_plan',
     ]) {
       expect(updateBodies[0]).not.toHaveProperty(field)
     }

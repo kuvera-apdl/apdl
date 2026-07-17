@@ -6,6 +6,8 @@ from pathlib import Path
 MIGRATIONS_DIR = (
     Path(__file__).resolve().parents[3] / "pipeline" / "clickhouse" / "migrations"
 )
+ROOT = Path(__file__).resolve().parents[3]
+BACKFILLS_DIR = ROOT / "pipeline" / "clickhouse" / "backfills"
 FEATURE_FLAG_EXPOSURES_SQL = (
     MIGRATIONS_DIR / "006_feature_flag_exposures.sql"
 ).read_text()
@@ -15,6 +17,11 @@ FRONTEND_HEALTH_EVENTS_SQL = (
 ).read_text()
 LEGACY_EXPERIMENTS_SQL = (MIGRATIONS_DIR / "003_experiments.sql").read_text()
 MATERIALIZED_VIEWS_SQL = (MIGRATIONS_DIR / "004_materialized_views.sql").read_text()
+IDENTITY_ALIASES_SQL = (MIGRATIONS_DIR / "011_identity_aliases.sql").read_text()
+IDENTITY_ALIASES_BACKFILL_SQL = (
+    BACKFILLS_DIR / "011_identity_aliases.sql"
+).read_text()
+CLICKHOUSE_INIT_SCRIPT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 
 
 def test_events_table_replaces_retries_by_project_and_message_id():
@@ -30,6 +37,12 @@ def test_retryable_projection_tables_replace_by_project_and_message_id():
     assert "ENGINE = ReplacingMergeTree(timestamp)" in FRONTEND_HEALTH_EVENTS_SQL
     assert "ORDER BY (project_id, message_id)" in FRONTEND_HEALTH_EVENTS_SQL
     assert "ENGINE = MergeTree()" not in FRONTEND_HEALTH_EVENTS_SQL
+
+    assert "ENGINE = ReplacingMergeTree(received_at)" in IDENTITY_ALIASES_SQL
+    assert (
+        "ORDER BY (project_id, message_id, anonymous_id, user_id)"
+        in IDENTITY_ALIASES_SQL
+    )
 
 
 def test_duplicate_amplifying_aggregate_views_are_retired():
@@ -78,3 +91,54 @@ def test_legacy_experiment_exposure_storage_is_retired():
         MATERIALIZED_VIEWS_SQL
     )
     assert "INNER JOIN experiment_exposures" not in MATERIALIZED_VIEWS_SQL
+
+
+def test_identity_alias_projection_uses_identify_with_both_ids_as_only_assertion():
+    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_assertions_mv" in (
+        IDENTITY_ALIASES_SQL
+    )
+    assert "FROM events\nWHERE event_type = 'identify'" in IDENTITY_ALIASES_SQL
+    assert "AND user_id != ''" in IDENTITY_ALIASES_SQL
+    assert "AND anonymous_id != ''" in IDENTITY_ALIASES_SQL
+    assert "previous_id" not in IDENTITY_ALIASES_SQL
+    assert "alias@" not in IDENTITY_ALIASES_SQL
+
+
+def test_identity_alias_backfill_is_historical_checksummed_and_one_time():
+    assert "FROM events FINAL" not in IDENTITY_ALIASES_SQL
+    assert "FROM events FINAL" in IDENTITY_ALIASES_BACKFILL_SQL
+    assert IDENTITY_ALIASES_SQL.index(
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_resolution_state_mv"
+    ) < IDENTITY_ALIASES_SQL.index(
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_assertions_mv"
+    )
+    assert "apdl_schema_backfills FINAL" in CLICKHOUSE_INIT_SCRIPT
+    assert "ClickHouse backfill checksum drift" in CLICKHOUSE_INIT_SCRIPT
+    assert "ORDER BY (name, checksum)" in CLICKHOUSE_INIT_SCRIPT
+    assert "mkdir \"$backfill_lock_dir\"" in CLICKHOUSE_INIT_SCRIPT
+    assert "cp \"$backfill\" \"$backfill_snapshot\"" in CLICKHOUSE_INIT_SCRIPT
+    assert "ClickHouse backfills directory not found" in CLICKHOUSE_INIT_SCRIPT
+    assert CLICKHOUSE_INIT_SCRIPT.index("recorded_checksum=") < (
+        CLICKHOUSE_INIT_SCRIPT.index("--multiquery < \"$backfill_snapshot\"")
+    )
+
+
+def test_resolved_identity_aliases_are_tenant_bound_and_conflicts_fail_closed():
+    assert "CREATE VIEW IF NOT EXISTS resolved_identity_aliases" in (
+        IDENTITY_ALIASES_SQL
+    )
+    assert "ENGINE = AggregatingMergeTree" in IDENTITY_ALIASES_SQL
+    assert "minState(user_id) AS min_user_id" in IDENTITY_ALIASES_SQL
+    assert "maxState(user_id) AS max_user_id" in IDENTITY_ALIASES_SQL
+    assert "minMerge(min_user_id) = maxMerge(max_user_id)" in IDENTITY_ALIASES_SQL
+    assert "AS has_conflict" in IDENTITY_ALIASES_SQL
+    assert "uniqExact" not in IDENTITY_ALIASES_SQL
+    assert "GROUP BY\n    project_id,\n    anonymous_id" in IDENTITY_ALIASES_SQL
+
+
+def test_identity_alias_assertions_outlive_the_source_event_ttl():
+    table_definition = IDENTITY_ALIASES_SQL.split(
+        "CREATE TABLE IF NOT EXISTS identity_alias_assertions (", 1
+    )[1].split("ALTER TABLE identity_alias_assertions", 1)[0]
+
+    assert "TTL" not in table_definition

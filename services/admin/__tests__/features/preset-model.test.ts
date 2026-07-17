@@ -106,6 +106,7 @@ describe('draftFromWire (edit-mode prefill)', () => {
         params: {
           cohort_selector: { event_name: 'signup', filters: [] },
           return_selector: { event_name: 'page', filters: [] },
+          cohort_mode: 'first_match_in_window',
           period: 'week',
         },
       },

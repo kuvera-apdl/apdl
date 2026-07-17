@@ -68,7 +68,7 @@ class TestFrequentist:
         ci_low, ci_high = result["confidence_interval"]
         assert ci_low > 0  # entire CI above zero
         assert ci_high > ci_low
-        assert "improvement" in result["recommendation"]
+        assert "recommendation" not in result
 
     def test_no_significant_difference(self):
         """Identical distributions should not be significant."""
@@ -80,7 +80,7 @@ class TestFrequentist:
 
         assert result["is_significant"] is False
         assert result["p_value"] > 0.05
-        assert "Continue" in result["recommendation"] or "null" in result["recommendation"]
+        assert "recommendation" not in result
 
     def test_negative_effect(self):
         """Treatment worse than control should report degradation."""
@@ -92,7 +92,7 @@ class TestFrequentist:
 
         assert result["is_significant"] is True
         assert result["effect_size"] < 0
-        assert "degradation" in result["recommendation"] or "reverting" in result["recommendation"]
+        assert "recommendation" not in result
 
     def test_custom_alpha(self):
         """Custom alpha=0.01 should require stronger evidence."""
@@ -125,7 +125,7 @@ class TestBayesian:
         assert result["prob_treatment_better"] > 0.95
         assert result["is_significant"] is True
         assert result["treatment_rate"] > result["control_rate"]
-        assert "deploying" in result["recommendation"].lower() or "better" in result["recommendation"].lower()
+        assert "recommendation" not in result
 
     def test_equal_conversion_rates(self):
         """With equal rates, probability should be near 0.5."""
@@ -137,7 +137,7 @@ class TestBayesian:
 
         assert 0.1 < result["prob_treatment_better"] < 0.9
         assert result["is_significant"] is False
-        assert "inconclusive" in result["recommendation"].lower() or "continue" in result["recommendation"].lower()
+        assert "recommendation" not in result
 
     def test_control_clearly_better(self):
         """When control is clearly better, prob_treatment_better should be low."""
@@ -179,7 +179,7 @@ class TestSequential:
         assert result["is_significant"] is True
         assert result["effect_size"] > 0
         assert result["always_valid_p_value"] < 0.05
-        assert "positive" in result["recommendation"].lower() or "deploying" in result["recommendation"].lower()
+        assert "recommendation" not in result
 
     def test_no_effect(self):
         """Same distributions should not be significant (enough data to not be spurious)."""
@@ -191,7 +191,7 @@ class TestSequential:
 
         assert result["is_significant"] is False
         assert result["always_valid_p_value"] > 0.05
-        assert "continue" in result["recommendation"].lower() or "monitoring" in result["recommendation"].lower()
+        assert "recommendation" not in result
 
     def test_significant_negative_effect(self):
         """Large negative effect should recommend reverting."""
@@ -203,7 +203,7 @@ class TestSequential:
 
         assert result["is_significant"] is True
         assert result["effect_size"] < 0
-        assert "negative" in result["recommendation"].lower() or "reverting" in result["recommendation"].lower()
+        assert "recommendation" not in result
 
     def test_msprt_statistic_positive(self):
         """The mSPRT statistic should always be positive."""

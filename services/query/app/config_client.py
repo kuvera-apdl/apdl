@@ -18,6 +18,30 @@ _API_KEY_PATTERN = re.compile(
 _RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
 
+class ConfigExperimentStatisticalPlan(BaseModel):
+    """The immutable fixed-horizon plan Config owns for Query."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol: Literal["fixed_horizon_fisher_newcombe_cc_plan_v1"]
+    baseline_conversion_rate: float = Field(
+        ..., ge=0.0, le=1.0, strict=True, allow_inf_nan=False
+    )
+    minimum_detectable_effect: float = Field(
+        ..., ge=1e-6, le=1.0, strict=True, allow_inf_nan=False
+    )
+    significance_level: float = Field(
+        ..., ge=1e-6, le=0.5, strict=True, allow_inf_nan=False
+    )
+    nominal_power: float = Field(
+        ..., gt=0.5, le=0.9999, strict=True, allow_inf_nan=False
+    )
+    required_sample_size_per_arm: int = Field(
+        ..., ge=2, le=10_000_000, strict=True
+    )
+    data_settlement_seconds: int = Field(..., ge=1, le=86_400, strict=True)
+
+
 class ConfigExperimentAnalysis(BaseModel):
     """The one Config contract Query accepts for experiment analysis."""
 
@@ -29,6 +53,8 @@ class ConfigExperimentAnalysis(BaseModel):
     control_variant: str = Field(..., min_length=1, max_length=128)
     variants: list[str] = Field(..., min_length=2, max_length=10)
     metric_event: str = Field(..., min_length=1)
+    metric_direction: Literal["increase", "decrease"]
+    statistical_plan: ConfigExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime
     version: int = Field(..., ge=1)

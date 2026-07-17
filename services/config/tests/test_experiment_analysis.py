@@ -53,6 +53,15 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "primary_metric_json": (
             '{"event":"purchase","type":"conversion","direction":"increase"}'
         ),
+        "statistical_plan": {
+            "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+            "baseline_conversion_rate": 0.5,
+            "minimum_detectable_effect": 0.5,
+            "significance_level": 0.05,
+            "nominal_power": 0.8,
+            "required_sample_size_per_arm": 20,
+            "data_settlement_seconds": 5,
+        },
         "traffic_percentage": 100.0,
         "start_date": "2026-08-01T00:00:00+00:00",
         "end_date": "2026-08-31T00:00:00+00:00",
@@ -88,6 +97,16 @@ async def test_analysis_returns_exact_authoritative_contract(monkeypatch, status
         "control_variant": "control",
         "variants": ["control", "treatment"],
         "metric_event": "purchase",
+        "metric_direction": "increase",
+        "statistical_plan": {
+            "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+            "baseline_conversion_rate": 0.5,
+            "minimum_detectable_effect": 0.5,
+            "significance_level": 0.05,
+            "nominal_power": 0.8,
+            "required_sample_size_per_arm": 20,
+            "data_settlement_seconds": 5,
+        },
         "start_date": "2026-08-01T00:00:00Z",
         "end_date": "2026-08-31T00:00:00Z",
         "version": 7,
@@ -160,6 +179,7 @@ async def test_analysis_returns_404_for_missing_tenant_record(monkeypatch):
     "overrides",
     [
         {"status": "draft"},
+        {"statistical_plan": None},
         {"variants_json": '[{"key":"control","weight":1}]'},
         {
             "variants_json": (

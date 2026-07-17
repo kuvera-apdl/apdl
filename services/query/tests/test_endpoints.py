@@ -13,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from app.auth import Principal, authenticate_request
 from app.config_client import ConfigExperimentAnalysis
 from app.main import app
+from app.models.schemas import ExperimentArmResult
 from app.routers import experiments
 
 PROJECT_ID = "apiasport"
@@ -324,7 +325,7 @@ async def test_guardrail_query_requires_active_flag_snapshot(client):
 
     assert resp.status_code == 200
     query = app.state.ch_client.execute.await_args.args[0]
-    assert "min(first_exposure) AS exposure_time" in query
+    assert "min(exposure.first_exposure) AS exposure_time" in query
     assert "countIf(" in query
     assert "f.timestamp >= e.exposure_time" in query
     assert "count(f.session_id)" not in query
@@ -388,7 +389,7 @@ async def test_event_count_rejects_removed_event_names_field(client):
 
 
 @pytest.mark.asyncio
-async def test_event_count_denies_numeric_project_outside_authenticated_tenant(client):
+async def test_event_count_rejects_numeric_project_without_coercion(client):
     app.state.ch_client.execute = AsyncMock(return_value=[])
 
     resp = await client.post("/v1/query/events/count", json={
@@ -398,7 +399,7 @@ async def test_event_count_denies_numeric_project_outside_authenticated_tenant(c
         "selectors": [{"event_name": "click", "filters": []}],
     })
 
-    assert resp.status_code == 403
+    assert resp.status_code == 422
     app.state.ch_client.execute.assert_not_awaited()
 
 
@@ -472,8 +473,20 @@ async def test_event_timeseries(client):
 @pytest.mark.asyncio
 async def test_event_breakdown(client):
     app.state.ch_client.execute = AsyncMock(return_value=[
-        {"property_value": "US", "event_count": 50, "unique_users": 20},
-        {"property_value": "UK", "event_count": 30, "unique_users": 15},
+        {
+            "selector": "click[page.path eq /pricing]",
+            "property_type": "string",
+            "property_value": "US",
+            "event_count": 50,
+            "unique_users": 20,
+        },
+        {
+            "selector": "click[page.path eq /pricing]",
+            "property_type": "string",
+            "property_value": "UK",
+            "event_count": 30,
+            "unique_users": 15,
+        },
     ])
 
     resp = await client.post("/v1/query/events/breakdown", json={
@@ -492,6 +505,13 @@ async def test_event_breakdown(client):
     assert body["selector"] == "click[page.path eq /pricing]"
     assert body["property"] == "country"
     assert len(body["results"]) == 2
+    assert body["results"][0] == {
+        "selector": "click[page.path eq /pricing]",
+        "property_type": "string",
+        "property_value": "US",
+        "event_count": 50,
+        "unique_users": 20,
+    }
 
 
 @pytest.mark.asyncio
@@ -688,12 +708,14 @@ async def test_retention_analysis(client):
             "filters": [{"property": "plan", "operator": "eq", "value": "pro"}],
         },
         "return_selector": {"event_name": "login", "filters": []},
+        "cohort_mode": "first_match_in_window",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
     })
 
     assert resp.status_code == 200
     body = resp.json()
+    assert body["cohort_mode"] == "first_match_in_window"
     assert body["cohort_selector"] == "signup[plan eq pro]"
     assert body["return_selector"] == "login"
     assert len(body["cohorts"]) == 1
@@ -719,6 +741,7 @@ async def test_retention_weekly(client):
             "event_name": "login",
             "filters": [{"property": "device_type", "operator": "neq", "value": "bot"}],
         },
+        "cohort_mode": "first_match_in_window",
         "start_date": "2025-01-01",
         "end_date": "2025-01-31",
         "period": "week",
@@ -730,6 +753,29 @@ async def test_retention_weekly(client):
     assert body["cohorts"][0]["retention"][1] == 50.0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        {},
+        {"cohort_mode": "all_history"},
+    ],
+)
+async def test_retention_requires_canonical_window_relative_mode(client, payload_update):
+    payload = {
+        "project_id": PROJECT_ID,
+        "cohort_selector": {"event_name": "signup", "filters": []},
+        "return_selector": {"event_name": "login", "filters": []},
+        "start_date": "2025-01-01",
+        "end_date": "2025-01-31",
+    }
+    payload.update(payload_update)
+
+    resp = await client.post("/v1/query/retention", json=payload)
+
+    assert resp.status_code == 422
+
+
 # ------------------------------------------------------------------
 # Experiment endpoint
 # ------------------------------------------------------------------
@@ -737,12 +783,13 @@ async def test_retention_weekly(client):
 
 def _experiment_metadata(
     *,
-    status: str = "running",
+    status: str = "completed",
     variants: list[str] | None = None,
     control_variant: str = "control",
     duration_days: int = 14,
     start_date: str | datetime | None = None,
     end_date: str | datetime | None = None,
+    required_sample_size_per_arm: int = 20,
 ) -> ConfigExperimentAnalysis:
     start = start_date or datetime(2025, 1, 1, tzinfo=UTC)
     end = end_date or start + timedelta(days=duration_days)
@@ -754,6 +801,16 @@ def _experiment_metadata(
             "control_variant": control_variant,
             "variants": variants or ["control", "treatment"],
             "metric_event": "purchase",
+            "metric_direction": "increase",
+            "statistical_plan": {
+                "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+                "baseline_conversion_rate": 0.5,
+                "minimum_detectable_effect": 0.5,
+                "significance_level": 0.05,
+                "nominal_power": 0.8,
+                "required_sample_size_per_arm": required_sample_size_per_arm,
+                "data_settlement_seconds": 5,
+            },
             "start_date": start,
             "end_date": end,
             "version": 7,
@@ -776,18 +833,21 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
                 "sample_size": 100,
                 "conversions": 10,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "blue",
                 "sample_size": 100,
                 "conversions": 20,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "green",
                 "sample_size": 100,
                 "conversions": 15,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -799,7 +859,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "ready"
+    assert body["analysis_status"] == "decision_snapshot"
     assert body["experiment_key"] == "exp_123"
     assert body["flag_key"] == "checkout-experiment"
     assert body["metric_event"] == "purchase"
@@ -822,7 +882,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
             min(comparison["raw_p_value"] * 2, 1.0)
         )
     assert "recommendation" not in body
-    assert "is_significant" not in body
+    assert body["deployment_readiness"] == "not_assessed"
     fetch.assert_awaited_once_with(PROJECT_ID, "exp_123", PROJECT_API_KEY)
 
 
@@ -858,6 +918,8 @@ async def test_experiment_shared_three_arm_fixture_is_finite_and_complete(
     ] == expected["comparison_order"]
     assert body["crossover_actors"] == expected["crossover_actors"]
     assert body["unknown_variant_actors"] == expected["unknown_variant_actors"]
+    assert body["identity_conflict_actors"] == expected["identity_conflict_actors"]
+    assert body["identity_quality"] == "unambiguous"
     assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
     assert all(
         comparison["raw_p_value"] == expected["raw_p_value"]
@@ -880,12 +942,14 @@ async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "treatment",
                 "sample_size": 20,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -897,13 +961,38 @@ async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "ready"
+    assert body["analysis_status"] == "decision_snapshot"
     comparison = body["comparisons"][0]
     assert comparison["raw_p_value"] == 1.0
     assert comparison["adjusted_p_value"] == 1.0
     assert comparison["rate_difference"] == 0.0
-    assert comparison["confidence_interval"] == [0.0, 0.0]
+    assert comparison["confidence_interval"][0] < 0.0
+    assert comparison["confidence_interval"][1] > 0.0
     assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
+
+
+def test_sparse_perfect_split_uses_exact_test_and_non_wald_interval():
+    result = experiments._comparison(
+        ExperimentArmResult(
+            variant="control",
+            sample_size=2,
+            conversions=0,
+            conversion_rate=0.0,
+        ),
+        ExperimentArmResult(
+            variant="treatment",
+            sample_size=2,
+            conversions=2,
+            conversion_rate=1.0,
+        ),
+        comparison_count=1,
+        significance_level=0.05,
+    )
+
+    assert result is not None
+    assert result.raw_p_value == pytest.approx(1 / 3)
+    assert result.confidence_interval != (1.0, 1.0)
+    assert result.is_statistically_significant is False
 
 
 @pytest.mark.asyncio
@@ -920,12 +1009,14 @@ async def test_experiment_underpowered_declared_arm_is_typed(client, monkeypatch
                 "sample_size": 20,
                 "conversions": 5,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "treatment",
                 "sample_size": 1,
                 "conversions": 1,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -937,10 +1028,10 @@ async def test_experiment_underpowered_declared_arm_is_typed(client, monkeypatch
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "insufficient_data"
+    assert body["analysis_status"] == "non_final"
     assert body["reason"] == "underpowered_arms"
     assert body["underpowered_variants"] == ["treatment"]
-    assert body["minimum_sample_size_per_arm"] == 2
+    assert body["statistical_plan"]["required_sample_size_per_arm"] == 20
     assert "comparisons" not in body
 
 
@@ -962,12 +1053,14 @@ async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 5,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "blue",
                 "sample_size": 20,
                 "conversions": 6,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -979,7 +1072,7 @@ async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "insufficient_data"
+    assert body["analysis_status"] == "non_final"
     assert body["underpowered_variants"] == ["green"]
     assert body["arms"][2] == {
         "variant": "green",
@@ -1000,21 +1093,24 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
         return_value=[
             {
                 "variant": "control",
-                "sample_size": 10,
+                "sample_size": 20,
                 "conversions": 1,
                 "crossover_actors": 1,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "treatment",
-                "sample_size": 10,
+                "sample_size": 20,
                 "conversions": 2,
                 "crossover_actors": 1,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "removed-arm",
                 "sample_size": 4,
                 "conversions": 4,
                 "crossover_actors": 2,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -1026,10 +1122,50 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "ready"
+    assert body["analysis_status"] == "decision_snapshot"
     assert body["crossover_actors"] == 4
     assert body["unknown_variant_actors"] == 4
-    assert [arm["sample_size"] for arm in body["arms"]] == [10, 10]
+    assert [arm["sample_size"] for arm in body["arms"]] == [20, 20]
+
+
+@pytest.mark.asyncio
+async def test_identity_alias_conflicts_prevent_decision_snapshot(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 5,
+                "crossover_actors": 0,
+                "identity_conflict_actors": 1,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 20,
+                "conversions": 10,
+                "crossover_actors": 0,
+                "identity_conflict_actors": 1,
+            },
+        ]
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "identity_alias_conflicts"
+    assert body["identity_conflict_actors"] == 1
+    assert body["identity_quality"] == "degraded"
+    assert "comparisons" not in body
 
 
 @pytest.mark.asyncio
@@ -1046,6 +1182,7 @@ async def test_experiment_rejects_non_integer_clickhouse_aggregates(client, monk
                 "sample_size": 2.5,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             }
         ]
     )
@@ -1079,7 +1216,7 @@ async def test_experiment_uses_authoritative_metric_and_window(client, monkeypat
 
     assert resp.status_code == 200
     call = app.state.ch_client.execute.await_args
-    assert "FROM feature_flag_exposures FINAL" in call.args[0]
+    assert "FROM feature_flag_exposures AS exposure FINAL" in call.args[0]
     assert call.args[1] == {
         "project_id": PROJECT_ID,
         "flag_key": metadata.flag_key,
@@ -1104,6 +1241,113 @@ async def test_scheduled_experiment_does_not_query_clickhouse(client, monkeypatc
 
     assert resp.status_code == 200
     assert resp.json()["reason"] == "experiment_not_started"
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [("running", "experiment_running"), ("stopped", "experiment_stopped")],
+)
+async def test_non_final_lifecycle_never_emits_comparisons(
+    client,
+    monkeypatch,
+    status,
+    reason,
+):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata(status=status)),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 100,
+                "conversions": 10,
+                "crossover_actors": 0,
+                "identity_conflict_actors": 0,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 100,
+                "conversions": 30,
+                "crossover_actors": 0,
+                "identity_conflict_actors": 0,
+            },
+        ]
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "non_final"
+    assert response.json()["reason"] == reason
+    assert "comparisons" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_completed_experiment_before_declared_end_fails_closed(
+    client,
+    monkeypatch,
+):
+    now = datetime.now(UTC)
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(
+            return_value=_experiment_metadata(
+                status="completed",
+                start_date=now - timedelta(days=1),
+                end_date=now + timedelta(days=1),
+            )
+        ),
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "non_final"
+    assert response.json()["reason"] == "experiment_window_open"
+    assert "comparisons" not in response.json()
+    app.state.ch_client.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completed_experiment_waits_for_predeclared_data_settlement(
+    client,
+    monkeypatch,
+):
+    now = datetime.now(UTC)
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(
+            return_value=_experiment_metadata(
+                status="completed",
+                start_date=now - timedelta(days=1),
+                end_date=now - timedelta(seconds=2),
+            )
+        ),
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "non_final"
+    assert response.json()["reason"] == "awaiting_data_settlement"
+    assert response.json()["data_completeness"] == "not_verified"
+    assert "comparisons" not in response.json()
     app.state.ch_client.execute.assert_not_awaited()
 
 
@@ -1158,12 +1402,14 @@ async def test_experiment_preserves_exact_zero_p_value(client, monkeypatch):
                 "sample_size": 1_000_000,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
             {
                 "variant": "treatment",
                 "sample_size": 1_000_000,
                 "conversions": 1_000_000,
                 "crossover_actors": 0,
+                "identity_conflict_actors": 0,
             },
         ]
     )
@@ -1186,8 +1432,31 @@ async def test_experiment_project_assertion_is_tenant_scoped(client, monkeypatch
 
     resp = await client.get(
         "/v1/query/experiment/exp_123",
-        params={"project_id": "another-project"},
+        params={"project_id": "anotherproject"},
     )
 
     assert resp.status_code == 403
     fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "project_id",
+    ["another-project", " anotherproject", "another_project", "a" * 65],
+)
+async def test_experiment_rejects_noncanonical_project_assertion(
+    client,
+    monkeypatch,
+    project_id,
+):
+    fetch = AsyncMock(return_value=_experiment_metadata())
+    monkeypatch.setattr(experiments, "fetch_experiment_analysis", fetch)
+
+    resp = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": project_id},
+    )
+
+    assert resp.status_code == 422
+    fetch.assert_not_awaited()
+    app.state.ch_client.execute.assert_not_awaited()

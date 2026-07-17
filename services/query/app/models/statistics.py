@@ -63,7 +63,7 @@ class ExperimentAnalyzer:
 
         Returns:
             dict with keys: method, t_statistic, p_value, effect_size,
-            confidence_interval, is_significant, recommendation.
+            confidence_interval, is_significant.
         """
         control = np.asarray(control, dtype=np.float64)
         treatment = np.asarray(treatment, dtype=np.float64)
@@ -90,13 +90,6 @@ class ExperimentAnalyzer:
 
         is_significant = bool(p_value < alpha)
 
-        if not is_significant:
-            recommendation = "No statistically significant difference detected. Continue collecting data or accept the null hypothesis."
-        elif mean_diff > 0:
-            recommendation = "Treatment shows a statistically significant improvement. Consider rolling out to all users."
-        else:
-            recommendation = "Treatment shows a statistically significant degradation. Consider reverting."
-
         return {
             "method": "frequentist",
             "t_statistic": float(t_stat),
@@ -105,7 +98,6 @@ class ExperimentAnalyzer:
             "mean_difference": float(mean_diff),
             "confidence_interval": (float(ci_lower), float(ci_upper)),
             "is_significant": is_significant,
-            "recommendation": recommendation,
         }
 
     @staticmethod
@@ -139,7 +131,7 @@ class ExperimentAnalyzer:
         Returns:
             dict with keys: method, control_rate, treatment_rate,
             prob_treatment_better, expected_loss_control, expected_loss_treatment,
-            is_significant (prob > 0.95), recommendation.
+            is_significant (prob > 0.95).
         """
         control = np.asarray(control, dtype=np.float64)
         treatment = np.asarray(treatment, dtype=np.float64)
@@ -172,22 +164,6 @@ class ExperimentAnalyzer:
 
         is_significant = prob_treatment_better > 0.95 or prob_treatment_better < 0.05
 
-        if prob_treatment_better > 0.95:
-            recommendation = (
-                f"Treatment is better with {prob_treatment_better:.1%} probability. "
-                "Consider deploying."
-            )
-        elif prob_treatment_better < 0.05:
-            recommendation = (
-                f"Control is better with {1 - prob_treatment_better:.1%} probability. "
-                "Consider reverting the treatment."
-            )
-        else:
-            recommendation = (
-                f"Inconclusive (P(treatment better) = {prob_treatment_better:.1%}). "
-                "Continue collecting data."
-            )
-
         return {
             "method": "bayesian",
             "control_rate": control_rate,
@@ -197,7 +173,6 @@ class ExperimentAnalyzer:
             "expected_loss_treatment": expected_loss_treatment,
             "effect_size": treatment_rate - control_rate,
             "is_significant": is_significant,
-            "recommendation": recommendation,
         }
 
     # ------------------------------------------------------------------
@@ -221,7 +196,7 @@ class ExperimentAnalyzer:
 
         Returns:
             dict with keys: method, msprt_statistic, always_valid_p_value,
-            effect_size, is_significant, recommendation.
+            effect_size, is_significant.
         """
         control = np.asarray(control, dtype=np.float64)
         treatment = np.asarray(treatment, dtype=np.float64)
@@ -255,22 +230,6 @@ class ExperimentAnalyzer:
 
         is_significant = bool(always_valid_p < alpha)
 
-        if not is_significant:
-            recommendation = (
-                "Sequential test has not reached significance. "
-                "It is safe to continue monitoring."
-            )
-        elif mean_diff > 0:
-            recommendation = (
-                "Sequential test indicates a significant positive effect. "
-                "Consider stopping the experiment and deploying."
-            )
-        else:
-            recommendation = (
-                "Sequential test indicates a significant negative effect. "
-                "Consider stopping the experiment and reverting."
-            )
-
         return {
             "method": "sequential",
             "msprt_statistic": float(lambda_stat),
@@ -278,7 +237,6 @@ class ExperimentAnalyzer:
             "effect_size": float(effect_size),
             "mean_difference": float(mean_diff),
             "is_significant": is_significant,
-            "recommendation": recommendation,
         }
 
     # ------------------------------------------------------------------
@@ -292,7 +250,10 @@ class ExperimentAnalyzer:
         alpha: float = 0.05,
         power: float = 0.8,
     ) -> int:
-        """Calculate required sample size per variant for a two-proportion z-test.
+        """Calculate a continuity-corrected prospective two-proportion target.
+
+        The correction makes this planning helper conservative for the
+        discrete fixed-horizon Fisher inference used by the experiment API.
 
         Args:
             baseline_rate: Expected conversion rate for the control group.
@@ -320,5 +281,11 @@ class ExperimentAnalyzer:
         if denominator == 0:
             return 0
 
-        n = math.ceil(numerator / denominator)
+        asymptotic_n = numerator / denominator
+        corrected_n = (
+            asymptotic_n
+            / 4.0
+            * (1.0 + math.sqrt(1.0 + 4.0 / (asymptotic_n * abs(mde)))) ** 2
+        )
+        n = math.ceil(corrected_n)
         return n

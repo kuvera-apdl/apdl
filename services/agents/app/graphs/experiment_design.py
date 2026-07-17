@@ -257,6 +257,7 @@ async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool
             variants=variants,
             default_variant=flag_config.get("default_variant"),
             primary_metric=experiment.get("primary_metric", {}),
+            statistical_plan=experiment.get("statistical_plan"),
             secondary_metrics=experiment.get("secondary_metrics"),
             guardrail_metrics=experiment.get("guardrail_metrics"),
             targeting=experiment.get("targeting"),
@@ -298,7 +299,13 @@ class ExperimentDesignAgent(BaseAgent):
     # A verification budget: enough to measure real baselines for the events
     # each design hinges on (sample-size math was previously guesswork over
     # "(to be determined)"), not enough to re-run behavior analysis.
-    agentic_tools = ("discover_events", "query_events", "query_timeseries", "query_breakdown")
+    agentic_tools = (
+        "discover_events",
+        "query_events",
+        "query_timeseries",
+        "query_breakdown",
+        "calculate_statistical_plan",
+    )
     max_tool_steps = 6
     #: Upper bound on designs per run — at most one per qualifying insight;
     #: insights that don't warrant an experiment get none.

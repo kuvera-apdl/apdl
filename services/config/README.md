@@ -101,14 +101,19 @@ Experiments use timezone-aware `start_date` and `end_date` values and the
 `draft`, `scheduled`, `running`, `completed`, or `stopped` states. Authoring
 requires 2-10 unique, positive-weight variants and an explicit
 `default_variant`; that one field is both the statistical control and the
-backing flag's fallback variant. Primary metrics are conversion events only, and a complete
-window is limited to 90 days. Scheduled and running experiments require the
-metric and window. After an experiment leaves `draft`, its default/control
-variant, variants, primary metric, and start date are immutable. The planned
-end date is also immutable to callers; an early `completed`/`stopped`
-transition atomically shortens it to the actual terminal time so later events
-cannot drift terminal results. The lifecycle worker atomically starts and
-completes due experiments. Stopping a draft or scheduled experiment clears its
+backing flag's fallback variant. Primary metrics are conversion events only,
+and a complete window is limited to 90 days. Scheduled and running experiments
+require the metric, window, and one strict
+`fixed_horizon_fisher_newcombe_cc_plan_v1` statistical plan. The plan declares
+baseline conversion, MDE, significance level, nominal power, a
+continuity-corrected per-arm target, and an explicit data-settlement hold.
+Nominal power is a planning input, not a guarantee of exact achieved Fisher
+power. After an experiment leaves `draft`, its default/control variant,
+variants, primary metric, statistical plan, and dates are immutable. Completing
+before the planned end is rejected; stopping truncates the observed window.
+The lifecycle worker validates the plan before activating scheduled traffic and
+atomically completes due experiments. Legacy rows without a plan can never be
+started. Stopping a draft or scheduled experiment clears its
 analysis end and remains non-analyzable (409), because it never started. If the
 scheduler misses an entire scheduled window, it takes that same fail-closed
 path instead of manufacturing a completed run.
@@ -120,7 +125,8 @@ state; on-demand guardrail evaluation remains read-only.
 `GET /v1/experiments/{key}/analysis` reads only the tenant's authoritative
 PostgreSQL experiment record. Its strict response contains exactly `key`,
 `flag_key`, `status`, `control_variant`, `variants`, `metric_event`,
-`start_date`, `end_date`, and `version`. Missing experiments return 404. Draft
+`metric_direction`, `statistical_plan`, `start_date`, `end_date`, and `version`.
+Missing experiments return 404. Draft
 or malformed/incomplete analysis contracts return 409 instead of guessing or
 deriving metadata from events.
 

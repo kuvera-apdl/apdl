@@ -484,41 +484,19 @@ async def _apply_approval_effects(
                     )
     elif gated_agent == "feature_proposal":
         for proposal in approved_items:
-            try:
-                forked = await _fork_proposal(
-                    app,
-                    run_id=run_id,
-                    project_id=project_id,
-                    autonomy_level=autonomy_level,
-                    proposal=proposal,
-                )
-                if forked:
-                    forked_run_id, task_kwargs = forked
-                    forked_runs.append(forked_run_id)
-                    forked_supervisor_tasks.append(task_kwargs)
-            except Exception:
-                logger.exception(
-                    "[%s] Failed to fork proposal %s",
-                    run_id,
-                    _item_id(gated_agent, proposal),
-                )
-            try:
-                await app.state.vector_store.store(
-                    project_id=project_id,
-                    content=json.dumps(proposal, default=str),
-                    metadata={
-                        "type": "feature_proposal",
-                        "proposal_id": str(proposal.get("proposal_id") or ""),
-                        "priority": str(proposal.get("priority") or "P2"),
-                        "status": "approved",
-                    },
-                )
-            except Exception:
-                logger.exception(
-                    "[%s] Could not store approved proposal %s to memory",
-                    run_id,
-                    _item_id(gated_agent, proposal),
-                )
+            item_id = _item_id(gated_agent, proposal)
+            reason = (
+                "legacy experiment-derived feature proposals are quarantined; "
+                "deployment readiness is not assessed"
+            )
+            errors.append(f"feature proposal unavailable: {item_id}")
+            await audit.log(
+                run_id,
+                "approval_skipped",
+                {"item_id": item_id, "kind": gated_agent, "reason": reason},
+                approval_status="skipped",
+            )
+            logger.warning("[%s] Skipped legacy feature proposal %s", run_id, item_id)
 
     await _persist_approval_errors(pool, run_id, lease_owner_id, errors)
     await audit.log(

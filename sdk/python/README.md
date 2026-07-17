@@ -36,7 +36,8 @@ client = APDL.init(
 
 # Track events (identity is explicit per call — servers handle many users)
 client.track("order_completed", {"total": 42.0}, user_id="u_123")
-client.identify("u_123", {"plan": "pro"})
+client.identify("u_123", {"plan": "pro"})  # trait update only
+client.identify("u_123", anonymous_id="anon_123")  # canonical alias assertion
 client.group("org_42", {"name": "Acme"}, user_id="u_123")
 client.page("/checkout", user_id="u_123")
 
@@ -58,6 +59,13 @@ within the ingestion service's 512 KiB request limit. HTTP 408/425/429,
 permanent rejections are discarded so they cannot block later valid events.
 Optional event and context fields use omission as their only absent wire form;
 explicit `null`, unknown context fields, and context aliases are rejected.
+
+An `identify` call with both `user_id` and `anonymous_id` is the only
+anonymous-to-user alias assertion. Omitting `anonymous_id` keeps the call as a
+trait update. Accepted assertions are tenant-bound and irreversible; there is
+no alias event, `previous_id`, or unmerge field. They become query-visible after
+the ingestion writer durably stores them and then apply retroactively to
+retained events. Conflicting claims fail closed as separate actors.
 
 The Python server SDK accepts only confidential `proj_<project>_<secret>`
 credentials. Browser-safe `client_...` credentials belong to the JavaScript

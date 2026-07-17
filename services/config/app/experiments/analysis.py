@@ -10,7 +10,9 @@ from pydantic import ValidationError
 from app.models.schemas import (
     ExperimentAnalysis,
     ExperimentMetric,
+    ExperimentStatisticalPlan,
     ExperimentVariant,
+    validate_statistical_plan,
 )
 
 
@@ -51,6 +53,15 @@ def build_analysis_contract(experiment: dict) -> ExperimentAnalysis:
             expected_type=dict,
         )
         primary_metric = ExperimentMetric.model_validate(metric_value)
+        statistical_plan = ExperimentStatisticalPlan.model_validate(
+            experiment.get("statistical_plan")
+        )
+        validate_statistical_plan(
+            status=experiment.get("status"),
+            statistical_plan=statistical_plan,
+            primary_metric=primary_metric,
+            variant_count=len(variants),
+        )
         return ExperimentAnalysis(
             key=experiment.get("key"),
             flag_key=experiment.get("flag_key"),
@@ -58,6 +69,8 @@ def build_analysis_contract(experiment: dict) -> ExperimentAnalysis:
             control_variant=experiment.get("default_variant"),
             variants=[variant.key for variant in variants],
             metric_event=primary_metric.event,
+            metric_direction=primary_metric.direction,
+            statistical_plan=statistical_plan,
             start_date=experiment.get("start_date"),
             end_date=experiment.get("end_date"),
             version=experiment.get("version"),

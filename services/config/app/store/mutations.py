@@ -12,7 +12,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.flags import experiment_flag
-from app.models.schemas import GateRule, VariantConfig, validate_flag_variant_config
+from app.models.schemas import (
+    ExperimentMetric,
+    ExperimentStatisticalPlan,
+    GateRule,
+    VariantConfig,
+    validate_flag_variant_config,
+    validate_statistical_plan,
+)
 from app.store import postgres as pg_store
 from app.utils import serialize_client_flag
 
@@ -66,6 +73,7 @@ _FROZEN_EXPERIMENT_FIELDS = {
     "default_variant": "default_variant",
     "variants_json": "variants",
     "primary_metric_json": "primary_metric",
+    "statistical_plan": "statistical_plan",
     "start_date": "start_date",
     "end_date": "end_date",
 }
@@ -451,10 +459,10 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         f"""
         INSERT INTO experiments (
             key, project_id, status, description, flag_key, default_variant,
-            variants_json, targeting_rules_json, primary_metric_json,
+            variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
             traffic_percentage, start_date, end_date
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)
         RETURNING {pg_store.EXPERIMENT_COLUMNS}
         """,
         experiment["key"],
@@ -466,6 +474,9 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         experiment.get("variants_json", "[]"),
         experiment.get("targeting_rules_json", "[]"),
         experiment.get("primary_metric_json", "{}"),
+        _json(experiment.get("statistical_plan"))
+        if experiment.get("statistical_plan") is not None
+        else None,
         experiment.get("traffic_percentage", 100.0),
         experiment.get("start_date"),
         experiment.get("end_date"),
@@ -487,9 +498,10 @@ async def _update_experiment(
             variants_json = $7,
             targeting_rules_json = $8,
             primary_metric_json = $9,
-            traffic_percentage = $10,
-            start_date = $11,
-            end_date = $12,
+            statistical_plan = $10::jsonb,
+            traffic_percentage = $11,
+            start_date = $12,
+            end_date = $13,
             version = version + 1,
             updated_at = now()
         WHERE project_id = $1 AND key = $2 AND version = $3
@@ -504,6 +516,9 @@ async def _update_experiment(
         experiment["variants_json"],
         experiment["targeting_rules_json"],
         experiment["primary_metric_json"],
+        _json(experiment.get("statistical_plan"))
+        if experiment.get("statistical_plan") is not None
+        else None,
         experiment["traffic_percentage"],
         experiment.get("start_date"),
         experiment.get("end_date"),
@@ -524,7 +539,11 @@ def _load_json(raw: str | None, fallback):
 
 
 def _frozen_value(field: str, value: Any) -> Any:
-    if field in {"variants_json", "primary_metric_json"} and isinstance(value, str):
+    if field in {
+        "variants_json",
+        "primary_metric_json",
+        "statistical_plan",
+    } and isinstance(value, str):
         try:
             return json.loads(value)
         except json.JSONDecodeError:
@@ -563,7 +582,7 @@ def finalize_terminal_analysis_window(
     *,
     now: datetime | None = None,
 ) -> tuple[dict, frozenset[str]]:
-    """Persist the actual observation end for a terminal transition."""
+    """Preserve fixed completion horizons and truncate only stopped windows."""
     if before["status"] in {"draft", "scheduled"} and desired["status"] == "stopped":
         # A cancelled experiment never opened an observation window.
         # Persist no analysis end so the analysis projection fails closed
@@ -587,6 +606,13 @@ def finalize_terminal_analysis_window(
         or current.tzinfo is None
     ):
         raise IntegrityError("Running experiment has an invalid analysis window")
+    if desired["status"] == "completed":
+        if current < planned_end:
+            raise IntegrityError(
+                "A fixed-horizon experiment cannot complete before its planned end"
+            )
+        return {**desired, "end_date": planned_end}, frozenset()
+
     actual_end = min(current, planned_end)
     if actual_end <= start:
         raise IntegrityError("Terminal experiment end must be after its start")
@@ -1025,6 +1051,26 @@ async def transition_due_experiment(
                 # flag was never activated. Stop it without an analysis window
                 # instead of manufacturing a completed experiment.
                 target = "running" if now < end else "stopped"
+                if target == "running":
+                    try:
+                        raw_plan = current.get("statistical_plan")
+                        if isinstance(raw_plan, str):
+                            raw_plan = json.loads(raw_plan)
+                        plan = ExperimentStatisticalPlan.model_validate(raw_plan)
+                        metric = ExperimentMetric.model_validate(
+                            _load_json(current.get("primary_metric_json"), {})
+                        )
+                        variants = _load_json(current.get("variants_json"), [])
+                        validate_statistical_plan(
+                            status="running",
+                            statistical_plan=plan,
+                            primary_metric=metric,
+                            variant_count=len(variants),
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise IntegrityError(
+                            "Scheduled experiment lacks a valid predeclared statistical plan"
+                        ) from exc
             elif current["status"] == "running":
                 if end is None or end > now:
                     return None

@@ -11,6 +11,17 @@ from app.routers import admin
 from app.store import mutations
 
 
+VALID_STATISTICAL_PLAN = {
+    "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+    "baseline_conversion_rate": 0.5,
+    "minimum_detectable_effect": 0.5,
+    "significance_level": 0.05,
+    "nominal_power": 0.8,
+    "required_sample_size_per_arm": 20,
+    "data_settlement_seconds": 5,
+}
+
+
 def make_flag(overrides: dict | None = None) -> dict:
     flag = {
         "key": "checkout",
@@ -61,6 +72,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         ),
         "targeting_rules_json": "[]",
         "primary_metric_json": "{}",
+        "statistical_plan": None,
         "traffic_percentage": 100.0,
         "start_date": None,
         "end_date": None,
@@ -332,6 +344,77 @@ async def test_create_experiment_requires_running_decision_contract():
 
 
 @pytest.mark.asyncio
+async def test_create_running_experiment_persists_valid_statistical_plan(
+    monkeypatch,
+):
+    command = AsyncMock(
+        return_value=(make_experiment({"status": "running", "version": 1}), make_flag())
+    )
+    monkeypatch.setattr(admin.mutations, "create_experiment_bundle", command)
+
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout_exp",
+            "status": "running",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+            "start_date": "2026-07-01T00:00:00Z",
+            "end_date": "2026-08-01T00:00:00Z",
+            "primary_metric": {
+                "event": "purchase",
+                "type": "conversion",
+                "direction": "increase",
+            },
+            "statistical_plan": VALID_STATISTICAL_PLAN,
+        },
+    )
+
+    assert response.status_code == 201
+    assert (
+        command.await_args.kwargs["experiment"]["statistical_plan"]
+        == VALID_STATISTICAL_PLAN
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_experiment_rejects_understated_predeclared_sample_target():
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout_exp",
+            "status": "running",
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+            "start_date": "2026-07-01T00:00:00Z",
+            "end_date": "2026-08-01T00:00:00Z",
+            "primary_metric": {
+                "event": "purchase",
+                "type": "conversion",
+                "direction": "increase",
+            },
+            "statistical_plan": {
+                **VALID_STATISTICAL_PLAN,
+                "required_sample_size_per_arm": 2,
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "required_sample_size_per_arm" in response.text
+
+
+@pytest.mark.asyncio
 async def test_update_experiment_rejects_stale_version(monkeypatch):
     monkeypatch.setattr(
         admin.pg_store,
@@ -401,6 +484,7 @@ async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
             ],
         ),
         ("primary_metric", {"event": "checkout_completed", "type": "conversion"}),
+        ("statistical_plan", VALID_STATISTICAL_PLAN),
         ("start_date", "2026-07-02T00:00:00Z"),
         ("end_date", "2026-08-02T00:00:00Z"),
     ],

@@ -4,6 +4,16 @@ import pytest
 
 from app.tools import experiments
 
+VALID_STATISTICAL_PLAN = {
+    "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+    "baseline_conversion_rate": 0.5,
+    "minimum_detectable_effect": 0.5,
+    "significance_level": 0.05,
+    "nominal_power": 0.8,
+    "required_sample_size_per_arm": 20,
+    "data_settlement_seconds": 300,
+}
+
 
 @pytest.mark.asyncio
 async def test_get_experiment_results_uses_authoritative_query_contract(monkeypatch):
@@ -15,7 +25,7 @@ async def test_get_experiment_results_uses_authoritative_query_contract(monkeypa
 
         def json(self):
             return {
-                "analysis_status": "insufficient_data",
+                "analysis_status": "non_final",
                 "reason": "underpowered_arms",
             }
 
@@ -40,7 +50,7 @@ async def test_get_experiment_results_uses_authoritative_query_contract(monkeypa
         project_id="apdl",
     )
 
-    assert result["analysis_status"] == "insufficient_data"
+    assert result["analysis_status"] == "non_final"
     assert captured == {
         "path": "/v1/query/experiment/exp%20checkout",
         "params": {"project_id": "apdl"},
@@ -86,6 +96,7 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
         ],
         default_variant="control",
         primary_metric={"event": "purchase", "type": "conversion", "direction": "increase"},
+        statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={"conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}]},
     )
 
@@ -109,6 +120,7 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
         "default_variant": "control",
         "traffic_percentage": 100.0,
         "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
+        "statistical_plan": VALID_STATISTICAL_PLAN,
         "targeting_rules": [
             {
                 "id": "targeting",
@@ -163,6 +175,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
             ],
             default_variant="control",
             primary_metric={"event": "purchase"},
+            statistical_plan=VALID_STATISTICAL_PLAN,
             targeting={
                 "conditions": [
                     {
@@ -186,6 +199,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
             ],
             default_variant="control",
             primary_metric={"event": "purchase"},
+            statistical_plan=VALID_STATISTICAL_PLAN,
             targeting={
                 "conditions": [
                     {"operator": "is_not_null", "attribute": "user_id"},
@@ -205,6 +219,7 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
         variants=[{"key": "control", "weight": 50}, {"key": "treatment", "weight": 50}],
         default_variant="control",
         primary_metric={"event": "purchase"},
+        statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={
             "conditions": [
                 {"operator": "exists", "attribute": "user_id"},
@@ -234,6 +249,7 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
         variants=[{"key": "control", "weight": 1}, {"key": "treatment", "weight": 1}],
         default_variant="control",
         primary_metric={"event": "purchase"},
+        statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={"conditions": []},
     )
 
@@ -252,6 +268,7 @@ async def test_running_experiment_requires_metric_and_bounded_duration(monkeypat
             {"key": "treatment", "weight": 1},
         ],
         "default_variant": "control",
+        "statistical_plan": VALID_STATISTICAL_PLAN,
     }
 
     with pytest.raises(ValueError, match="primary_metric.event"):
@@ -266,3 +283,26 @@ async def test_running_experiment_requires_metric_and_bounded_duration(monkeypat
 
 def test_automatic_experiment_status_mutator_is_not_exposed():
     assert not hasattr(experiments, "update_experiment_status")
+
+
+@pytest.mark.asyncio
+async def test_sample_size_builds_bonferroni_corrected_canonical_plan():
+    plan = await experiments.calculate_sample_size(
+        baseline_rate=0.5,
+        minimum_detectable_effect=0.5,
+        alpha=0.05,
+        nominal_power=0.8,
+        treatment_count=2,
+        direction="increase",
+        data_settlement_seconds=300,
+    )
+
+    assert plan == {
+        "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+        "baseline_conversion_rate": 0.5,
+        "minimum_detectable_effect": 0.5,
+        "significance_level": 0.05,
+        "nominal_power": 0.8,
+        "required_sample_size_per_arm": 17,
+        "data_settlement_seconds": 300,
+    }

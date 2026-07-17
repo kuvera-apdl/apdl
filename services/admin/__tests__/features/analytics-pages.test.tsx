@@ -10,6 +10,7 @@ import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { EventsExplorerPage } from '../../src/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '../../src/features/analytics/FunnelsPage'
+import { RetentionPage } from '../../src/features/analytics/RetentionPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
 const requests: { path: string; body: unknown }[] = []
@@ -23,6 +24,29 @@ const server = setupServer(
       ],
       total_events: 120,
       total_users: 48,
+    })
+  }),
+  http.post('*/api/projects/demo/query/v1/query/events/breakdown', async ({ request }) => {
+    requests.push({ path: 'breakdown', body: await request.json() })
+    return HttpResponse.json({
+      selector: '$click',
+      property: 'score',
+      results: [
+        {
+          selector: '$click',
+          property_type: 'integer',
+          property_value: '1',
+          event_count: 9,
+          unique_users: 7,
+        },
+        {
+          selector: '$click',
+          property_type: 'float',
+          property_value: '1',
+          event_count: 4,
+          unique_users: 3,
+        },
+      ],
     })
   }),
   http.post('*/api/projects/demo/query/v1/query/funnel', async ({ request }) => {
@@ -47,6 +71,15 @@ const server = setupServer(
         },
       ],
       overall_conversion: 25,
+    })
+  }),
+  http.post('*/api/projects/demo/query/v1/query/retention', async ({ request }) => {
+    requests.push({ path: 'retention', body: await request.json() })
+    return HttpResponse.json({
+      cohort_mode: 'first_match_in_window',
+      cohort_selector: 'page',
+      return_selector: 'page',
+      cohorts: [],
     })
   }),
   http.post('*/api/projects/demo/query/v1/query/events/names', async () => {
@@ -102,6 +135,20 @@ describe('EventsExplorerPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))
     expect(requests).toHaveLength(0)
   })
+
+  test('renders scalar types that distinguish equal canonical values', async () => {
+    renderPage(<EventsExplorerPage />)
+    await userEvent.click(screen.getByRole('tab', { name: 'Breakdown' }))
+    await userEvent.type(screen.getByPlaceholderText('href'), 'score')
+    await userEvent.click(screen.getByRole('button', { name: 'Run' }))
+
+    expect(await screen.findByText('integer')).toBeInTheDocument()
+    expect(screen.getByText('float')).toBeInTheDocument()
+    expect(requests[0]?.body).toMatchObject({
+      project_id: 'demo',
+      property: 'score',
+    })
+  })
 })
 
 describe('FunnelsPage', () => {
@@ -113,5 +160,21 @@ describe('FunnelsPage', () => {
     expect(screen.getByText(/−75% between step 1 and 2/)).toBeInTheDocument()
     expect(screen.getByText(/biggest drop-off/)).toBeInTheDocument()
     expect(requests[0]?.body).toMatchObject({ window_days: 7, project_id: 'demo' })
+  })
+})
+
+describe('RetentionPage', () => {
+  test('declares and explains first-match-in-window cohorts', async () => {
+    renderPage(<RetentionPage />)
+
+    expect(screen.getByRole('heading', { name: 'Window-relative retention' })).toBeInTheDocument()
+    expect(screen.getByText(/Existing actors may re-enter/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Run retention' }))
+
+    expect(await screen.findByText('No cohorts in range')).toBeInTheDocument()
+    expect(requests[0]?.body).toMatchObject({
+      project_id: 'demo',
+      cohort_mode: 'first_match_in_window',
+    })
   })
 })

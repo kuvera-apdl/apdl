@@ -26,11 +26,13 @@ def _get_client(request: Request) -> ClickHouseClient:
 async def retention_analysis(
     body: RetentionRequest, request: Request
 ) -> RetentionResponse:
-    """Compute an N-day or N-week retention grid.
+    """Compute a window-relative N-day or N-week retention grid.
 
-    For each cohort (defined by the date a user first matched ``cohort_selector``),
-    compute the percentage of users who returned to match ``return_selector``
-    on each subsequent day or week.
+    Each actor enters a cohort on their first ``cohort_selector`` match inside
+    the selected dates. Events before the selected dates are not consulted, so
+    an existing actor may re-enter on their first in-window match. For each
+    cohort, compute the percentage of actors who matched ``return_selector`` on
+    each subsequent day or week inside the same selected dates.
     """
     require_project(request, body.project_id, "query:read")
     client = _get_client(request)
@@ -96,6 +98,7 @@ async def retention_analysis(
         )
 
     return RetentionResponse(
+        cohort_mode=body.cohort_mode,
         cohort_selector=selector_label(body.cohort_selector),
         return_selector=selector_label(body.return_selector),
         cohorts=cohorts,

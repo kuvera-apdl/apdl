@@ -12,11 +12,15 @@ from app.clickhouse.client import normalize_query_params
 from app.clickhouse.queries import (
     EXPERIMENT_ANALYSIS_QUERY,
     build_cohort_query,
+    build_event_breakdown_query,
     build_event_catalog_query,
     build_event_count_query,
+    build_event_timeseries_query,
     build_feature_flag_frontend_error_guardrail_query,
     build_funnel_query,
     build_retention_query,
+    canonical_actor_sql,
+    identity_alias_join_sql,
 )
 from app.clickhouse.selectors import build_selector_condition, selector_label
 from app.models.schemas import EventSelector
@@ -220,65 +224,109 @@ class TestQueryBuilders:
         assert "funnel_step_1_filter_0_value" in params
         assert "/checkout" not in sql
         assert "OR" in sql
-        assert "concat('u:', user_id)" in sql
-        assert "concat('a:', anonymous_id)" in sql
+        assert "concat('u:', e.user_id)" in sql
+        assert "concat('u:', actor_identity.resolved_user_id)" in sql
+        assert "concat('a:', e.anonymous_id)" in sql
 
-    def test_non_experiment_analytics_share_namespaced_actor_identity(self):
-        params = {}
+    def test_all_actor_analytics_use_tenant_scoped_fail_closed_aliases(self):
         queries = [
-            build_event_count_query([_selector("page")], params),
-            build_event_catalog_query(params),
-            build_cohort_query(_selector("purchase"), params),
+            build_event_count_query([_selector("page")], {}),
+            build_event_timeseries_query(_selector("page"), {}, "1 DAY"),
+            build_event_breakdown_query(_selector("page"), {}),
+            build_event_catalog_query({}),
+            build_cohort_query(_selector("purchase"), {}),
+            build_funnel_query([_selector("page"), _selector("purchase")], {}),
             build_retention_query(
                 _selector("signup"),
                 _selector("return"),
-                params,
+                {},
                 period="day",
+            ),
+            build_retention_query(
+                _selector("signup"),
+                _selector("return"),
+                {},
+                period="week",
             ),
         ]
 
         for sql in queries:
-            assert "concat('u:', user_id)" in sql
-            assert "concat('a:', anonymous_id)" in sql
+            assert "FROM resolved_identity_aliases" in sql
+            assert "WHERE project_id = %(project_id)s" in sql
+            assert "has_conflict" in sql
+            assert "resolved_user_id" in sql
+            assert "concat('a:'," in sql
+
+    def test_actor_resolution_prefers_direct_user_then_alias_then_anonymous(self):
+        actor = canonical_actor_sql("event", "actor_identity")
+
+        direct_user = "event.user_id != '', concat('u:', event.user_id)"
+        resolved_user = (
+            "actor_identity.resolved_user_id != '', "
+            "concat('u:', actor_identity.resolved_user_id)"
+        )
+        anonymous = "concat('a:', event.anonymous_id)"
+        assert actor.index(direct_user) < actor.index(resolved_user) < actor.index(anonymous)
+
+    def test_alias_join_is_tenant_bound_fail_closed_and_retroactive(self):
+        join = identity_alias_join_sql("event", "actor_identity")
+
+        assert "FROM resolved_identity_aliases" in join
+        assert "WHERE project_id = %(project_id)s" in join
+        assert "resolved_user_id, has_conflict" in join
+        assert "AND has_conflict = 0" not in join
+        assert "actor_identity.project_id = event.project_id" in join
+        assert "actor_identity.anonymous_id = event.anonymous_id" in join
+        assert "first_identified_at" not in join
+        assert "last_identified_at" not in join
 
     def test_guardrail_uses_session_then_namespaced_actor_fallback(self):
         sql = build_feature_flag_frontend_error_guardrail_query()
 
-        assert "concat('s:', session_id)" in sql
-        assert "concat('u:', user_id)" in sql
-        assert "concat('a:', anonymous_id)" in sql
+        assert "concat('s:', exposure.session_id)" in sql
+        assert "concat('u:', exposure.user_id)" in sql
+        assert "concat('u:', exposure_identity.resolved_user_id)" in sql
+        assert "concat('a:', exposure.anonymous_id)" in sql
         assert "concat('s:', f.session_id)" in sql
+        assert "concat('u:', health_identity.resolved_user_id)" in sql
+        assert sql.count("FROM resolved_identity_aliases") == 2
 
     def test_experiment_query_is_exposure_led_and_first_assignment_wins(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
-        assert "FROM feature_flag_exposures FINAL" in sql
-        assert "flag_key = %(flag_key)s" in sql
+        assert "FROM feature_flag_exposures AS exposure FINAL" in sql
+        assert "exposure.flag_key = %(flag_key)s" in sql
         assert "argMin(variant, tuple(first_exposure, message_id))" in sql
         assert "uniqExact(variant) > 1 AS crossed_over" in sql
         assert "LEFT JOIN metric_events" in sql
         assert "countIf(converted) AS conversions" in sql
         assert "INNER JOIN" not in sql
 
-    def test_experiment_query_namespaces_identities_without_stitching(self):
+    def test_experiment_query_stitches_exposures_and_metrics_through_same_aliases(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
-        assert sql.count("concat('u:', user_id)") >= 2
-        assert sql.count("concat('a:', anonymous_id)") >= 2
-        assert "user_id =" not in sql
-        assert "anonymous_id =" not in sql
-        assert " OR " not in sql
+        assert sql.count("FROM resolved_identity_aliases") == 2
+        assert "concat('u:', exposure_identity.resolved_user_id)" in sql
+        assert "concat('u:', metric_identity.resolved_user_id)" in sql
+        assert "exposure_identity.anonymous_id = exposure.anonymous_id" in sql
+        assert "metric_identity.anonymous_id = metric.anonymous_id" in sql
+        assert "ifNull(exposure_identity.has_conflict, 0)" in sql
+        assert "ifNull(metric_identity.has_conflict, 0)" in sql
+        assert "uniqExact(actor_id) AS identity_conflict_actors" in sql
+        assert "CROSS JOIN identity_quality" in sql
+        assert "exposure.user_id = metric.user_id" not in sql
+        assert "exposure.anonymous_id = metric.anonymous_id" not in sql
 
     def test_experiment_query_uses_authoritative_metric_and_half_open_window(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
-        assert "event_name = %(metric_event)s" in sql
+        assert "metric.event_name = %(metric_event)s" in sql
         assert "fromUnixTimestamp64Milli(%(start_ms)s, 'UTC')" in sql
         assert "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')" in sql
-        assert "first_exposure >= analysis_start" in sql
-        assert "first_exposure < analysis_end" in sql
-        assert "timestamp >= analysis_start" in sql
-        assert "timestamp < analysis_end" in sql
+        assert "exposure.first_exposure >= analysis_start" in sql
+        assert "exposure.first_exposure < analysis_end" in sql
+        assert "metric.timestamp >= analysis_start" in sql
+        assert "metric.timestamp < analysis_end" in sql
         assert sql.count("event_date BETWEEN toDate(analysis_start)") == 2
         assert "%(start_date)s" not in sql
         assert "%(end_date)s" not in sql

@@ -47,7 +47,7 @@ function RetentionGrid({ result, period }: { result: RetentionResponse; period: 
     return (
       <EmptyState
         title="No cohorts in range"
-        description="No users performed the cohort event in this date range — names are exact-match."
+        description="No actors first matched the cohort event in the selected dates — names are exact-match."
       />
     )
   }
@@ -137,6 +137,7 @@ export function RetentionPage() {
       ...range,
       cohort_selector: selectorToWire(cohortSelector),
       return_selector: selectorToWire(returnSelector),
+      cohort_mode: 'first_match_in_window',
       period,
     })
   }
@@ -146,8 +147,8 @@ export function RetentionPage() {
   return (
     <div className="space-y-4">
       <PageHeader
-        title="Retention"
-        description="Users who did the cohort event, and whether they came back and did the return event."
+        title="Window-relative retention"
+        description="Actors enter on their first matching cohort event in the selected dates. Existing actors may re-enter on that first in-window match; this is not lifetime acquisition retention."
         actions={
           <SavedViews
             screen="retention"
@@ -166,10 +167,10 @@ export function RetentionPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Cohort: users who did…</CardTitle>
+            <CardTitle className="text-sm">First matching event in selected dates</CardTitle>
           </CardHeader>
           <CardContent>
-            <SelectorBuilder value={cohortSelector} onChange={setCohortSelector} eventLabel="Cohort event name" />
+            <SelectorBuilder value={cohortSelector} onChange={setCohortSelector} eventLabel="Window-entry event name" />
           </CardContent>
         </Card>
         <Card>

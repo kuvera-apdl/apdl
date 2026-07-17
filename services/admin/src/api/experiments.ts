@@ -9,6 +9,7 @@ import {
   experimentUpdateResponseSchema,
   experimentUpdateSchema,
 } from './schemas/experiments'
+import { projectIdSchema } from './schemas/query'
 import type {
   ExperimentCreate,
   ExperimentCreateResponse,
@@ -69,6 +70,10 @@ export interface ExperimentResultsParams {
   projectId: string
 }
 
+function canonicalProjectId(params: ExperimentResultsParams): string {
+  return projectIdSchema.parse(params.projectId)
+}
+
 /** Query-service connection, not config. project_id is a query param here. */
 export function experimentResults(
   queryConn: ServiceConnection,
@@ -78,7 +83,7 @@ export function experimentResults(
 ): Promise<ExperimentResult> {
   return request(queryConn, `/v1/query/experiment/${encodeURIComponent(experimentKey)}`, {
     query: {
-      project_id: params.projectId,
+      project_id: canonicalProjectId(params),
     },
     schema: experimentResultSchema,
     signal: options.signal,
@@ -96,7 +101,7 @@ export function experimentResultsCurl(
 ): CurlSpec {
   return apiCurl(queryConn, 'GET', `/v1/query/experiment/${encodeURIComponent(experimentKey)}`, {
     query: {
-      project_id: params.projectId,
+      project_id: canonicalProjectId(params),
     },
   })
 }

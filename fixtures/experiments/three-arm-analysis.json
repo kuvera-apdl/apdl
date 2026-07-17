@@ -2,12 +2,22 @@
   "config_contract": {
     "key": "three_arm_checkout",
     "flag_key": "checkout_gate",
-    "status": "running",
+    "status": "completed",
     "control_variant": "baseline",
     "variants": ["blue", "baseline", "green"],
     "metric_event": "purchase",
-    "start_date": "2026-07-01T00:00:00Z",
-    "end_date": "2026-07-31T00:00:00Z",
+    "metric_direction": "increase",
+    "statistical_plan": {
+      "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+      "baseline_conversion_rate": 0.5,
+      "minimum_detectable_effect": 0.5,
+      "significance_level": 0.05,
+      "nominal_power": 0.8,
+      "required_sample_size_per_arm": 20,
+      "data_settlement_seconds": 5
+    },
+    "start_date": "2026-06-01T00:00:00Z",
+    "end_date": "2026-06-30T00:00:00Z",
     "version": 7
   },
   "clickhouse_aggregates": [
@@ -15,32 +25,37 @@
       "variant": "baseline",
       "sample_size": 20,
       "conversions": 0,
-      "crossover_actors": 1
+      "crossover_actors": 1,
+      "identity_conflict_actors": 0
     },
     {
       "variant": "blue",
       "sample_size": 20,
       "conversions": 0,
-      "crossover_actors": 0
+      "crossover_actors": 0,
+      "identity_conflict_actors": 0
     },
     {
       "variant": "green",
       "sample_size": 20,
       "conversions": 0,
-      "crossover_actors": 0
+      "crossover_actors": 0,
+      "identity_conflict_actors": 0
     },
     {
       "variant": "retired",
       "sample_size": 2,
       "conversions": 1,
-      "crossover_actors": 1
+      "crossover_actors": 1,
+      "identity_conflict_actors": 0
     }
   ],
   "expected": {
-    "analysis_status": "ready",
+    "analysis_status": "decision_snapshot",
     "arm_order": ["blue", "baseline", "green"],
     "comparison_order": ["blue", "green"],
     "crossover_actors": 2,
+    "identity_conflict_actors": 0,
     "unknown_variant_actors": 2,
     "raw_p_value": 1.0,
     "adjusted_p_value": 1.0
@@ -88,6 +103,7 @@
         "green": 0
       },
       "crossover_actors": 2,
+      "identity_conflict_actors": 0,
       "unknown_variant_actors": 3,
       "raw_p_value": 1.0,
       "adjusted_p_value": 1.0

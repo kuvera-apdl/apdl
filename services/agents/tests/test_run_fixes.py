@@ -40,7 +40,7 @@ def _ctx(**ov: Any) -> AgentContext:
 async def test_feature_proposal_gather_degrades_without_pool():
     agent = fp.FeatureProposalAgent()
     out = await agent.gather(_ctx(), {}, {})
-    assert out == {"ship_verdicts": []}
+    assert out == {"disabled": True, "ship_verdicts": []}
     assert agent.build_prompt(_ctx(), {}, out) is None
 
 

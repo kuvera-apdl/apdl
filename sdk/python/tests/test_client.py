@@ -88,6 +88,22 @@ def test_identify_and_group_and_page():
     assert by_type["page"]["properties"]["name"] == "/home"
 
 
+def test_identify_with_both_ids_emits_the_canonical_alias_assertion():
+    transport = RecordingTransport()
+    client = make_client(transport)
+
+    client.identify("u1", {"plan": "pro"}, anonymous_id="anon1")
+    client.flush()
+    client.shutdown()
+
+    [event] = transport.all_events()
+    assert event["type"] == "identify"
+    assert event["user_id"] == "u1"
+    assert event["anonymous_id"] == "anon1"
+    assert event["traits"] == {"plan": "pro"}
+    assert _ingestion_validator()(event)["valid"] is True
+
+
 def test_event_requires_identity():
     client = make_client(RecordingTransport())
     with pytest.raises(ValueError):

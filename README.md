@@ -296,10 +296,10 @@ per-flag audit history — see the [config service README](services/config/READM
 |---|---|---|
 | `POST` | `/v1/query/events/count` | Count one or more event selectors |
 | `POST` | `/v1/query/events/timeseries` | Time-bucketed counts for one selector |
-| `POST` | `/v1/query/events/breakdown` | Property breakdown for one selector |
+| `POST` | `/v1/query/events/breakdown` | Typed scalar property breakdown for one selector |
 | `POST` | `/v1/query/funnel` | N-step funnel analysis (windowFunnel) |
 | `POST` | `/v1/query/cohort` | Cohort analysis |
-| `POST` | `/v1/query/retention` | Retention curves |
+| `POST` | `/v1/query/retention` | Window-relative retention (`first_match_in_window`) |
 | `GET` | `/v1/query/experiment/:key` | Config-owned conversion experiment analysis |
 | `POST` | `/v1/query/guardrails/evaluate` | Evaluate flag guardrails |
 | `GET` | `/health`, `/ready` | Health / readiness |
@@ -367,6 +367,11 @@ Breakdown of filtered clicks:
 }
 ```
 
+Breakdown rows include `property_type` (`string`, `integer`, `float`, or
+`boolean`) plus a canonical string `property_value`. Type is part of the bucket,
+so values such as the integer `1` and string `"1"` remain distinct. Missing,
+null, array, and object properties are excluded.
+
 Page/click-path funnel:
 
 ```json
@@ -390,6 +395,11 @@ Page/click-path funnel:
 
 Property-filtered retention:
 
+Retention is intentionally window-relative. Actors enter on their first
+matching cohort event in the selected dates, so existing actors may re-enter;
+this is not lifetime acquisition retention. The required `cohort_mode` makes
+that behavior explicit in every request and response.
+
 ```json
 {
   "project_id": "apiasport",
@@ -403,6 +413,7 @@ Property-filtered retention:
     "event_name": "$click",
     "filters": [{"property": "href", "operator": "eq", "value": "/signup"}]
   },
+  "cohort_mode": "first_match_in_window",
   "period": "day"
 }
 ```

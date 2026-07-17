@@ -10,6 +10,7 @@ import {
   eventPropertyFilterSchema,
   funnelRequestSchema,
   funnelResponseSchema,
+  retentionRequestSchema,
   retentionResponseSchema,
   timeseriesResponseSchema,
 } from '../../src/api/schemas/query'
@@ -70,6 +71,14 @@ describe('request schemas', () => {
       eventCountRequestSchema.safeParse({ ...base, start_date: '2026-06-11' }).success,
     ).toBe(false)
     expect(eventCountRequestSchema.safeParse({ ...base, selectors: [] }).success).toBe(false)
+    expect(eventCountRequestSchema.safeParse({ ...base, project_id: 'A'.repeat(64) }).success).toBe(
+      true,
+    )
+    for (const projectId of [1, '', 'demo-project', 'demo_project', ' demo', 'A'.repeat(65)]) {
+      expect(eventCountRequestSchema.safeParse({ ...base, project_id: projectId }).success).toBe(
+        false,
+      )
+    }
   })
 
   test('funnel requires 2–20 steps and window 1–90', () => {
@@ -84,6 +93,25 @@ describe('request schemas', () => {
     expect(funnelRequestSchema.safeParse(base).success).toBe(true)
     expect(funnelRequestSchema.safeParse({ ...base, steps: [step] }).success).toBe(false)
     expect(funnelRequestSchema.safeParse({ ...base, window_days: 91 }).success).toBe(false)
+  })
+
+  test('retention requires the canonical window-relative cohort mode', () => {
+    const base = {
+      project_id: 'demo',
+      start_date: '2026-06-01',
+      end_date: '2026-06-10',
+      cohort_selector: { event_name: 'signup', filters: [] },
+      return_selector: { event_name: 'login', filters: [] },
+      cohort_mode: 'first_match_in_window',
+      period: 'day',
+    }
+    expect(retentionRequestSchema.safeParse(base).success).toBe(true)
+    const withoutMode: Partial<typeof base> = { ...base }
+    delete withoutMode.cohort_mode
+    expect(retentionRequestSchema.safeParse(withoutMode).success).toBe(false)
+    expect(
+      retentionRequestSchema.safeParse({ ...base, cohort_mode: 'all_history' }).success,
+    ).toBe(false)
   })
 })
 
@@ -108,15 +136,38 @@ describe('response schemas (exact SQL alias mirrors)', () => {
       breakdownResponseSchema.safeParse({
         selector: '$click',
         property: 'href',
-        results: [{ selector: '$click', property_value: '/pricing', event_count: 7, unique_users: 6 }],
+        results: [
+          {
+            selector: '$click',
+            property_type: 'string',
+            property_value: '/pricing',
+            event_count: 7,
+            unique_users: 6,
+          },
+        ],
       }).success,
     ).toBe(true)
-    // Aliased/wrong row keys must fail (Strict Schema Rule).
+    // Missing type and aliased/wrong row keys must fail (Strict Schema Rule).
     expect(
       breakdownResponseSchema.safeParse({
         selector: '$click',
         property: 'href',
         results: [{ selector: '$click', value: '/pricing', event_count: 7, unique_users: 6 }],
+      }).success,
+    ).toBe(false)
+    expect(
+      breakdownResponseSchema.safeParse({
+        selector: '$click',
+        property: 'href',
+        results: [
+          {
+            selector: '$click',
+            property_type: 'number',
+            property_value: '1',
+            event_count: 7,
+            unique_users: 6,
+          },
+        ],
       }).success,
     ).toBe(false)
   })
@@ -139,11 +190,19 @@ describe('response schemas (exact SQL alias mirrors)', () => {
     ).toBe(true)
     expect(
       retentionResponseSchema.safeParse({
+        cohort_mode: 'first_match_in_window',
         cohort_selector: '$pageview',
         return_selector: '$click',
         cohorts: [{ cohort_date: '2026-06-01', size: 50, retention: [100, 40.5, 22] }],
       }).success,
     ).toBe(true)
+    expect(
+      retentionResponseSchema.safeParse({
+        cohort_selector: '$pageview',
+        return_selector: '$click',
+        cohorts: [],
+      }).success,
+    ).toBe(false)
     expect(
       cohortResponseSchema.safeParse({
         metric_selector: '$pageview',
