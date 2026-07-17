@@ -41,7 +41,6 @@ PACKAGES=(
   "agents|services/agents|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "codegen|services/codegen|.venv/bin/ruff check app/ tests/|.venv/bin/python -m pytest -q"
   "writer|pipeline/redis|.venv/bin/ruff check clickhouse_writer.py tests/|.venv/bin/python -m pytest -q"
-  "etl-experimental|pipeline/etl|.venv/bin/ruff check etl/ scripts/ tests/|.venv/bin/python -m pytest -q"
 )
 
 LOG_DIR="$(mktemp -d)"

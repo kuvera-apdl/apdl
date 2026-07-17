@@ -6,8 +6,8 @@
 > Kubernetes, SaaS, multi-tenant, multi-region, backup/restore, compliance, SLO,
 > or production capability exists. APDL 0.3.0 supports only the fresh,
 > single-node, source-built OSS Compose core described in
-> [Support](../SUPPORT.md). ETL v2, Kafka, Flink, Kubernetes, Terraform,
-> multi-replica operation, upgrades, backup, and restore are unsupported.
+> [Support](../SUPPORT.md). Kafka, Flink, Kubernetes, Terraform, multi-replica
+> operation, upgrades, backup, and restore are unsupported.
 
 Status: Historical draft v5 (unimplemented; 3-layer ETL + Agent design on SQS / Lambda / ECS Fargate)
 Owner: Platform Architecture

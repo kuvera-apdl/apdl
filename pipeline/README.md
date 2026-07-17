@@ -1,13 +1,11 @@
 # Pipeline
 
-The APDL data pipeline: moves events from Redis Streams into ClickHouse, owns
-the ClickHouse schema, and provides the ETL framework for custom event types.
+The APDL data pipeline moves events from Redis Streams into ClickHouse and owns
+the ClickHouse and PostgreSQL migration paths.
 
-For APDL 0.3.0, only the Redis-to-ClickHouse writer and the PostgreSQL and
-ClickHouse migrations used by the source-built single-node core are supported.
-ETL v2, Kafka, and Flink are disconnected future/experimental surfaces: they
-are not started by the supported stack, published as release artifacts, or
-covered by the runtime support contract.
+For APDL 0.3.0, the Redis-to-ClickHouse writer and the PostgreSQL and ClickHouse
+migrations used by the source-built single-node core are supported. Redis
+Streams is the only event bus included in APDL.
 
 ## Layout
 
@@ -16,17 +14,16 @@ covered by the runtime support contract.
 | `redis/` | Supported core | ClickHouse writer — consumes `events:raw:{project_id}` Redis Streams and batch-inserts into ClickHouse |
 | `clickhouse/` | Supported core migrations | SQL migrations and reference schemas (tables + materialized views) |
 | `postgres/` | Supported core migrations | The authoritative, versioned PostgreSQL migration sequence |
-| `etl/` | Unsupported experiment | Standalone custom-events ETL framework (`apdl-etl` package), not wired to live events |
-| `kafka/` | Unsupported design | Future Kafka topic definitions, not a runtime |
-| `flink/` | Unsupported design | Future Flink jobs, not a runtime |
 
 ## ClickHouse writer
 
 `redis/clickhouse_writer.py` is a single-file async consumer
-(deps: `redis`, `clickhouse-driver`). It reads from every `events:raw:*`
-stream — discovered via `SCAN`, or pinned with `PROJECT_IDS` — using the
-`clickhouse-writer` consumer group (consumer name `worker-{pid}`) and
-batch-inserts into the `events` table.
+(deps: `redis`, `clickhouse-driver`). The synchronous ClickHouse driver is
+isolated in one dedicated worker thread, so inserts cannot block Redis reads,
+pending claims, monitoring, or signal handling on the asyncio loop. It reads
+from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
+`PROJECT_IDS` — using the `clickhouse-writer` consumer group (consumer name
+`worker-{pid}`) and batch-inserts into the `events` table.
 
 - **Batching:** rotates fairly across streams and reads one tenant at a time so
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
@@ -60,7 +57,11 @@ batch-inserts into the `events` table.
   backoff shared by the consumer and periodic flusher; events are not dropped
   after an arbitrary retry count. Only narrow client-side row serialization
   errors are terminal—server/schema failures retain the batch.
-- **Shutdown:** SIGINT/SIGTERM trigger a final flush and stats log.
+- **Shutdown:** SIGINT/SIGTERM trigger a bounded final flush and stats log.
+  Cancellation never marks a still-running synchronous insert as complete. If
+  the shutdown deadline expires, the writer closes the native ClickHouse socket
+  and leaves the Redis deliveries pending for replay instead of ACKing an
+  unobserved insert result.
 
 The deletion contract permits any number of consumers in the one required
 `clickhouse-writer` group, but no second durable consumer group. Adding another
@@ -93,17 +94,42 @@ bounded producers. Mixed old/new producers are unsupported because one legacy
 producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
-`CLICKHOUSE_URL` (default `clickhouse://localhost:9000/apdl`), `BUFFER_SIZE`,
+`CLICKHOUSE_NATIVE_URL` (default
+`clickhouse://apdl:apdl_dev@localhost:9000/apdl`), `BUFFER_SIZE`,
 `FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),
 `PENDING_CLAIM_IDLE_MS` (default 60000),
-`PENDING_CLAIM_INTERVAL_SECONDS` (default 30), and `PROJECT_IDS` (optional
-comma-separated allowlist).
+`PENDING_CLAIM_INTERVAL_SECONDS` (default 30),
+`CLICKHOUSE_CONNECT_TIMEOUT_SECONDS` (default 5),
+`CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS` (default 30),
+`CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS` (default 5),
+`SHUTDOWN_TIMEOUT_SECONDS` (default 10), and `PROJECT_IDS` (optional
+comma-separated allowlist). The writer owns the three native-driver timeout
+query parameters and replaces conflicting values embedded in the URL.
 
 ## ClickHouse schema
 
 Migrations live in `clickhouse/migrations/` (applied by
 `make migrate-clickhouse`); `clickhouse/schemas/events.sql` is a documentation
 copy of the events table.
+
+### Canonical developer-preview event contract
+
+The release has one event contract and one analytical source of truth:
+
+1. SDKs send the strict flat event shape validated by
+   `services/ingestion/app/models/schemas.py`.
+2. Ingestion publishes that complete JSON record to
+   `events:raw:{project_id}`.
+3. The Redis writer validates the same field set and inserts into `events`.
+4. Query SQL and ClickHouse materialized views read `events` (using `FINAL`
+   where retry deduplication is required).
+
+There is no envelope alias, v2 dual-write, or fallback loader in the supported
+runtime. The unused service envelope models and prototype v2 SQL were removed.
+Existing local databases created from older scaffolding may still contain inert
+v2 tables; they are not read, reconciled, migrated, or supported. In-place
+upgrades are outside the 0.3.0 preview contract, so use a fresh stack for release
+checks.
 
 **Tables**
 
@@ -202,26 +228,6 @@ unprojectable `feature_flags` table as `feature_flags_legacy`, and migration 007
 preserves runtime-evidence rows without an exact CI binding in
 `codegen_runtime_evidence_observations_legacy_unbound`.
 
-## ETL framework (unsupported in 0.3.0)
-
-`etl/` is a standalone, dependency-light experimental package (Pydantic only) that
-standardizes how custom records reach the warehouse: every record is wrapped
-in a canonical envelope keyed by a `_schema` discriminator, processed through
-a `decode → validate → enrich → build_row` Template Method lifecycle with
-per-record DLQ isolation, routed by a schema registry, and handed to a
-pluggable `Loader`. No supported producer, consumer, loader process, Compose
-service, or release artifact connects it to the 0.3.0 runtime. New event types
-can be scaffolded for research with `make new-transform`; this is not a
-supported extension contract. Full design details:
-[`etl/docs/etl-framework.md`](etl/docs/etl-framework.md).
-
-## Kafka and Flink (unsupported designs)
-
-`kafka/topics.yaml` and `flink/` preserve future scaling ideas. No default
-runtime, build artifact, CI integration test, or supported deployment connects
-them to APDL. Do not treat the files as migration guidance or an available
-alternative to Redis Streams.
-
 ## Running locally
 
 ```bash
@@ -240,6 +246,4 @@ outside the 0.3.0 support boundary.
 ```bash
 make test-writer # pytest for the Redis ClickHouse writer
 make lint-writer # ruff for the writer and its tests
-make test-etl   # pytest for the ETL framework (pipeline/etl/tests/)
-make lint-etl   # ruff for etl/, scripts/, tests/
 ```

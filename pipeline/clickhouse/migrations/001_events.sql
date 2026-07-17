@@ -1,4 +1,4 @@
--- Migration 001: Events table
+-- Migration 001: canonical developer-preview events table
 CREATE TABLE IF NOT EXISTS events (
     project_id     String,
     event_id       UUID DEFAULT generateUUIDv4(),

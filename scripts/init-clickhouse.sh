@@ -76,6 +76,13 @@ for migration in "$CLICKHOUSE_MIGRATIONS_DIR"/*.sql; do
         exit 1
     fi
 
+    if grep -qiE \
+        '(^|[^A-Za-z0-9_])(events_v2|decisions_v2|feeds_v2)([^A-Za-z0-9_]|$)' \
+        "$migration"; then
+        echo "Unsupported prototype v2 schema in release migration: $migration" >&2
+        exit 1
+    fi
+
     echo "  Applying $(basename "$migration")"
     docker exec -i "$container_id" clickhouse-client \
         --user "$CLICKHOUSE_USER" \
