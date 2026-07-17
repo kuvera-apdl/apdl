@@ -27,7 +27,7 @@ ARG CODEGEN_REVISION
 # in an intermediate stage, then copy only that pruned tree into the final image;
 # deleting them after a direct COPY would leave them recoverable from an image
 # layer.
-FROM python:3.14-slim AS candidate-source
+FROM python:3.12-slim AS candidate-source
 WORKDIR /candidate
 COPY pyproject.toml .
 COPY app/ app/
@@ -37,7 +37,7 @@ RUN rm -rf \
         app/evaluations/oracles_v1.json \
     && find app -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
-FROM python:3.14-slim
+FROM python:3.12-slim
 ARG CODEGEN_REVISION
 RUN test -n "$CODEGEN_REVISION" \
     && test "$CODEGEN_REVISION" != "development-unversioned"
