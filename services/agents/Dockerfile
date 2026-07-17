@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 WORKDIR /app
 
 # onnxruntime (pulled in by fastembed) needs libgomp at runtime.
