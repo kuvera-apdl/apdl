@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import pytest
 
 from app.tools import experiments
@@ -13,6 +11,48 @@ VALID_STATISTICAL_PLAN = {
     "required_sample_size_per_arm": 20,
     "data_settlement_seconds": 300,
 }
+IDEMPOTENCY_KEY = "command:effect"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"experiments": []},
+        {"experiments": [], "count": 0, "extra": True},
+        {"experiments": {}, "count": 0},
+        {"experiments": [], "count": 1},
+        [],
+    ],
+)
+async def test_get_active_experiments_rejects_incomplete_config_evidence(
+    monkeypatch, payload
+):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(experiments.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(ValueError, match="Config experiments response"):
+        await experiments.get_active_experiments("apdl")
 
 
 @pytest.mark.asyncio
@@ -58,7 +98,7 @@ async def test_get_experiment_results_uses_authoritative_query_contract(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
+async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
     captured = {}
 
     class FakeResponse:
@@ -70,7 +110,7 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
-            pass
+            captured["headers"] = kwargs["headers"]
 
         async def __aenter__(self):
             return self
@@ -86,8 +126,9 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
 
     monkeypatch.setattr(experiments.httpx, "AsyncClient", FakeClient)
 
-    result = await experiments.create_experiment_config(
+    result = await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_checkout",
         hypothesis="Checkout changes should improve conversion.",
         variants=[
@@ -103,15 +144,12 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
     assert result == {"created": True, "key": "exp_checkout"}
     assert captured["path"] == "/v1/admin/experiments"
     assert captured["params"] == {"project_id": "apdl"}
+    assert captured["headers"]["Idempotency-Key"] == IDEMPOTENCY_KEY
     payload = captured["json"]
-    start_date = datetime.fromisoformat(payload.pop("start_date"))
-    end_date = datetime.fromisoformat(payload.pop("end_date"))
-    assert start_date.tzinfo is not None
-    assert (end_date - start_date).days == 14
     assert payload == {
         "key": "exp_checkout",
         "flag_key": "exp_checkout",
-        "status": "running",
+        "status": "draft",
         "description": "Checkout changes should improve conversion.",
         "variants": [
             {"key": "control", "weight": 1, "description": "Current checkout"},
@@ -132,7 +170,7 @@ async def test_create_experiment_config_uses_config_admin_schema(monkeypatch):
 
 
 def _capture_post(monkeypatch) -> dict:
-    """Patch httpx.AsyncClient so create_experiment_config's POST is captured."""
+    """Patch httpx.AsyncClient so create_experiment_draft's POST is captured."""
     captured: dict = {}
 
     class _Resp:
@@ -165,8 +203,9 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
     _capture_post(monkeypatch)
 
     with pytest.raises(ValueError, match="requires exactly"):
-        await experiments.create_experiment_config(
+        await experiments.create_experiment_draft(
             project_id="apdl",
+            idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
             hypothesis="h",
             variants=[
@@ -189,8 +228,9 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
         )
 
     with pytest.raises(ValueError, match="unsupported targeting operator"):
-        await experiments.create_experiment_config(
+        await experiments.create_experiment_draft(
             project_id="apdl",
+            idempotency_key=IDEMPOTENCY_KEY,
             experiment_id="exp_x",
             hypothesis="h",
             variants=[
@@ -212,8 +252,9 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
 async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
     captured = _capture_post(monkeypatch)
 
-    await experiments.create_experiment_config(
+    await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_x",
         hypothesis="h",
         variants=[{"key": "control", "weight": 50}, {"key": "treatment", "weight": 50}],
@@ -242,8 +283,9 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
 async def test_empty_targeting_conditions_are_omitted(monkeypatch):
     captured = _capture_post(monkeypatch)
 
-    await experiments.create_experiment_config(
+    await experiments.create_experiment_draft(
         project_id="apdl",
+        idempotency_key=IDEMPOTENCY_KEY,
         experiment_id="exp_y",
         hypothesis="h",
         variants=[{"key": "control", "weight": 1}, {"key": "treatment", "weight": 1}],
@@ -257,10 +299,11 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_running_experiment_requires_metric_and_bounded_duration(monkeypatch):
+async def test_experiment_draft_requires_primary_metric(monkeypatch):
     _capture_post(monkeypatch)
     common = {
         "project_id": "apdl",
+        "idempotency_key": IDEMPOTENCY_KEY,
         "experiment_id": "exp_y",
         "hypothesis": "h",
         "variants": [
@@ -272,13 +315,7 @@ async def test_running_experiment_requires_metric_and_bounded_duration(monkeypat
     }
 
     with pytest.raises(ValueError, match="primary_metric.event"):
-        await experiments.create_experiment_config(**common, primary_metric={})
-    with pytest.raises(ValueError, match="estimated_duration_days"):
-        await experiments.create_experiment_config(
-            **common,
-            primary_metric={"event": "purchase"},
-            estimated_duration_days=0,
-        )
+        await experiments.create_experiment_draft(**common, primary_metric={})
 
 
 def test_automatic_experiment_status_mutator_is_not_exposed():

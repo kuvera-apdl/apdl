@@ -4,7 +4,9 @@ Tier 1 (fast): High-throughput, lower-cost tasks — summarisation, classificati
                UI config generation.
 Tier 2 (reasoning): Complex analysis, experiment design, feature proposals.
 
-Each tier tries providers in order and falls back on failure.
+Each request is authorized, budgeted, and recorded in PostgreSQL before any
+provider egress. Fallback happens only for classified retryable failures and
+may cross a vendor boundary only when the project's explicit policy permits it.
 
 Two entry points share the tier/fallback machinery:
 
@@ -18,17 +20,47 @@ Two entry points share the tier/fallback machinery:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 import anthropic
+import httpx
 import openai
 from google import genai
 from google.genai import types as genai_types
+
+from app.llm.contracts import (
+    ErrorClassification,
+    LlmBudgetExceededError,
+    LlmCostOverrunError,
+    LlmGovernanceError,
+    LlmGovernanceUnavailableError,
+    LlmPolicyDeniedError,
+    LlmRequestContext,
+    LlmRunInactiveError,
+    ProviderErrorDisposition,
+    ProviderName,
+    ProviderPolicy,
+    canonical_prompt_bytes,
+    classify_provider_error,
+    conservative_input_token_bound,
+    prompt_sha256,
+)
+from app.store.llm_governance import (
+    begin_llm_call,
+    block_provider_attempt_before_egress,
+    finish_llm_call,
+    finish_provider_attempt,
+    load_project_llm_policy,
+    mark_provider_egress,
+    prepare_provider_attempt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +78,40 @@ _google_client: genai.Client | None = None
 _local_client: openai.AsyncOpenAI | None = None
 
 
+def _normalized_endpoint_url(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    try:
+        parsed = httpx.URL(raw)
+    except Exception as exc:
+        raise ValueError("LLM provider endpoint is not a valid URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.host:
+        raise ValueError("LLM provider endpoint must be an absolute HTTP(S) URL")
+    if parsed.userinfo:
+        raise ValueError("LLM provider endpoint must not contain user information")
+    return str(parsed).rstrip("/")
+
+
+def _provider_endpoint_url(provider: str) -> str:
+    if provider == "openai":
+        value = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    elif provider == "anthropic":
+        value = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    elif provider == "google":
+        value = "https://generativelanguage.googleapis.com"
+    elif provider == "local":
+        value = os.getenv("LOCAL_LLM_URL", "")
+    else:
+        raise ValueError(f"Unknown provider {provider!r}")
+    return _normalized_endpoint_url(value)
+
+
 def _get_openai() -> openai.AsyncOpenAI:
     global _openai_client
     if _openai_client is None:
         _openai_client = openai.AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", ""), timeout=_REQUEST_TIMEOUT
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            base_url=_provider_endpoint_url("openai"),
+            timeout=_REQUEST_TIMEOUT,
         )
     return _openai_client
 
@@ -59,7 +120,9 @@ def _get_anthropic() -> anthropic.AsyncAnthropic:
     global _anthropic_client
     if _anthropic_client is None:
         _anthropic_client = anthropic.AsyncAnthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY", ""), timeout=_REQUEST_TIMEOUT
+            api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            base_url=_provider_endpoint_url("anthropic"),
+            timeout=_REQUEST_TIMEOUT,
         )
     return _anthropic_client
 
@@ -78,7 +141,7 @@ def _get_local() -> openai.AsyncOpenAI:
     global _local_client
     if _local_client is None:
         _local_client = openai.AsyncOpenAI(
-            base_url=os.getenv("LOCAL_LLM_URL", "http://localhost:11434/v1"),
+            base_url=_provider_endpoint_url("local"),
             api_key="local",  # local servers don't require a real key
             timeout=_REQUEST_TIMEOUT,
         )
@@ -96,7 +159,7 @@ _TIER_DEFAULTS: dict[str, dict[str, Any]] = {
 
 
 def _tier_models(tier: str) -> list[dict[str, str]]:
-    """Return an ordered list of (provider, model) pairs for the given tier.
+    """Return ordered provider/model/endpoint candidates for the tier.
 
     Providers whose API key is not set are skipped (except local, which
     is always available when LOCAL_LLM_URL is configured).
@@ -119,7 +182,18 @@ def _tier_models(tier: str) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for provider, model in candidates:
         if _provider_available(provider):
-            result.append({"provider": provider, "model": model})
+            try:
+                endpoint_url = _provider_endpoint_url(provider)
+            except ValueError:
+                logger.error("Ignoring %s LLM candidate with invalid endpoint", provider)
+                continue
+            result.append(
+                {
+                    "provider": provider,
+                    "model": model,
+                    "endpoint_url": endpoint_url,
+                }
+            )
     return result
 
 
@@ -131,7 +205,8 @@ def _provider_available(provider: str) -> bool:
     if provider == "google":
         return bool(os.getenv("GOOGLE_API_KEY"))
     if provider == "local":
-        # Available when explicitly configured OR as last-resort fallback
+        # Candidate only when its endpoint is explicitly configured. Project
+        # policy still authorizes the exact local model before any request.
         return bool(os.getenv("LOCAL_LLM_URL"))
     return False
 
@@ -140,13 +215,71 @@ def _provider_available(provider: str) -> bool:
 # Provider-specific completion functions
 # ---------------------------------------------------------------------------
 
+
+@dataclass(frozen=True)
+class TextCompletion:
+    """Provider text plus provider-reported usage, when available."""
+
+    text: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        candidate = getattr(usage, name, None)
+        if isinstance(candidate, int) and candidate >= 0:
+            return candidate
+    return None
+
+
+def _usage_tokens(usage: Any) -> tuple[int | None, int | None]:
+    if usage is None:
+        return None, None
+
+    return (
+        _usage_value(usage, "input_tokens", "prompt_tokens", "prompt_token_count"),
+        _usage_value(
+            usage, "output_tokens", "completion_tokens", "candidates_token_count"
+        ),
+    )
+
+
+def _anthropic_usage_tokens(usage: Any) -> tuple[int | None, int | None]:
+    if usage is None:
+        return None, None
+    ordinary_input = _usage_value(usage, "input_tokens")
+    cache_creation = _usage_value(usage, "cache_creation_input_tokens") or 0
+    cache_read = _usage_value(usage, "cache_read_input_tokens") or 0
+    input_tokens = (
+        ordinary_input + cache_creation + cache_read
+        if ordinary_input is not None
+        else None
+    )
+    return input_tokens, _usage_value(usage, "output_tokens")
+
+
+def _google_usage_tokens(usage: Any) -> tuple[int | None, int | None]:
+    if usage is None:
+        return None, None
+    prompt = _usage_value(usage, "prompt_token_count")
+    tool_prompt = _usage_value(usage, "tool_use_prompt_token_count") or 0
+    candidates = _usage_value(usage, "candidates_token_count")
+    thoughts = _usage_value(usage, "thoughts_token_count") or 0
+    input_tokens = prompt + tool_prompt if prompt is not None else None
+    output_tokens = candidates + thoughts if candidates is not None else None
+    return input_tokens, output_tokens
+
+
 def _is_openai_reasoning_model(model: str) -> bool:
     return model.startswith(("gpt-5", "o1", "o3", "o4"))
 
 
 async def _openai_completion(
-    model: str, messages: list[dict[str, str]], **kwargs: Any,
-) -> str:
+    model: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> TextCompletion:
     client = _get_openai()
     if _is_openai_reasoning_model(model):
         # Reasoning-family models 400 on `max_tokens` (they take
@@ -155,13 +288,22 @@ async def _openai_completion(
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         kwargs.pop("temperature", None)
-    resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
-    return resp.choices[0].message.content or ""
+    resp = await client.chat.completions.create(
+        model=model, messages=messages, **kwargs
+    )
+    input_tokens, output_tokens = _usage_tokens(getattr(resp, "usage", None))
+    return TextCompletion(
+        text=resp.choices[0].message.content or "",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 async def _anthropic_completion(
-    model: str, messages: list[dict[str, str]], **kwargs: Any,
-) -> str:
+    model: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> TextCompletion:
     client = _get_anthropic()
     system_text = ""
     chat_messages: list[dict[str, str]] = []
@@ -182,12 +324,19 @@ async def _anthropic_completion(
     # content can be empty (e.g. refusal) or lead with a non-text block —
     # indexing [0].text would raise and misreport it as a provider failure.
     parts = [block.text for block in resp.content if getattr(block, "text", None)]
-    return "\n".join(parts)
+    input_tokens, output_tokens = _anthropic_usage_tokens(getattr(resp, "usage", None))
+    return TextCompletion(
+        text="\n".join(parts),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 async def _google_completion(
-    model: str, messages: list[dict[str, str]], **kwargs: Any,
-) -> str:
+    model: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> TextCompletion:
     client = _get_google()
     system_instruction: str | None = None
     contents: list[dict[str, Any]] = []
@@ -209,15 +358,31 @@ async def _google_completion(
         contents=contents,
         config=config,
     )
-    return resp.text or ""
+    input_tokens, output_tokens = _google_usage_tokens(
+        getattr(resp, "usage_metadata", None)
+    )
+    return TextCompletion(
+        text=resp.text or "",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 async def _local_completion(
-    model: str, messages: list[dict[str, str]], **kwargs: Any,
-) -> str:
+    model: str,
+    messages: list[dict[str, str]],
+    **kwargs: Any,
+) -> TextCompletion:
     client = _get_local()
-    resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
-    return resp.choices[0].message.content or ""
+    resp = await client.chat.completions.create(
+        model=model, messages=messages, **kwargs
+    )
+    input_tokens, output_tokens = _usage_tokens(getattr(resp, "usage", None))
+    return TextCompletion(
+        text=resp.choices[0].message.content or "",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 _PROVIDER_FN = {
@@ -227,99 +392,335 @@ _PROVIDER_FN = {
     "local": _local_completion,
 }
 
-_CompletionT = TypeVar("_CompletionT")
+
+class _AuditedCompletion(Protocol):
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+_CompletionT = TypeVar("_CompletionT", bound=_AuditedCompletion)
+
+
+def _governance_error_classification(
+    exc: LlmGovernanceError,
+) -> ErrorClassification:
+    if isinstance(exc, LlmBudgetExceededError):
+        return "budget_exceeded"
+    if isinstance(exc, LlmRunInactiveError):
+        return "run_inactive"
+    if isinstance(exc, LlmPolicyDeniedError):
+        return "policy_denied"
+    if isinstance(exc, LlmCostOverrunError):
+        return "cost_overrun"
+    if isinstance(exc, LlmGovernanceUnavailableError):
+        return "governance_unavailable"
+    return "unknown"
 
 
 async def _route_with_fallback(
     model_tier: str,
     *,
+    context: LlmRequestContext,
+    prompt_bytes: bytes,
     operation: str,
     invoke: Callable[[str, str, dict[str, Any]], Awaitable[_CompletionT]],
     kwargs: dict[str, Any],
 ) -> _CompletionT:
-    """Run one completion shape through the shared provider fallback chain."""
+    """Run one completion through policy, budget, audit, and safe fallback."""
     if model_tier not in _TIER_DEFAULTS:
         raise ValueError(
             f"Unknown model_tier {model_tier!r} — expected one of "
             f"{sorted(_TIER_DEFAULTS)}"
         )
 
-    models = _tier_models(model_tier)
-    if not models:
-        raise RuntimeError(
-            f"No LLM providers configured for tier '{model_tier}'. "
-            "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, or "
-            "LOCAL_LLM_URL."
-        )
-
     merged = {**_TIER_DEFAULTS[model_tier], **kwargs}
-    last_exc: Exception | None = None
+    max_output_tokens = merged["max_tokens"]
+    if (
+        not isinstance(max_output_tokens, int)
+        or isinstance(max_output_tokens, bool)
+        or max_output_tokens <= 0
+    ):
+        raise ValueError("max_tokens must be a positive integer")
+    prompt_hash = prompt_sha256(prompt_bytes)
+    estimated_input_tokens = conservative_input_token_bound(prompt_bytes)
+
+    policy = await load_project_llm_policy(context)
+    call_id = await begin_llm_call(context, prompt_sha256=prompt_hash)
+    models = _tier_models(model_tier)
+    eligible: list[tuple[dict[str, str], ProviderPolicy]] = []
     for entry in models:
-        provider = entry["provider"]
+        provider_policy = policy.provider_policy(
+            context,
+            entry["provider"],
+            entry["model"],
+            entry["endpoint_url"],
+        )
+        if provider_policy is not None:
+            eligible.append((entry, provider_policy))
+
+    if not models:
+        message = (
+            f"No LLM providers are configured for tier {model_tier!r}; set a "
+            "provider credential or LOCAL_LLM_URL"
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="blocked",
+            error_classification="no_provider",
+            error_message=message,
+        )
+        raise RuntimeError(message)
+    if not eligible:
+        message = (
+            f"Project policy permits none of the configured {model_tier!r} "
+            f"provider/models for {context.data_classification} data"
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="blocked",
+            error_classification="policy_denied",
+            error_message=message,
+        )
+        raise RuntimeError(message)
+
+    last_exc: Exception | None = None
+    last_disposition: ProviderErrorDisposition | None = None
+    last_provider: str | None = None
+    attempts = 0
+    for entry, _ in eligible:
+        provider = cast(ProviderName, entry["provider"])
         model = entry["model"]
+        endpoint_url = entry["endpoint_url"]
+        if (
+            last_provider is not None
+            and provider != last_provider
+            and not policy.allow_cross_vendor_retry
+        ):
+            logger.warning(
+                "LLM %s stopped before cross-vendor retry (%s -> %s)",
+                operation,
+                last_provider,
+                provider,
+            )
+            break
+
+        attempts += 1
+        try:
+            prepared = await prepare_provider_attempt(
+                context,
+                call_id=call_id,
+                attempt_number=attempts,
+                provider=provider,
+                model=model,
+                endpoint_url=endpoint_url,
+                prompt_sha256=prompt_hash,
+                estimated_input_tokens=estimated_input_tokens,
+                max_output_tokens=max_output_tokens,
+            )
+        except LlmGovernanceError as exc:
+            classification = _governance_error_classification(exc)
+            await finish_llm_call(
+                context,
+                call_id=call_id,
+                status="blocked",
+                error_classification=classification,
+                error_message=str(exc),
+            )
+            raise
+
+        try:
+            await mark_provider_egress(context, attempt_id=prepared.attempt_id)
+        except asyncio.CancelledError:
+            await block_provider_attempt_before_egress(
+                context,
+                attempt_id=prepared.attempt_id,
+                error_classification="cancelled",
+                error_message="LLM request task was cancelled before egress",
+            )
+            await finish_llm_call(
+                context,
+                call_id=call_id,
+                status="cancelled",
+                error_classification="cancelled",
+                error_message="LLM request task was cancelled before egress",
+            )
+            raise
+        except LlmGovernanceError as exc:
+            classification = _governance_error_classification(exc)
+            await block_provider_attempt_before_egress(
+                context,
+                attempt_id=prepared.attempt_id,
+                error_classification=classification,
+                error_message=str(exc),
+            )
+            await finish_llm_call(
+                context,
+                call_id=call_id,
+                status="blocked",
+                error_classification=classification,
+                error_message=str(exc),
+            )
+            raise
+        started = time.monotonic()
         try:
             result = await invoke(provider, model, dict(merged))
-            # Visible at info level so a permanently-failing primary (every
-            # call silently landing on a fallback rung) is observable.
-            logger.info(
-                "LLM %s ok (provider=%s, model=%s)", operation, provider, model
+        except asyncio.CancelledError:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            await finish_provider_attempt(
+                context,
+                attempt=prepared,
+                status="cancelled",
+                latency_ms=latency_ms,
+                input_tokens=None,
+                output_tokens=None,
+                error_classification="cancelled",
+                error_message="LLM request task was cancelled after egress",
             )
-            return result
+            await finish_llm_call(
+                context,
+                call_id=call_id,
+                status="cancelled",
+                error_classification="cancelled",
+                error_message="LLM request task was cancelled after egress",
+            )
+            raise
         except Exception as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            disposition = classify_provider_error(exc)
+            # Provider exception strings can echo request fragments. Persist
+            # and log only the type plus canonical classification.
+            error_message = f"{type(exc).__name__} ({disposition.classification})"
+            await finish_provider_attempt(
+                context,
+                attempt=prepared,
+                status="failed",
+                latency_ms=latency_ms,
+                input_tokens=None,
+                output_tokens=None,
+                error_classification=disposition.classification,
+                error_message=error_message,
+                retryable=disposition.retryable,
+            )
             logger.warning(
-                "LLM %s failed (provider=%s, model=%s): %s",
+                "LLM %s failed (provider=%s, model=%s, classification=%s, "
+                "retryable=%s, exception_type=%s)",
                 operation,
                 provider,
                 model,
-                exc,
+                disposition.classification,
+                disposition.retryable,
+                type(exc).__name__,
             )
             last_exc = exc
+            last_disposition = disposition
+            last_provider = provider
+            if not disposition.retryable:
+                await finish_llm_call(
+                    context,
+                    call_id=call_id,
+                    status="failed",
+                    error_classification=disposition.classification,
+                    error_message=error_message,
+                )
+                raise RuntimeError(
+                    f"LLM {operation} failed without a safe retry "
+                    f"({provider}/{model}, {disposition.classification})"
+                ) from exc
+            continue
 
-    raise RuntimeError(
-        f"All LLM providers failed for tier '{model_tier}'"
-    ) from last_exc
+        latency_ms = int((time.monotonic() - started) * 1000)
+        try:
+            await finish_provider_attempt(
+                context,
+                attempt=prepared,
+                status="succeeded",
+                latency_ms=latency_ms,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+            )
+        except LlmCostOverrunError as exc:
+            await finish_llm_call(
+                context,
+                call_id=call_id,
+                status="failed",
+                error_classification="cost_overrun",
+                error_message=str(exc),
+            )
+            raise
+        await finish_llm_call(context, call_id=call_id, status="succeeded")
+        # Visible at info level so fallback behavior remains operationally
+        # searchable in addition to the authoritative attempt ledger.
+        logger.info("LLM %s ok (provider=%s, model=%s)", operation, provider, model)
+        return result
+
+    classification: ErrorClassification = (
+        last_disposition.classification
+        if last_disposition is not None
+        else "no_provider"
+    )
+    message = f"No safe LLM retry remained for tier {model_tier!r}"
+    await finish_llm_call(
+        context,
+        call_id=call_id,
+        status="failed",
+        error_classification=classification,
+        error_message=message,
+    )
+    raise RuntimeError(message) from last_exc
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+
 async def chat_completion(
     model_tier: str,
     messages: list[dict[str, str]],
+    *,
+    context: LlmRequestContext,
     **kwargs: Any,
 ) -> str:
-    """Route a chat completion through the configured provider chain.
+    """Route a chat completion through the governed provider chain.
 
-    Tries each provider in order for the given tier, falling back on failure.
+    Every provider attempt is policy-checked, budgeted, and audited. Only
+    classified retryable failures may advance to another permitted candidate.
 
     Args:
         model_tier: "fast" or "reasoning"
         messages: Chat messages in OpenAI format (role + content)
-        **kwargs: Additional parameters forwarded to the provider
+        context: Required tenant/run/purpose/data-classification scope.
+        **kwargs: Additional parameters forwarded to the provider.
 
     Returns:
         The assistant's response text.
 
     Raises:
-        RuntimeError: If all providers fail.
+        RuntimeError: If policy, budget, or all safe provider candidates fail.
     """
+
     async def invoke(
         provider: str, model: str, provider_kwargs: dict[str, Any]
-    ) -> str:
+    ) -> TextCompletion:
         return await _PROVIDER_FN[provider](model, messages, **provider_kwargs)
 
-    return await _route_with_fallback(
+    completion = await _route_with_fallback(
         model_tier,
+        context=context,
+        prompt_bytes=canonical_prompt_bytes(messages=messages, tools=None),
         operation="call",
         invoke=invoke,
         kwargs=kwargs,
     )
+    return completion.text
 
 
 # ---------------------------------------------------------------------------
 # Tool calling (function calling)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ToolCall:
@@ -338,6 +739,8 @@ class ToolCompletion:
 
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def _parse_arguments(raw: Any) -> dict[str, Any]:
@@ -431,10 +834,18 @@ async def _openai_completion_tools(
         )
         for tc in (message.tool_calls or [])
     ]
-    return ToolCompletion(text=message.content or "", tool_calls=calls)
+    input_tokens, output_tokens = _usage_tokens(getattr(resp, "usage", None))
+    return ToolCompletion(
+        text=message.content or "",
+        tool_calls=calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
-def _anthropic_tool_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _anthropic_tool_messages(
+    messages: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
     """Convert normalized messages to Anthropic's (system, messages) shape.
 
     Consecutive tool results merge into ONE user turn — Anthropic requires
@@ -452,7 +863,12 @@ def _anthropic_tool_messages(messages: list[dict[str, Any]]) -> tuple[str, list[
             if msg.get("content"):
                 blocks.append({"type": "text", "text": msg["content"]})
             blocks.extend(
-                {"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["arguments"]}
+                {
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": tc["arguments"],
+                }
                 for tc in msg["tool_calls"]
             )
             out.append({"role": "assistant", "content": blocks})
@@ -462,7 +878,11 @@ def _anthropic_tool_messages(messages: list[dict[str, Any]]) -> tuple[str, list[
                 "tool_use_id": msg["tool_call_id"],
                 "content": msg["content"],
             }
-            if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
+            if (
+                out
+                and out[-1]["role"] == "user"
+                and isinstance(out[-1]["content"], list)
+            ):
                 out[-1]["content"].append(result_block)
             else:
                 out.append({"role": "user", "content": [result_block]})
@@ -484,7 +904,11 @@ async def _anthropic_completion_tools(
     max_tokens = kwargs.pop("max_tokens", 4096)
     if tools:
         kwargs["tools"] = [
-            {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": t["parameters"],
+            }
             for t in tools
         ]
         if force_text:
@@ -510,10 +934,18 @@ async def _anthropic_completion_tools(
             )
         elif getattr(block, "text", None):
             text_parts.append(block.text)
-    return ToolCompletion(text="\n".join(text_parts), tool_calls=calls)
+    input_tokens, output_tokens = _anthropic_usage_tokens(getattr(resp, "usage", None))
+    return ToolCompletion(
+        text="\n".join(text_parts),
+        tool_calls=calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
-def _google_tool_contents(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+def _google_tool_contents(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
     """Convert normalized messages to google-genai (system_instruction, contents)."""
     system_instruction: str | None = None
     contents: list[dict[str, Any]] = []
@@ -627,7 +1059,15 @@ async def _google_completion_tools(
             )
         elif getattr(part, "text", None):
             text_parts.append(part.text)
-    return ToolCompletion(text="\n".join(text_parts), tool_calls=calls)
+    input_tokens, output_tokens = _google_usage_tokens(
+        getattr(resp, "usage_metadata", None)
+    )
+    return ToolCompletion(
+        text="\n".join(text_parts),
+        tool_calls=calls,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 async def chat_completion_with_tools(
@@ -635,10 +1075,11 @@ async def chat_completion_with_tools(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     *,
+    context: LlmRequestContext,
     force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
-    """Route a tool-enabled chat completion through the provider chain.
+    """Route a tool-enabled completion through the governed provider chain.
 
     Args:
         model_tier: "fast" or "reasoning".
@@ -647,6 +1088,7 @@ async def chat_completion_with_tools(
             tool results are ``{"role": "tool", "tool_call_id", "name", "content"}``.
         tools: Neutral tool specs ``{"name", "description", "parameters"}``
             (parameters = JSON schema). ``None``/empty sends no tools.
+        context: Required tenant/run/purpose/data-classification scope.
         force_text: Keep tool declarations available for validating historical
             tool calls, but forbid the provider from requesting a new call.
 
@@ -654,8 +1096,9 @@ async def chat_completion_with_tools(
         A :class:`ToolCompletion` with the assistant text and any tool calls.
 
     Raises:
-        RuntimeError: If all providers fail.
+        RuntimeError: If policy, budget, or all safe provider candidates fail.
     """
+
     async def invoke(
         provider: str, model: str, provider_kwargs: dict[str, Any]
     ) -> ToolCompletion:
@@ -697,6 +1140,8 @@ async def chat_completion_with_tools(
 
     return await _route_with_fallback(
         model_tier,
+        context=context,
+        prompt_bytes=canonical_prompt_bytes(messages=messages, tools=tools),
         operation="tool call",
         invoke=invoke,
         kwargs=kwargs,

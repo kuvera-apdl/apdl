@@ -6,6 +6,7 @@ merge. There is intentionally no merge endpoint.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from typing import Any
@@ -37,6 +38,12 @@ router = APIRouter(
     prefix="/v1/changesets",
     tags=["changesets"],
 )
+
+
+def _derived_idempotency_key(operation: str, changeset_id: str) -> str:
+    """Build a canonical stable key for one server-owned child operation."""
+    digest = hashlib.sha256(changeset_id.encode("utf-8")).hexdigest()
+    return f"codegen:{operation}:{digest}"
 
 
 def _require_publication_stage(app: Any) -> None:
@@ -105,8 +112,26 @@ async def create_changeset(
     """Enqueue a changeset for a connected project."""
     pool: asyncpg.Pool = request.app.state.pg_pool
     require_project(request, body.project_id, "agents:manage")
-    _require_publication_stage(request.app)
+    task = body.task.model_dump()
+    request_sha256 = store.changeset_request_sha256(
+        project_id=body.project_id,
+        run_id=body.run_id,
+        base_branch=body.base_branch,
+        task=task,
+    )
+    try:
+        existing = await store.get_idempotent_changeset(
+            pool,
+            project_id=body.project_id,
+            idempotency_key=body.idempotency_key,
+            idempotency_request_sha256=request_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if existing is not None:
+        return existing
 
+    _require_publication_stage(request.app)
     connection = await _current_connection(pool, body.project_id)
     tenant_policy, effective_policy_sha256 = _policy_provenance(
         request.app, connection
@@ -114,18 +139,24 @@ async def create_changeset(
 
     changeset_id = f"cs_{uuid.uuid4().hex[:24]}"
     base_branch = body.base_branch or connection.default_base_branch
-    changeset = await store.create_changeset(
-        pool,
-        changeset_id=changeset_id,
-        project_id=body.project_id,
-        run_id=body.run_id,
-        base_branch=base_branch,
-        task=body.task.model_dump(),
-        repository_target=connection.target,
-        tenant_policy_snapshot=tenant_policy,
-        effective_safety_policy_sha256=effective_policy_sha256,
-    )
-    _maybe_enqueue(request.app, background_tasks, changeset_id)
+    try:
+        changeset, created = await store.create_changeset(
+            pool,
+            changeset_id=changeset_id,
+            project_id=body.project_id,
+            idempotency_key=body.idempotency_key,
+            idempotency_request_sha256=request_sha256,
+            run_id=body.run_id,
+            base_branch=base_branch,
+            task=task,
+            repository_target=connection.target,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=effective_policy_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if created:
+        _maybe_enqueue(request.app, background_tasks, changeset.changeset_id)
     return changeset
 
 
@@ -224,7 +255,6 @@ async def revert_changeset(
     original = await _authorized_changeset(
         pool, request, changeset_id, "agents:manage"
     )
-    _require_publication_stage(request.app)
     if original.status != ChangesetStatus.merged:
         raise HTTPException(
             status_code=409,
@@ -259,22 +289,48 @@ async def revert_changeset(
         "context": context,
         "constraints": ["All existing tests must pass."],
     }
-    connection = await _current_connection(pool, original.project_id)
-    tenant_policy, effective_policy_sha256 = _policy_provenance(
-        request.app, connection
-    )
-    new_changeset = await store.create_changeset(
-        pool,
-        changeset_id=new_id,
+    idempotency_key = _derived_idempotency_key("revert", changeset_id)
+    request_sha256 = store.changeset_request_sha256(
         project_id=original.project_id,
         run_id=original.run_id,
         base_branch=base,
         task=revert_task,
-        repository_target=connection.target,
-        tenant_policy_snapshot=tenant_policy,
-        effective_safety_policy_sha256=effective_policy_sha256,
     )
-    _maybe_enqueue(request.app, background_tasks, new_id)
+    try:
+        existing = await store.get_idempotent_changeset(
+            pool,
+            project_id=original.project_id,
+            idempotency_key=idempotency_key,
+            idempotency_request_sha256=request_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if existing is not None:
+        return existing
+
+    _require_publication_stage(request.app)
+    connection = await _current_connection(pool, original.project_id)
+    tenant_policy, effective_policy_sha256 = _policy_provenance(
+        request.app, connection
+    )
+    try:
+        new_changeset, created = await store.create_changeset(
+            pool,
+            changeset_id=new_id,
+            project_id=original.project_id,
+            idempotency_key=idempotency_key,
+            idempotency_request_sha256=request_sha256,
+            run_id=original.run_id,
+            base_branch=base,
+            task=revert_task,
+            repository_target=connection.target,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=effective_policy_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if created:
+        _maybe_enqueue(request.app, background_tasks, new_changeset.changeset_id)
     return new_changeset
 
 
@@ -291,7 +347,6 @@ async def retry_changeset(
     original = await _authorized_changeset(
         pool, request, changeset_id, "agents:manage"
     )
-    _require_publication_stage(request.app)
     if original.status not in RETRYABLE_STATUSES:
         retryable = ", ".join(sorted(s.value for s in RETRYABLE_STATUSES))
         raise HTTPException(
@@ -312,22 +367,48 @@ async def retry_changeset(
     # context so the new changeset's lineage back to the failed run is traceable.
     task = original.task.model_dump()
     task["context"] = {**task.get("context", {}), "retry_of": changeset_id}
-    connection = await _current_connection(pool, original.project_id)
-    tenant_policy, effective_policy_sha256 = _policy_provenance(
-        request.app, connection
-    )
-    new_changeset, created = await store.create_retry_changeset(
-        pool,
-        changeset_id=new_id,
-        retry_of_changeset_id=changeset_id,
+    idempotency_key = _derived_idempotency_key("retry", changeset_id)
+    request_sha256 = store.changeset_request_sha256(
         project_id=original.project_id,
         run_id=original.run_id,
         base_branch=original.base_branch,
         task=task,
-        repository_target=connection.target,
-        tenant_policy_snapshot=tenant_policy,
-        effective_safety_policy_sha256=effective_policy_sha256,
     )
+    try:
+        existing = await store.get_idempotent_retry_changeset(
+            pool,
+            project_id=original.project_id,
+            retry_of_changeset_id=changeset_id,
+            idempotency_key=idempotency_key,
+            idempotency_request_sha256=request_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if existing is not None:
+        return existing
+
+    _require_publication_stage(request.app)
+    connection = await _current_connection(pool, original.project_id)
+    tenant_policy, effective_policy_sha256 = _policy_provenance(
+        request.app, connection
+    )
+    try:
+        new_changeset, created = await store.create_retry_changeset(
+            pool,
+            changeset_id=new_id,
+            retry_of_changeset_id=changeset_id,
+            project_id=original.project_id,
+            idempotency_key=idempotency_key,
+            idempotency_request_sha256=request_sha256,
+            run_id=original.run_id,
+            base_branch=original.base_branch,
+            task=task,
+            repository_target=connection.target,
+            tenant_policy_snapshot=tenant_policy,
+            effective_safety_policy_sha256=effective_policy_sha256,
+        )
+    except store.ChangesetIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if created:
         _maybe_enqueue(request.app, background_tasks, new_changeset.changeset_id)
     return new_changeset

@@ -23,6 +23,35 @@ const requests: { path: string; body: unknown }[] = []
 let monitorStatus = 'waiting_approval'
 let monitorPhase = 'experiment_design_approval'
 
+function queuedApproval(runId: string) {
+  return {
+    command_id: '018f3d4e-c1c2-7000-8000-000000000001',
+    run_id: runId,
+    actor_credential_id: 'test-agents',
+    actor_user_id: null,
+    gate_id: `${runId}:experiment_design`,
+    gate_agent: 'experiment_design',
+    status: 'queued',
+    approved_count: 1,
+    rejected_count: 0,
+    comment: null,
+    last_error: null,
+    created_at: '2026-07-15T00:00:00Z',
+    updated_at: '2026-07-15T00:00:00Z',
+    effects: [
+      {
+        effect_id: '018f3d4e-c1c2-7000-8000-000000000002',
+        item_id: 'exp_cta',
+        effect_type: 'stage_experiment_draft',
+        status: 'queued',
+        attempt_count: 0,
+        last_error: null,
+        result: null,
+      },
+    ],
+  }
+}
+
 const server = setupServer(
   http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
     HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
@@ -94,17 +123,8 @@ const server = setupServer(
   ),
   http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', async ({ request, params }) => {
     requests.push({ path: 'approve', body: await request.json() })
-    monitorStatus = 'approved'
-    monitorPhase = 'resuming'
-    return HttpResponse.json({
-      run_id: String(params.runId),
-      status: 'approved',
-      approved_count: 1,
-      rejected_count: 0,
-      forked_runs: [],
-      opened_changesets: [],
-      message: 'Run approved',
-    })
+    monitorStatus = 'approval_queued'
+    return HttpResponse.json(queuedApproval(String(params.runId)))
   }),
 )
 
@@ -308,23 +328,14 @@ describe('RunMonitorPage', () => {
     })
 
     // After approval the panel goes away on the refetch.
-    expect(await screen.findByText('approved')).toBeInTheDocument()
+    expect(await screen.findByText('approval queued')).toBeInTheDocument()
   })
 
-  test('warns when an approved experiment fails to deploy', async () => {
-    const warning = vi.spyOn(toast, 'warning').mockReturnValue('approval-warning')
+  test('reports a committed command without claiming deployment completed', async () => {
+    const success = vi.spyOn(toast, 'success').mockReturnValue('approval-queued')
     server.use(
       http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', ({ params }) =>
-        HttpResponse.json({
-          run_id: String(params.runId),
-          status: 'approved',
-          approved_count: 1,
-          rejected_count: 0,
-          forked_runs: [],
-          opened_changesets: [],
-          errors: ['experiment deploy failed: exp_cta'],
-          message: '1 approved, 0 rejected — run resumes. · 1 error(s)',
-        }),
+        HttpResponse.json(queuedApproval(String(params.runId))),
       ),
     )
     renderWithProviders(
@@ -339,9 +350,9 @@ describe('RunMonitorPage', () => {
     await userEvent.click(screen.getByRole('button', { name: /submit decisions/i }))
 
     await waitFor(() =>
-      expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining('1 deployment error(s)'),
-        expect.objectContaining({ description: 'experiment deploy failed: exp_cta' }),
+      expect(success).toHaveBeenCalledWith(
+        expect.stringContaining('effects queued'),
+        expect.objectContaining({ description: expect.stringContaining('command') }),
       ),
     )
   })
@@ -454,8 +465,8 @@ describe('read-only loop surfaces', () => {
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
   })
 
-  test('Decide warns instead of reporting false success on deploy failure', async () => {
-    const warning = vi.spyOn(toast, 'warning').mockReturnValue('decision-warning')
+  test('Decide reports a durable command without claiming synchronous effects', async () => {
+    const success = vi.spyOn(toast, 'success').mockReturnValue('decision-queued')
     server.use(
       http.get('*/api/projects/demo/agents/v1/agents/runs', () =>
         HttpResponse.json({
@@ -475,16 +486,7 @@ describe('read-only loop surfaces', () => {
         }),
       ),
       http.post('*/api/projects/demo/agents/v1/agents/:runId/approve', ({ params }) =>
-        HttpResponse.json({
-          run_id: String(params.runId),
-          status: 'approved',
-          approved_count: 1,
-          rejected_count: 0,
-          forked_runs: [],
-          opened_changesets: [],
-          errors: ['experiment deploy failed: exp_cta'],
-          message: '1 approved, 0 rejected — run resumes. · 1 error(s)',
-        }),
+        HttpResponse.json(queuedApproval(String(params.runId))),
       ),
     )
     renderWithProviders(<DecidePage />, '/decide')
@@ -492,9 +494,9 @@ describe('read-only loop surfaces', () => {
     await userEvent.click(await screen.findByRole('button', { name: /approve design/i }))
 
     await waitFor(() =>
-      expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining('1 deployment error(s)'),
-        expect.objectContaining({ description: 'experiment deploy failed: exp_cta' }),
+      expect(success).toHaveBeenCalledWith(
+        expect.stringContaining('effects queued'),
+        expect.objectContaining({ description: expect.stringContaining('command') }),
       ),
     )
   })

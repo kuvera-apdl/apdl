@@ -40,22 +40,41 @@ else:
         f"explicitly, or use one of {sorted(_MODEL_DIMENSIONS)}"
     )
 _CACHE_DIR = os.getenv("FASTEMBED_CACHE_DIR", "/app/.fastembed_cache")
+_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH")
 
 _model: Any = None
 
 
 def _get_model() -> Any:
-    """Lazily load the embedding model (downloaded once, cached on disk).
+    """Lazily load an already-provisioned embedding model without networking.
 
     The ``fastembed`` import is deferred so this module imports without the
     heavy optional dependency present — unit tests patch ``_get_model``.
     """
     global _model
     if _model is None:
+        # Set these before importing fastembed/huggingface_hub. The explicit
+        # local_files_only argument below remains the fail-closed enforcement
+        # even if huggingface_hub was imported earlier in the process.
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
         from fastembed import TextEmbedding
 
-        logger.info("Loading local embedding model %s", EMBEDDING_MODEL)
-        _model = TextEmbedding(model_name=EMBEDDING_MODEL, cache_dir=_CACHE_DIR)
+        model_options: dict[str, Any] = {"local_files_only": True}
+        if _MODEL_PATH:
+            model_options["specific_model_path"] = _MODEL_PATH
+
+        logger.info(
+            "Loading local embedding model %s from %s",
+            EMBEDDING_MODEL,
+            _MODEL_PATH or _CACHE_DIR,
+        )
+        _model = TextEmbedding(
+            model_name=EMBEDDING_MODEL,
+            cache_dir=_CACHE_DIR,
+            **model_options,
+        )
     return _model
 
 

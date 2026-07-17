@@ -1,8 +1,8 @@
 <h1 align="center">APDL</h1>
 
 <p align="center">
-  <b>Autonomous Product Development Loop</b> — a self-optimizing product analytics
-  and experimentation platform.
+  <b>Autonomous Product Development Loop</b> — product analytics and
+  experimentation with an optional agent operator preview.
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   <a href="#using-the-sdks">SDKs</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#api-reference">API Reference</a> ·
-  <a href="#autonomous-agents">Agents</a> ·
+  <a href="#agents-operator-preview">Agents</a> ·
   <a href="examples/">Examples</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -25,12 +25,18 @@
 ---
 
 APDL ingests user behavior events, runs analytics queries, evaluates feature
-flags and A/B experiments, and uses LLM-powered agents to autonomously generate
-insights, design experiments, and personalize user experiences. The name is the
-data flow:
+flags and A/B experiments, and can use opt-in LLM workflows to generate
+insights and propose experiment designs. In 0.3.0 those workflows do not close
+the product loop: experiment designs require human approval, approval creates
+an inert Config draft with a disabled flag, treatment implementation is a
+separate changeset lifecycle, and an operator must separately activate any
+completed treatment. Personalization, autonomous evaluation, and rollback are
+disabled. The intended data flow is:
 
-> **events in → analytics out → agents act on flags & experiments → SDKs pick
-> up the changes → new events in…** — that feedback cycle is the *Loop*.
+> **events in → analytics out → agent proposal → human approval → disabled
+> draft + treatment work → separate operator activation → SDKs → new events**.
+> The *Loop* is the product direction, not a claim of closed automation in this
+> developer preview.
 
 ## Release status
 
@@ -441,10 +447,14 @@ Filtered cohort comparison:
 |---|---|---|
 | `POST` | `/v1/agents/trigger` | Start an agent run |
 | `GET` | `/v1/agents/:run_id/status` | Check run status |
-| `POST` | `/v1/agents/:run_id/approve` | Approve a run's pending actions |
-| `GET` | `/health`, `/ready` | Health / readiness |
+| `POST` | `/v1/agents/:run_id/cancel` | Durably cancel an active run and fence further work |
+| `POST` | `/v1/agents/:run_id/approve` | Queue strict per-item approval decisions (`202`) |
+| `GET` | `/v1/agents/:run_id/approvals/:command_id` | Approval command and effect status |
+| `GET` | `/health` | Process liveness |
+| `GET` | `/ready` | Core Agents runtime and PostgreSQL readiness |
+| `GET` | `/ready/capabilities` | Non-blocking LLM, Query, Config, and Codegen capability report |
 
-## Autonomous Agents
+## Agents operator preview
 
 Agents execution is an operator-provisioned capability in the OSS developer
 preview. Projects created through public registration keep `agents:read` for
@@ -453,25 +463,30 @@ manage/test custom agents, or approve queued actions. Agents derives this
 boundary from immutable project provenance as well as credential roles, so an
 overprivileged key cannot enable execution for a self-registered project.
 
-The agents service runs autonomous analysis workflows powered by LLM reasoning
-(via OpenAI, Anthropic, Google, and local model SDKs):
+The agents service runs operator-triggered analysis and proposal workflows
+powered by policy-governed LLM reasoning. The safe default permits only the
+exact local `gemma4` model at `http://localhost:11434/v1`; external providers, data classifications,
+residency, prices, spend ceilings, and cross-vendor retry require explicit
+per-project policy:
 
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns
-- **Experiment Design** — proposes A/B tests based on behavioral insights, creates flags and experiments
+- **Experiment Design** — proposes A/B tests for human approval; an approval
+  creates only a disabled experiment draft and may request separate treatment work
 - **Personalization** — disabled in 0.3.0; no canonical Config storage or SDK
   delivery path exists yet
-- **Feature Proposals** — generates product feature suggestions backed by data
+- **Experiment Evaluation and Feature Proposals** — disabled in 0.3.0; current
+  statistical snapshots do not establish deployment readiness
 
-For eligible operator projects, every action passes a safety validator and an
-autonomy gate and is audit-logged. Autonomous experiment evaluation, stopping,
-shipping, and rollback remain disabled in this release:
+For eligible operator projects, proposed experiment drafts receive static
+validation and are recorded in the audit trail. Experiment design is hard-gated
+for human approval at every configured autonomy level. Approval does not deploy
+treatment code, enable its backing flag, or start an experiment; those are
+separate implementation, review, and activation steps outside the Agents run.
 
-| Level | Behavior |
-|---|---|
-| L1 | Suggest only — surfaces insights for human review |
-| L2 | Approval-only — holds every safety-passing action for human approval |
-| L3 | Higher autonomy — auto-deploys low-risk actions; queues medium/high-risk actions |
-| L4 | Full auto — deploys every safety-passing action except explicitly always-gated actions |
+The validator checks the proposed action's shape and bounded blast radius. It
+does not monitor live guardrail metrics or prove treatment/deployment readiness.
+Automatic experiment evaluation, activation, stopping, shipping, and rollback
+are unavailable in this release.
 
 ## Contributing
 

@@ -39,18 +39,18 @@ function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-// Mirrors the server's _item_id (routers/approvals.py): experiment_id or
-// flag_config.key for designs, proposal_id otherwise; positional fallback for a
-// lone unkeyed item.
-function itemId(item: Record<string, unknown>, agent: GatedAgent, index: number): string {
-  const flag = rec(item.flag_config)
-  const raw =
-    agent === 'experiment_design' ? str(item.experiment_id) || str(flag.key) : str(item.proposal_id)
-  return raw.trim() !== '' ? raw : `__index_${index}`
+// Mirrors the server's strict persisted identity: experiment_id for designs,
+// proposal_id for proposal/changeset gates. No aliases or positional fallback.
+function itemId(item: Record<string, unknown>, agent: GatedAgent): string | null {
+  const raw = agent === 'experiment_design' ? item.experiment_id : item.proposal_id
+  return typeof raw === 'string' && raw.trim() === raw && raw.length > 0 && raw.length <= 128
+    ? raw
+    : null
 }
 
-function designDecision(runId: string, item: Record<string, unknown>, index: number): Decision {
-  const id = itemId(item, 'experiment_design', index)
+function designDecision(runId: string, item: Record<string, unknown>): Decision | null {
+  const id = itemId(item, 'experiment_design')
+  if (id === null) return null
   const metric = rec(item.primary_metric)
   const variants = Array.isArray(item.variants) ? item.variants.length : null
   const evidence: Evidence[] = []
@@ -70,8 +70,9 @@ function designDecision(runId: string, item: Record<string, unknown>, index: num
   }
 }
 
-function proposalDecision(runId: string, item: Record<string, unknown>, index: number): Decision {
-  const id = itemId(item, 'feature_proposal', index)
+function proposalDecision(runId: string, item: Record<string, unknown>): Decision | null {
+  const id = itemId(item, 'feature_proposal')
+  if (id === null) return null
   const evidenceObj = rec(item.evidence)
   const metrics = rec(evidenceObj.metrics)
   const evidence: Evidence[] = []
@@ -91,8 +92,9 @@ function proposalDecision(runId: string, item: Record<string, unknown>, index: n
   }
 }
 
-function changesetDecision(runId: string, item: Record<string, unknown>, index: number): Decision {
-  const id = itemId(item, 'code_implementation', index)
+function changesetDecision(runId: string, item: Record<string, unknown>): Decision | null {
+  const id = itemId(item, 'code_implementation')
+  if (id === null) return null
   return {
     runId,
     itemId: id,
@@ -112,19 +114,15 @@ export function decisionsForRun(run: RunStatus, results: RunResults | null): Dec
   const key = GATE_RESULT_KEY[agent]
   if (!key) return []
   const items = (results[key] as unknown[]) ?? []
-  return items.map((raw, index) => {
+  const decisions = items.map((raw) => {
     const item = rec(raw)
-    if (agent === 'experiment_design') return designDecision(run.run_id, item, index)
-    if (agent === 'feature_proposal') return proposalDecision(run.run_id, item, index)
-    if (agent === 'code_implementation') return changesetDecision(run.run_id, item, index)
-    // personalization (parked) or unknown — a minimal generic decision.
-    return {
-      runId: run.run_id,
-      itemId: itemId(item, agent, index),
-      agent,
-      stage: 'awaiting_approval',
-      question: `Approve ${agent.replace(/_/g, ' ')} item?`,
-      evidence: [],
-    }
+    if (agent === 'experiment_design') return designDecision(run.run_id, item)
+    if (agent === 'feature_proposal') return proposalDecision(run.run_id, item)
+    if (agent === 'code_implementation') return changesetDecision(run.run_id, item)
+    return null
   })
+  if (decisions.some((decision) => decision === null)) return []
+  const canonical = decisions as Decision[]
+  const ids = canonical.map((decision) => decision.itemId)
+  return new Set(ids).size === ids.length ? canonical : []
 }

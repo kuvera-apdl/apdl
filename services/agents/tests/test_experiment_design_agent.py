@@ -1,34 +1,20 @@
 import pytest
 
-from app.framework import AgentContext
 from app.graphs import experiment_design
-from app.graphs.experiment_design import ExperimentDesignAgent
-
-
-def make_ctx() -> AgentContext:
-    return AgentContext(
-        pool=None,
-        vector_store=None,
-        audit=None,
-        run_id="run-1",
-        project_id="apdl",
-        autonomy_level=3,
-        time_range_days=7,
-    )
 
 
 @pytest.mark.asyncio
-async def test_deploy_uses_single_config_owned_creation_path(monkeypatch):
+async def test_staging_uses_single_config_owned_draft_path(monkeypatch):
     captured = {}
 
-    async def fake_create_experiment_config(**kwargs):
+    async def fake_create_experiment_draft(**kwargs):
         captured["experiment"] = kwargs
         return {"created": True, "key": kwargs["experiment_id"], "flag_key": kwargs.get("flag_key")}
 
     monkeypatch.setattr(
         experiment_design,
-        "create_experiment_config",
-        fake_create_experiment_config,
+        "create_config_experiment_draft",
+        fake_create_experiment_draft,
     )
 
     # Config now owns flag init — the agent must not import or call create_flag.
@@ -63,12 +49,18 @@ async def test_deploy_uses_single_config_owned_creation_path(monkeypatch):
         },
     }
 
-    deployed = await ExperimentDesignAgent()._deploy(make_ctx(), experiment)
+    drafted = await experiment_design.stage_experiment_draft(
+        "apdl", experiment, idempotency_key="command:effect"
+    )
 
-    assert deployed is True
+    assert drafted is None
+    assert captured["experiment"]["idempotency_key"] == "command:effect"
     # Exactly one creation path, carrying the canonical link + variants.
     assert captured["experiment"]["experiment_id"] == "exp_checkout"
     assert captured["experiment"]["flag_key"] == "exp_checkout"
     assert captured["experiment"]["variants"] == experiment["variants"]
     assert captured["experiment"]["primary_metric"] == experiment["primary_metric"]
     assert captured["experiment"]["statistical_plan"] == experiment["statistical_plan"]
+    assert "estimated_duration_days" not in captured["experiment"]
+    assert "secondary_metrics" not in captured["experiment"]
+    assert "guardrail_metrics" not in captured["experiment"]

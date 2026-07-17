@@ -32,6 +32,7 @@ class Principal:
     project_id: str
     roles: frozenset[str]
     self_registered_project: bool
+    actor_user_id: str | None = None
 
 
 class PostgresAuthenticator:
@@ -52,6 +53,7 @@ class PostgresAuthenticator:
                     SELECT credential.credential_id, credential.project_id,
                            credential.key_hash, credential.roles,
                            credential.active, credential.expires_at,
+                           credential.actor_user_id,
                            (project.created_by IS NOT NULL)
                                AS self_registered_project
                     FROM auth_credentials AS credential
@@ -83,6 +85,11 @@ class PostgresAuthenticator:
             project_id=stored_project,
             roles=frozenset(str(role) for role in row["roles"]),
             self_registered_project=bool(row["self_registered_project"]),
+            actor_user_id=(
+                str(row["actor_user_id"])
+                if row["actor_user_id"] is not None
+                else None
+            ),
         )
 
 

@@ -8,7 +8,10 @@ merge; APDL only creates and observes pull requests.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 from typing import Any
 from urllib.parse import quote
 
@@ -18,12 +21,25 @@ from app.service_auth import service_headers
 
 CODEGEN_SERVICE_URL = os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084")
 _TIMEOUT = 30.0
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
+_IDEMPOTENCY_SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
 
 def _seg(value: str) -> str:
     """URL-quote one path segment — ids here are often LLM-authored, and an id
     containing '/' or '?' would otherwise reroute the request."""
     return quote(value, safe="")
+
+
+def derive_changeset_idempotency_key(scope: str, *identity: str) -> str:
+    """Derive a bounded canonical key from stable logical-effect identity."""
+    if _IDEMPOTENCY_SCOPE_RE.fullmatch(scope) is None:
+        raise ValueError("Changeset idempotency scope is not canonical")
+    if not identity or any(not part for part in identity):
+        raise ValueError("Changeset idempotency identity must not be empty")
+    blob = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return f"agents:{scope}:{digest}"
 
 
 async def _get(
@@ -51,6 +67,7 @@ async def open_changeset(
     title: str,
     spec: str,
     *,
+    idempotency_key: str,
     run_id: str | None = None,
     base_branch: str | None = None,
     context: dict[str, Any] | None = None,
@@ -60,8 +77,12 @@ async def open_changeset(
 
     Returns the changeset record (includes ``changeset_id`` and ``status``).
     """
+    if _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
+        raise ValueError("idempotency_key must be a canonical 1 to 200 character key")
+
     payload: dict[str, Any] = {
         "project_id": project_id,
+        "idempotency_key": idempotency_key,
         "task": {
             "title": title,
             "spec": spec,

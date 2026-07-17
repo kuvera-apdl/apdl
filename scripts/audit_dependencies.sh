@@ -25,6 +25,7 @@ for lock in \
     services/ingestion/requirements.lock \
     services/config/requirements.lock \
     services/query/requirements.lock \
+    services/agents/requirements.lock \
     services/admin-api/requirements.lock \
     pipeline/redis/requirements.lock
 do
@@ -32,7 +33,7 @@ do
     uvx pip-audit --strict --require-hashes -r "$ROOT_DIR/$lock"
 done
 
-for project in sdk/python services/agents services/codegen; do
+for project in sdk/python services/codegen; do
     slug="${project//\//-}"
     requirements="$TMP_DIR/$slug.txt"
     if [ "$project" = "services/codegen" ]; then

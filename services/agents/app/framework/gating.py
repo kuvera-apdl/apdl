@@ -14,6 +14,7 @@ each agent's routing function.
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 from typing import Any
 
@@ -24,6 +25,16 @@ class GateDecision(str, Enum):
     deploy = "deploy"      # apply the action now
     approve = "approve"    # hold for human approval
     halt = "halt"          # do not proceed (failed safety or suggest-only)
+
+
+def autonomous_mutations_enabled() -> bool:
+    """Whether the operator explicitly enabled autonomous external effects.
+
+    The OSS preview is approval-first.  Treat every value except the exact
+    canonical string ``"true"`` as disabled so a typo cannot silently widen
+    agent authority.
+    """
+    return os.getenv("AGENTS_ENABLE_AUTONOMOUS_MUTATIONS", "false") == "true"
 
 
 def gate_action(
@@ -52,6 +63,12 @@ def gate_action(
         return GateDecision.halt
 
     if always_require_approval:
+        return GateDecision.approve
+
+    # Autonomous external effects are an operator-controlled preview feature,
+    # disabled by default.  L3/L4 still influence risk handling once enabled,
+    # but cannot silently acquire mutation authority from the request alone.
+    if not autonomous_mutations_enabled():
         return GateDecision.approve
 
     # L4 is full autonomy (the documented contract): any action that passed

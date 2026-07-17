@@ -46,12 +46,12 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_retry_lineage_migration():
+async def test_rejects_database_without_durable_effects_migration():
     with pytest.raises(
-        RuntimeError, match="015_custom_agent_contracts_and_retry_lineage.sql"
+        RuntimeError, match="022_agents_durable_effects.sql"
     ):
         await assert_schema_ready(
-            FakeConn(migration_name="014_disable_self_registered_agents.sql")
+            FakeConn(migration_name="021_agents_mutation_quotas.sql")
         )
 
 
@@ -70,6 +70,25 @@ def test_codegen_startup_contains_no_postgres_ddl():
     assert "ALTER TABLE" not in main_source
     assert "CREATE TABLE" not in db_source
     assert "ALTER TABLE" not in db_source
+
+
+def test_durable_effects_migration_defines_strict_changeset_idempotency():
+    migration = (
+        Path(__file__).parents[3]
+        / "pipeline/postgres/migrations/022_agents_durable_effects.sql"
+    ).read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS idempotency_key TEXT" in migration
+    assert "ADD COLUMN IF NOT EXISTS idempotency_request_sha256 CHAR(64)" in migration
+    assert "ALTER COLUMN idempotency_key SET NOT NULL" in migration
+    assert "ALTER COLUMN idempotency_request_sha256 SET NOT NULL" in migration
+    assert "codegen_changesets_idempotency_key_check" in migration
+    assert "codegen_changesets_idempotency_request_sha256_check" in migration
+    assert "'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'" in migration
+    assert "ON codegen_changesets (project_id, idempotency_key)" in migration
+    assert "FOREIGN KEY (project_id, retry_of_changeset_id)" in migration
+    assert "REFERENCES codegen_changesets(project_id, changeset_id)" in migration
+    assert "'legacy:'\n        || md5(" in migration
 
 
 def test_shutdown_awaits_requeued_jobs_before_closing_database():

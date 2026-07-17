@@ -334,6 +334,7 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
             audit=AuditLogger(pool),
             run_id=test_run_id,
             project_id=body.project_id,
+            execution_kind="custom_agent_test",
             autonomy_level=1,
             time_range_days=body.time_range_days,
         )
@@ -387,6 +388,10 @@ async def test_custom(body: TestRunRequest, request: Request) -> TestRunResponse
                     {"role": "system", "content": agent.system_prompt},
                     {"role": "user", "content": prompt},
                 ],
+                context=ctx.llm_request(
+                    purpose=f"custom_agent_test.{agent.name}.reason",
+                    data_classification="confidential",
+                ),
             )
             llm_calls = 1
         llm_ms = int((time.monotonic() - llm_start) * 1000)

@@ -50,10 +50,19 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 19
-    assert MIGRATION_NAME == "019_retention_cohort_mode.sql"
+    assert MIGRATION_VERSION == 23
+    assert MIGRATION_NAME == "023_llm_governance.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
+    assert ("feature_proposals", "project_id") in REQUIRED_COLUMNS
     assert ("custom_agent_test_runs", "lease_expires_at") in REQUIRED_COLUMNS
+    assert (
+        "agent_mutation_quota_reservations",
+        "idempotency_key",
+    ) in REQUIRED_COLUMNS
+    assert ("agent_run_results", "metadata") in REQUIRED_COLUMNS
+    assert ("agent_approval_effects", "lease_expires_at") in REQUIRED_COLUMNS
+    assert ("llm_project_policies", "required_data_residency") in REQUIRED_COLUMNS
+    assert ("llm_provider_attempts", "egress_started_at") in REQUIRED_COLUMNS
 
 
 @pytest.mark.asyncio

@@ -96,12 +96,27 @@ async def test_run_tool_injects_project_and_date_window(monkeypatch):
     assert captured["project_id"] == "proj-1"
     assert captured["window_days"] == 3
     assert captured["steps"][0] == {"event_name": "signup", "filters": []}
-    # The window is ctx-derived: 14 days wide, ISO dates.
+    # The window is ctx-derived: 14 inclusive calendar dates, in ISO form.
     from datetime import date
 
     start = date.fromisoformat(captured["start_date"])
     end = date.fromisoformat(captured["end_date"])
-    assert (end - start).days == 14
+    assert (end - start).days == 13
+
+
+@pytest.mark.asyncio
+async def test_run_tool_one_day_window_is_today(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_discover(**kwargs):
+        captured.update(kwargs)
+        return {"events": []}
+
+    monkeypatch.setattr(tool_catalog.clickhouse, "discover_events", fake_discover)
+
+    await tool_catalog.run_tool(_ctx(days=1), "discover_events", {})
+
+    assert captured["start_date"] == captured["end_date"]
 
 
 @pytest.mark.asyncio

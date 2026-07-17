@@ -51,7 +51,11 @@ from app.framework.tool_catalog import (
     validate_preset_tools,
     validate_tool_names,
 )
-from app.framework.tool_loop import ToolTraceEntry, run_preset_tools
+from app.framework.tool_loop import (
+    ToolTraceEntry,
+    run_preset_tools,
+    warehouse_result_envelope,
+)
 
 #: State keys a custom agent must never produce: supervisor seed keys, keys
 #: the run loop reads (``errors``, counter sources), BaseAgent working keys
@@ -102,9 +106,9 @@ def render_preset_results(trace: list[ToolTraceEntry]) -> str:
     """
     blocks: list[str] = []
     for entry in trace:
-        params = json.dumps(entry.params, default=str)
-        body = entry.result if entry.error is None else f"ERROR: {entry.error}"
-        blocks.append(f"### {entry.tool} {params}\n{body}")
+        blocks.append(
+            f"### {entry.tool}\n```json\n{warehouse_result_envelope(entry)}\n```"
+        )
     return "\n\n".join(blocks)
 
 

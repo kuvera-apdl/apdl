@@ -17,13 +17,57 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.framework import AgentContext, BaseAgent, MemoryEntry, register_agent
-from app.framework.tool_loop import ToolLoopResult, ToolTraceEntry
+from app.framework.tool_loop import (
+    ToolLoopResult,
+    ToolTraceEntry,
+    tool_result_source_id,
+)
 from app.llm.prompts.analysis import BEHAVIOR_ANALYSIS_SYSTEM, INVESTIGATION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+class InsightEvidence(BaseModel):
+    """Grounding references for a behavior insight."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=2_000)
+    source_ids: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("source_ids")
+    @classmethod
+    def validate_source_ids(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("source_ids must be unique")
+        if any(
+            not value.startswith("warehouse:")
+            or len(value) != len("warehouse:") + 24
+            for value in values
+        ):
+            raise ValueError("source_ids must use canonical warehouse IDs")
+        return values
+
+
+class BehaviorInsight(BaseModel):
+    """Strict warehouse-grounded output contract for behavior analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=4_000)
+    evidence: InsightEvidence
+    confidence: Literal["high", "medium", "low"]
+    impact: Literal["high", "medium", "low"]
+    recommended_action: str = Field(min_length=1, max_length=4_000)
+    action_type: Literal[
+        "experiment", "deeper_analysis", "immediate_fix", "monitor"
+    ]
 
 
 @register_agent
@@ -89,7 +133,28 @@ class BehaviorAnalysisAgent(BaseAgent):
                 "Investigation did not complete event discovery; producing no insights"
             )
             return []
-        return super().parse_agentic(result)
+        parsed = super().parse_agentic(result)
+        successful_sources = {
+            tool_result_source_id(entry)
+            for entry in result.trace
+            if entry.error is None
+        }
+        validated: list[dict[str, Any]] = []
+        try:
+            for raw in parsed:
+                insight = BehaviorInsight.model_validate(raw)
+                cited = set(insight.evidence.source_ids)
+                unknown = sorted(cited - successful_sources)
+                if unknown:
+                    raise ValueError(
+                        "behavior insight cites unknown warehouse source IDs: "
+                        + ", ".join(unknown)
+                    )
+                validated.append(insight.model_dump())
+        except (ValidationError, ValueError) as exc:
+            logger.error("Behavior insight output failed strict grounding: %s", exc)
+            raise ValueError(f"invalid grounded behavior insight: {exc}") from exc
+        return validated
 
     def memory_entries(
         self,

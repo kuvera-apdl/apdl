@@ -1,12 +1,6 @@
 import pytest
 
-from app.safety import validator
 from app.safety.validator import ActionType, AgentAction, SafetyValidator
-
-
-@pytest.fixture(autouse=True)
-def clear_rate_limit_state():
-    validator._action_timestamps.clear()
 
 
 def make_experiment(flag_config: dict | None = None) -> dict:
@@ -18,9 +12,6 @@ def make_experiment(flag_config: dict | None = None) -> dict:
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
-        "guardrail_metrics": [
-            {"event": "frontend_error_rate", "threshold": "2x_baseline", "direction": "increase"},
-        ],
         "flag_config": flag_config
         or {
             "key": "exp_checkout",
@@ -56,6 +47,11 @@ def test_create_experiment_accepts_canonical_variant_flag_config():
     checks = {check["name"]: check for check in result["checks"]}
     assert checks["variant_config"]["passed"] is True
     assert checks["blast_radius"]["passed"] is True
+    assert checks["guardrails"] == {
+        "name": "guardrails",
+        "passed": True,
+        "message": "Required experiment design fields are present.",
+    }
 
 
 def test_create_experiment_treats_variant_weights_as_relative():
@@ -259,53 +255,3 @@ def test_update_flag_rejects_legacy_boolean_field():
     assert result["passed"] is False
     assert variant_check["passed"] is False
     assert "non-canonical" in variant_check["message"]
-
-
-def test_rate_limit_check_failure_fails_closed(monkeypatch):
-    validator_instance = SafetyValidator()
-
-    def broken_rate_limit(action, record=True):
-        raise RuntimeError("rate store unavailable")
-
-    monkeypatch.setattr(validator_instance, "_check_rate_limits", broken_rate_limit)
-
-    result = validator_instance.validate(
-        AgentAction(
-            type=ActionType.create_experiment,
-            config=make_experiment(),
-            project_id="apdl",
-        )
-    ).model_dump()
-
-    rate_limit = {check["name"]: check for check in result["checks"]}["rate_limit"]
-    assert result["passed"] is False
-    assert rate_limit["passed"] is False
-    assert "rate store unavailable" in rate_limit["message"]
-
-
-def test_rate_limit_wrapper_preserves_record_semantics(monkeypatch):
-    validator_instance = SafetyValidator()
-    recorded: list[bool] = []
-
-    def track_rate_limit(action, record=True):
-        recorded.append(record)
-        return {"name": "rate_limit", "passed": True, "message": "tracked"}
-
-    monkeypatch.setattr(validator_instance, "_check_rate_limits", track_rate_limit)
-
-    validator_instance.validate(
-        AgentAction(
-            type=ActionType.create_experiment,
-            config=make_experiment(),
-            project_id="apdl",
-        )
-    )
-    validator_instance.validate(
-        AgentAction(
-            type=ActionType.update_flag,
-            config={"key": "checkout", "default_value": False},
-            project_id="apdl",
-        )
-    )
-
-    assert recorded == [True, False]

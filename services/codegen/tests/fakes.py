@@ -225,6 +225,16 @@ class FakeConn:
         if "SELECT status FROM codegen_changesets" in query:
             row = self._rows("changesets").get(args[0])
             return row["status"] if row else None
+        if "SELECT project_id" in query and "retry_of_changeset_id = $1" in query:
+            row = next(
+                (
+                    item
+                    for item in self._rows("changesets").values()
+                    if item.get("retry_of_changeset_id") == args[0]
+                ),
+                None,
+            )
+            return row["project_id"] if row else None
         if "SELECT COALESCE(MIN(started_at), $2)" in query:
             values = [
                 row["started_at"]
@@ -450,23 +460,33 @@ class FakeConn:
             }
         if "INSERT INTO codegen_changesets" in query:
             is_retry = "retry_of_changeset_id" in query
-            retry_of_changeset_id = args[12] if is_retry else None
-            if is_retry and any(
-                existing.get("retry_of_changeset_id") == retry_of_changeset_id
+            retry_of_changeset_id = args[14] if is_retry else None
+            if any(
+                (
+                    is_retry
+                    and existing.get("retry_of_changeset_id")
+                    == retry_of_changeset_id
+                )
+                or (
+                    existing["project_id"] == args[1]
+                    and existing.get("idempotency_key") == args[2]
+                )
                 for existing in self._rows("changesets").values()
             ):
                 return None
             row = {
                 "changeset_id": args[0],
                 "project_id": args[1],
-                "repository_grant_id": args[8],
-                "repository_id": args[9],
-                "repository_installation_id": args[10],
-                "repository_full_name": args[11],
+                "idempotency_key": args[2],
+                "idempotency_request_sha256": args[3],
+                "repository_grant_id": args[10],
+                "repository_id": args[11],
+                "repository_installation_id": args[12],
+                "repository_full_name": args[13],
                 "repository_target_quarantined": False,
-                "run_id": args[2],
-                "status": args[3],
-                "base_branch": args[4],
+                "run_id": args[4],
+                "status": args[5],
+                "base_branch": args[6],
                 "branch": None,
                 "pr_url": None,
                 "pr_number": None,
@@ -479,7 +499,7 @@ class FakeConn:
                 "ci_failure_key": None,
                 "ci_failure_summary": None,
                 "merge_sha": None,
-                "task": args[5],
+                "task": args[7],
                 "diff_stat": "{}",
                 "prompts": "[]",
                 "contract_bundle": None,
@@ -492,8 +512,8 @@ class FakeConn:
                 "runtime_acceptance_plan": None,
                 "runtime_evidence_assessment": None,
                 "publication_authorization": None,
-                "tenant_policy_snapshot": args[6],
-                "effective_safety_policy_sha256": args[7],
+                "tenant_policy_snapshot": args[8],
+                "effective_safety_policy_sha256": args[9],
                 "retry_of_changeset_id": retry_of_changeset_id,
                 "error": None,
                 "created_at": _T0,
@@ -501,6 +521,28 @@ class FakeConn:
             }
             self._rows("changesets")[args[0]] = row
             return row
+
+        if "WHERE project_id = $1 AND idempotency_key = $2" in query:
+            return next(
+                (
+                    row
+                    for row in self._rows("changesets").values()
+                    if row["project_id"] == args[0]
+                    and row.get("idempotency_key") == args[1]
+                ),
+                None,
+            )
+
+        if "WHERE project_id = $1 AND retry_of_changeset_id = $2" in query:
+            return next(
+                (
+                    row
+                    for row in self._rows("changesets").values()
+                    if row["project_id"] == args[0]
+                    and row.get("retry_of_changeset_id") == args[1]
+                ),
+                None,
+            )
 
         if "WHERE retry_of_changeset_id = $1" in query:
             return next(
@@ -843,6 +885,8 @@ class FakePool:
         self.store["changesets"][changeset_id] = {
             "changeset_id": changeset_id,
             "project_id": project_id,
+            "idempotency_key": f"test:{changeset_id}",
+            "idempotency_request_sha256": "0" * 64,
             "repository_grant_id": grant["grant_id"] if grant else None,
             "repository_id": grant["repository_id"] if grant else None,
             "repository_installation_id": (

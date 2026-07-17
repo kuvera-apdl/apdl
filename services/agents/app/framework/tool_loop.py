@@ -24,6 +24,7 @@ Safety properties, in order of importance:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -38,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 #: Per-result character cap before a tool result re-enters the conversation.
 RESULT_CHAR_CAP = 8_000
+# Reserve space for the trust envelope and provenance metadata so the complete
+# tool message, not just its data field, stays within the prompt budget.
+RESULT_DATA_CHAR_CAP = RESULT_CHAR_CAP - 1_000
 #: Hard ceiling on tool calls within one round — a model that requests dozens
 #: of parallel calls in a single turn is misbehaving, not thorough.
 MAX_CALLS_PER_ROUND = 8
@@ -61,6 +65,50 @@ class ToolLoopResult:
     text: str
     trace: list[ToolTraceEntry] = field(default_factory=list)
     rounds: int = 0
+
+
+def tool_result_source_id(entry: ToolTraceEntry) -> str:
+    """Return a stable identifier for one observed tool result.
+
+    The identifier binds the tool, canonical parameters, result, and error so
+    an insight cannot cite a different warehouse observation by reusing an
+    arbitrary model-authored label.
+    """
+    payload = json.dumps(
+        {
+            "tool": entry.tool,
+            "params": entry.params,
+            "result": entry.result,
+            "error": entry.error,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return f"warehouse:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+
+
+def warehouse_result_envelope(entry: ToolTraceEntry) -> str:
+    """Serialize warehouse output as explicitly untrusted structured data."""
+    data: Any = entry.result
+    if entry.result is not None:
+        try:
+            data = json.loads(entry.result)
+        except (json.JSONDecodeError, TypeError):
+            data = entry.result
+    return json.dumps(
+        {
+            "schema": "warehouse_tool_result@1",
+            "trust": "untrusted",
+            "source_id": tool_result_source_id(entry),
+            "tool": entry.tool,
+            "params": entry.params,
+            "data": data if entry.error is None else None,
+            "error": entry.error,
+        },
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def _truncate(blob: str, cap: int = RESULT_CHAR_CAP) -> str:
@@ -99,7 +147,7 @@ async def _execute_call(
 
     try:
         output = await tool_catalog.run_tool(ctx, name, arguments)
-        result = _truncate(json.dumps(output, default=str))
+        result = _truncate(json.dumps(output, default=str), RESULT_DATA_CHAR_CAP)
         return ToolTraceEntry(
             tool=name,
             params=arguments,
@@ -195,10 +243,19 @@ async def run_tool_loop(
     ]
     trace: list[ToolTraceEntry] = []
     allowed_tools = frozenset(schema["name"] for schema in tool_schemas)
+    purpose_scope = (
+        "custom_agent_test" if ctx.execution_kind == "custom_agent_test" else "agent"
+    )
 
     for round_index in range(max_steps):
         completion = await chat_completion_with_tools(
-            model_tier=model_tier, messages=messages, tools=tool_schemas
+            model_tier=model_tier,
+            messages=messages,
+            tools=tool_schemas,
+            context=ctx.llm_request(
+                purpose=f"{purpose_scope}.{agent_name}.tool_round",
+                data_classification="confidential",
+            ),
         )
         if not completion.tool_calls:
             return ToolLoopResult(text=completion.text, trace=trace, rounds=round_index)
@@ -256,9 +313,7 @@ async def run_tool_loop(
                     "role": "tool",
                     "tool_call_id": tc.id,
                     "name": tc.name,
-                    "content": entry.result
-                    if entry.error is None
-                    else json.dumps({"error": entry.error}),
+                    "content": warehouse_result_envelope(entry),
                 }
             )
             if terminal_result_for_tool is not None:
@@ -291,6 +346,10 @@ async def run_tool_loop(
         model_tier=model_tier,
         messages=messages,
         tools=tool_schemas,
+        context=ctx.llm_request(
+            purpose=f"{purpose_scope}.{agent_name}.tool_finalize",
+            data_classification="confidential",
+        ),
         force_text=True,
     )
     logger.info(

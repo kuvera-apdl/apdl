@@ -92,11 +92,27 @@ def _repository_target(pool: FakePool, project_id: str = "demo") -> RepositoryTa
     )
 
 
+def _request_hash(
+    project_id: str,
+    run_id: str | None,
+    base_branch: str | None,
+    task: dict,
+) -> str:
+    return store.changeset_request_sha256(
+        project_id=project_id,
+        run_id=run_id,
+        base_branch=base_branch,
+        task=task,
+    )
+
+
 async def _seed(pool: FakePool, changeset_id: str, project_id: str = "demo", base="main"):
     await store.create_changeset(
         pool,
         changeset_id=changeset_id,
         project_id=project_id,
+        idempotency_key=f"test:{changeset_id}",
+        idempotency_request_sha256=_request_hash(project_id, "run-1", base, _TASK),
         run_id="run-1",
         base_branch=base,
         task=_TASK,
@@ -563,6 +579,8 @@ async def test_job_errors_when_repository_grant_is_revoked():
     pool.add_connection("ghost")
     await store.create_changeset(
         pool, changeset_id="cs_ghost001", project_id="ghost",
+        idempotency_key="test:cs-ghost001",
+        idempotency_request_sha256=_request_hash("ghost", None, "main", _TASK),
         run_id=None, base_branch="main", task=_TASK,
         repository_target=_repository_target(pool, "ghost"),
         tenant_policy_snapshot=TenantCodegenConnectionPolicy(),
@@ -769,6 +787,8 @@ async def test_job_passes_connection_policy_and_revert_sha_to_the_editor():
     task = {**_TASK, "context": {"revert_sha": "cafebabe"}}
     await store.create_changeset(
         pool, changeset_id="cs_pol00001", project_id="demo",
+        idempotency_key="test:cs-pol00001",
+        idempotency_request_sha256=_request_hash("demo", None, "main", task),
         run_id=None, base_branch="main", task=task,
         repository_target=_repository_target(pool),
         tenant_policy_snapshot=TenantCodegenConnectionPolicy(
@@ -812,6 +832,8 @@ async def test_job_uses_queued_tenant_policy_snapshot_after_connection_is_weaken
         pool,
         changeset_id="cs_snapshot1",
         project_id="demo",
+        idempotency_key="test:cs-snapshot1",
+        idempotency_request_sha256=_request_hash("demo", None, "main", _TASK),
         run_id=None,
         base_branch="main",
         task=_TASK,
@@ -1183,6 +1205,8 @@ async def test_job_opens_draft_pr_for_higher_risk_change():
         pool,
         changeset_id="cs_risk0001",
         project_id="demo",
+        idempotency_key="test:cs-risk0001",
+        idempotency_request_sha256=_request_hash("demo", None, "main", task),
         run_id=None,
         base_branch="main",
         task=task,

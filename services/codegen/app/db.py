@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 15
-MIGRATION_NAME = "015_custom_agent_contracts_and_retry_lineage.sql"
+MIGRATION_VERSION = 22
+MIGRATION_NAME = "022_agents_durable_effects.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("codegen_connections", "project_id"),
@@ -30,6 +30,8 @@ REQUIRED_COLUMNS = frozenset(
         ("github_repository_grants", "revoked_at"),
         ("codegen_changesets", "changeset_id"),
         ("codegen_changesets", "project_id"),
+        ("codegen_changesets", "idempotency_key"),
+        ("codegen_changesets", "idempotency_request_sha256"),
         ("codegen_changesets", "repository_grant_id"),
         ("codegen_changesets", "repository_id"),
         ("codegen_changesets", "repository_installation_id"),

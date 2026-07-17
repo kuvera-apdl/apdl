@@ -1,876 +1,207 @@
-"""Approval endpoint — per-item human decisions on a pending agent gate.
+"""Strict human approval commands for persisted agent gates.
 
-A gate (experiment_design or feature_proposal) can hold several items. The
-human decides each one in a single batched submit; approved items fork their
-own downstream track (a feature proposal → its own code_implementation run /
-PR; an experiment design → an individual deploy) while rejected items are
-recorded and skipped. Whatever the mix, the run always resumes afterwards so it
-either runs later pipeline agents or finalizes — it never wedges at ``resuming``.
+This router never calls Config, Codegen, or an in-process supervisor.  A POST
+only validates the exact persisted gate and transactionally queues its command,
+decisions, mandatory audit intents, and effects.  The durable effect worker
+applies and retries those effects after the response has returned.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import uuid
-from typing import Any
+from datetime import datetime
+from typing import Literal
 
 import asyncpg
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.auth import require_role
-from app.graphs.experiment_design import deploy_experiment, open_treatment_changeset
-from app.graphs.supervisor import run_supervisor
-from app.safety.audit import AuditLogger
-from app.store.experiments import record_designed_experiment
-from app.store.proposals import (
-    enqueue_proposals,
-    get_proposal,
-    mark_failed,
-    mark_implemented,
+from app.store.approval_effects import (
+    ApprovalCommandView,
+    ApprovalDecision,
+    ApprovalDecisionError,
+    ApprovalGateConflictError,
+    ApprovalRunNotFoundError,
+    enqueue_approval_command,
+    get_approval_command,
 )
-from app.store.run_leases import (
-    RUN_LEASE_SECONDS,
-    RunLeaseLostError,
-    handoff_run_to_queue,
-    maintain_run_lease,
-    new_lease_owner_id,
-    run_while_lease_owned,
-)
-from app.tools.code import open_changeset
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
-#: Gate agent name -> the `produces` key its items are persisted under.
-_GATE_RESULT_KEY = {
-    "experiment_design": "experiment_designs",
-    "feature_proposal": "feature_proposals",
-    "code_implementation": "changesets",
-}
+CommandStatus = Literal["queued", "processing", "succeeded", "manual_intervention"]
+EffectStatus = Literal[
+    "queued",
+    "processing",
+    "retryable_failed",
+    "succeeded",
+    "failed",
+    "manual_intervention",
+]
+GateAgent = Literal["experiment_design", "feature_proposal", "code_implementation"]
 
 
 class ItemDecision(BaseModel):
-    item_id: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    item_id: str = Field(min_length=1, max_length=128)
     approved: bool
+
+    @field_validator("item_id")
+    @classmethod
+    def _canonical_item_id(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("item_id must not contain surrounding whitespace")
+        if not value:
+            raise ValueError("item_id must not be blank")
+        return value
 
 
 class ApprovalRequest(BaseModel):
-    """Per-item decisions (``decisions``) or a legacy whole-gate ``approved``.
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    Exactly one must be supplied. ``decisions`` maps each gated item — keyed by
-    ``proposal_id`` / ``experiment_id`` — to approve or reject.
-    """
-
-    decisions: list[ItemDecision] | None = None
-    approved: bool | None = None
-    comment: str | None = None
+    decisions: list[ItemDecision] = Field(min_length=1, max_length=100)
+    comment: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
-    def _exactly_one(self) -> "ApprovalRequest":
-        if (self.decisions is None) == (self.approved is None):
-            raise ValueError("Provide exactly one of 'decisions' or 'approved'.")
-        if self.decisions is not None and not self.decisions:
-            raise ValueError("'decisions' must not be empty.")
+    def _unique_item_ids(self) -> "ApprovalRequest":
+        item_ids = [decision.item_id for decision in self.decisions]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("decisions must contain unique item_id values")
         return self
 
 
-class ApprovalResponse(BaseModel):
+class ApprovalEffectResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    effect_id: str
+    item_id: str
+    effect_type: str
+    status: EffectStatus
+    attempt_count: int
+    last_error: str | None
+    result: dict | None
+
+
+class ApprovalCommandResponse(BaseModel):
+    """One canonical queued-command/status envelope for POST and GET."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: str
     run_id: str
-    status: str
+    actor_credential_id: str
+    actor_user_id: str | None
+    gate_id: str
+    gate_agent: GateAgent
+    status: CommandStatus
     approved_count: int
     rejected_count: int
-    forked_runs: list[str]
-    #: Changeset ids opened by this approval: draft PRs from a
-    #: code_implementation gate (Phase 6) or treatment changesets for approved
-    #: experiment designs (loop phase 2).
-    opened_changesets: list[str] = Field(default_factory=list)
-    errors: list[str] = Field(default_factory=list)
-    message: str
+    comment: str | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+    effects: list[ApprovalEffectResponse]
 
 
-def _parse_config(raw: Any) -> dict[str, Any]:
-    """agent_runs.config is JSONB stored as a JSON string; parse defensively."""
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _changeset_openable(changeset: dict[str, Any]) -> bool:
-    """True if a code_implementation gate item is safe to open a PR for.
-
-    Only items the agent gated as ``approve`` (passed safety, genuinely awaiting a
-    human) are openable. Safety-halted items (``decision == "halt"`` /
-    ``safety_result.passed is False``) are already failed and must never be opened
-    even if a blanket approve sweeps them up alongside a sibling that is ``approve``.
-    """
-    if str(changeset.get("decision") or "") != "approve":
-        return False
-    safety = changeset.get("safety_result")
-    if isinstance(safety, dict) and safety.get("passed") is False:
-        return False
-    return True
-
-
-async def _update_design_ledger(
-    pool: asyncpg.Pool,
-    run_id: str,
-    project_id: str,
-    design: dict[str, Any],
-    status: str,
-) -> None:
-    """Best-effort sync of a human decision into the designed_experiments ledger."""
-    try:
-        await record_designed_experiment(pool, project_id, run_id, design, status)
-    except Exception:
-        logger.exception(
-            "[%s] Could not update design ledger for %s",
-            run_id,
-            design.get("experiment_id"),
-        )
-
-
-def _experiment_deployable(design: dict[str, Any]) -> bool:
-    """True if an experiment_design gate item is safe to deploy on approval.
-
-    Multi-design gates can mix outcomes: a safety-halted sibling or one the
-    agent already deployed (L3/L4) lands in the same persisted list as the
-    items genuinely awaiting a human. A blanket approve must not deploy those.
-    Legacy single-design items carry no ``decision`` key — the run only gated
-    when that design was awaiting approval, so they stay deployable.
-    """
-    decision = design.get("decision")
-    if decision is not None and str(decision) != "approve":
-        return False
-    safety = design.get("safety_result")
-    if isinstance(safety, dict) and safety.get("passed") is False:
-        return False
-    return True
-
-
-def _item_id(gated_agent: str, item: dict[str, Any]) -> str:
-    """The stable id used to match a decision to a persisted gate item."""
-    if gated_agent == "experiment_design":
-        flag = item.get("flag_config") or {}
-        return str(item.get("experiment_id") or flag.get("key") or "").strip()
-    return str(item.get("proposal_id") or "").strip()
-
-
-async def _load_gate_items(
-    pool: asyncpg.Pool, run_id: str, produces: str
-) -> list[dict[str, Any]]:
-    """Reload a gated agent's persisted output items from agent_run_results."""
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT output FROM agent_run_results WHERE run_id = $1 AND produces = $2",
-            run_id,
-            produces,
-        )
-    items: list[dict[str, Any]] = []
-    for record in rows:
-        output = record["output"]
-        if isinstance(output, str):
-            # A malformed row must not 500 the gate forever — the human could
-            # never submit a decision. Skip it and decide the rest.
-            try:
-                output = json.loads(output)
-            except (json.JSONDecodeError, ValueError):
-                logger.error("[%s] Skipping malformed %s result row", run_id, produces)
-                continue
-        data = output
-        if isinstance(data, list):
-            items.extend(d for d in data if isinstance(d, dict))
-        elif isinstance(data, dict):
-            items.append(data)
-    return items
-
-
-async def _persist_approval_errors(
-    pool: asyncpg.Pool,
-    run_id: str,
-    lease_owner_id: str,
-    errors: list[str],
-) -> None:
-    """Persist approval-effect failures for the resumed supervisor state.
-
-    The internal result row uses the supervisor's canonical ``errors`` state
-    key. Ownership is checked in the same statement, so a stale approval worker
-    cannot write an error after losing its lease.
-    """
-    if not errors:
-        return
-    async with pool.acquire() as conn:
-        inserted = await conn.execute(
-            """
-            WITH owned_run AS (
-                SELECT run_id
-                FROM agent_runs
-                WHERE run_id = $1
-                  AND lease_owner_id = $3
-                  AND lease_expires_at > now()
-                FOR UPDATE
+def _response(view: ApprovalCommandView) -> ApprovalCommandResponse:
+    return ApprovalCommandResponse(
+        command_id=view.command_id,
+        run_id=view.run_id,
+        actor_credential_id=view.actor_credential_id,
+        actor_user_id=view.actor_user_id,
+        gate_id=view.gate_id,
+        gate_agent=view.gate_agent,  # type: ignore[arg-type]
+        status=view.status,  # type: ignore[arg-type]
+        approved_count=view.approved_count,
+        rejected_count=view.rejected_count,
+        comment=view.comment,
+        last_error=view.last_error,
+        created_at=view.created_at,
+        updated_at=view.updated_at,
+        effects=[
+            ApprovalEffectResponse(
+                effect_id=effect.effect_id,
+                item_id=effect.item_id,
+                effect_type=effect.effect_type,
+                status=effect.status,  # type: ignore[arg-type]
+                attempt_count=effect.attempt_count,
+                last_error=effect.last_error,
+                result=effect.result,
             )
-            INSERT INTO agent_run_results (run_id, agent_name, produces, output)
-            SELECT $1, 'approval_errors', 'errors', $2::jsonb
-            FROM owned_run
-            ON CONFLICT (run_id, agent_name)
-            DO UPDATE SET produces = EXCLUDED.produces,
-                          output = EXCLUDED.output,
-                          created_at = now()
-            """,
-            run_id,
-            json.dumps(errors),
-            lease_owner_id,
-        )
-    if isinstance(inserted, str) and inserted.endswith(" 0"):
-        raise RunLeaseLostError(f"Run {run_id} approval lease expired")
-
-
-def _resolve_decisions(
-    body: ApprovalRequest, gated_agent: str, items: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split persisted items into (approved, rejected).
-
-    Legacy ``approved`` applies one verdict to all items. Per-item ``decisions``
-    must name every item exactly once (matched by id); unknown or missing ids
-    are a 422 — an explicit human gate should not silently drop a decision.
-    """
-    if body.approved is not None:
-        return (list(items), []) if body.approved else ([], list(items))
-
-    decisions = {d.item_id: d.approved for d in (body.decisions or [])}
-    by_id: dict[str, dict[str, Any]] = {}
-    for index, item in enumerate(items):
-        iid = _item_id(gated_agent, item)
-        if not iid:
-            # A single unkeyed item (e.g. an experiment design lacking an
-            # experiment_id) aligns positionally with a lone decision.
-            iid = (
-                next(iter(decisions))
-                if len(items) == 1 and len(decisions) == 1
-                else f"__index_{index}"
-            )
-        if iid in by_id:
-            # Two items sharing an id (LLM emitted duplicate experiment_ids)
-            # must both stay addressable — silently collapsing one would let it
-            # bypass the gate undecided.
-            iid = f"{iid}#{index}"
-        by_id[iid] = item
-
-    unknown = sorted(set(decisions) - set(by_id))
-    if unknown:
-        raise HTTPException(
-            status_code=422, detail=f"Decision for unknown item id(s): {unknown}"
-        )
-    missing = sorted(set(by_id) - set(decisions))
-    if missing:
-        raise HTTPException(
-            status_code=422, detail=f"Missing a decision for item id(s): {missing}"
-        )
-
-    approved = [item for iid, item in by_id.items() if decisions[iid]]
-    rejected = [item for iid, item in by_id.items() if not decisions[iid]]
-    return approved, rejected
-
-
-def _any_approved(body: ApprovalRequest) -> bool:
-    if body.approved is not None:
-        return body.approved
-    return any(d.approved for d in (body.decisions or []))
-
-
-async def _run_supervisor_batch(tasks: list[dict[str, Any]]) -> None:
-    """Start every durably queued supervisor without Starlette serialization."""
-    results = await asyncio.gather(
-        *(run_supervisor(**task_kwargs) for task_kwargs in tasks),
-        return_exceptions=True,
+            for effect in view.effects
+        ],
     )
-    for task_kwargs, result in zip(tasks, results, strict=True):
-        if isinstance(result, BaseException):
-            logger.error(
-                "Queued supervisor %s exited unexpectedly: %r",
-                task_kwargs.get("run_id"),
-                result,
-            )
 
 
-async def _apply_approval_effects(
-    app: Any,
-    *,
-    pool: asyncpg.Pool,
-    run_id: str,
-    gated_agent: str,
-    project_id: str,
-    autonomy_level: int,
-    approved_items: list[dict[str, Any]],
-    rejected_items: list[dict[str, Any]],
-    comment: str | None,
-    gate_status: str,
-    lease_owner_id: str,
-) -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
-    """Apply one claimed gate's effects while the caller owns its lease.
-
-    The caller races this whole coroutine against lease loss. Cancellation
-    fences every subsequent Config, Codegen, vector-store, and scheduling
-    effect, although an HTTP request already accepted by another service cannot
-    be undone (the residual AUD-039 idempotency boundary).
-    """
-    audit = AuditLogger(pool)
-    for item in approved_items:
-        await audit.log(
-            run_id,
-            "human_approval",
-            {
-                "item_id": _item_id(gated_agent, item),
-                "kind": gated_agent,
-                "approved": True,
-                "comment": comment,
-            },
-            approval_status="approved",
-        )
-    for item in rejected_items:
-        await audit.log(
-            run_id,
-            "human_approval",
-            {
-                "item_id": _item_id(gated_agent, item),
-                "kind": gated_agent,
-                "approved": False,
-                "comment": comment,
-            },
-            approval_status="rejected",
-        )
-
-    forked_runs: list[str] = []
-    opened_changesets: list[str] = []
-    errors: list[str] = []
-    forked_supervisor_tasks: list[dict[str, Any]] = []
-    if gated_agent == "experiment_design":
-        for design in approved_items:
-            if not _experiment_deployable(design):
-                await audit.log(
-                    run_id,
-                    "approval_skipped",
-                    {
-                        "item_id": _item_id(gated_agent, design),
-                        "kind": gated_agent,
-                        "reason": "design did not pass safety / was not awaiting approval",
-                        "decision": design.get("decision"),
-                    },
-                    approval_status="skipped",
-                )
-                logger.warning(
-                    "[%s] Skipped deploying design %s — decision=%r, not deployable",
-                    run_id,
-                    _item_id(gated_agent, design),
-                    design.get("decision"),
-                )
-                continue
-            try:
-                deployed = await deploy_experiment(project_id, design)
-            except Exception:
-                deployed = False
-                logger.exception(
-                    "[%s] Failed to deploy experiment %s",
-                    run_id,
-                    _item_id(gated_agent, design),
-                )
-            await _update_design_ledger(
-                pool,
-                run_id,
-                project_id,
-                design,
-                "deployed" if deployed else "deploy_failed",
-            )
-            if deployed:
-                logger.info(
-                    "[%s] Deployed approved experiment %s",
-                    run_id,
-                    _item_id(gated_agent, design),
-                )
-                try:
-                    changeset_id = await open_treatment_changeset(
-                        pool, project_id, run_id, design
-                    )
-                    if changeset_id:
-                        opened_changesets.append(changeset_id)
-                        await audit.log(
-                            run_id,
-                            "treatment_changeset_opened",
-                            {
-                                "experiment_id": _item_id(gated_agent, design),
-                                "changeset_id": changeset_id,
-                            },
-                        )
-                except Exception:
-                    logger.exception(
-                        "[%s] Treatment changeset failed for %s",
-                        run_id,
-                        _item_id(gated_agent, design),
-                    )
-                    await audit.log(
-                        run_id,
-                        "treatment_changeset_failed",
-                        {"experiment_id": _item_id(gated_agent, design)},
-                    )
-            else:
-                experiment_id = _item_id(gated_agent, design) or "(no id)"
-                errors.append(f"experiment deploy failed: {experiment_id}")
-                await audit.log(
-                    run_id,
-                    "deploy_failed",
-                    {"item_id": experiment_id, "kind": gated_agent},
-                    approval_status="approved",
-                )
-                logger.error(
-                    "[%s] Deploy failed for approved experiment %s",
-                    run_id,
-                    experiment_id,
-                )
-        for design in rejected_items:
-            await _update_design_ledger(pool, run_id, project_id, design, "rejected")
-    elif gated_agent == "code_implementation":
-        for changeset in approved_items:
-            if not _changeset_openable(changeset):
-                await audit.log(
-                    run_id,
-                    "approval_skipped",
-                    {
-                        "item_id": _item_id(gated_agent, changeset),
-                        "kind": gated_agent,
-                        "reason": "changeset did not pass safety / was not awaiting approval",
-                        "decision": changeset.get("decision"),
-                    },
-                    approval_status="skipped",
-                )
-                logger.warning(
-                    "[%s] Skipped approving changeset %s — decision=%r, not openable",
-                    run_id,
-                    _item_id(gated_agent, changeset),
-                    changeset.get("decision"),
-                )
-                continue
-            opened = await _open_approved_changeset(
-                app,
-                run_id=run_id,
-                project_id=project_id,
-                changeset=changeset,
-            )
-            if opened:
-                opened_changesets.append(opened)
-        for changeset in rejected_items:
-            proposal_id = str(changeset.get("proposal_id") or "").strip()
-            if proposal_id:
-                try:
-                    await mark_failed(
-                        pool,
-                        proposal_id,
-                        "PR rejected at the approval gate.",
-                        run_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "[%s] Could not mark rejected proposal %s", run_id, proposal_id
-                    )
-    elif gated_agent == "feature_proposal":
-        for proposal in approved_items:
-            item_id = _item_id(gated_agent, proposal)
-            reason = (
-                "legacy experiment-derived feature proposals are quarantined; "
-                "deployment readiness is not assessed"
-            )
-            errors.append(f"feature proposal unavailable: {item_id}")
-            await audit.log(
-                run_id,
-                "approval_skipped",
-                {"item_id": item_id, "kind": gated_agent, "reason": reason},
-                approval_status="skipped",
-            )
-            logger.warning("[%s] Skipped legacy feature proposal %s", run_id, item_id)
-
-    await _persist_approval_errors(pool, run_id, lease_owner_id, errors)
-    await audit.log(
-        run_id,
-        "approval_decision",
-        {
-            "gated_agent": gated_agent,
-            "approved": len(approved_items),
-            "rejected": len(rejected_items),
-            "forked_runs": forked_runs,
-            "opened_changesets": opened_changesets,
-            "errors": errors,
-        },
-        approval_status=gate_status,
-    )
-    return forked_runs, opened_changesets, errors, forked_supervisor_tasks
-
-
-@router.post("/{run_id}/approve", response_model=ApprovalResponse)
+@router.post(
+    "/{run_id}/approve",
+    response_model=ApprovalCommandResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def approve_action(
     run_id: str,
     body: ApprovalRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
-) -> ApprovalResponse:
-    """Record per-item human decisions on a gate, fork approved items, resume.
-
-    Approved feature proposals each fork their own code_implementation run (one
-    PR per proposal); approved experiment designs each deploy individually.
-    Rejected items are audited and skipped. The run always resumes so it
-    continues the pipeline or finalizes — closing the old ``resuming`` wedge.
-    """
+) -> ApprovalCommandResponse:
+    """Queue the exact decisions for the run's currently persisted gate."""
     principal = require_role(request, "agents:approve")
     pool: asyncpg.Pool = request.app.state.pg_pool
-
-    async with pool.acquire() as conn:
-        row: Any = await conn.fetchrow(
-            "SELECT run_id, status, phase, project_id, autonomy_level, config "
-            "FROM agent_runs WHERE run_id = $1 AND project_id = $2",
-            run_id,
-            principal.project_id,
-        )
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    if row["status"] != "waiting_approval":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Run {run_id} is not waiting for approval (current status: {row['status']})",
-        )
-
-    # Captured from the pre-update snapshot — the gate phase, before we overwrite it.
-    gated_agent = (row["phase"] or "").removesuffix("_approval")
-    project_id: str = row["project_id"]
-    autonomy_level: int = row["autonomy_level"]
-    config = _parse_config(row["config"])
-    analysis_types = config.get("analysis_types") or []
-    resume_task_kwargs = {
-        "pool": pool,
-        "vector_store": request.app.state.vector_store,
-        "run_id": run_id,
-        "project_id": project_id,
-        "analysis_types": analysis_types,
-        "time_range_days": int(config.get("time_range_days", 7)),
-        "autonomy_level": autonomy_level,
-        "resume": True,
-    }
-
-    # Resolve decisions against persisted items BEFORE mutating (a 422 here must
-    # leave the run untouched at waiting_approval so the human can resubmit).
-    produces = _GATE_RESULT_KEY.get(gated_agent)
-    if produces is not None:
-        items = await _load_gate_items(pool, run_id, produces)
-        approved_items, rejected_items = _resolve_decisions(body, gated_agent, items)
-    else:
-        # An unknown gate with no persisted payload: record the decision and
-        # resume without acting on items.
-        approved_items, rejected_items = [], []
-
-    gate_status = "approved" if _any_approved(body) else "rejected"
-    approval_owner_id = new_lease_owner_id()
-    approval_claim_started = asyncio.get_running_loop().time()
-
-    # Atomically claim the gate: only one request flips it off waiting_approval,
-    # so a duplicate/concurrent submit 400s instead of double-forking. The claim
-    # also pins the snapshotted phase — a delayed duplicate that snapshotted an
-    # earlier gate must not consume a *later* gate the run has since reached
-    # (its decisions were resolved against the earlier gate's items).
-    async with pool.acquire() as conn:
-        claimed = await conn.fetchval(
-            """
-            UPDATE agent_runs
-            SET status = $2,
-                phase = 'resuming',
-                lease_owner_id = $5,
-                lease_expires_at = now() + ($4 * interval '1 second'),
-                updated_at = now()
-            WHERE run_id = $1
-              AND status = 'waiting_approval'
-              AND phase = $3
-              AND lease_owner_id IS NULL
-              AND lease_expires_at IS NULL
-            RETURNING run_id
-            """,
-            run_id,
-            gate_status,
-            row["phase"],
-            RUN_LEASE_SECONDS,
-            approval_owner_id,
-        )
-    if claimed is None:
-        raise HTTPException(
-            status_code=400, detail=f"Run {run_id} is no longer waiting for approval"
-        )
-
-    lease_stop = asyncio.Event()
-    lease_lost = asyncio.Event()
-    heartbeat_task = asyncio.create_task(
-        maintain_run_lease(
+    decisions = tuple(
+        ApprovalDecision(item_id=item.item_id, approved=item.approved)
+        for item in body.decisions
+    )
+    try:
+        command = await enqueue_approval_command(
             pool,
-            run_id,
-            approval_owner_id,
-            lease_stop,
-            lease_lost,
-            confirmed_at=approval_claim_started,
-        )
-    )
-    try:
-        (
-            forked_runs,
-            opened_changesets,
-            errors,
-            forked_supervisor_tasks,
-        ) = await run_while_lease_owned(
-            _apply_approval_effects(
-                request.app,
-                pool=pool,
-                run_id=run_id,
-                gated_agent=gated_agent,
-                project_id=project_id,
-                autonomy_level=autonomy_level,
-                approved_items=approved_items,
-                rejected_items=rejected_items,
-                comment=body.comment,
-                gate_status=gate_status,
-                lease_owner_id=approval_owner_id,
-            ),
-            lease_lost,
             run_id=run_id,
+            project_id=principal.project_id,
+            actor_credential_id=principal.credential_id,
+            actor_user_id=principal.actor_user_id,
+            decisions=decisions,
+            comment=body.comment,
         )
-        if lease_lost.is_set():
-            raise RunLeaseLostError(f"Run {run_id} approval lease expired")
-    except RunLeaseLostError as exc:
+    except ApprovalRunNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ApprovalDecisionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ApprovalGateConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except asyncpg.UniqueViolationError as exc:
         raise HTTPException(
-            status_code=503,
-            detail="Approval ownership was lost; the run will be recovered.",
+            status_code=409,
+            detail=f"Run {run_id} approval gate was already submitted",
         ) from exc
-    finally:
-        lease_stop.set()
-        await heartbeat_task
-
-    try:
-        queued = await handoff_run_to_queue(pool, run_id, approval_owner_id)
     except Exception as exc:
-        logger.exception(
-            "[%s] Could not hand approval work back to the run queue", run_id
-        )
+        # A transaction failure includes failure to persist mandatory audit
+        # intent.  The transaction rolls back and no effect is allowed to run.
+        logger.exception("[%s] Could not enqueue approval command", run_id)
         raise HTTPException(
             status_code=503,
-            detail="Approval completed but resume handoff failed; the run will be recovered.",
+            detail="Approval was not recorded; retry the complete request.",
         ) from exc
-    if not queued:
-        raise HTTPException(
-            status_code=503,
-            detail="Approval lease expired before resume handoff; the run will be recovered.",
-        )
+    return _response(command)
 
-    # Always resume: run later pipeline agents (each gated in turn) or finalize
-    # to done when none remain. This is what prevents the resuming wedge.
-    supervisor_tasks = [resume_task_kwargs, *forked_supervisor_tasks]
-    background_tasks.add_task(_run_supervisor_batch, supervisor_tasks)
 
-    logger.info(
-        "Run %s gate %s decided: %d approved, %d rejected, %d forked, %d PR(s) opened",
-        run_id,
-        gated_agent,
-        len(approved_items),
-        len(rejected_items),
-        len(forked_runs),
-        len(opened_changesets),
-    )
-    opened_note = (
-        f" · {len(opened_changesets)} PR(s) opened" if opened_changesets else ""
-    )
-    error_note = f" · {len(errors)} error(s)" if errors else ""
-    return ApprovalResponse(
+@router.get(
+    "/{run_id}/approvals/{command_id}",
+    response_model=ApprovalCommandResponse,
+)
+async def approval_command_status(
+    run_id: str,
+    command_id: str,
+    request: Request,
+) -> ApprovalCommandResponse:
+    """Return command and per-effect retry/manual-intervention state."""
+    principal = require_role(request, "agents:approve")
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    command = await get_approval_command(
+        pool,
         run_id=run_id,
-        status=gate_status,
-        approved_count=len(approved_items),
-        rejected_count=len(rejected_items),
-        forked_runs=forked_runs,
-        opened_changesets=opened_changesets,
-        errors=errors,
-        message=(
-            f"{len(approved_items)} approved, {len(rejected_items)} rejected — run resumes."
-            + opened_note
-            + error_note
-        ),
+        project_id=principal.project_id,
+        command_id=command_id,
     )
-
-
-async def _open_approved_changeset(
-    app: Any,
-    *,
-    run_id: str,
-    project_id: str,
-    changeset: dict[str, Any],
-) -> str | None:
-    """Open the draft PR for one approved code_implementation changeset.
-
-    The gated changeset carries the proposal's ``title``/``spec`` (self-describing
-    since Phase 6); older items fall back to the durable ``feature_proposals``
-    row. Best-effort: a codegen failure marks the proposal failed and is logged,
-    never raised — the approval handler must still resume the run.
-    """
-    pool: asyncpg.Pool = app.state.pg_pool
-    proposal_id = str(changeset.get("proposal_id") or "").strip()
-    title = str(changeset.get("title") or "").strip()
-    spec = str(changeset.get("spec") or "").strip()
-
-    if (not title or not spec) and proposal_id:
-        try:
-            proposal = await get_proposal(pool, proposal_id)
-        except Exception:
-            logger.exception("[%s] Could not load proposal %s", run_id, proposal_id)
-            proposal = None
-        if proposal:
-            title = title or str(proposal.get("title") or "")
-            spec = spec or str(proposal.get("spec") or "")
-
-    if not title or not spec:
-        logger.warning(
-            "[%s] Cannot open PR for proposal %r — missing title/spec",
-            run_id,
-            proposal_id,
-        )
-        if proposal_id:
-            try:
-                await mark_failed(
-                    pool,
-                    proposal_id,
-                    "Missing title/spec at approval.",
-                    run_id,
-                )
-            except Exception:
-                logger.exception(
-                    "[%s] Could not mark proposal %s failed", run_id, proposal_id
-                )
-        return None
-
-    try:
-        result = await open_changeset(
-            project_id=project_id,
-            title=title,
-            spec=spec,
-            run_id=run_id,
-            context={"proposal_id": proposal_id},
-            constraints=["All existing tests must pass."],
-        )
-    except Exception as exc:
-        logger.exception("[%s] Failed to open changeset for %s", run_id, proposal_id)
-        if proposal_id:
-            try:
-                await mark_failed(pool, proposal_id, str(exc), run_id)
-            except Exception:
-                logger.exception(
-                    "[%s] Could not mark proposal %s failed", run_id, proposal_id
-                )
-        return None
-
-    changeset_id = str(result.get("changeset_id") or "").strip()
-    if changeset_id and proposal_id:
-        try:
-            await mark_implemented(pool, proposal_id, changeset_id, run_id)
-        except Exception:
-            logger.exception(
-                "[%s] Could not mark proposal %s implemented", run_id, proposal_id
-            )
-    logger.info(
-        "[%s] Opened changeset %s for approved proposal %s",
-        run_id,
-        changeset_id,
-        proposal_id,
-    )
-    return changeset_id or None
-
-
-async def _fork_proposal(
-    app: Any,
-    *,
-    run_id: str,
-    project_id: str,
-    autonomy_level: int,
-    proposal: dict[str, Any],
-) -> tuple[str, dict[str, Any]] | None:
-    """Persist one approved proposal and its queued code-implementation run.
-
-    Decision D2 (hybrid): the durable ``feature_proposals`` queue is the source
-    of truth; the forked run claims this exact proposal (one PR per approval).
-    The caller schedules the returned task only after the original run's queue
-    handoff, so the resume task is registered first and neither run depends on
-    an ownerless in-memory-only window.
-    """
-    pool: asyncpg.Pool = app.state.pg_pool
-    proposal_id = str(proposal.get("proposal_id") or "").strip()
-    if not proposal_id:
-        logger.warning(
-            "[%s] Approved proposal has no proposal_id — cannot fork", run_id
-        )
-        return None
-
-    await enqueue_proposals(pool, run_id, project_id, [proposal])
-
-    # Enqueue is idempotent (ON CONFLICT DO NOTHING) and skips rows failing
-    # field validation, so the row may not be claimable: an id reused from an
-    # earlier run can sit at implemented/failed, or the insert may have been
-    # skipped entirely. Forking anyway would create a run that claims nothing
-    # and reports success while the approval silently did nothing.
-    row = await get_proposal(pool, proposal_id)
-    if row is None or row.get("status") != "approved":
-        logger.warning(
-            "[%s] Proposal %s is not claimable after enqueue (status=%r) — not forking",
-            run_id,
-            proposal_id,
-            row.get("status") if row else None,
-        )
-        return None
-
-    new_run_id = str(uuid.uuid4())
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO agent_runs
-                (run_id, project_id, trigger_type, autonomy_level, status, phase,
-                 lease_expires_at, config)
-            VALUES ($1, $2, 'manual', $3, 'started', 'initializing',
-                    now() + ($4 * interval '1 second'), $5::jsonb)
-            """,
-            new_run_id,
-            project_id,
-            autonomy_level,
-            RUN_LEASE_SECONDS,
-            json.dumps(
-                {
-                    "analysis_types": ["code_implementation"],
-                    "kicked_by": run_id,
-                    "target_proposal_id": proposal_id,
-                }
-            ),
-        )
-
-    task_kwargs = {
-        "pool": pool,
-        "vector_store": app.state.vector_store,
-        "run_id": new_run_id,
-        "project_id": project_id,
-        "analysis_types": ["code_implementation"],
-        "time_range_days": 7,
-        "autonomy_level": autonomy_level,
-        "target_proposal_id": proposal_id,
-    }
-    logger.info(
-        "Forked code_implementation run %s for proposal %s (from %s)",
-        new_run_id,
-        proposal_id,
-        run_id,
-    )
-    return new_run_id, task_kwargs
+    if command is None:
+        raise HTTPException(status_code=404, detail="Approval command not found")
+    return _response(command)

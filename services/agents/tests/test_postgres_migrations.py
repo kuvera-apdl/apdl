@@ -29,6 +29,12 @@ CUSTOM_AGENT_CONTRACT_SQL = (
 RETENTION_COHORT_MODE_SQL = (
     POSTGRES_MIGRATIONS / "019_retention_cohort_mode.sql"
 ).read_text()
+AGENTS_GOVERNANCE_SQL = (
+    POSTGRES_MIGRATIONS / "020_agents_governance.sql"
+).read_text()
+AGENTS_MUTATION_QUOTAS_SQL = (
+    POSTGRES_MIGRATIONS / "021_agents_mutation_quotas.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -117,6 +123,24 @@ def test_agents_core_migration_matches_the_running_service_contracts():
     assert AGENTS_CORE_SQL.index("CREATE TABLE agent_memory_legacy_vectors") < (
         AGENTS_CORE_SQL.index("DELETE FROM agent_memory")
     )
+
+
+def test_agents_governance_scopes_feature_proposal_identity_to_project():
+    assert "DROP CONSTRAINT feature_proposals_pkey" in AGENTS_GOVERNANCE_SQL
+    assert "PRIMARY KEY (project_id, proposal_id)" in AGENTS_GOVERNANCE_SQL
+
+
+def test_agents_mutation_quota_ledger_has_one_strict_canonical_identity():
+    sql = AGENTS_MUTATION_QUOTAS_SQL
+
+    assert "CREATE TABLE agent_mutation_quota_reservations" in sql
+    assert "PRIMARY KEY (project_id, action_type, idempotency_key)" in sql
+    assert "policy_version = 'rolling_hour@1'" in sql
+    assert "agent_mutation_quota_action_type_check" in sql
+    assert "agent_mutation_quota_idempotency_key_check" in sql
+    assert "btrim(idempotency_key) <> ''" in sql
+    assert "agent_mutation_quota_reservations_lookup_idx" in sql
+    assert "(project_id, action_type, policy_version, occurred_at DESC)" in sql
 
 
 def test_observability_migration_uses_text_tenant_and_run_identifiers():

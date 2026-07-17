@@ -1,18 +1,21 @@
 # Agents Service
 
-LLM-powered autonomous agents for the **Autonomous Product Development Loop** —
-FastAPI service on port **8083**.
+LLM-powered analysis and proposal workflows for the **Autonomous Product
+Development Loop** — an opt-in operator preview on port **8083**.
 
 ## What it does
 
-Closes the product loop autonomously: agents **read analytics** from the Query
-Service (funnels, retention, event counts), **reason** over them with an LLM to
-produce insights, and **act** through bounded experiment-design workflows.
-Every action passes a safety validator and an autonomy gate before deployment
-and is written to an audit log. Experiment results are read-only in the OSS
-developer preview: autonomous evaluation, stopping, shipping, feature-proposal
-generation, and rollback are disabled. Insights are persisted to pgvector
-memory so later runs build on earlier findings.
+Agents **read analytics** from the Query Service (funnels, retention, event
+counts) and **reason** over them with an LLM to produce insights and experiment
+designs. The 0.3.0 workflow deliberately remains open: every experiment design
+requires human approval, an approval creates an inert Config draft with a
+disabled backing flag, treatment work follows a separate changeset lifecycle,
+and activation remains a separate operator action. Insights are persisted to
+pgvector memory so later runs can build on earlier findings.
+
+Experiment results are read-only in the OSS developer preview. Autonomous
+evaluation, treatment deployment, activation, stopping, shipping,
+feature-proposal generation, personalization, and rollback are disabled.
 
 The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
@@ -25,10 +28,11 @@ trigger runs, manage/test custom agents, or approve work. This is enforced from
 canonical project provenance even when a credential incorrectly contains an
 execution role.
 
-A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): it
-resolves the requested agents from a registry, runs them in pipeline order,
-skips agents whose `requires` inputs are missing, and threads a shared state
-dict between them.
+A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
+PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
+resolves agents in pipeline order, and each result is persisted before
+post-result bookkeeping or a later approval effect. Expired ownership is
+requeued at the persisted phase rather than terminalized as a failed run.
 
 ## API
 
@@ -39,11 +43,14 @@ operator-provisioned projects (`admin_projects.created_by IS NULL`).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/agents/trigger` | Start an agent run (runs in the background; returns `run_id`) |
+| `POST` | `/v1/agents/trigger` | Durably queue an agent run; returns `run_id` |
 | `GET` | `/v1/agents/{run_id}/status` | Run status, phase, insight/experiment counts |
-| `POST` | `/v1/agents/{run_id}/approve` | Approve or reject a run waiting at an approval gate |
+| `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
+| `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
+| `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
 | `GET` | `/health` | Liveness probe |
-| `GET` | `/ready` | Readiness probe (checks PostgreSQL connectivity) |
+| `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
+| `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
 
 ```bash
 curl -X POST localhost:8083/v1/agents/trigger \
@@ -61,7 +68,14 @@ curl -X POST localhost:8083/v1/agents/trigger \
 
 `trigger_type` is `scheduled`, `manual`, or `threshold_alert`. To approve a
 waiting run: `POST /v1/agents/{run_id}/approve` with
-`{"approved": true, "comment": "..."}`.
+`{"decisions": [{"item_id": "exp_checkout", "approved": true}], "comment": "..."}`.
+The request accepts no whole-gate alias or unknown fields. Decisions must name
+every persisted gate item exactly once. Its response is a queued-command
+envelope containing `command_id`, gate/count fields, timestamps, and an
+`effects` array. Command status is `queued`, `processing`, `succeeded`, or
+`manual_intervention`; each effect also exposes `retryable_failed` and its
+attempt/error/result fields. Config and Codegen calls run only in the durable
+effect worker with a persisted idempotency key and PostgreSQL quota reservation.
 
 ## Agent graphs
 
@@ -70,7 +84,7 @@ Agents self-register via `@register_agent` and run in `order`:
 | Name | Tier | Requires | Produces | What it does |
 |------|------|----------|----------|--------------|
 | `behavior_analysis` | reasoning | — | `insights` | Plans + runs analytics queries, synthesises insights |
-| `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment and deploys it through the safety gate |
+| `experiment_design` | reasoning | `insights` | `experiment_designs` | Designs an A/B experiment for mandatory human approval |
 | `experiment_evaluation` | reasoning | — | — | **Disabled**; experiment results require human interpretation |
 | `personalization` | fast | `insights` | `personalizations` | **Disabled**; no Config storage or delivery contract exists |
 | `feature_proposal` | reasoning | — | — | **Disabled**; statistical snapshots do not assess deployment readiness |
@@ -80,38 +94,58 @@ Scaffold a new agent with `scripts/new_agent.py`.
 ## LLM router
 
 `app/llm/router.py` routes by tier (`fast` for cheap tasks, `reasoning` for
-analysis/design). Each tier tries **OpenAI → Anthropic → Google → local** in
-order, skipping providers whose API key is unset, and falls back to the next
-provider on failure. Defaults are overridable per slot
-(`LLM_FAST_PRIMARY`, `LLM_REASONING_FALLBACK`, `LOCAL_LLM_MODEL`, …).
+analysis/design), but environment variables only define candidate models; they
+do not authorize tenant data egress. Every call carries an explicit project,
+run, purpose, execution kind, and data classification. Before network egress,
+the router loads the project's exact provider/model/residency policy, reserves
+the worst-case run and daily cost atomically, and persists the logical call and
+provider attempt. It then records provider/model, prompt hash, usage, cost,
+latency, outcome, and retry classification without storing prompt content.
 
-## Autonomy & safety
+Migration 023 creates one safe default policy for every project: only the exact
+local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
+spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, or Google requires an operator to update
+`llm_project_policies` and insert the exact provider/model row in
+`llm_project_provider_policies`, including allowed data classifications,
+residency, current input/output prices, and positive project-daily and per-run
+ceilings. A provider failure crosses to another vendor only when the project
+policy explicitly permits it and the failure is classified as retryable.
+
+## Approval and safety boundary
 
 These levels apply only to operator-provisioned projects. Self-created projects
 cannot start or resume an Agents execution at any autonomy level.
 
-Every acting agent funnels its safety result through `gate_action`
-(`app/framework/gating.py`):
+`gate_action` (`app/framework/gating.py`) is a generic policy primitive, not a
+claim that the enabled product flow is autonomous. Experiment design invokes it
+with mandatory approval: L1 performs no Config mutation, while L2 through L4
+all stop at the same human gate. No autonomy level enables a flag or starts an
+experiment in 0.3.0. Actions that fail static validation halt.
 
-| Level | Behavior |
-|-------|----------|
-| L1 | Suggest only — never mutates anything, even if safety passes |
-| L2 | Holds every safety-passing action for human approval |
-| L3 | Auto-deploys validated **low-risk** actions; medium/high risk goes to approval |
-| L4 | Full autonomy — deploys every enabled safety-passing action |
+- **Static safety validator** (`app/safety/validator.py`) — canonical-shape,
+  Config-conflict, and proposed blast-radius checks (including variant weights
+  and a control group). Experiments require one primary metric and a clear
+  hypothesis. These are pre-draft checks, not live guardrail monitoring or
+  evidence that a treatment is safe to activate.
+- **Audit log** (`app/safety/audit.py`) — authoritative human decisions and
+  mutation intents are committed with their command/outbox transaction before
+  external work. Best-effort logging is reserved for non-authoritative
+  workflow telemetry.
+- **Rollback surface** (`app/safety/rollback.py`) — explicitly unavailable and
+  fails closed. It neither decides nor executes an automatic rollback.
 
-Actions that fail safety validation always halt.
+### Experiment draft, treatment, and activation lifecycle
 
-- **Safety validator** (`app/safety/validator.py`) — per-action-type rate
-  limits, conflict detection, blast-radius checks (including variant weights ≤
-  100% and a control group ≥ 10%), and guardrail checks (experiments need
-  guardrail metrics, a primary metric, and a hypothesis; proposals need
-  documented risks and success criteria). Outputs a `low`/`medium`/`high` risk level.
-- **Audit log** (`app/safety/audit.py`) — every step, decision, safety result,
-  and approval is written to the `agent_audit_log` table in PostgreSQL.
-- **Rollback assessment** (`app/safety/rollback.py`) — fails closed with an
-  unavailable decision. Statistical snapshots are evidence only and do not
-  establish deployment or rollback readiness.
+1. The LLM produces a design and the validator checks the proposal.
+2. A human approves or rejects each design.
+3. Approval creates an inert experiment draft and disabled backing flag in
+   Config. No users are assigned treatment.
+4. If code is required, Agents may ask a separately provisioned Codegen worker
+   to open a treatment changeset. Creating the draft does not prove that code
+   exists, passes review, or has merged.
+5. After implementation and review, an operator must explicitly activate the
+   experiment through the Config/Admin lifecycle. Agents does not perform or
+   infer that activation.
 
 When upgrading an existing deployment to migration 014, stop the Agents
 service before applying PostgreSQL migrations. The migration fails existing
@@ -144,16 +178,22 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Runs, audit log, pgvector memory |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
+| `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
+| `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `GOOGLE_API_KEY` | — | Google provider |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Model overrides |
+| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names; each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
 | `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
 
-At least one of the four LLM credentials is required.
+At least one policy-authorized provider must also be configured and reachable
+to execute an LLM-backed run. API keys alone grant no project permission.
+`/ready/capabilities` reports process-level provider and service availability,
+but its degraded state does not make the core `/ready` endpoint fail and does
+not assert that any particular project's policy permits egress.
 
 ## Running locally
 

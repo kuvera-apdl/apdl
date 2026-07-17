@@ -1,4 +1,4 @@
-"""Canonical envelope for agent actions and LLM calls.
+"""Canonical envelope for agent actions.
 
 Agent actions live in two places by design:
   * The mutable approval lifecycle (pending -> approved/rejected -> executed)
@@ -7,8 +7,9 @@ Agent actions live in two places by design:
     to the `decisions:raw:{project_id}` Redis Stream and lands in ClickHouse
     `decisions_v2`. That's what agents and analysts query.
 
-LLM calls are tracked separately in PostgreSQL `llm_calls` (small rows,
-SHA-256 pointers into object storage for prompt/completion blobs).
+LLM calls use the strict runtime contracts in ``app.llm.contracts`` and the
+PostgreSQL logical-call/provider-attempt ledgers; they are not action-stream
+envelopes.
 """
 
 import hashlib
@@ -32,7 +33,9 @@ ActionType = Literal[
     "open_pull_request",
 ]
 
-ApprovalStatus = Literal["auto", "pending", "approved", "rejected", "executed", "rolled_back"]
+ApprovalStatus = Literal[
+    "auto", "pending", "approved", "rejected", "executed", "rolled_back"
+]
 
 
 class AgentActionPayload(BaseModel):
@@ -58,39 +61,9 @@ class AgentActionPayload(BaseModel):
     audit_log_id: UUID | None = None
 
 
-# ---------- LLM call payload (used by Postgres writer) ----------
-
-LlmStatus = Literal["ok", "error", "safety_block"]
-
-
-class LlmCallPayload(BaseModel):
-    """One LLM invocation. Persisted as a row in PostgreSQL llm_calls;
-    prompt + completion bodies live in object storage."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: UUID
-    provider: Literal["anthropic", "openai", "google", "local"]
-    model: str = Field(min_length=1, max_length=128)
-    purpose: str = Field(min_length=1, max_length=128)
-
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    latency_ms: int = Field(default=0, ge=0)
-    cost_usd_micros: int = Field(default=0, ge=0)
-
-    status: LlmStatus = "ok"
-    error_message: str | None = None
-
-    prompt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    prompt_uri: str | None = None
-    completion_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    completion_uri: str | None = None
-
-
 # ---------- envelope ----------
 
-_AgentSchema = Literal["agent_action@1", "llm_call@1"]
+_AgentSchema = Literal["agent_action@1"]
 
 
 class AgentEnvelope(BaseModel):
@@ -111,11 +84,12 @@ class AgentEnvelope(BaseModel):
     source: str = Field(alias="_source", min_length=1, max_length=64)
     occurred_at: datetime = Field(alias="_occurred_at")
 
-    # Undiscriminated union: the discriminator lives on the envelope's `_schema`.
-    payload: AgentActionPayload | LlmCallPayload
+    # Payload shape is fixed by the envelope's sole canonical schema.
+    payload: AgentActionPayload
 
 
 # ---------- idempotency helpers ----------
+
 
 def agent_action_idempotency_key(
     run_id: UUID, action_type: str, config: dict[str, Any]
@@ -125,11 +99,3 @@ def agent_action_idempotency_key(
     config_blob = json.dumps(config, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(config_blob.encode("utf-8")).hexdigest()[:32]
     return f"act:{run_id}:{action_type}:{digest}"
-
-
-def llm_call_idempotency_key(
-    run_id: UUID, purpose: str, prompt_sha256: str
-) -> str:
-    """Same prompt for the same run+purpose = same call. Useful when a
-    retry hits the LLM provider again — we still only log once."""
-    return f"llm:{run_id}:{purpose}:{prompt_sha256[:16]}"

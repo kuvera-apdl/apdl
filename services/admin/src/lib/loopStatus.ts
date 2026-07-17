@@ -63,9 +63,16 @@ export function loopStageMeta(stage: LoopStage): StageMeta {
 // rather than throwing on a surface.
 export function runToLoopStage(status: string, phase = ''): LoopStage {
   if (status === 'waiting_approval') return 'awaiting_approval'
-  if (status === 'failed' || status === 'completed_with_errors') return 'failed'
-  if (status === 'completed' || status === 'approved') return 'done'
-  if (status === 'rejected') return 'done'
+  if (status === 'approval_queued') return 'building'
+  if (phase === 'resuming' && (status === 'approved' || status === 'rejected')) return 'building'
+  if (
+    status === 'failed' ||
+    status === 'completed_with_errors' ||
+    status === 'manual_intervention' ||
+    status === 'cancelled'
+  )
+    return 'failed'
+  if (status === 'completed') return 'done'
   if (status === 'running' || status === 'started') {
     if (phase.startsWith('code_implementation')) return 'building'
     return 'designing'

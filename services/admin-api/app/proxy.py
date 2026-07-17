@@ -43,9 +43,12 @@ async def _service_credential(
     project_id: str,
     roles: frozenset[str],
     settings: Settings,
+    *,
+    actor_user_id: str | None = None,
+    force_ephemeral: bool = False,
 ) -> tuple[str, str | None]:
     configured = settings.service_api_keys.get(project_id)
-    if configured is not None:
+    if configured is not None and not force_ephemeral:
         return configured, None
 
     raw_key = f"proj_{project_id}_{secrets.token_hex(24)}"
@@ -64,10 +67,10 @@ async def _service_credential(
                 """
                 INSERT INTO auth_credentials (
                     credential_id, project_id, credential_kind, key_prefix,
-                    key_hash, roles, expires_at
+                    key_hash, roles, actor_user_id, expires_at
                 ) VALUES (
-                    $1, $2, 'confidential', $3, $4, $5,
-                    NOW() + ($6 * INTERVAL '1 second')
+                    $1, $2, 'confidential', $3, $4, $5, $6,
+                    NOW() + ($7 * INTERVAL '1 second')
                 )
                 """,
                 credential_id,
@@ -75,6 +78,7 @@ async def _service_credential(
                 f"proj_{project_id}_",
                 digest,
                 sorted(roles),
+                uuid.UUID(actor_user_id) if actor_user_id is not None else None,
                 _EPHEMERAL_CREDENTIAL_TTL_SECONDS,
             )
     return raw_key, credential_id
@@ -373,8 +377,14 @@ async def proxy_service(
     )
 
     ephemeral_credential_id: str | None = None
+    require_human_actor = service == "agents" and request.method not in _SAFE_METHODS
     api_key, ephemeral_credential_id = await _service_credential(
-        request, project_id, roles, settings
+        request,
+        project_id,
+        roles,
+        settings,
+        actor_user_id=session.user_id if require_human_actor else None,
+        force_ephemeral=require_human_actor,
     )
     try:
         if service == "codegen":

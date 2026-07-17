@@ -6,13 +6,14 @@ same pattern as the other router tests.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.graphs.supervisor import _persist_results
+from app.graphs.supervisor import RunResultPersistenceError, _persist_results
 from app.main import app
 from app.store.run_leases import RunLeaseLostError
 
@@ -64,8 +65,36 @@ class FakeConn:
             )
         raise AssertionError(f"Unexpected fetchval: {query}")
 
+    async def fetchrow(self, query: str, *args):
+        if "SELECT status, phase" in query and "FROM agent_runs" in query:
+            return next(
+                (
+                    {"status": row["status"], "phase": row["phase"]}
+                    for row in self.store["runs"]
+                    if row["run_id"] == args[0] and row["project_id"] == args[1]
+                ),
+                None,
+            )
+        raise AssertionError(f"Unexpected fetchrow: {query}")
+
+    def transaction(self):
+        return _Transaction()
+
     async def execute(self, query: str, *args):
         self.executes.append((query, args))
+        if "UPDATE agent_runs" in query and "SET status = 'cancelled'" in query:
+            for row in self.store["runs"]:
+                if row["run_id"] == args[0] and row["project_id"] == args[1]:
+                    row.update(status="cancelled", phase="cancelled")
+        return "UPDATE 1"
+
+
+class _Transaction:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
 
 
 class _Acquire:
@@ -170,6 +199,57 @@ async def test_list_runs_requires_project_id():
 
 
 @pytest.mark.asyncio
+async def test_cancel_run_is_tenant_scoped_audited_and_idempotent():
+    store = copy.deepcopy(STORE)
+    async with _client(store) as client:
+        response = await client.post("/v1/agents/run-2/cancel")
+        replay = await client.post("/v1/agents/run-2/cancel")
+        hidden = await client.post("/v1/agents/run-other/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-2",
+        "previous_status": "running",
+        "status": "cancelled",
+    }
+    assert replay.status_code == 200
+    assert replay.json()["previous_status"] == "cancelled"
+    assert hidden.status_code == 404
+    assert next(row for row in store["runs"] if row["run_id"] == "run-2")[
+        "status"
+    ] == "cancelled"
+
+    pool = app.state.pg_pool
+    audit_calls = [
+        args for query, args in pool.conn.executes if "INSERT INTO agent_audit_log" in query
+    ]
+    assert len(audit_calls) == 1
+    assert json.loads(audit_calls[0][1]) == {
+        "actor_credential_id": "test-agents",
+        "actor_user_id": None,
+        "previous_phase": "done",
+        "previous_status": "running",
+    }
+    assert audit_calls[0][3] == "run-cancelled:run-2"
+    effect_query = next(
+        query
+        for query, _ in pool.conn.executes
+        if "UPDATE agent_approval_effects AS effect" in query
+    )
+    assert "'queued', 'processing', 'retryable_failed'" in effect_query
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_rejects_an_already_completed_run():
+    store = copy.deepcopy(STORE)
+    async with _client(store) as client:
+        response = await client.post("/v1/agents/run-1/cancel")
+
+    assert response.status_code == 409
+    assert "already terminal" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_run_results_aggregates_by_produces_with_empty_defaults():
     async with _client(STORE) as client:
         resp = await client.get("/v1/agents/run-1/results")
@@ -227,6 +307,7 @@ async def test_persist_results_upserts_jsonb():
         "behavior_analysis",
         "insights",
         [{"a": 1}],
+        {"source": "test"},
         "worker-9",
     )
     query, args = pool.conn.executes[0]
@@ -237,17 +318,20 @@ async def test_persist_results_upserts_jsonb():
     assert args[1] == "behavior_analysis"
     assert args[2] == "insights"
     assert json.loads(args[3]) == [{"a": 1}]
-    assert args[4] == "worker-9"
+    assert json.loads(args[4]) == {"source": "test"}
+    assert args[5] == "worker-9"
 
 
 @pytest.mark.asyncio
-async def test_persist_results_never_raises():
+async def test_persist_results_fails_closed():
     class ExplodingPool:
         def acquire(self):
             raise RuntimeError("boom")
 
-    # Must swallow the failure — persistence cannot kill a run.
-    await _persist_results(ExplodingPool(), "run-9", "x", "insights", [], "worker-9")
+    with pytest.raises(RunResultPersistenceError):
+        await _persist_results(
+            ExplodingPool(), "run-9", "x", "insights", [], {}, "worker-9"
+        )
 
 
 @pytest.mark.asyncio
@@ -260,4 +344,6 @@ async def test_persist_results_fences_a_stale_owner():
     pool.conn.execute = stale_execute
 
     with pytest.raises(RunLeaseLostError):
-        await _persist_results(pool, "run-9", "x", "insights", [], "worker-stale")
+        await _persist_results(
+            pool, "run-9", "x", "insights", [], {}, "worker-stale"
+        )

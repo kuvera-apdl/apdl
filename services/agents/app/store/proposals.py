@@ -122,7 +122,7 @@ def _spec_of(proposal: dict[str, Any]) -> str:
 async def enqueue_proposals(
     pool: asyncpg.Pool, run_id: str, project_id: str, proposals: list[dict[str, Any]]
 ) -> int:
-    """Insert approved proposals as ``approved`` queue rows (idempotent on id)."""
+    """Insert approved proposals, idempotent on the project-scoped proposal id."""
     inserted = 0
     async with pool.acquire() as conn:
         for proposal in proposals:
@@ -140,12 +140,12 @@ async def enqueue_proposals(
             status = await conn.execute(
                 """
                 INSERT INTO feature_proposals
-                    (proposal_id, project_id, run_id, status, title, spec, priority)
+                    (project_id, proposal_id, run_id, status, title, spec, priority)
                 VALUES ($1, $2, $3, 'approved', $4, $5, $6)
-                ON CONFLICT (proposal_id) DO NOTHING
+                ON CONFLICT (project_id, proposal_id) DO NOTHING
                 """,
-                proposal_id,
                 project_id,
+                proposal_id,
                 run_id,
                 title,
                 spec,
@@ -173,8 +173,9 @@ async def claim_proposals(
     abandoned by that run. When
     ``proposal_id`` is given, claim only that proposal (one PR per approved
     proposal); the ``status='approved'`` guard still applies, so an
-    already-claimed proposal yields an empty (no-op) claim rather than a
-    duplicate build.
+    proposal already claimed by this same run is returned again so crash
+    recovery can reconstruct its approval gate. Another run's claim remains
+    excluded.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -183,34 +184,47 @@ async def claim_proposals(
                     """
                     SELECT proposal_id, title, spec, priority
                     FROM feature_proposals
-                    WHERE project_id = $1 AND status = 'approved' AND proposal_id = $2
+                    WHERE project_id = $1
+                      AND proposal_id = $2
+                      AND (
+                          status = 'approved'
+                          OR (status = 'implementing' AND claim_run_id = $3)
+                      )
                     FOR UPDATE SKIP LOCKED
                     """,
                     project_id,
                     proposal_id,
+                    run_id,
                 )
             else:
                 rows = await conn.fetch(
                     """
                     SELECT proposal_id, title, spec, priority
                     FROM feature_proposals
-                    WHERE project_id = $1 AND status = 'approved'
+                    WHERE project_id = $1
+                      AND (
+                          status = 'approved'
+                          OR (status = 'implementing' AND claim_run_id = $3)
+                      )
                     ORDER BY created_at
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED
                     """,
                     project_id,
                     limit,
+                    run_id,
                 )
             claimed = [dict(r) for r in rows]
             if claimed:
                 await conn.execute(
                     """
                     UPDATE feature_proposals
-                    SET status = 'implementing', claim_run_id = $2,
+                    SET status = 'implementing', claim_run_id = $3,
                         error = NULL, updated_at = now()
-                    WHERE proposal_id = ANY($1::text[])
+                    WHERE project_id = $1
+                      AND proposal_id = ANY($2::text[])
                     """,
+                    project_id,
                     [c["proposal_id"] for c in claimed],
                     run_id,
                 )
@@ -242,8 +256,10 @@ async def list_recent_proposals(
     return [dict(r) for r in rows]
 
 
-async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] | None:
-    """Fetch a single proposal's durable row (title/spec/status) by id.
+async def get_proposal(
+    pool: asyncpg.Pool, project_id: str, proposal_id: str
+) -> dict[str, Any] | None:
+    """Fetch one project's durable proposal row (title/spec/status).
 
     The durable ``feature_proposals`` queue is the source of truth (D2), so the
     approval handler can open a PR for a gated changeset even when the persisted
@@ -252,7 +268,8 @@ async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] |
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT proposal_id, project_id, title, spec, status FROM feature_proposals "
-            "WHERE proposal_id = $1",
+            "WHERE project_id = $1 AND proposal_id = $2",
+            project_id,
             proposal_id,
         )
     return dict(row) if row is not None else None
@@ -260,6 +277,7 @@ async def get_proposal(pool: asyncpg.Pool, proposal_id: str) -> dict[str, Any] |
 
 async def mark_implemented(
     pool: asyncpg.Pool,
+    project_id: str,
     proposal_id: str,
     changeset_id: str,
     run_id: str,
@@ -268,12 +286,14 @@ async def mark_implemented(
         await conn.execute(
             """
             UPDATE feature_proposals
-            SET status = 'implemented', changeset_id = $2,
+            SET status = 'implemented', changeset_id = $3,
                 claim_run_id = NULL, updated_at = now()
-            WHERE proposal_id = $1
+            WHERE project_id = $1
+              AND proposal_id = $2
               AND status = 'implementing'
-              AND claim_run_id = $3
+              AND claim_run_id = $4
             """,
+            project_id,
             proposal_id,
             changeset_id,
             run_id,
@@ -282,6 +302,7 @@ async def mark_implemented(
 
 async def mark_failed(
     pool: asyncpg.Pool,
+    project_id: str,
     proposal_id: str,
     error: str,
     run_id: str,
@@ -290,12 +311,14 @@ async def mark_failed(
         await conn.execute(
             """
             UPDATE feature_proposals
-            SET status = 'failed', error = $2,
+            SET status = 'failed', error = $3,
                 claim_run_id = NULL, updated_at = now()
-            WHERE proposal_id = $1
+            WHERE project_id = $1
+              AND proposal_id = $2
               AND status = 'implementing'
-              AND claim_run_id = $3
+              AND claim_run_id = $4
             """,
+            project_id,
             proposal_id,
             error,
             run_id,

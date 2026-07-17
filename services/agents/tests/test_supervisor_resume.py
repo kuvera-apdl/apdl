@@ -75,8 +75,9 @@ async def test_resume_skips_completed_and_runs_remaining(monkeypatch) -> None:
     prior = [
         {
             "agent_name": "experiment_design",
-            "produces": "experiment_designs",
-            "output": json.dumps([{"experiment_id": "exp_x"}]),
+                "produces": "experiment_designs",
+                "output": json.dumps([{"experiment_id": "exp_x"}]),
+                "metadata": {},
         }
     ]
     pool = _FakePool(prior)
@@ -109,13 +110,15 @@ async def test_resume_finishes_with_errors_after_approved_deploy_failure(monkeyp
     prior = [
         {
             "agent_name": "experiment_design",
-            "produces": "experiment_designs",
-            "output": json.dumps([{"experiment_id": "exp_failed"}]),
+                "produces": "experiment_designs",
+                "output": json.dumps([{"experiment_id": "exp_failed"}]),
+                "metadata": {},
         },
         {
             "agent_name": "approval_errors",
-            "produces": "errors",
-            "output": json.dumps([deploy_error]),
+                "produces": "errors",
+                "output": json.dumps([deploy_error]),
+                "metadata": {},
         },
     ]
     pool = _FakePool(prior)
@@ -139,3 +142,79 @@ async def test_resume_finishes_with_errors_after_approved_deploy_failure(monkeyp
     ]
     assert "completed_with_errors" in statuses
     assert "completed" not in statuses
+
+
+@pytest.mark.asyncio
+async def test_recovered_run_restores_persisted_pending_gate(monkeypatch) -> None:
+    gated = _Agent("experiment_design", 20, "experiment_designs")
+    monkeypatch.setattr(supervisor, "is_registered", lambda name: True)
+    monkeypatch.setattr(supervisor, "get_agent", lambda name: gated)
+    pool = _FakePool(
+        [
+            {
+                "agent_name": "experiment_design",
+                "produces": "experiment_designs",
+                "output": [{"experiment_id": "exp_x"}],
+                "metadata": {
+                    "needs_approval": True,
+                    "approval_gate": {
+                        "gate_id": "run-1:experiment_design",
+                        "agent_name": "experiment_design",
+                        "produces": "experiment_designs",
+                        "phase": "experiment_design_approval",
+                        "state": "pending",
+                    },
+                },
+            }
+        ]
+    )
+
+    await supervisor.run_supervisor(
+        pool=pool,
+        vector_store=object(),
+        run_id="run-1",
+        project_id="demo",
+        analysis_types=["experiment_design"],
+        time_range_days=7,
+        autonomy_level=2,
+        resume=True,
+    )
+
+    assert gated.ran is False
+    transitions = [
+        args[1:3]
+        for query, args in pool.conn.executed
+        if "UPDATE agent_runs" in query and "SET status = $2" in query
+    ]
+    assert ("waiting_approval", "experiment_design_approval") in transitions
+    assert not any(status == "completed" for status, _ in transitions)
+
+
+@pytest.mark.asyncio
+async def test_post_result_bookkeeping_runs_after_durable_result(monkeypatch) -> None:
+    pool = _FakePool([])
+    ordering: list[str] = []
+
+    class _OrderedAgent(_Agent):
+        async def after_result_persisted(self, ctx, state, result) -> None:
+            assert any(
+                "INSERT INTO agent_run_results" in query
+                for query, _ in pool.conn.executed
+            )
+            ordering.append("post_persist")
+
+    agent = _OrderedAgent("behavior_analysis", 10, "insights")
+    monkeypatch.setattr(supervisor, "is_registered", lambda name: True)
+    monkeypatch.setattr(supervisor, "get_agent", lambda name: agent)
+
+    await supervisor.run_supervisor(
+        pool=pool,
+        vector_store=object(),
+        run_id="run-1",
+        project_id="demo",
+        analysis_types=["behavior_analysis"],
+        time_range_days=7,
+        autonomy_level=2,
+    )
+
+    assert ordering == ["post_persist"]

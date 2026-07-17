@@ -10,7 +10,7 @@ SQL = MIGRATION_PATH.read_text(encoding="utf-8")
 EXECUTION_ROLES = ("agents:run", "agents:manage", "agents:approve")
 
 
-def test_self_registered_agents_migration_is_contiguous() -> None:
+def test_postgres_migration_sequence_is_contiguous() -> None:
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     assert MIGRATION_PATH.name in names
     assert [name[:3] for name in names] == [

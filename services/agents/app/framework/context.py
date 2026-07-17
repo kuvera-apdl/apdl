@@ -14,6 +14,11 @@ from typing import Any
 import asyncpg
 
 from app.memory.pgvector_store import PgVectorStore
+from app.llm.contracts import (
+    DataClassification,
+    ExecutionKind,
+    LlmRequestContext,
+)
 from app.safety.audit import AuditLogger
 
 
@@ -26,11 +31,36 @@ class AgentContext:
     audit: AuditLogger
     run_id: str
     project_id: str
+    execution_kind: ExecutionKind = "agent_run"
+    #: Exact durable lease owner for a normal run. LLM governance binds egress
+    #: to this value so a stale supervisor cannot borrow a replacement lease.
+    lease_owner_id: str | None = None
     autonomy_level: int = 2
     time_range_days: int = 7
     #: When set, a forked code_implementation run targets exactly this proposal
     #: (one PR per approved proposal) instead of draining the project queue.
     target_proposal_id: str | None = None
+
+    def llm_request(
+        self,
+        *,
+        purpose: str,
+        data_classification: DataClassification,
+    ) -> LlmRequestContext:
+        """Build the required immutable governance scope for one LLM call."""
+        return LlmRequestContext(
+            pool=self.pool,
+            project_id=self.project_id,
+            run_id=self.run_id,
+            execution_kind=self.execution_kind,
+            purpose=purpose,
+            data_classification=data_classification,
+            execution_owner_id=(
+                self.lease_owner_id
+                if self.execution_kind == "agent_run"
+                else self.run_id
+            ),
+        )
 
 
 @dataclass
@@ -53,4 +83,5 @@ class AgentResult:
 
     output: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    memory_entries: tuple[MemoryEntry, ...] = ()
     error: str | None = None

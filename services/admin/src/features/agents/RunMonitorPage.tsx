@@ -115,15 +115,14 @@ function gatedItems(run: RunStatus, results: RunResults | null): { items: unknow
   return { items: results[key], kind: agent }
 }
 
-// The stable id used to match a per-item decision to a gated item — mirrors
-// the server's _item_id (experiment_id / flag_config.key for designs,
-// proposal_id for proposals). Falls back to a positional id the server accepts
-// for a single unkeyed item.
-function itemId(item: unknown, kind: string, index: number): string {
+// The exact canonical id persisted by the server. There is deliberately no
+// positional or flag-key fallback at this mutation boundary.
+function itemId(item: unknown, kind: string): string | null {
   const rec = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {}
-  const flag = rec.flag_config as Record<string, unknown> | undefined
-  const raw = kind === 'experiment_design' ? (rec.experiment_id ?? flag?.key) : rec.proposal_id
-  return typeof raw === 'string' && raw.trim() !== '' ? raw : `__index_${index}`
+  const raw = kind === 'experiment_design' ? rec.experiment_id : rec.proposal_id
+  return typeof raw === 'string' && raw.trim() === raw && raw.length > 0 && raw.length <= 128
+    ? raw
+    : null
 }
 
 function ApprovalPanel({
@@ -143,9 +142,13 @@ function ApprovalPanel({
   const gated = gatedItems(run, results)
   const items = gated?.items ?? []
   const kind = gated?.kind
-  const hasItems = items.length > 0 && kind !== undefined
-
-  const ids = items.map((item, index) => itemId(item, kind ?? '', index))
+  const parsedIds = items.map((item) => itemId(item, kind ?? ''))
+  const ids = parsedIds.filter((id): id is string => id !== null)
+  const hasItems =
+    items.length > 0 &&
+    kind !== undefined &&
+    ids.length === items.length &&
+    new Set(ids).size === ids.length
   // Per-item verdicts, defaulting to approve; re-seeded when the item set changes.
   const [decisions, setDecisions] = useState<Record<string, boolean>>({})
   const idsKey = ids.join('|')
@@ -158,7 +161,7 @@ function ApprovalPanel({
   const anyRejected = hasItems && ids.some((id) => !isApproved(id))
   const approvedCount = ids.filter(isApproved).length
 
-  const submit = async (body: { decisions?: { item_id: string; approved: boolean }[]; approved?: boolean }, needsComment: boolean) => {
+  const submit = async (body: { decisions: { item_id: string; approved: boolean }[] }, needsComment: boolean) => {
     if (!active) return
     if (needsComment && comment.trim() === '') {
       toast.error('A comment is required when rejecting')
@@ -170,23 +173,15 @@ function ApprovalPanel({
         ...body,
         ...(comment.trim() ? { comment: comment.trim() } : {}),
       })
-      const forked = (res.forked_runs ?? []).length
-      const opened = (res.opened_changesets ?? []).length
-      const errors = res.errors ?? []
-      const summary =
-        `${res.approved_count ?? 0} approved, ${res.rejected_count ?? 0} rejected — run resumes` +
-        (forked ? ` · ${forked} PR run(s) forked` : '') +
-        (opened ? ` · ${opened} PR(s) opened` : '')
-      if (errors.length > 0) {
-        toast.warning(`${summary} · ${errors.length} deployment error(s)`, {
-          description: errors.join(' · '),
-        })
-      } else {
-        toast.success(summary)
-      }
+      toast.success(
+        `${res.approved_count} approved, ${res.rejected_count} rejected — effects queued`,
+        {
+          description: `${res.effects.length} durable effect${res.effects.length === 1 ? '' : 's'} · command ${res.command_id}`,
+        },
+      )
       onDecided()
     } catch (error) {
-      if (error instanceof ApiError && error.status === 400) {
+      if (error instanceof ApiError && error.status === 409) {
         // Someone else acted, or the supervisor moved on — re-poll (§5.6.3).
         toast.info('This run is no longer awaiting approval — refreshing.')
         onDecided()
@@ -207,8 +202,8 @@ function ApprovalPanel({
         </CardTitle>
         <CardDescription>
           {hasItems
-            ? 'Approve or reject each item, then submit. Each approved proposal opens its own PR; approved experiments deploy individually.'
-            : 'This run is gated by its autonomy level. No persisted payload is available for this phase — review the agents-service logs before deciding.'}
+            ? 'Approve or reject each item, then submit. Effects are queued durably after the decision is recorded.'
+            : 'No canonical persisted items are available for this gate. The service will not accept an ambiguous whole-gate decision.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -273,21 +268,7 @@ function ApprovalPanel({
               {approvedCount} of {ids.length} approved
             </span>
           </div>
-        ) : (
-          <div className="flex gap-2">
-            <Button onClick={() => void submit({ approved: true }, false)} disabled={submitting}>
-              {submitting ? <Loader2 className="animate-spin" /> : null}
-              Approve
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void submit({ approved: false }, true)}
-              disabled={submitting || comment.trim() === ''}
-            >
-              Reject
-            </Button>
-          </div>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   )
@@ -319,7 +300,7 @@ function ReadOnlyApprovalPanel({ run, results }: { run: RunStatus; results: RunR
             </p>
             {items.map((item, index) => (
               <ResultCard
-                key={itemId(item, kind, index)}
+                key={itemId(item, kind) ?? `malformed-${index}`}
                 item={item}
                 kind={GATE_CARD_KIND[kind]}
               />

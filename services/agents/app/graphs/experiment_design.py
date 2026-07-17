@@ -1,9 +1,9 @@
 """Experiment design agent.
 
 Consumes behaviour-analysis insights, designs an A/B experiment, runs it
-through the safety validator (plus a nuanced LLM safety review), and — gated by
-autonomy level — deploys it as a feature flag + experiment config or routes it
-to human approval.
+through the safety validator (plus a nuanced LLM safety review), and routes
+every valid design to human approval. Approval creates an inert Config draft
+before opening the treatment changeset; activation is a separate lifecycle.
 """
 
 from __future__ import annotations
@@ -12,8 +12,11 @@ import json
 import logging
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.framework import (
     AgentContext,
+    AgentResult,
     BaseAgent,
     GateDecision,
     gate_action,
@@ -26,6 +29,7 @@ from app.llm.prompts.experiment import (
 )
 from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
+from app.models.experiment_design import ExperimentDesign, ExperimentSafetyReview
 from app.safety.validator import (
     ActionType,
     AgentAction,
@@ -39,70 +43,22 @@ from app.store.experiments import (
     record_designed_experiment,
 )
 from app.tools.code import open_changeset
-from app.tools.experiments import create_experiment_config, get_active_experiments
+from app.tools.experiments import (
+    create_experiment_draft as create_config_experiment_draft,
+    get_active_experiments,
+)
 
 logger = logging.getLogger(__name__)
 _safety = SafetyValidator()
-
-_CANONICAL_VARIANT_FIELDS = ("key", "weight")
-
-
-def _is_canonical_rule(rule: Any) -> bool:
-    """True for a flag rule the safety validator accepts: a valid rollout and no
-    variant-assignment fields."""
-    if not isinstance(rule, dict):
-        return False
-    if "variants" in rule or "default_variant" in rule:
-        return False
-    rollout = rule.get("rollout")
-    if not isinstance(rollout, dict) or set(rollout) - {"percentage", "bucket_by"}:
-        return False
-    percentage = rollout.get("percentage")
-    return (
-        isinstance(percentage, int | float)
-        and not isinstance(percentage, bool)
-        and 0 <= percentage <= 100
-        and isinstance(rollout.get("bucket_by"), str)
-        and bool(rollout.get("bucket_by"))
-    )
-
-
-def _canonicalize_flag_config(experiment: dict[str, Any]) -> None:
-    """Coerce an LLM-authored ``flag_config`` into the canonical shape the safety
-    validator enforces, mutating ``experiment`` in place.
-
-    Variants keep only ``key``/``weight`` (models tend to add a ``description``,
-    which fails the strict variant check); non-canonical rules — typically
-    rollout-less, variant-assignment rules — are dropped, since experiment
-    targeting lives in the top-level ``targeting`` field, not the flag rules.
-    The top-level ``variants`` are left intact (the config service accepts an
-    optional per-variant description on deploy).
-    """
-    flag_config = experiment.get("flag_config")
-    if not isinstance(flag_config, dict):
-        return
-
-    variants = flag_config.get("variants")
-    if isinstance(variants, list):
-        flag_config["variants"] = [
-            {field: variant[field] for field in _CANONICAL_VARIANT_FIELDS if field in variant}
-            for variant in variants
-            if isinstance(variant, dict)
-        ]
-
-    rules = flag_config.get("rules")
-    if isinstance(rules, list):
-        flag_config["rules"] = [rule for rule in rules if _is_canonical_rule(rule)]
 
 
 def _designed_traffic_percentage(flag_config: dict[str, Any]) -> float:
     """The traffic share the safety validator judged for this design.
 
-    Uses the validator's own helper (max over fallthrough AND rule rollouts) so
-    deploy and blast-radius check read the identical number — reading only the
-    fallthrough here left a bypass where a rules-only rollout passed the check
-    at 10% and deployed at 100%. A design with no rollout anywhere cannot have
-    passed the blast-radius gate; 100% is only a fallback for ungated callers.
+    Uses the validator's own helper so the Config draft records the exact
+    traffic proposal that the blast-radius check judged. A design with no
+    rollout anywhere cannot have passed the blast-radius gate; 100% is only a
+    fallback for direct callers.
     """
     percentage = _max_rollout_percentage(flag_config)
     if percentage is None:
@@ -120,35 +76,19 @@ def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
     """Build the (title, spec) for the codegen changeset implementing a design's
     treatment variant, or None when the design declares no code is needed.
 
-    A deployed experiment without treatment code measures noise — both variants
-    render the same product. This spec is what makes the experiment real: the
-    treatment is built behind the already-deployed flag, the control path stays
-    untouched. ``treatment_spec`` is the design's own work order; a missing
-    field (older designs, model omission) degrades to the hypothesis + variant
-    descriptions rather than silently skipping the build. An explicitly empty
-    string is the design saying "config-only experiment" — no changeset.
+    The treatment is built behind the disabled flag created with the Config
+    draft, while the control path stays untouched. ``treatment_spec`` is the
+    design's canonical work order. An empty string explicitly declares a
+    config-only experiment and therefore produces no changeset.
     """
     experiment_id = str(design.get("experiment_id") or "").strip()
     flag_key = _flag_key_of(design)
     if not flag_key:
         return None
 
-    if "treatment_spec" in design:
-        what_to_build = str(design.get("treatment_spec") or "").strip()
-        if not what_to_build:
-            return None
-    else:
-        hypothesis = str(design.get("hypothesis") or "").strip()
-        treatments = [
-            f"- {v.get('key')}: {v.get('description')}"
-            for v in design.get("variants") or []
-            if isinstance(v, dict) and v.get("key") != "control" and v.get("description")
-        ]
-        what_to_build = "\n".join(
-            part for part in (hypothesis, *treatments) if part
-        ).strip()
-        if not what_to_build:
-            return None
+    what_to_build = str(design.get("treatment_spec") or "").strip()
+    if not what_to_build:
+        return None
 
     metric_event = str((design.get("primary_metric") or {}).get("event") or "").strip()
     variants = ", ".join(
@@ -161,7 +101,7 @@ def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
     sections = [
         "## Experiment",
         f"Hypothesis: {design.get('hypothesis', '')}",
-        f"Backing feature flag: `{flag_key}` (already deployed; variants: {variants or 'control, treatment'})",
+        f"Backing feature flag: `{flag_key}` (disabled Config draft; variants: {variants or 'control, treatment'})",
     ]
     if metric_event:
         sections.append(f"Primary metric event: `{metric_event}`")
@@ -192,14 +132,17 @@ def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
 
 
 async def open_treatment_changeset(
-    pool: Any, project_id: str, run_id: str, design: dict[str, Any]
+    pool: Any,
+    project_id: str,
+    run_id: str,
+    design: dict[str, Any],
+    *,
+    idempotency_key: str,
 ) -> str:
-    """Open the codegen changeset that implements a deployed design's treatment.
+    """Open the codegen changeset that implements a drafted design's treatment.
 
-    Returns the changeset id ("" when the design needs no code or the open
-    failed — callers surface that, they don't crash the deploy that already
-    succeeded). Shared by the agent (autonomy-permitting deploy) and the
-    approval endpoint (human-approved deploy), like deploy_experiment.
+    Returns the changeset id ("" when the design needs no code). This is called
+    only after the human-approved Config draft has been created.
     """
     task = treatment_changeset_task(design)
     if task is None:
@@ -209,6 +152,7 @@ async def open_treatment_changeset(
         project_id=project_id,
         title=title,
         spec=spec,
+        idempotency_key=idempotency_key,
         run_id=run_id,
         context={
             "experiment_id": str(design.get("experiment_id") or ""),
@@ -234,42 +178,212 @@ async def open_treatment_changeset(
     return changeset_id
 
 
-async def deploy_experiment(project_id: str, experiment: dict[str, Any]) -> bool:
-    """Create a running experiment (and its canonical backing flag) from a design.
+async def stage_experiment_draft(
+    project_id: str,
+    experiment: dict[str, Any],
+    *,
+    idempotency_key: str,
+) -> None:
+    """Create an inert experiment draft and its disabled backing flag.
 
     Config owns experiment→flag initialization, so this single call also creates
-    the backing flag keyed by ``flag_key``. Shared by the agent (autonomy-permitting
-    deploy) and the approval endpoint (human-approved deploy).
+    the backing flag keyed by ``flag_key``. Only the approval endpoint calls
+    this function; experiment-design agents never apply their own proposals.
     """
-    try:
-        flag_config = experiment.get("flag_config", {})
-        if not isinstance(flag_config, dict):
-            flag_config = {}
-        experiment_id = experiment.get("experiment_id", "")
-        flag_key = flag_config.get("key") or experiment_id
-        variants = experiment.get("variants") or flag_config.get("variants", [])
-        description = experiment.get("description") or experiment.get("hypothesis", "")
+    flag_config = experiment.get("flag_config", {})
+    if not isinstance(flag_config, dict):
+        flag_config = {}
+    experiment_id = experiment.get("experiment_id", "")
+    flag_key = flag_config.get("key") or experiment_id
+    variants = experiment.get("variants") or flag_config.get("variants", [])
+    description = experiment.get("description") or experiment.get("hypothesis", "")
 
-        await create_experiment_config(
-            project_id=project_id,
-            experiment_id=experiment_id or flag_key,
-            hypothesis=description,
-            variants=variants,
-            default_variant=flag_config.get("default_variant"),
-            primary_metric=experiment.get("primary_metric", {}),
-            statistical_plan=experiment.get("statistical_plan"),
-            secondary_metrics=experiment.get("secondary_metrics"),
-            guardrail_metrics=experiment.get("guardrail_metrics"),
-            targeting=experiment.get("targeting"),
-            estimated_duration_days=experiment.get("estimated_duration_days", 14),
-            flag_key=flag_key,
-            traffic_percentage=_designed_traffic_percentage(flag_config),
-        )
-        logger.info("Experiment %s deployed successfully", experiment_id)
+    await create_config_experiment_draft(
+        project_id=project_id,
+        idempotency_key=idempotency_key,
+        experiment_id=experiment_id or flag_key,
+        hypothesis=description,
+        variants=variants,
+        default_variant=flag_config.get("default_variant"),
+        primary_metric=experiment.get("primary_metric", {}),
+        statistical_plan=experiment.get("statistical_plan"),
+        targeting=experiment.get("targeting"),
+        flag_key=flag_key,
+        traffic_percentage=_designed_traffic_percentage(flag_config),
+    )
+    logger.info("Experiment %s drafted successfully", experiment_id)
+
+
+_LIVE_EXPERIMENT_STATUSES = {"scheduled", "running"}
+_EXPERIMENT_STATUSES = _LIVE_EXPERIMENT_STATUSES | {"draft", "completed", "stopped"}
+_TARGETING_OPERATORS = {
+    "equals", "not_equals", "gt", "gte", "lt", "lte", "contains",
+    "not_contains", "starts_with", "ends_with", "in", "not_in", "exists",
+    "not_exists",
+}
+
+
+def _validated_conditions(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    for condition in value:
+        if not isinstance(condition, dict):
+            return None
+        attribute = condition.get("attribute")
+        operator = condition.get("operator")
+        if not isinstance(attribute, str) or not attribute or operator not in _TARGETING_OPERATORS:
+            return None
+        if operator in {"exists", "not_exists"}:
+            if set(condition) != {"attribute", "operator"}:
+                return None
+        elif set(condition) != {"attribute", "operator", "value"} or condition.get("value") is None:
+            return None
+    return value
+
+
+def _conjunctions_are_disjoint(
+    left: list[dict[str, Any]], right: list[dict[str, Any]]
+) -> bool:
+    """Prove disjointness for contradictory equality constraints.
+
+    Returning false means the populations may overlap, not that they are
+    identical. This conservative relation is sufficient for fail-closed
+    primary-metric conflict detection.
+    """
+    left_equals = {
+        condition["attribute"]: condition["value"]
+        for condition in left
+        if condition["operator"] == "equals"
+    }
+    right_equals = {
+        condition["attribute"]: condition["value"]
+        for condition in right
+        if condition["operator"] == "equals"
+    }
+    return any(
+        left_equals[attribute] != right_equals[attribute]
+        for attribute in left_equals.keys() & right_equals.keys()
+    )
+
+
+def _populations_may_overlap(
+    design_conditions: Any, active_rules: Any
+) -> bool | None:
+    design = _validated_conditions(design_conditions)
+    if design is None or not isinstance(active_rules, list):
+        return None
+    if not design or not active_rules:
         return True
-    except Exception as exc:
-        logger.error("Failed to deploy experiment: %s", exc)
-        return False
+
+    # Config rules are OR branches. The two populations may overlap when any
+    # active branch is not provably disjoint from the design conjunction.
+    for rule in active_rules:
+        if not isinstance(rule, dict):
+            return None
+        conditions = _validated_conditions(rule.get("conditions"))
+        if conditions is None:
+            return None
+        if not _conjunctions_are_disjoint(design, conditions):
+            return True
+    return False
+
+
+def _config_conflict_check(
+    design: dict[str, Any],
+    config_rows: list[dict[str, Any]],
+    evidence: dict[str, Any] | None,
+) -> tuple[dict[str, Any], bool]:
+    """Compare a design with authoritative Config experiment records."""
+    if not evidence or evidence.get("status") != "available":
+        return ({
+            "name": "config_conflicts",
+            "passed": None,
+            "status": "unavailable",
+            "message": "Config conflicts could not be evaluated; human review is required.",
+        }, False)
+
+    experiment_id = str(design.get("experiment_id") or "")
+    flag_key = _flag_key_of(design)
+    metric = design.get("primary_metric")
+    metric_event = metric.get("event") if isinstance(metric, dict) else None
+    targeting = design.get("targeting")
+    design_conditions = targeting.get("conditions") if isinstance(targeting, dict) else None
+
+    conflicts: list[str] = []
+    incomplete: list[str] = []
+    for index, row in enumerate(config_rows):
+        if not isinstance(row, dict):
+            incomplete.append(f"row {index} is not an object")
+            continue
+        key = row.get("key")
+        existing_flag_key = row.get("flag_key")
+        status = row.get("status")
+        if not isinstance(key, str) or not key:
+            incomplete.append(f"row {index} has no experiment key")
+            continue
+        if not isinstance(existing_flag_key, str) or not existing_flag_key:
+            incomplete.append(f"experiment {key} has no flag key")
+        if status not in _EXPERIMENT_STATUSES:
+            incomplete.append(f"experiment {key} has an unknown status")
+
+        if experiment_id and key == experiment_id:
+            conflicts.append(f"experiment id {experiment_id!r} already exists")
+        if flag_key and existing_flag_key == flag_key:
+            conflicts.append(f"flag key {flag_key!r} already exists")
+
+        if status not in _LIVE_EXPERIMENT_STATUSES:
+            continue
+        active_metric = row.get("primary_metric")
+        active_event = active_metric.get("event") if isinstance(active_metric, dict) else None
+        if not isinstance(active_event, str) or not active_event:
+            incomplete.append(f"active experiment {key} has no primary metric event")
+            continue
+        if not isinstance(metric_event, str) or not metric_event:
+            incomplete.append("design has no primary metric event")
+            continue
+        if active_event != metric_event:
+            continue
+        if "targeting_rules" not in row:
+            incomplete.append(f"active experiment {key} has no targeting rules evidence")
+            continue
+        overlap = _populations_may_overlap(design_conditions, row.get("targeting_rules"))
+        if overlap is None:
+            incomplete.append(f"active experiment {key} has unevaluable targeting")
+        elif overlap:
+            conflicts.append(
+                f"primary metric {metric_event!r} may overlap population with {key!r}"
+            )
+
+    if conflicts:
+        message = "; ".join(dict.fromkeys(conflicts))
+        if incomplete:
+            message += "; additional Config rows were unevaluable"
+        return ({
+            "name": "config_conflicts",
+            "passed": False,
+            "status": "available" if not incomplete else "partial",
+            "message": message,
+        }, not incomplete)
+    if incomplete:
+        return ({
+            "name": "config_conflicts",
+            "passed": None,
+            "status": "partial",
+            "message": (
+                "Config conflict evidence is incomplete: "
+                + "; ".join(dict.fromkeys(incomplete))
+                + "; human review is required."
+            ),
+        }, False)
+    return ({
+        "name": "config_conflicts",
+        "passed": True,
+        "status": "available",
+        "message": (
+            "No duplicate identity or overlapping primary-metric population "
+            "conflict was found in Config records."
+        ),
+    }, True)
 
 
 def _render_designed(designed: list[dict[str, Any]]) -> str:
@@ -284,10 +398,10 @@ def _render_designed(designed: list[dict[str, Any]]) -> str:
 
 @register_agent
 class ExperimentDesignAgent(BaseAgent):
-    """Designs, validates, and (autonomy permitting) deploys experiments."""
+    """Designs and validates experiments for an explicit human gate."""
 
     name = "experiment_design"
-    description = "Design A/B experiments from insights and deploy them safely."
+    description = "Design A/B experiments from insights for human approval."
     order = 20
     system_prompt = EXPERIMENT_DESIGN_SYSTEM
     model_tier = "reasoning"
@@ -311,14 +425,56 @@ class ExperimentDesignAgent(BaseAgent):
     #: insights that don't warrant an experiment get none.
     max_designs = 3
 
+    def parse(self, response: str) -> list[dict[str, Any]]:
+        """Reject malformed model output; never coerce or silently repair it."""
+        raw = parse_llm_json(response, fallback=None)
+        if not isinstance(raw, list):
+            raise ValueError("experiment design output must be a JSON array")
+
+        designs: list[ExperimentDesign] = []
+        for index, item in enumerate(raw):
+            try:
+                designs.append(ExperimentDesign.model_validate(item))
+            except ValidationError as exc:
+                details = "; ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
+                    for error in exc.errors(include_url=False)[:5]
+                )
+                raise ValueError(
+                    f"invalid experiment design at index {index}: {details}"
+                ) from exc
+
+        experiment_ids = [design.experiment_id for design in designs]
+        if len(set(experiment_ids)) != len(experiment_ids):
+            raise ValueError("experiment designs must contain unique experiment_id values")
+        flag_keys = [design.flag_config.key for design in designs]
+        if len(set(flag_keys)) != len(flag_keys):
+            raise ValueError("experiment designs must contain unique flag_config.key values")
+        return [
+            design.model_dump(mode="json", exclude_none=True)
+            for design in designs
+        ]
+
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
     ) -> dict[str, Any]:
         try:
             active = await get_active_experiments(project_id=ctx.project_id)
+            if not isinstance(active, list):
+                raise TypeError("Config experiment response was not a list")
+            active_evidence = {
+                "status": "available",
+                "source": "config",
+                "message": "Active experiment evidence loaded from Config.",
+            }
         except Exception as exc:
             logger.warning("Could not fetch active experiments: %s", exc)
             active = []
+            active_evidence = {
+                "status": "unavailable",
+                "source": "config",
+                "message": "Active experiment evidence is unavailable.",
+            }
         # The durable design ledger is the hard dedup layer: insights barely
         # change between runs, so without it every run redesigns the same
         # experiments (only softly guarded by active_experiments in the prompt).
@@ -329,7 +485,8 @@ class ExperimentDesignAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Could not list designed experiments: %s", exc)
         return {
-            "active_experiments": active if isinstance(active, list) else [],
+            "active_experiments": active,
+            "active_experiments_evidence": active_evidence,
             "designed_experiments": designed,
         }
 
@@ -364,51 +521,52 @@ class ExperimentDesignAgent(BaseAgent):
                     "needs_approval": False}
 
         active = working.get("active_experiments", [])
-        deployed_count = 0
         for design in output:
-            # LLMs drift from the canonical flag schema (descriptive variant
-            # fields, rollout-less rules), which fails the validator's
-            # variant_config check. Normalize before validating, deploying,
-            # and persisting so a sound design is not halted on shape alone.
-            _canonicalize_flag_config(design)
-
-            safety = await self._safety_check(ctx, design, active)
-            decision = gate_action(ctx.autonomy_level, safety)
+            safety = await self._safety_check(
+                ctx,
+                design,
+                active,
+                working.get("active_experiments_evidence"),
+            )
+            decision = gate_action(
+                ctx.autonomy_level,
+                safety,
+                always_require_approval=True,
+            )
             # Stamped onto the persisted item so the approval gate can tell an
-            # approvable design from a halted or already-deployed sibling, and
+            # approvable design from a halted sibling, and
             # the console can render per-design outcomes.
             design["decision"] = decision.value
             design["safety_result"] = safety
             design["deployed"] = False
-
-            if decision is GateDecision.deploy:
-                deployed = await self._deploy(ctx, design)
-                design["deployed"] = deployed
-                if deployed:
-                    deployed_count += 1
-                    await self._open_treatment(ctx, state, design)
-                else:
-                    # deploy_experiment swallows HTTP failures into False;
-                    # without this the run would end "completed" while the
-                    # auto-approved experiment silently doesn't exist.
-                    experiment_id = design.get("experiment_id", "")
-                    message = f"experiment deploy failed: {experiment_id or '(no id)'}"
-                    state.setdefault("errors", []).append(message)
-                    await ctx.audit.log(
-                        ctx.run_id,
-                        "deploy_failed",
-                        {"experiment_id": experiment_id, "agent": self.name},
-                    )
-            await self._record(ctx, design, decision)
 
         ids = [d.get("experiment_id", "") for d in output]
         return {
             # Singular kept for audit/console back-compat with single-design runs.
             "experiment_id": ids[0] if ids else "",
             "experiment_ids": ids,
-            "deployed_count": deployed_count,
+            "deployed_count": 0,
             "needs_approval": any(d.get("decision") == GateDecision.approve.value for d in output),
         }
+
+    async def after_result_persisted(
+        self,
+        ctx: AgentContext,
+        state: dict[str, Any],
+        result: AgentResult,
+    ) -> None:
+        """Update the dedup ledger only after the canonical run result exists."""
+        await super().after_result_persisted(ctx, state, result)
+        if not isinstance(result.output, list):
+            return
+        for design in result.output:
+            if not isinstance(design, dict):
+                continue
+            try:
+                decision = GateDecision(str(design.get("decision")))
+            except ValueError:
+                continue
+            await self._record(ctx, design, decision)
 
     # ------------------------------------------------------------------
     # Internal steps
@@ -439,49 +597,13 @@ class ExperimentDesignAgent(BaseAgent):
         fresh = [i for i in selected if insight_key(i) not in covered]
         return fresh[: self.max_designs]
 
-    async def _open_treatment(
-        self, ctx: AgentContext, state: dict[str, Any], design: dict[str, Any]
-    ) -> None:
-        """Open the treatment changeset for a just-deployed design.
-
-        A failure is surfaced (state error + audit) but never unwinds the
-        deploy that already succeeded — the experiment exists either way; what
-        failed is making its treatment real, and a human can retry from the
-        console. Without the surfacing, the experiment silently measures noise.
-        """
-        experiment_id = str(design.get("experiment_id") or "")
-        try:
-            changeset_id = await open_treatment_changeset(
-                ctx.pool, ctx.project_id, ctx.run_id, design
-            )
-        except Exception as exc:
-            logger.error("Treatment changeset for %s failed: %s", experiment_id, exc)
-            state.setdefault("errors", []).append(
-                f"treatment changeset failed: {experiment_id or '(no id)'}"
-            )
-            await ctx.audit.log(
-                ctx.run_id,
-                "treatment_changeset_failed",
-                {"experiment_id": experiment_id, "agent": self.name, "error": str(exc)},
-            )
-            return
-        design["treatment_changeset_id"] = changeset_id
-        if changeset_id:
-            await ctx.audit.log(
-                ctx.run_id,
-                "treatment_changeset_opened",
-                {"experiment_id": experiment_id, "changeset_id": changeset_id},
-            )
-
     async def _record(
         self, ctx: AgentContext, design: dict[str, Any], decision: GateDecision
     ) -> None:
-        """Best-effort ledger write; a failure must not fail the run."""
+        """Best-effort post-result ledger write; a failure must not fail the run."""
         if ctx.pool is None:
             return
-        if design.get("deployed"):
-            status = "deployed"
-        elif decision is GateDecision.approve:
+        if decision is GateDecision.approve:
             status = "awaiting_approval"
         else:
             status = "halted"
@@ -496,7 +618,11 @@ class ExperimentDesignAgent(BaseAgent):
             )
 
     async def _safety_check(
-        self, ctx: AgentContext, experiment: dict, active_experiments: list[dict]
+        self,
+        ctx: AgentContext,
+        experiment: dict,
+        active_experiments: list[dict],
+        active_evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         action = AgentAction(
             type=ActionType.create_experiment,
@@ -504,6 +630,35 @@ class ExperimentDesignAgent(BaseAgent):
             project_id=ctx.project_id,
         )
         result = _safety.validate(action).model_dump()
+        result["evidence_complete"] = True
+        # Experiment creation is always a preview requiring human approval,
+        # even when all deterministic and external evidence is available.
+        result["requires_approval"] = True
+
+        if active_evidence and active_evidence.get("status") == "available":
+            result["checks"].append({
+                "name": "active_experiments_evidence",
+                "passed": True,
+                "status": "available",
+                "message": active_evidence.get("message", "Config evidence is available."),
+            })
+        else:
+            result["checks"].append({
+                "name": "active_experiments_evidence",
+                "passed": None,
+                "status": "unavailable",
+                "message": "Active experiment evidence is unavailable; human review is required.",
+            })
+            result["evidence_complete"] = False
+
+        conflict_check, conflict_evidence_complete = _config_conflict_check(
+            experiment, active_experiments, active_evidence
+        )
+        result["checks"].append(conflict_check)
+        if conflict_check["passed"] is False:
+            result["passed"] = False
+        if not conflict_evidence_complete:
+            result["evidence_complete"] = False
 
         # Layer a nuanced LLM safety review on top of the deterministic checks.
         try:
@@ -517,26 +672,38 @@ class ExperimentDesignAgent(BaseAgent):
                     {"role": "system", "content": "You are a safety reviewer for A/B experiments."},
                     {"role": "user", "content": review_prompt},
                 ],
+                context=ctx.llm_request(
+                    purpose="agent.experiment_design.safety_review",
+                    data_classification="confidential",
+                ),
             )
-            parsed = parse_llm_json(review)
-            if not isinstance(parsed, dict):
-                # Fail-open by design (a flaky fast-tier provider must not
-                # block every experiment), but observably so.
-                logger.warning("LLM safety review output was unparseable — review skipped")
-                parsed = None
-            if parsed and not parsed.get("approved", True):
+            parsed = ExperimentSafetyReview.model_validate(parse_llm_json(review))
+            if not parsed.approved:
                 result["checks"].append({
                     "name": "llm_safety_review",
                     "passed": False,
-                    "message": "; ".join(parsed.get("concerns", [])),
+                    "status": "available",
+                    "message": "; ".join(parsed.concerns) or "LLM safety review rejected the design.",
                 })
                 result["passed"] = False
-        except Exception as exc:
-            logger.warning("LLM safety review failed: %s", exc)
+            else:
+                result["checks"].append({
+                    "name": "llm_safety_review",
+                    "passed": True,
+                    "status": "available",
+                    "message": "LLM safety review approved the design.",
+                })
+            risk_order = {"low": 0, "medium": 1, "high": 2}
+            if risk_order[parsed.risk_level] > risk_order.get(result["risk_level"], 2):
+                result["risk_level"] = parsed.risk_level
+        except Exception:
+            logger.warning("LLM safety review was unavailable or invalid")
+            result["checks"].append({
+                "name": "llm_safety_review",
+                "passed": None,
+                "status": "unavailable",
+                "message": "LLM safety review is unavailable; human review is required.",
+            })
+            result["evidence_complete"] = False
 
         return result
-
-    async def _deploy(self, ctx: AgentContext, experiment: dict) -> bool:
-        # Config owns experiment→flag initialization. Delegates to the shared
-        # deploy_experiment so the agent and the approval endpoint use one path.
-        return await deploy_experiment(ctx.project_id, experiment)

@@ -31,6 +31,11 @@ def test_migration_quarantines_legacy_significance_derived_ship_verdicts():
 def test_config_schema_gate_requires_the_new_migration():
     from app import schema
 
-    assert schema.MIGRATION_VERSION == 18
-    assert schema.MIGRATION_NAME == "018_experiment_statistical_plan.sql"
+    assert schema.MIGRATION_VERSION == 22
+    assert schema.MIGRATION_NAME == "022_agents_durable_effects.sql"
     assert ("experiments", "statistical_plan") in schema.REQUIRED_COLUMNS
+    assert ("experiments", "creation_idempotency_key") in schema.REQUIRED_COLUMNS
+    assert (
+        "experiments",
+        "creation_idempotency_request_sha256",
+    ) in schema.REQUIRED_COLUMNS

@@ -13,6 +13,7 @@ from app.runtime.collector import RuntimeEvidenceCollection
 from app.runtime.evidence import build_runtime_evidence_observation
 from app.runtime.models import RuntimeAcceptancePlan
 from app.routers import changesets as changesets_router
+from app.safety.policy import TenantCodegenConnectionPolicy
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 
@@ -27,7 +28,11 @@ async def test_create_changeset_requires_connection():
     async with _client(FakePool()) as client:
         resp = await client.post(
             "/v1/changesets",
-            json={"project_id": "demo", "task": {"title": "x", "spec": "do the thing"}},
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:requires-connection",
+                "task": {"title": "x", "spec": "do the thing"},
+            },
         )
     assert resp.status_code == 404
 
@@ -43,6 +48,7 @@ async def test_evaluation_only_stage_rejects_changeset_before_queueing():
                 "/v1/changesets",
                 json={
                     "project_id": "demo",
+                    "idempotency_key": "test:evaluation-stage",
                     "task": {"title": "x", "spec": "do the thing"},
                 },
             )
@@ -63,6 +69,7 @@ async def test_create_get_and_list_changeset():
             "/v1/changesets",
             json={
                 "project_id": "demo",
+                "idempotency_key": "test:create-dark-mode",
                 "run_id": "run-1",
                 "task": {"title": "Add dark mode", "spec": "Implement a dark-mode toggle."},
             },
@@ -81,6 +88,168 @@ async def test_create_get_and_list_changeset():
         listed = await client.get("/v1/changesets", params={"project_id": "demo"})
         assert listed.status_code == 200
         assert [c["changeset_id"] for c in listed.json()] == [cid]
+
+
+@pytest.mark.asyncio
+async def test_create_changeset_is_idempotent_under_concurrent_retries(monkeypatch):
+    pool = FakePool()
+    pool.add_connection("demo")
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        changesets_router,
+        "_maybe_enqueue",
+        lambda app, background_tasks, changeset_id: enqueued.append(changeset_id),
+    )
+    body = {
+        "project_id": "demo",
+        "idempotency_key": "agent-effect:command-1:changeset-1",
+        "run_id": "run-1",
+        "base_branch": "main",
+        "task": {"title": "Add dark mode", "spec": "Add the toggle."},
+    }
+
+    async with _client(pool) as client:
+        first, second = await asyncio.gather(
+            client.post("/v1/changesets", json=body),
+            client.post("/v1/changesets", json=body),
+        )
+        third = await client.post("/v1/changesets", json=body)
+
+    assert [first.status_code, second.status_code, third.status_code] == [202, 202, 202]
+    changeset_ids = {
+        first.json()["changeset_id"],
+        second.json()["changeset_id"],
+        third.json()["changeset_id"],
+    }
+    assert len(changeset_ids) == 1
+    assert len(pool.store["changesets"]) == 1
+    assert enqueued == [next(iter(changeset_ids))]
+
+
+@pytest.mark.parametrize(
+    "changed_field",
+    [
+        "run_id",
+        "base_branch",
+        "task",
+    ],
+)
+@pytest.mark.asyncio
+async def test_idempotency_key_rejects_changed_canonical_request(changed_field):
+    pool = FakePool()
+    pool.add_connection("demo")
+    body = {
+        "project_id": "demo",
+        "idempotency_key": f"test:immutable:{changed_field}",
+        "run_id": "run-1",
+        "base_branch": "main",
+        "task": {"title": "Add dark mode", "spec": "Add the toggle."},
+    }
+    second_body = {**body, "task": dict(body["task"])}
+
+    async with _client(pool) as client:
+        first = await client.post("/v1/changesets", json=body)
+        assert first.status_code == 202
+
+        if changed_field == "run_id":
+            second_body["run_id"] = "run-2"
+        elif changed_field == "base_branch":
+            second_body["base_branch"] = "develop"
+        elif changed_field == "task":
+            second_body["task"]["spec"] = "A different implementation."
+        second = await client.post("/v1/changesets", json=second_body)
+
+    assert second.status_code == 409
+    assert "canonical request payload" in second.json()["detail"]
+    assert len(pool.store["changesets"]) == 1
+
+
+@pytest.mark.parametrize("change", ["repository_target", "policy_snapshot", "removed"])
+@pytest.mark.asyncio
+async def test_exact_replay_returns_original_after_mutable_connection_change(change):
+    pool = FakePool()
+    pool.add_connection("demo")
+    body = {
+        "project_id": "demo",
+        "idempotency_key": f"test:replay:{change}",
+        "run_id": "run-1",
+        "task": {"title": "Add dark mode", "spec": "Add the toggle."},
+    }
+
+    async with _client(pool) as client:
+        first = await client.post("/v1/changesets", json=body)
+        assert first.status_code == 202
+
+        if change == "repository_target":
+            pool.add_connection(
+                "demo",
+                repo="acme/other",
+                installation_id=2,
+                repository_id=20,
+                grant_id="ghg_demoother",
+            )
+        elif change == "policy_snapshot":
+            pool.add_connection(
+                "demo",
+                tenant_policy=TenantCodegenConnectionPolicy(test_cmd="make verify"),
+            )
+        else:
+            del pool.store["connections"]["demo"]
+
+        replay = await client.post("/v1/changesets", json=body)
+
+    assert replay.status_code == 202
+    assert replay.json()["changeset_id"] == first.json()["changeset_id"]
+    assert len(pool.store["changesets"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_digest_distinguishes_json_boolean_from_number():
+    pool = FakePool()
+    pool.add_connection("demo")
+    first_body = {
+        "project_id": "demo",
+        "idempotency_key": "test:typed-context",
+        "task": {
+            "title": "Typed context",
+            "spec": "Preserve JSON types.",
+            "context": {"value": True},
+        },
+    }
+    second_body = {
+        **first_body,
+        "task": {**first_body["task"], "context": {"value": 1}},
+    }
+
+    async with _client(pool) as client:
+        first = await client.post("/v1/changesets", json=first_body)
+        second = await client.post("/v1/changesets", json=second_body)
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert "canonical request payload" in second.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "idempotency_key",
+    [None, "", "contains whitespace", "-starts-with-punctuation", "x" * 201],
+)
+@pytest.mark.asyncio
+async def test_create_changeset_requires_canonical_idempotency_key(idempotency_key):
+    pool = FakePool()
+    pool.add_connection("demo")
+    body = {
+        "project_id": "demo",
+        "task": {"title": "x", "spec": "do it"},
+    }
+    if idempotency_key is not None:
+        body["idempotency_key"] = idempotency_key
+
+    async with _client(pool) as client:
+        response = await client.post("/v1/changesets", json=body)
+
+    assert response.status_code == 422
+    assert pool.store["changesets"] == {}
 
 
 @pytest.mark.asyncio
@@ -113,6 +282,7 @@ async def test_changeset_routes_reject_another_project(
             "/v1/changesets",
             json={
                 "project_id": "other",
+                "idempotency_key": "test:other-project",
                 "task": {"title": "x", "spec": "do the thing"},
             },
         )
@@ -130,6 +300,7 @@ async def test_changeset_mutation_requires_manage_role(authorized_codegen_reques
             "/v1/changesets",
             json={
                 "project_id": "demo",
+                "idempotency_key": "test:manage-role",
                 "task": {"title": "x", "spec": "do the thing"},
             },
         )
@@ -195,7 +366,11 @@ async def test_abandon_changeset_transitions_to_abandoned():
     async with _client(pool) as client:
         created = await client.post(
             "/v1/changesets",
-            json={"project_id": "demo", "task": {"title": "x", "spec": "do it"}},
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:abandon",
+                "task": {"title": "x", "spec": "do it"},
+            },
         )
         cid = created.json()["changeset_id"]
         resp = await client.post(f"/v1/changesets/{cid}/abandon")
@@ -210,23 +385,37 @@ async def test_create_changeset_rejects_unknown_field():
     async with _client(pool) as client:
         resp = await client.post(
             "/v1/changesets",
-            json={"project_id": "demo", "task": {"title": "x", "spec": "y"}, "extra": 1},
+            json={
+                "project_id": "demo",
+                "idempotency_key": "test:unknown-field",
+                "task": {"title": "x", "spec": "y"},
+                "extra": 1,
+            },
         )
     assert resp.status_code == 422
 
 
 @pytest.mark.asyncio
-async def test_revert_merged_changeset_enqueues_a_revert():
+async def test_revert_merged_changeset_enqueues_one_idempotent_revert(monkeypatch):
     pool = FakePool()
     pool.add_connection("demo")
     pool.add_changeset(
         "cs_orig", "demo", status="merged", pr_number=7, branch="apdl/x",
         merge_sha="deadbeef123",
     )
+    enqueued: list[str] = []
+    monkeypatch.setattr(
+        changesets_router,
+        "_maybe_enqueue",
+        lambda app, background_tasks, changeset_id: enqueued.append(changeset_id),
+    )
     async with _client(pool) as client:
         resp = await client.post("/v1/changesets/cs_orig/revert")
+        duplicate = await client.post("/v1/changesets/cs_orig/revert")
     assert resp.status_code == 202
+    assert duplicate.status_code == 202
     body = resp.json()
+    assert duplicate.json()["changeset_id"] == body["changeset_id"]
     assert body["changeset_id"].startswith("cs_")
     assert body["changeset_id"] != "cs_orig"
     assert body["status"] == "queued"
@@ -236,6 +425,7 @@ async def test_revert_merged_changeset_enqueues_a_revert():
     # The recorded merge SHA rides along so the editor reverts deterministically.
     assert body["task"]["context"]["revert_sha"] == "deadbeef123"
     assert "deadbeef123" in body["task"]["spec"]
+    assert enqueued == [body["changeset_id"]]
 
 
 @pytest.mark.asyncio
@@ -320,6 +510,41 @@ async def test_retry_is_idempotent_for_duplicate_and_concurrent_requests(monkeyp
     ]
     assert len(children) == 1
     assert enqueued == [next(iter(child_ids))]
+
+
+@pytest.mark.asyncio
+async def test_retry_never_returns_a_cross_project_legacy_child():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_bad", "demo", status="error")
+    pool.add_changeset("cs_foreign_child", "other", status="queued")
+    pool.store["changesets"]["cs_foreign_child"]["retry_of_changeset_id"] = "cs_bad"
+
+    async with _client(pool) as client:
+        response = await client.post("/v1/changesets/cs_bad/retry")
+
+    assert response.status_code == 409
+    assert "another project" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_server_key_bound_to_different_lineage():
+    pool = FakePool()
+    pool.add_connection("demo")
+    pool.add_changeset("cs_bad", "demo", status="error")
+    pool.add_changeset("cs_other_parent", "demo", status="error")
+    pool.add_changeset("cs_existing_child", "demo", status="queued")
+    row = pool.store["changesets"]["cs_existing_child"]
+    row["idempotency_key"] = changesets_router._derived_idempotency_key(
+        "retry", "cs_bad"
+    )
+    row["retry_of_changeset_id"] = "cs_other_parent"
+
+    async with _client(pool) as client:
+        response = await client.post("/v1/changesets/cs_bad/retry")
+
+    assert response.status_code == 409
+    assert "different retry lineage" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(

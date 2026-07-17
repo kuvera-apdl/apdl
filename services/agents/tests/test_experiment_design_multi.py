@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from app.framework import AgentContext
+from app.framework import AgentContext, AgentResult
 from app.graphs import experiment_design
 from app.graphs.experiment_design import ExperimentDesignAgent
-from app.routers.approvals import _experiment_deployable
+from app.store.approval_effects import _experiment_stageable
 from app.store.experiments import insight_key
 
 
@@ -85,7 +85,7 @@ def test_insight_key_normalizes_whitespace_and_case():
 async def test_act_routes_all_passing_designs_to_approval_at_l2(monkeypatch):
     agent = ExperimentDesignAgent()
 
-    async def fake_safety(ctx, design, active):
+    async def fake_safety(ctx, design, active, evidence):
         return {"passed": True, "risk_level": "low", "checks": []}
 
     monkeypatch.setattr(agent, "_safety_check", fake_safety)
@@ -100,77 +100,50 @@ async def test_act_routes_all_passing_designs_to_approval_at_l2(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_act_deploys_all_at_l4_and_counts(monkeypatch):
+async def test_act_routes_all_passing_designs_to_approval_at_l4(monkeypatch):
     agent = ExperimentDesignAgent()
 
-    async def fake_safety(ctx, design, active):
+    async def fake_safety(ctx, design, active, evidence):
         return {"passed": True, "risk_level": "medium", "checks": []}
 
-    async def fake_deploy(ctx, design):
-        return True
+    async def fail_create_draft(**kwargs):
+        raise AssertionError("agent act must not call Config before human approval")
 
     monkeypatch.setattr(agent, "_safety_check", fake_safety)
-    monkeypatch.setattr(agent, "_deploy", fake_deploy)
+    monkeypatch.setattr(
+        experiment_design, "create_config_experiment_draft", fail_create_draft
+    )
     output = [_design("exp_a"), _design("exp_b")]
     meta = await agent.act(make_ctx(autonomy_level=4), {}, {}, output)
 
-    assert meta["deployed_count"] == 2
-    assert meta["needs_approval"] is False
-    assert all(d["decision"] == "deploy" and d["deployed"] is True for d in output)
+    assert meta["deployed_count"] == 0
+    assert meta["needs_approval"] is True
+    assert all(d["decision"] == "approve" and d["deployed"] is False for d in output)
 
 
 @pytest.mark.asyncio
 async def test_act_mixed_outcomes_halted_design_never_deploys(monkeypatch):
     agent = ExperimentDesignAgent()
-    deploys: list[str] = []
-
-    async def fake_safety(ctx, design, active):
+    async def fake_safety(ctx, design, active, evidence):
         passed = design["experiment_id"] != "exp_bad"
         return {"passed": passed, "risk_level": "low", "checks": []}
 
-    async def fake_deploy(ctx, design):
-        deploys.append(design["experiment_id"])
-        return True
-
     monkeypatch.setattr(agent, "_safety_check", fake_safety)
-    monkeypatch.setattr(agent, "_deploy", fake_deploy)
     output = [_design("exp_good"), _design("exp_bad")]
     meta = await agent.act(make_ctx(autonomy_level=4), {}, {}, output)
 
-    assert deploys == ["exp_good"]
     good, bad = output
-    assert good["decision"] == "deploy" and good["deployed"] is True
+    assert good["decision"] == "approve" and good["deployed"] is False
     assert bad["decision"] == "halt" and bad["deployed"] is False
-    assert meta["deployed_count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_act_deploy_failure_is_surfaced_in_state_errors(monkeypatch):
-    agent = ExperimentDesignAgent()
-
-    async def fake_safety(ctx, design, active):
-        return {"passed": True, "risk_level": "low", "checks": []}
-
-    async def fake_deploy(ctx, design):
-        return False
-
-    monkeypatch.setattr(agent, "_safety_check", fake_safety)
-    monkeypatch.setattr(agent, "_deploy", fake_deploy)
-    ctx = make_ctx(autonomy_level=4)
-    state: dict[str, Any] = {}
-    meta = await agent.act(ctx, state, {}, [_design("exp_a")])
-
     assert meta["deployed_count"] == 0
-    assert state["errors"] == ["experiment deploy failed: exp_a"]
-    assert any(kind == "deploy_failed" for _, kind, _ in ctx.audit.logged)
 
 
 @pytest.mark.asyncio
-async def test_act_records_gate_outcome_in_ledger(monkeypatch):
+async def test_post_persist_hook_records_gate_outcome_in_ledger(monkeypatch):
     agent = ExperimentDesignAgent()
     recorded: list[tuple[str, str]] = []
 
-    async def fake_safety(ctx, design, active):
+    async def fake_safety(ctx, design, active, evidence):
         return {"passed": design["experiment_id"] != "exp_halt", "risk_level": "low", "checks": []}
 
     async def fake_record(pool, project_id, run_id, design, status):
@@ -179,8 +152,15 @@ async def test_act_records_gate_outcome_in_ledger(monkeypatch):
     monkeypatch.setattr(agent, "_safety_check", fake_safety)
     monkeypatch.setattr(experiment_design, "record_designed_experiment", fake_record)
     output = [_design("exp_wait"), _design("exp_halt")]
-    await agent.act(make_ctx(autonomy_level=2, pool=object()), {}, {}, output)
+    ctx = make_ctx(autonomy_level=2, pool=object())
+    metadata = await agent.act(ctx, {}, {}, output)
 
+    assert recorded == []
+    await agent.after_result_persisted(
+        ctx,
+        {},
+        AgentResult(output=output, metadata=metadata),
+    )
     assert recorded == [("exp_wait", "awaiting_approval"), ("exp_halt", "halted")]
 
 
@@ -189,16 +169,21 @@ async def test_act_records_gate_outcome_in_ledger(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_experiment_deployable_legacy_item_without_decision():
-    assert _experiment_deployable({"experiment_id": "exp_old"}) is True
+def test_experiment_stageable_rejects_legacy_item_without_gate_evidence():
+    assert _experiment_stageable({"experiment_id": "exp_old"}) is False
 
 
-def test_experiment_deployable_rejects_halted_and_already_deployed():
-    assert _experiment_deployable({"decision": "halt"}) is False
-    assert _experiment_deployable({"decision": "deploy"}) is False
-    assert _experiment_deployable({"decision": "approve"}) is True
+def test_experiment_stageable_rejects_halted_and_nonapproval_items():
+    assert _experiment_stageable({"decision": "halt"}) is False
+    assert _experiment_stageable({"decision": "deploy"}) is False
+    assert _experiment_stageable({"decision": "approve"}) is False
 
 
-def test_experiment_deployable_rejects_failed_safety():
+def test_experiment_stageable_requires_approval_and_passed_safety():
+    item = {"decision": "approve", "safety_result": {"passed": True}}
+    assert _experiment_stageable(item) is True
+
+
+def test_experiment_stageable_rejects_failed_safety():
     item = {"decision": "approve", "safety_result": {"passed": False}}
-    assert _experiment_deployable(item) is False
+    assert _experiment_stageable(item) is False
