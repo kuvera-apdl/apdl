@@ -4,6 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["node"],
     "strict": true,
     "paths": {
       "@apdl-oss/sdk": ["./src/index.ts"]

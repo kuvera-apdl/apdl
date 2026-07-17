@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 # git: the in-process editor clones/commits with it.
 # docker CLI: only used when CODEGEN_SANDBOX=docker (Option B) to launch the
 #   per-changeset sandbox container via a mounted Docker socket; unused otherwise.
