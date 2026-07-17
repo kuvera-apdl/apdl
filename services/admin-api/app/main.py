@@ -18,9 +18,9 @@ ReadinessState = Literal["ready", "not_ready"]
 _CORE_UPSTREAMS = {
     "ingestion": ("/health", "ok"),
     "config": ("/ready", "ready"),
+    "query": ("/ready", "ready"),
 }
 _CAPABILITY_UPSTREAMS = {
-    "query": ("/ready", "ready"),
     "agents": ("/ready", "ready"),
     "codegen": ("/ready", "ready"),
 }

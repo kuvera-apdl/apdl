@@ -42,9 +42,9 @@ def expected_payload(
         "postgres": "ready",
         "ingestion": "ready",
         "config": "ready",
+        "query": "ready",
     }
     default_capabilities = {
-        "query": "ready",
         "agents": "ready",
         "codegen": "ready",
     }
@@ -123,7 +123,6 @@ async def test_optional_capability_failure_is_http_200_degraded() -> None:
     assert response == expected_payload(
         degraded=True,
         capabilities={
-            "query": "ready",
             "agents": "not_ready",
             "codegen": "not_ready",
         },
@@ -146,6 +145,7 @@ async def test_core_failure_is_http_503_even_when_capabilities_are_ready() -> No
             "postgres": "ready",
             "ingestion": "ready",
             "config": "not_ready",
+            "query": "ready",
         },
     )
 
@@ -161,6 +161,7 @@ async def test_postgres_failure_is_a_core_failure() -> None:
             "postgres": "not_ready",
             "ingestion": "ready",
             "config": "ready",
+            "query": "ready",
         },
     )
 
@@ -179,7 +180,7 @@ async def test_postgres_failure_is_a_core_failure() -> None:
             "http://query.test/ready",
             httpx.Response(200, json=[]),
             "not_ready",
-            True,
+            False,
         ),
         (
             "http://agents.test/ready",
@@ -209,11 +210,11 @@ async def test_malformed_or_noncanonical_upstream_responses_fail_closed(
     result = await readiness_response(malformed)
     payload = json.loads(result.body) if hasattr(result, "body") else result
     service = httpx.URL(url).host.split(".", 1)[0]
-    section = "core" if service == "config" else "capabilities"
+    section = "core" if service in {"config", "query"} else "capabilities"
 
     assert payload[section][service] == expected_status
     assert payload["degraded"] is degraded
-    if service == "config":
+    if service in {"config", "query"}:
         assert result.status_code == 503
         assert payload["status"] == "not_ready"
     else:
