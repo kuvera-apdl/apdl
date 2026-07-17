@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the user asks to create a PR, open a pull request, raise a PR, make commits for a PR branch, or ship the current branch or changes.
 - This is the canonical version of that workflow. The standalone service repos split out of this monorepo (`kuvera-edi`, `apdl-database-service`, `apdl-experiments-service`, `apdl-agent-service`) each carry their own adapted copy at the same path (`uv`/`ruff`/`mypy`/`pytest` directly instead of `make lint-<area>`, since they're single-package repos) plus the same `.claude/skills/structured-pr/` wrapper — keep them in sync if this workflow's shape changes.
+- Secure coding & review: follow `docs/agent-workflows/secure-coding.md` when writing or reviewing code that touches auth, tenant isolation, SQL/queries, request validation, subprocess/git, frontend/UI, outbound HTTP, secrets, deserialization, resource limits, CORS/transport, LLM-agent safety, webhooks, logging, CI/CD, or container/infra — and when the user asks to check security or review for vulnerabilities. It is the canonical security convention for the monorepo, wrapped as the `secure-coding` skill.
 
 ## What is APDL?
 
