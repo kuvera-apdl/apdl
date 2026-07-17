@@ -220,6 +220,7 @@ export class APDLClient implements APDLApi {
     );
     this.sseHandlers = new SSEHandlers(
       this.flagCache,
+      this.config.projectId,
       this.config.debug
     );
     this.sseConnection.onMessage((msg) => {
@@ -466,7 +467,7 @@ export class APDLClient implements APDLApi {
           return;
         }
         const result = parseFlagConfigResult(data);
-        if (result !== null) {
+        if (result !== null && result.project_id === this.config.projectId) {
           if (result.flags.length > 0 || result.invalid_keys.length === 0) {
             this.flagCache.set(result.flags, 'initial_fetch', result.invalid_keys);
           } else {

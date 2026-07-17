@@ -17,6 +17,11 @@ export function createTestConfig(overrides: TestConfigOverrides = {}): APDLConfi
       ...auth,
     },
     autoCapture: false,
+    consent: {
+      analytics: true,
+      personalization: true,
+      experiments: true,
+    },
     persistence: 'memory',
     ...rest,
   };

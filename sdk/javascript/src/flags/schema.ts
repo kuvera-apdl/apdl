@@ -18,8 +18,14 @@ import {
 type RawRecord = Record<string, unknown>;
 
 export interface FlagConfigParseResult {
+  project_id: string;
   flags: FlagConfig[];
   invalid_keys: string[];
+}
+
+interface FlagConfigCandidates {
+  project_id: string;
+  flags: unknown[];
 }
 
 const FLAG_KEYS = new Set([
@@ -62,15 +68,15 @@ export function parseFlagConfigs(input: unknown): FlagConfig[] | null {
 }
 
 export function parseFlagConfigResult(input: unknown): FlagConfigParseResult | null {
-  const candidates = extractCandidates(input);
-  if (!candidates) {
+  const envelope = extractCandidates(input);
+  if (!envelope) {
     return null;
   }
 
   const flags: FlagConfig[] = [];
   const invalidKeys: string[] = [];
 
-  for (const candidate of candidates) {
+  for (const candidate of envelope.flags) {
     if (isFlagConfig(candidate)) {
       flags.push(candidate);
       continue;
@@ -84,6 +90,7 @@ export function parseFlagConfigResult(input: unknown): FlagConfigParseResult | n
   }
 
   return {
+    project_id: envelope.project_id,
     flags,
     invalid_keys: invalidKeys,
   };
@@ -124,7 +131,7 @@ export function isFlagConfig(input: unknown): input is FlagConfig {
     && input.version >= 1;
 }
 
-function extractCandidates(input: unknown): unknown[] | null {
+function extractCandidates(input: unknown): FlagConfigCandidates | null {
   if (
     isRecord(input)
     && hasOnlyKeys(input, COLLECTION_KEYS)
@@ -132,7 +139,10 @@ function extractCandidates(input: unknown): unknown[] | null {
     && input.schema_version === 2
     && isIdentifier(input.project_id)
   ) {
-    return input.flags;
+    return {
+      project_id: input.project_id,
+      flags: input.flags,
+    };
   }
 
   return null;

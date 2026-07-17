@@ -10,9 +10,6 @@ import os
 import re
 import sys
 import tomllib
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -259,53 +256,11 @@ def verify_release(root: Path, supplied_tag: str | None, environment: dict[str, 
     return version
 
 
-def _assert_registry_version_absent(url: str, label: str) -> None:
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "apdl-release-verifier/1"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            status = response.status
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return
-        raise ReleaseContractError(
-            f"cannot verify {label} availability: registry returned HTTP {exc.code}"
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ReleaseContractError(f"cannot verify {label} availability: {exc}") from exc
-    if status == 200:
-        raise ReleaseContractError(f"{label} already exists; refusing to overwrite a release")
-    raise ReleaseContractError(
-        f"cannot verify {label} availability: registry returned HTTP {status}"
-    )
-
-
-def verify_registry_versions_available(version: str) -> None:
-    """Fail closed unless both immutable package versions are unpublished."""
-
-    npm_name = urllib.parse.quote("@apdl-oss/sdk", safe="")
-    _assert_registry_version_absent(
-        f"https://registry.npmjs.org/{npm_name}/{version}",
-        f"@apdl-oss/sdk@{version}",
-    )
-    _assert_registry_version_absent(
-        f"https://pypi.org/pypi/apdl-sdk/{version}/json",
-        f"apdl-sdk=={version}",
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--tag",
         help="tag being released; optional off tag refs and strict when provided",
-    )
-    parser.add_argument(
-        "--check-registries",
-        action="store_true",
-        help="fail unless both package versions are still available to publish",
     )
     parser.add_argument(
         "--root",
@@ -316,8 +271,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         version = verify_release(args.root.resolve(), args.tag, dict(os.environ))
-        if args.check_registries:
-            verify_registry_versions_available(version)
     except ReleaseContractError as exc:
         print(f"release verification failed: {exc}", file=sys.stderr)
         return 1

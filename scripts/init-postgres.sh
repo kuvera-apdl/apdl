@@ -45,6 +45,21 @@ for _ in $(seq 1 30); do
 done
 [ "$ready" -eq 1 ] || { echo "PostgreSQL did not become ready in time." >&2; exit 1; }
 
+quiescence_args=(
+    --anchor-container "$container_id"
+    --service ingestion
+    --service config
+    --service query
+    --service agents
+    --service codegen
+    --service clickhouse-writer
+    --service admin-api
+    --service admin
+    --service gateway
+)
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
+    "${quiescence_args[@]}"
+
 docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGHOST="$POSTGRES_SERVICE" \
@@ -53,6 +68,7 @@ docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGPASSWORD="$POSTGRES_PASSWORD" \
     -e PGDATABASE="$POSTGRES_DB" \
     -e POSTGRES_MIGRATIONS_DIR=/migrations \
+    -e APDL_POSTGRES_SERVICES_QUIESCED=1 \
     -v "$MIGRATIONS_DIR:/migrations:ro" \
     "$POSTGRES_MIGRATOR_SERVICE"
 

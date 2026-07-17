@@ -124,7 +124,18 @@ const REMOVED_CONFIG_FIELDS: Record<string, string> = {
   projectId: 'auth.clientKey',
 };
 
-const DEFAULT_AUTO_CAPTURE: AutoCaptureConfig = {
+const DISABLED_AUTO_CAPTURE: AutoCaptureConfig = {
+  pageViews: false,
+  clicks: false,
+  formSubmissions: false,
+  inputChanges: false,
+  scrollDepth: false,
+  rage_clicks: false,
+  frontend_errors: false,
+  web_vitals: false,
+};
+
+const ENABLED_AUTO_CAPTURE: AutoCaptureConfig = {
   pageViews: true,
   clicks: true,
   formSubmissions: true,
@@ -136,9 +147,9 @@ const DEFAULT_AUTO_CAPTURE: AutoCaptureConfig = {
 };
 
 const DEFAULT_CONSENT: ConsentState = {
-  analytics: true,
-  personalization: true,
-  experiments: true,
+  analytics: false,
+  personalization: false,
+  experiments: false,
 };
 
 export function resolveConfig(config: APDLConfig): ResolvedConfig;
@@ -263,26 +274,21 @@ export function resolveConfig(
 
 function resolveAutoCapture(value: unknown): AutoCaptureConfig {
   if (value === false) {
-    return {
-      pageViews: false,
-      clicks: false,
-      formSubmissions: false,
-      inputChanges: false,
-      scrollDepth: false,
-      rage_clicks: false,
-      frontend_errors: false,
-      web_vitals: false,
-    };
+    return { ...DISABLED_AUTO_CAPTURE };
   }
 
-  if (value === true || value === undefined) {
-    return { ...DEFAULT_AUTO_CAPTURE };
+  if (value === true) {
+    return { ...ENABLED_AUTO_CAPTURE };
+  }
+
+  if (value === undefined) {
+    return { ...DISABLED_AUTO_CAPTURE };
   }
 
   const input = assertObject(value, 'autoCapture');
   assertSupportedNestedFields(input, SUPPORTED_AUTO_CAPTURE_FIELDS, 'autoCapture');
 
-  const autoCapture = { ...DEFAULT_AUTO_CAPTURE };
+  const autoCapture = { ...DISABLED_AUTO_CAPTURE };
   for (const field of SUPPORTED_AUTO_CAPTURE_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(input, field)) {
       continue;

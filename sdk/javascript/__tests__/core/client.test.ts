@@ -49,6 +49,29 @@ describe('APDLClient', () => {
       });
     });
 
+    it('should default collection, personalization, experiments, and auto-capture off', () => {
+      const resolved = resolveConfig({
+        endpoint: ENDPOINT,
+        auth: { clientKey: CLIENT_KEY },
+      });
+
+      expect(resolved.consent).toEqual({
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      });
+      expect(Object.values(resolved.autoCapture)).toEqual([
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+      ]);
+    });
+
     it('should fetch initial flags from the config endpoint with client key auth', () => {
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
 
@@ -57,6 +80,23 @@ describe('APDLClient', () => {
         'X-API-Key': CLIENT_KEY,
         'X-APDL-SDK': SDK_IDENTIFIER,
       });
+    });
+
+    it('should reject an initial flag envelope for another project', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'foreign',
+          flags: [makeFlag('foreign-flag')],
+        }),
+      });
+      const foreignClient = new APDLClient(createTestConfig());
+
+      await flushAsync();
+
+      expect(foreignClient.getVariant('foreign-flag')).toBeNull();
+      await foreignClient.shutdown();
     });
 
     it('should open the SSE stream with header auth and no credential in the URL', async () => {
@@ -1475,6 +1515,14 @@ describe('APDLClient', () => {
       const projectA = new APDLClient(createTestConfig({
         persistence: 'localStorage',
       }));
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'projectb',
+          flags: [],
+        }),
+      });
       const projectB = new APDLClient(createTestConfig({
         auth: { clientKey: 'client_projectb_0123456789abcdef' },
         persistence: 'localStorage',

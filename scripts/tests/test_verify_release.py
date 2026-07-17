@@ -3,8 +3,6 @@ from __future__ import annotations
 import copy
 import importlib.util
 import unittest
-import urllib.error
-from unittest.mock import Mock, patch
 from pathlib import Path
 
 
@@ -71,31 +69,6 @@ class ReleaseManifestTests(unittest.TestCase):
                 {"GITHUB_REF_TYPE": "branch", "GITHUB_REF_NAME": "main"}
             )
         )
-
-    def test_registry_check_accepts_only_not_found(self) -> None:
-        with patch.object(
-            verify_release.urllib.request,
-            "urlopen",
-            side_effect=urllib.error.HTTPError(
-                "https://registry.invalid", 404, "Not Found", {}, None
-            ),
-        ):
-            verify_release._assert_registry_version_absent(
-                "https://registry.invalid/package/0.3.0", "package@0.3.0"
-            )
-
-    def test_registry_check_rejects_an_existing_immutable_version(self) -> None:
-        response = Mock(status=200)
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        with patch.object(verify_release.urllib.request, "urlopen", return_value=response):
-            with self.assertRaisesRegex(
-                verify_release.ReleaseContractError, "already exists"
-            ):
-                verify_release._assert_registry_version_absent(
-                    "https://registry.invalid/package/0.3.0", "package@0.3.0"
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 _PROBE_TIMEOUT_SECONDS = 2.0
+
+CodegenChangesetCapability = Literal["available", "disabled", "unavailable"]
 
 
 def _endpoint(base_url: str, path: str) -> str:
@@ -46,6 +48,66 @@ async def _probe_if_configured(
     if not configured:
         return False
     return await _probe_endpoint(client, url, headers=headers)
+
+
+async def _probe_codegen_readiness(
+    client: httpx.AsyncClient,
+    *,
+    configured: bool,
+    url: str,
+) -> dict[str, Any]:
+    """Read Codegen's strict readiness/capability contract.
+
+    A reachable process is not enough: offline and shadow deployments are
+    healthy but cannot accept the changeset mutations produced by an approval
+    command.  Malformed or non-ready responses are unavailable, never inferred
+    as publication-capable.
+    """
+    if not configured:
+        return {
+            "configured": False,
+            "reachable": False,
+            "changeset_creation": "disabled",
+        }
+    try:
+        response = await client.get(url)
+        body = response.json()
+    except (httpx.HTTPError, ValueError, TypeError):
+        return {
+            "configured": True,
+            "reachable": False,
+            "changeset_creation": "unavailable",
+        }
+    if response.status_code != 200 or not isinstance(body, dict):
+        return {
+            "configured": True,
+            "reachable": False,
+            "changeset_creation": "unavailable",
+        }
+    if set(body) != {"status", "service", "capabilities"}:
+        return {
+            "configured": True,
+            "reachable": False,
+            "changeset_creation": "unavailable",
+        }
+    capabilities = body.get("capabilities")
+    if (
+        body.get("status") != "ready"
+        or body.get("service") != "apdl-codegen"
+        or not isinstance(capabilities, dict)
+        or set(capabilities) != {"changeset_creation"}
+        or capabilities.get("changeset_creation") not in {"available", "disabled"}
+    ):
+        return {
+            "configured": True,
+            "reachable": False,
+            "changeset_creation": "unavailable",
+        }
+    return {
+        "configured": True,
+        "reachable": True,
+        "changeset_creation": capabilities["changeset_creation"],
+    }
 
 
 def _provider_probes() -> dict[str, dict[str, Any]]:
@@ -107,7 +169,11 @@ async def capability_report() -> dict[str, Any]:
     """Report optional workflow capabilities without affecting core readiness."""
     provider_probes = _provider_probes()
     service_probes = _service_probes()
-    all_probes = {**provider_probes, **service_probes}
+    generic_service_probes = {
+        name: service_probes[name] for name in ("query", "config")
+    }
+    generic_probes = {**provider_probes, **generic_service_probes}
+    codegen_probe = service_probes["codegen"]
 
     timeout = httpx.Timeout(_PROBE_TIMEOUT_SECONDS)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
@@ -119,11 +185,17 @@ async def capability_report() -> dict[str, Any]:
                     url=probe["url"],
                     headers=probe["headers"],
                 )
-                for probe in all_probes.values()
-            )
+                for probe in generic_probes.values()
+            ),
+            _probe_codegen_readiness(
+                client,
+                configured=codegen_probe["configured"],
+                url=codegen_probe["url"],
+            ),
         )
 
-    reachability = dict(zip(all_probes, results, strict=True))
+    *generic_results, codegen = results
+    reachability = dict(zip(generic_probes, generic_results, strict=True))
     providers = {
         name: {
             "configured": probe["configured"],
@@ -136,20 +208,38 @@ async def capability_report() -> dict[str, Any]:
         "reachable": any(provider["reachable"] for provider in providers.values()),
         "providers": providers,
     }
-    services = {
+    services: dict[str, dict[str, Any]] = {
         name: {
             "configured": probe["configured"],
             "reachable": reachability[name],
         }
-        for name, probe in service_probes.items()
+        for name, probe in generic_service_probes.items()
     }
+    services["codegen"] = codegen
     capabilities = {"llm": llm, **services}
-    fully_available = all(
-        capability["configured"] and capability["reachable"]
-        for capability in capabilities.values()
+    fully_available = (
+        all(
+            capability["configured"] and capability["reachable"]
+            for name, capability in capabilities.items()
+            if name != "codegen"
+        )
+        and codegen["changeset_creation"] == "available"
     )
     return {
         "status": "available" if fully_available else "degraded",
         "service": "apdl-agents",
         "capabilities": capabilities,
     }
+
+
+async def codegen_changeset_capability() -> CodegenChangesetCapability:
+    """Return the authoritative capability used at the approval boundary."""
+    probe = _service_probes()["codegen"]
+    timeout = httpx.Timeout(_PROBE_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        result = await _probe_codegen_readiness(
+            client,
+            configured=probe["configured"],
+            url=probe["url"],
+        )
+    return result["changeset_creation"]

@@ -119,7 +119,11 @@ async def test_degraded_capabilities_do_not_block_core_readiness(
             "llm": {"configured": False, "reachable": False, "providers": {}},
             "query": {"configured": True, "reachable": False},
             "config": {"configured": True, "reachable": False},
-            "codegen": {"configured": True, "reachable": False},
+            "codegen": {
+                "configured": True,
+                "reachable": False,
+                "changeset_creation": "unavailable",
+            },
         },
     }
 

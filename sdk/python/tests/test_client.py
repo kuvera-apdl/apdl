@@ -258,7 +258,7 @@ def test_exposure_skipped_without_identity():
 def test_refresh_flags_from_v2_envelope():
     payload = {
         "schema_version": 2,
-        "project_id": "p1",
+        "project_id": "test",
         "flags": [
             {
                 "key": "g",
@@ -279,6 +279,35 @@ def test_refresh_flags_from_v2_envelope():
     client = make_client(transport)
     assert client.refresh_flags() is True
     assert client.get_variant("g", user_id="u1", log_exposure=False) in {"control", "treatment"}
+    client.shutdown()
+
+
+def test_refresh_flags_rejects_foreign_project_envelope():
+    payload = {
+        "schema_version": 2,
+        "project_id": "other",
+        "flags": [
+            {
+                "key": "foreign",
+                "enabled": True,
+                "default_variant": "control",
+                "variants": [
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
+                "salt": "s",
+                "rules": [],
+                "fallthrough": {
+                    "rollout": {"percentage": 100.0, "bucket_by": "user_id"}
+                },
+                "version": 1,
+            }
+        ],
+    }
+    client = make_client(RecordingTransport(flags=payload))
+
+    assert client.refresh_flags() is False
+    assert client.get_variant("foreign", user_id="u1", log_exposure=False) is None
     client.shutdown()
 
 

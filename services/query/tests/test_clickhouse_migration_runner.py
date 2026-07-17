@@ -135,3 +135,38 @@ def test_prototype_objects_may_only_be_retired(tmp_path: Path):
     )
     with pytest.raises(migrate.MigrationError, match="prototype v2"):
         migrate.discover_migrations(tmp_path)
+
+
+def test_rebuild_migrations_require_confirmed_writer_quiescence(
+    tmp_path: Path,
+    monkeypatch,
+):
+    for version in range(1, 8):
+        _write_migration(
+            tmp_path,
+            f"{version:03d}_migration_{version}.sql",
+            f"SELECT {version};\n",
+        )
+    migrations = migrate.discover_migrations(tmp_path)
+    monkeypatch.delenv(migrate.QUIESCENCE_CONFIRMATION_ENV, raising=False)
+
+    with pytest.raises(migrate.MigrationError, match="writer to be stopped"):
+        migrate._assert_writer_quiescence(migrations)
+
+    monkeypatch.setenv(migrate.QUIESCENCE_CONFIRMATION_ENV, "true")
+    with pytest.raises(migrate.MigrationError, match="writer to be stopped"):
+        migrate._assert_writer_quiescence(migrations)
+
+    monkeypatch.setenv(migrate.QUIESCENCE_CONFIRMATION_ENV, "1")
+    migrate._assert_writer_quiescence(migrations)
+
+
+def test_non_rebuild_migrations_do_not_require_quiescence(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _write_migration(tmp_path, "001_safe.sql", "SELECT 1;\n")
+    (migration,) = migrate.discover_migrations(tmp_path)
+    monkeypatch.delenv(migrate.QUIESCENCE_CONFIRMATION_ENV, raising=False)
+
+    migrate._assert_writer_quiescence((migration,))

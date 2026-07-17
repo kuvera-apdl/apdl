@@ -17,6 +17,7 @@ from app.main import app
 from app.routers import approvals
 from app.store import approval_effects
 from app.store.approval_effects import (
+    ApprovalCapabilityError,
     ApprovalCommandView,
     ApprovalDecision,
     ApprovalDecisionError,
@@ -65,6 +66,14 @@ def _view(status: str = "queued") -> ApprovalCommandView:
 def _client() -> AsyncClient:
     app.state.pg_pool = object()
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.fixture(autouse=True)
+def codegen_available(monkeypatch):
+    async def available() -> str:
+        return "available"
+
+    monkeypatch.setattr(approvals, "codegen_changeset_capability", available)
 
 
 @pytest.mark.asyncio
@@ -120,6 +129,31 @@ async def test_post_returns_only_the_queued_command_envelope(monkeypatch) -> Non
     assert captured["decisions"] == (ApprovalDecision("p1", True),)
     assert captured["actor_credential_id"] == "test-agents"
     assert captured["actor_user_id"] is None
+    assert captured["codegen_changeset_capability"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_post_rejects_codegen_effect_when_capability_is_disabled(
+    monkeypatch,
+) -> None:
+    async def disabled() -> str:
+        return "disabled"
+
+    async def fake_enqueue(pool: Any, **kwargs: Any) -> ApprovalCommandView:
+        del pool
+        raise ApprovalCapabilityError(kwargs["codegen_changeset_capability"])
+
+    monkeypatch.setattr(approvals, "codegen_changeset_capability", disabled)
+    monkeypatch.setattr(approvals, "enqueue_approval_command", fake_enqueue)
+
+    async with _client() as client:
+        response = await client.post(
+            "/v1/agents/run-1/approve",
+            json={"decisions": [{"item_id": "p1", "approved": True}]},
+        )
+
+    assert response.status_code == 424
+    assert "changeset creation is disabled" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -149,9 +183,7 @@ async def test_request_rejects_legacy_ambiguous_or_extra_shapes(payload) -> None
 
 @pytest.mark.asyncio
 async def test_request_bounds_decisions_and_comment() -> None:
-    too_many = [
-        {"item_id": f"p{index}", "approved": True} for index in range(101)
-    ]
+    too_many = [{"item_id": f"p{index}", "approved": True} for index in range(101)]
     async with _client() as client:
         decisions = await client.post(
             "/v1/agents/run-1/approve", json={"decisions": too_many}
@@ -339,7 +371,9 @@ class _Pool:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_persists_decision_audit_and_effect_before_queue_transition() -> None:
+async def test_enqueue_persists_decision_audit_and_effect_before_queue_transition() -> (
+    None
+):
     conn = _CommandConn()
     command = await enqueue_approval_command(
         _Pool(conn),
@@ -347,6 +381,7 @@ async def test_enqueue_persists_decision_audit_and_effect_before_queue_transitio
         project_id="demo",
         actor_credential_id="test-agents",
         actor_user_id="20000000-0000-4000-8000-000000000002",
+        codegen_changeset_capability="available",
         decisions=(ApprovalDecision("p1", True),),
         comment="ship it",
     )
@@ -384,6 +419,7 @@ async def test_identical_command_retry_returns_the_persisted_command() -> None:
         "run_id": "run-1",
         "project_id": "demo",
         "actor_credential_id": "test-agents",
+        "codegen_changeset_capability": "available",
         "decisions": (ApprovalDecision("p1", True),),
         "comment": "ship it",
     }
@@ -393,10 +429,13 @@ async def test_identical_command_retry_returns_the_persisted_command() -> None:
 
     assert second.command_id == first.command_id
     assert second.effects == first.effects
-    assert sum(
-        "INSERT INTO agent_approval_commands" in query
-        for query, _ in conn.statements
-    ) == 1
+    assert (
+        sum(
+            "INSERT INTO agent_approval_commands" in query
+            for query, _ in conn.statements
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -407,12 +446,15 @@ async def test_enqueue_rejects_incomplete_persisted_gate_metadata(
     conn = _CommandConn()
     del conn.gate_item[missing_field]
 
-    with pytest.raises(ApprovalGateConflictError, match="canonical decision|safety result"):
+    with pytest.raises(
+        ApprovalGateConflictError, match="canonical decision|safety result"
+    ):
         await enqueue_approval_command(
             _Pool(conn),
             run_id="run-1",
             project_id="demo",
             actor_credential_id="test-agents",
+            codegen_changeset_capability="available",
             decisions=(ApprovalDecision("p1", True),),
             comment=None,
         )
@@ -431,6 +473,7 @@ async def test_enqueue_rejects_non_exact_gate_decisions_before_mutation() -> Non
             run_id="run-1",
             project_id="demo",
             actor_credential_id="test-agents",
+            codegen_changeset_capability="available",
             decisions=(ApprovalDecision("unknown", True),),
             comment=None,
         )
@@ -448,9 +491,51 @@ async def test_mandatory_audit_failure_prevents_command_return() -> None:
             run_id="run-1",
             project_id="demo",
             actor_credential_id="test-agents",
+            codegen_changeset_capability="available",
             decisions=(ApprovalDecision("p1", True),),
             comment=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_rejects_codegen_effect_before_any_command_is_persisted() -> None:
+    conn = _CommandConn()
+
+    with pytest.raises(ApprovalCapabilityError, match="changeset creation is disabled"):
+        await enqueue_approval_command(
+            _Pool(conn),
+            run_id="run-1",
+            project_id="demo",
+            actor_credential_id="test-agents",
+            codegen_changeset_capability="disabled",
+            decisions=(ApprovalDecision("p1", True),),
+            comment=None,
+        )
+
+    assert not any(
+        "INSERT INTO agent_approval_commands" in query for query, _ in conn.statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_enqueue_allows_rejection_when_codegen_is_disabled() -> None:
+    conn = _CommandConn()
+
+    command = await enqueue_approval_command(
+        _Pool(conn),
+        run_id="run-1",
+        project_id="demo",
+        actor_credential_id="test-agents",
+        codegen_changeset_capability="disabled",
+        decisions=(ApprovalDecision("p1", False),),
+        comment="Codegen publication is intentionally offline.",
+    )
+
+    assert command.approved_count == 0
+    assert command.rejected_count == 1
+    assert [effect.effect_type for effect in command.effects] == [
+        "record_proposal_rejection"
+    ]
 
 
 def _effect(effect_type: str, *, quota: str) -> _ClaimedEffect:

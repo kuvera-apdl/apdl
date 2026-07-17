@@ -1,9 +1,10 @@
 """Strict human approval commands for persisted agent gates.
 
-This router never calls Config, Codegen, or an in-process supervisor.  A POST
-only validates the exact persisted gate and transactionally queues its command,
-decisions, mandatory audit intents, and effects.  The durable effect worker
-applies and retries those effects after the response has returned.
+This router never mutates Config, Codegen, or an in-process supervisor.  A POST
+first reads Codegen's strict readiness/capability contract, then validates the
+exact persisted gate and transactionally queues its command, decisions,
+mandatory audit intents, and effects.  The durable effect worker applies and
+retries those effects after the response has returned.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.auth import require_role
+from app.readiness import codegen_changeset_capability
 from app.store.approval_effects import (
+    ApprovalCapabilityError,
     ApprovalCommandView,
     ApprovalDecision,
     ApprovalDecisionError,
@@ -153,12 +156,14 @@ async def approve_action(
         for item in body.decisions
     )
     try:
+        codegen_capability = await codegen_changeset_capability()
         command = await enqueue_approval_command(
             pool,
             run_id=run_id,
             project_id=principal.project_id,
             actor_credential_id=principal.credential_id,
             actor_user_id=principal.actor_user_id,
+            codegen_changeset_capability=codegen_capability,
             decisions=decisions,
             comment=body.comment,
         )
@@ -168,6 +173,11 @@ async def approve_action(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ApprovalGateConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ApprovalCapabilityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_424_FAILED_DEPENDENCY,
+            detail=str(exc),
+        ) from exc
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(
             status_code=409,

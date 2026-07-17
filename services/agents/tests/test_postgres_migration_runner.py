@@ -116,3 +116,38 @@ def test_existing_ledger_prefix_skips_fresh_database_preflight(monkeypatch):
     monkeypatch.setattr(migrate, "_psql", unexpected_psql)
 
     migrate._assert_fresh_database_for_empty_ledger((migration,))
+
+
+def test_execution_authority_migration_requires_confirmed_service_quiescence(
+    tmp_path: Path,
+    monkeypatch,
+):
+    for version in range(1, 29):
+        _write_migration(
+            tmp_path,
+            f"{version:03d}_migration_{version}.sql",
+            f"SELECT {version};\n",
+        )
+    migrations = migrate.discover_migrations(tmp_path)
+    monkeypatch.delenv(migrate.QUIESCENCE_CONFIRMATION_ENV, raising=False)
+
+    with pytest.raises(migrate.MigrationError, match="services to be stopped"):
+        migrate._assert_service_quiescence(migrations)
+
+    monkeypatch.setenv(migrate.QUIESCENCE_CONFIRMATION_ENV, "true")
+    with pytest.raises(migrate.MigrationError, match="services to be stopped"):
+        migrate._assert_service_quiescence(migrations)
+
+    monkeypatch.setenv(migrate.QUIESCENCE_CONFIRMATION_ENV, "1")
+    migrate._assert_service_quiescence(migrations)
+
+
+def test_unrelated_postgres_migrations_do_not_require_quiescence(
+    tmp_path: Path,
+    monkeypatch,
+):
+    _write_migration(tmp_path, "001_safe.sql", "SELECT 1;\n")
+    (migration,) = migrate.discover_migrations(tmp_path)
+    monkeypatch.delenv(migrate.QUIESCENCE_CONFIRMATION_ENV, raising=False)
+
+    migrate._assert_service_quiescence((migration,))
