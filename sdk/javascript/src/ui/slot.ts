@@ -44,15 +44,20 @@ export class SlotManager {
   }
 
   /**
-   * Stops observing the DOM for slot changes.
+   * Pauses DOM observation while preserving subscribers for a later restart.
    */
-  stop(): void {
+  pause(): void {
     this.active = false;
     if (this.observer) {
       this.observer.disconnect();
       this.observer = null;
     }
     this.slots.clear();
+  }
+
+  /** Stops observing and releases all subscribers. */
+  stop(): void {
+    this.pause();
     this.callbacks.clear();
   }
 

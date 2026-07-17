@@ -62,6 +62,7 @@ export type FlagConfigSource =
 export type FlagEvaluationReason =
   | 'not_found'
   | 'invalid_config'
+  | 'consent_denied'
   | 'disabled'
   | 'error'
   | 'rule_match'

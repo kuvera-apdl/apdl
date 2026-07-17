@@ -98,6 +98,9 @@ client = APDL.init(APDLConfig(
 ))
 ```
 
+Configuration is strict: pass native strings, numbers, and booleans. Stringified
+numbers or booleans and numeric values outside the documented bounds are rejected.
+
 ## Lifecycle and delivery reports
 
 `flush()` and `shutdown()` return a `DeliveryReport` with `accepted`,

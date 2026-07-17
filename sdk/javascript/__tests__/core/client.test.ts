@@ -801,6 +801,43 @@ describe('APDLClient', () => {
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
     });
 
+    it('should return assignments and retry exposure telemetry after queue pressure', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('queue-pressure-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const flaggedClient = new APDLClient(createTestConfig({
+        batchSize: 2,
+        maxQueueSize: 1,
+      }));
+      await flushAsync();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      flaggedClient.track('fills_queue');
+      expect(() => flaggedClient.getVariant('queue-pressure-flag'))
+        .not.toThrow();
+      expect(flaggedClient.getVariantDetails('queue-pressure-flag').variant)
+        .toBe('control');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
+      expect(warn).toHaveBeenCalledWith(
+        "APDL: Failed to enqueue exposure for feature flag 'queue-pressure-flag'",
+        expect.objectContaining({ message: 'APDL: event queue is full' })
+      );
+
+      await flaggedClient.debug.flush();
+      expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('control');
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
+
+      warn.mockRestore();
+      await flaggedClient.shutdown();
+    });
+
     it('should preserve JSON attribute types for public flag evaluation', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -1235,6 +1272,121 @@ describe('APDLClient', () => {
 
       button.remove();
       await captureClient.shutdown();
+    });
+
+    it('should fence flag assignment, exposure, fetch, cache, and SSE across experiment consent transitions', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('consent-controlled-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const experimentClient = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+      }));
+      await flushAsync();
+      experimentClient.identify('user_123');
+
+      expect(experimentClient.getVariant('consent-controlled-flag'))
+        .toBe('treatment');
+      expect(featureFlagExposures(experimentClient)).toHaveLength(1);
+      expect(localStorage.getItem(flagStorageKey('apdl'))).not.toBeNull();
+      const initialStream = MockEventSource.instances.at(-1);
+
+      experimentClient.consent.update({ experiments: false });
+      await flushAsync();
+
+      expect(experimentClient.getVariantDetails('consent-controlled-flag'))
+        .toMatchObject({ variant: null, reason: 'consent_denied', source: null });
+      expect(featureFlagExposures(experimentClient)).toHaveLength(0);
+      expect(experimentClient.experiments.getContext()).toEqual({ attributes: {} });
+      expect(localStorage.getItem(flagStorageKey('apdl'))).toBeNull();
+      expect(initialStream?.readyState).toBe(2);
+
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('consent-controlled-flag', { version: 2 })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      experimentClient.consent.update({ experiments: true });
+      await flushAsync();
+
+      expect(experimentClient.getVariantDetails('consent-controlled-flag'))
+        .toMatchObject({ variant: 'treatment', source: 'initial_fetch' });
+      expect(MockEventSource.instances.at(-1)).not.toBe(initialStream);
+      expect(localStorage.getItem(flagStorageKey('apdl'))).not.toBeNull();
+
+      await experimentClient.shutdown();
+    });
+
+    it('should not retain experiment context while experiment consent is denied', async () => {
+      await flushAsync();
+      const existingStreamCount = MockEventSource.instances.length;
+      fetchMock.mockClear();
+      localStorage.setItem(flagStorageKey('apdl'), JSON.stringify({
+        schema_version: 3,
+        project_id: 'local_storage',
+        flags: [makeFlag('cached-flag')],
+        versions: { 'cached-flag': 1 },
+      }));
+      const deniedClient = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+        consent: { analytics: true, personalization: true, experiments: false },
+      }));
+
+      deniedClient.experiments.setContext({ attributes: { plan: 'secret' } });
+      expect(deniedClient.experiments.getContext()).toEqual({ attributes: {} });
+      expect(deniedClient.getVariantDetails('cached-flag').reason)
+        .toBe('consent_denied');
+      expect(localStorage.getItem(flagStorageKey('apdl'))).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        `${ENDPOINT}/v1/flags`,
+        expect.anything()
+      );
+      expect(MockEventSource.instances).toHaveLength(existingStreamCount);
+
+      await deniedClient.shutdown();
+    });
+
+    it('should block and remove personalized UI until consent is granted again', async () => {
+      const personalizedClient = new APDLClient(createTestConfig({
+        consent: { analytics: true, personalization: false, experiments: true },
+      }));
+      const slot = document.createElement('div');
+      slot.setAttribute('data-apdl-slot', 'consent-slot');
+      document.body.append(slot);
+      const onSlot = vi.fn();
+      personalizedClient.ui.onSlotUpdate(onSlot);
+      const uiConfig = {
+        component: 'banner',
+        props: { text: 'Consent controlled banner' },
+        slotId: 'consent-slot',
+      };
+
+      expect(personalizedClient.ui.render(uiConfig, slot)).toBeNull();
+      expect(slot.children).toHaveLength(0);
+      expect(onSlot).not.toHaveBeenCalled();
+
+      personalizedClient.consent.update({ personalization: true });
+      expect(onSlot).toHaveBeenCalledWith('consent-slot', slot);
+      expect(personalizedClient.ui.render(uiConfig, slot)).not.toBeNull();
+      expect(slot.children).toHaveLength(1);
+
+      personalizedClient.consent.update({ personalization: false });
+      expect(slot.children).toHaveLength(0);
+      expect(personalizedClient.ui.render(uiConfig, slot)).toBeNull();
+
+      slot.remove();
+      await personalizedClient.shutdown();
     });
 
     it('should namespace browser identity, session, consent, and flags by project', async () => {

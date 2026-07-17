@@ -418,29 +418,34 @@ class APDLClient:
         with self._state_lock:
             if dedupe_key in self._exposure_keys:
                 return
+            try:
+                self._enqueue(
+                    "track",
+                    event=FEATURE_FLAG_EXPOSURE_EVENT,
+                    properties={
+                        "flag_key": result.key,
+                        "variant": result.variant,
+                        "reason": result.reason,
+                        "rule_id": result.rule_id,
+                        "rollout_bucket": result.rollout_bucket,
+                        "variant_bucket": result.variant_bucket,
+                        "rollout_percentage": result.rollout_percentage,
+                        "bucket_by": result.bucket_by,
+                        "config_version": result.config_version,
+                        "source": result.source,
+                        "page": page,
+                        "component": component,
+                    },
+                    user_id=context.user_id,
+                    anonymous_id=context.anonymous_id,
+                    session_id=self._session_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "APDL: feature flag exposure could not be enqueued: %s", exc
+                )
+                return
             self._exposure_keys.add(dedupe_key)
-
-        self._enqueue(
-            "track",
-            event=FEATURE_FLAG_EXPOSURE_EVENT,
-            properties={
-                "flag_key": result.key,
-                "variant": result.variant,
-                "reason": result.reason,
-                "rule_id": result.rule_id,
-                "rollout_bucket": result.rollout_bucket,
-                "variant_bucket": result.variant_bucket,
-                "rollout_percentage": result.rollout_percentage,
-                "bucket_by": result.bucket_by,
-                "config_version": result.config_version,
-                "source": result.source,
-                "page": page,
-                "component": component,
-            },
-            user_id=context.user_id,
-            anonymous_id=context.anonymous_id,
-            session_id=self._session_id,
-        )
 
     def _warn_missing_flag(self, result: GateEvaluationResult) -> None:
         if result.reason != "not_found":

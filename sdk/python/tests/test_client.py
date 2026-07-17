@@ -9,6 +9,7 @@ import pytest
 from conftest import RecordingTransport, make_flag
 
 from apdl import APDL, APDLClient, APDLConfig
+from apdl.config import MAX_BATCH_SIZE
 from apdl.types import FEATURE_FLAG_EXPOSURE_EVENT
 
 CANONICAL_EXPOSURE_KEYS = {
@@ -150,6 +151,29 @@ def test_exposure_logged_once_per_identity_version_variant():
     assert props["flag_key"] == "g"
     assert "value" not in props and "bucket" not in props
     assert isinstance(exposures[0]["session_id"], str) and exposures[0]["session_id"]
+
+
+def test_exposure_queue_failure_does_not_change_variant_or_commit_dedupe():
+    transport = RecordingTransport()
+    client = make_client(transport, log_exposures=True, max_queue_size=1)
+    client.set_flags([make_flag("g")])
+    client.track("queue_filler", user_id="u1")
+
+    expected = client.get_variant("g", user_id="u1", log_exposure=False)
+    assert client.get_variant("g", user_id="u1") == expected
+    assert client.pending_events == 1
+
+    client.flush()
+    assert client.get_variant("g", user_id="u1") == expected
+    client.flush()
+    client.shutdown()
+
+    exposures = [
+        event
+        for event in transport.all_events()
+        if event["event"] == FEATURE_FLAG_EXPOSURE_EVENT
+    ]
+    assert len(exposures) == 1
 
 
 def test_exposure_carries_page_and_component():
@@ -349,6 +373,52 @@ def test_endpoint_accepts_an_http_origin_and_removes_a_trailing_slash():
     )
 
     assert config.endpoint == "http://localhost:8000"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("api_key", b"proj_test_0123456789abcdef"),
+        ("endpoint", b"https://apdl.test"),
+        ("batch_size", "20"),
+        ("flush_interval", "3.0"),
+        ("max_queue_size", "1000"),
+        ("enable_flags", "false"),
+        ("flag_poll_interval", "30.0"),
+        ("log_exposures", "true"),
+        ("request_timeout", "10.0"),
+        ("debug", "off"),
+    ],
+)
+def test_config_rejects_coercive_scalar_inputs(field, value):
+    values = {
+        "api_key": "proj_test_0123456789abcdef",
+        "endpoint": "https://apdl.test",
+        field: value,
+    }
+
+    with pytest.raises(ValueError):
+        APDLConfig(**values)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("batch_size", 0),
+        ("batch_size", MAX_BATCH_SIZE + 1),
+        ("max_queue_size", 0),
+        ("flush_interval", 0.0),
+        ("flag_poll_interval", -1.0),
+        ("request_timeout", 0.0),
+    ],
+)
+def test_config_rejects_values_outside_explicit_bounds(field, value):
+    with pytest.raises(ValueError):
+        APDLConfig(
+            api_key="proj_test_0123456789abcdef",
+            endpoint="https://apdl.test",
+            **{field: value},
+        )
 
 
 def test_exposes_project_id_from_api_key():

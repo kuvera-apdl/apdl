@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import re
+from typing import Annotated
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    field_validator,
+)
 
 # Canonical API-key wire format. The project segment is a client-side hint;
 # services derive tenant authority only from the verified database record.
@@ -17,6 +27,10 @@ DEFAULT_FLUSH_INTERVAL = 3.0
 DEFAULT_MAX_QUEUE_SIZE = 1000
 DEFAULT_FLAG_POLL_INTERVAL = 30.0
 DEFAULT_REQUEST_TIMEOUT = 10.0
+
+BatchSize = Annotated[StrictInt, Field(ge=1, le=MAX_BATCH_SIZE)]
+QueueSize = Annotated[StrictInt, Field(ge=1)]
+PositiveSeconds = Annotated[StrictFloat, Field(gt=0)]
 
 
 class APDLConfig(BaseModel):
@@ -31,24 +45,24 @@ class APDLConfig(BaseModel):
     service behind that origin.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    api_key: str
-    endpoint: str
+    api_key: StrictStr
+    endpoint: StrictStr
 
     # Event batching
-    batch_size: int = DEFAULT_BATCH_SIZE
-    flush_interval: float = DEFAULT_FLUSH_INTERVAL
-    max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE
+    batch_size: BatchSize = DEFAULT_BATCH_SIZE
+    flush_interval: PositiveSeconds = DEFAULT_FLUSH_INTERVAL
+    max_queue_size: QueueSize = DEFAULT_MAX_QUEUE_SIZE
 
     # Feature flags
-    enable_flags: bool = True
-    flag_poll_interval: float = DEFAULT_FLAG_POLL_INTERVAL
-    log_exposures: bool = True
+    enable_flags: StrictBool = True
+    flag_poll_interval: PositiveSeconds = DEFAULT_FLAG_POLL_INTERVAL
+    log_exposures: StrictBool = True
 
     # Transport
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    debug: bool = False
+    request_timeout: PositiveSeconds = DEFAULT_REQUEST_TIMEOUT
+    debug: StrictBool = False
 
     @field_validator("api_key")
     @classmethod
@@ -94,20 +108,3 @@ class APDLConfig(BaseModel):
                 "query, or fragment"
             )
         return v.rstrip("/")
-
-    @field_validator("batch_size")
-    @classmethod
-    def _clamp_batch_size(cls, v: int) -> int:
-        return max(1, min(v, MAX_BATCH_SIZE))
-
-    @field_validator("max_queue_size")
-    @classmethod
-    def _validate_queue_size(cls, v: int) -> int:
-        return max(1, v)
-
-    @field_validator("flush_interval", "flag_poll_interval", "request_timeout")
-    @classmethod
-    def _validate_positive(cls, v: float) -> float:
-        if v <= 0:
-            raise ValueError("interval/timeout values must be positive")
-        return v
