@@ -18,9 +18,10 @@ ETL/Kafka/Flink surfaces.
 - Prefer active upstream projects with clear licensing, release history, and a
   vulnerability-reporting process. MIT compatibility does not remove the need
   to review transitive licenses and notices.
-- Dependabot checks GitHub Actions, npm, Python, and Docker base-image
-  dependencies weekly. Automated pull requests are proposals, never authority
-  to merge or publish.
+- GitHub Actions, npm, Python, and Docker base-image dependencies are
+  reviewed and updated manually; automated update proposals (Dependabot
+  version updates) are not enabled on this repository. Any update proposal is
+  a proposal, never authority to merge or publish.
 - Security updates take priority over routine version churn. If an upstream fix
   cannot be adopted safely, document the temporary mitigation and tracking
   issue; do not silently suppress the finding.
