@@ -109,6 +109,36 @@ async def get_flags(
     return [_row_to_flag(r) for r in rows]
 
 
+async def get_flag_snapshot(
+    pool,
+    project_id: str,
+    *,
+    client_visible_only: bool = False,
+) -> tuple[list[dict], int]:
+    """Read one flag collection and its project version from one DB snapshot."""
+    async with pool.acquire() as conn:
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            project_version = await conn.fetchval(
+                """
+                SELECT COALESCE(
+                    (
+                        SELECT project_version
+                        FROM config_project_versions
+                        WHERE project_id = $1
+                    ),
+                    0
+                )
+                """,
+                project_id,
+            )
+            flags = await get_flags(
+                conn,
+                project_id,
+                client_visible_only=client_visible_only,
+            )
+    return flags, int(project_version)
+
+
 async def get_flag(
     pool, project_id: str, key: str, *, include_archived: bool = False
 ) -> dict | None:

@@ -95,7 +95,22 @@ async def _insert_outbox(
     )
 
 
-def _flag_delivery(action: str, flag: dict) -> dict:
+async def _next_project_version(conn, project_id: str) -> int:
+    row = await conn.fetchrow(
+        """
+        INSERT INTO config_project_versions (project_id, project_version)
+        VALUES ($1, 1)
+        ON CONFLICT (project_id) DO UPDATE
+        SET project_version = config_project_versions.project_version + 1,
+            updated_at = now()
+        RETURNING project_version
+        """,
+        project_id,
+    )
+    return int(row["project_version"])
+
+
+def _flag_delivery(action: str, flag: dict, project_version: int) -> dict:
     version = int(flag["version"])
     if (
         flag.get("evaluation_mode") in {"client", "both"}
@@ -112,10 +127,18 @@ def _flag_delivery(action: str, flag: dict) -> dict:
             "key": flag["key"],
             "version": version,
         }
-    return {"event_type": "flag_update", "data": data, "version": version}
+    return {
+        "event_type": "flag_update",
+        "project_version": project_version,
+        "data": data,
+    }
 
 
-def _experiment_delivery(action: str, experiment: dict) -> dict:
+def _experiment_delivery(
+    action: str,
+    experiment: dict,
+    project_version: int,
+) -> dict:
     version = int(experiment["version"])
     return {
         "event_type": "experiment_update",
@@ -126,25 +149,41 @@ def _experiment_delivery(action: str, experiment: dict) -> dict:
             "flag_key": experiment["flag_key"],
             "version": version,
         },
-        "version": version,
+        "project_version": project_version,
     }
 
 
-async def _enqueue_flag_change(conn, action: str, flag: dict) -> None:
+async def _enqueue_flag_change(
+    conn,
+    action: str,
+    flag: dict,
+    *,
+    project_version: int | None = None,
+) -> int:
+    if project_version is None:
+        project_version = await _next_project_version(conn, flag["project_id"])
     await _insert_outbox(
         conn,
         project_id=flag["project_id"],
         kind="flag_change",
         dedup_key=f"{flag['key']}:{flag['version']}:{action}",
-        payload=_flag_delivery(action, flag),
+        payload=_flag_delivery(action, flag, project_version),
     )
+    return project_version
 
 
 async def _enqueue_experiment_change(
     conn,
     action: str,
     experiment: dict,
-) -> None:
+    *,
+    project_version: int | None = None,
+) -> int:
+    if project_version is None:
+        project_version = await _next_project_version(
+            conn,
+            experiment["project_id"],
+        )
     await _insert_outbox(
         conn,
         project_id=experiment["project_id"],
@@ -152,8 +191,9 @@ async def _enqueue_experiment_change(
         dedup_key=(
             f"{experiment['key']}:{experiment['version']}:{action}"
         ),
-        payload=_experiment_delivery(action, experiment),
+        payload=_experiment_delivery(action, experiment, project_version),
     )
+    return project_version
 
 
 async def _audit_flag(
@@ -242,6 +282,7 @@ async def _reject_experiment_owned(conn, project_id: str, flag_key: str) -> None
 
 
 async def _insert_flag(conn, flag: dict) -> dict:
+    validate_flag_variant_config(flag)
     row = await conn.fetchrow(
         f"""
         INSERT INTO flags (
@@ -277,6 +318,7 @@ async def _insert_flag(conn, flag: dict) -> dict:
 
 
 async def _update_flag(conn, flag: dict, expected_version: int) -> dict:
+    validate_flag_variant_config(flag)
     row = await conn.fetchrow(
         f"""
         UPDATE flags SET
@@ -799,11 +841,16 @@ async def create_experiment_bundle(
                 after=created_flag,
                 reason=f"experiment:{created_experiment['key']}",
             )
-            await _enqueue_flag_change(conn, "flag_created", created_flag)
+            project_version = await _enqueue_flag_change(
+                conn,
+                "flag_created",
+                created_flag,
+            )
             await _enqueue_experiment_change(
                 conn,
                 "experiment_created",
                 created_experiment,
+                project_version=project_version,
             )
             return created_experiment, created_flag
 
@@ -859,11 +906,16 @@ async def _update_experiment_bundle(
         after=updated_flag,
         reason=f"experiment:{updated_experiment['key']}",
     )
-    await _enqueue_flag_change(conn, "flag_updated", updated_flag)
+    project_version = await _enqueue_flag_change(
+        conn,
+        "flag_updated",
+        updated_flag,
+    )
     await _enqueue_experiment_change(
         conn,
         "experiment_updated",
         updated_experiment,
+        project_version=project_version,
     )
     return updated_experiment, updated_flag
 
@@ -929,12 +981,17 @@ async def delete_experiment_bundle(
                 after=archived,
                 reason=f"experiment_deleted:{key}",
             )
-            await _enqueue_flag_change(conn, "flag_archived", archived)
+            project_version = await _enqueue_flag_change(
+                conn,
+                "flag_archived",
+                archived,
+            )
             tombstone = {**experiment, "version": expected_version + 1}
             await _enqueue_experiment_change(
                 conn,
                 "experiment_deleted",
                 tombstone,
+                project_version=project_version,
             )
             return tombstone, archived
 

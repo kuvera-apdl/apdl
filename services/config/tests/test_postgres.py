@@ -47,6 +47,27 @@ async def test_get_flag_uses_explicit_canonical_projection():
     assert pool.args == ("apdl", "checkout")
 
 
+@pytest.mark.asyncio
+async def test_flag_snapshot_reads_version_and_rows_in_repeatable_read():
+    conn = SnapshotConnection()
+    pool = SnapshotPool(conn)
+
+    flags, project_version = await postgres.get_flag_snapshot(
+        pool,
+        "apdl",
+        client_visible_only=True,
+    )
+
+    assert project_version == 8
+    assert flags == []
+    assert conn.transaction_kwargs == {
+        "isolation": "repeatable_read",
+        "readonly": True,
+    }
+    assert "config_project_versions" in conn.version_sql
+    assert "evaluation_mode IN ('client', 'both')" in conn.flags_sql
+
+
 def test_row_to_flag_omits_obsolete_columns_from_legacy_records():
     row = {
         **make_row(),
@@ -194,6 +215,46 @@ class RecordingPool:
         self.sql = sql
         self.args = args
         return []
+
+
+class _Context:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class SnapshotConnection:
+    def __init__(self):
+        self.transaction_kwargs = None
+        self.version_sql = ""
+        self.flags_sql = ""
+
+    def transaction(self, **kwargs):
+        self.transaction_kwargs = kwargs
+        return _Context(None)
+
+    async def fetchval(self, sql: str, *args):
+        self.version_sql = sql
+        assert args == ("apdl",)
+        return 8
+
+    async def fetch(self, sql: str, *args):
+        self.flags_sql = sql
+        assert args == ("apdl",)
+        return []
+
+
+class SnapshotPool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        return _Context(self.conn)
 
 
 class RecordingFetchRowPool:

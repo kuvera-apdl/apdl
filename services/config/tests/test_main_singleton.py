@@ -67,3 +67,26 @@ def test_lifecycle_environment_contract_has_no_expiry_or_replica_aliases():
     assert "EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS" in source
     assert "EXPERIMENT_EXPIRY_" not in source
     assert "CONFIG_REPLICA_COUNT" not in source
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "86401", "not-an-integer"])
+def test_lifecycle_environment_rejects_invalid_interval_before_task_creation(
+    monkeypatch,
+    value,
+):
+    monkeypatch.setenv("EXPERIMENT_LIFECYCLE_ENABLED", "true")
+    monkeypatch.setenv("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", value)
+
+    with pytest.raises(ValueError, match="EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS"):
+        main._start_lifecycle_monitor(object())
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1"])
+def test_sse_environment_rejects_non_finite_or_non_positive_durations(
+    monkeypatch,
+    value,
+):
+    monkeypatch.setenv("SSE_SEND_TIMEOUT_SECONDS", value)
+
+    with pytest.raises(ValueError, match="SSE_SEND_TIMEOUT_SECONDS"):
+        main._sse_settings_from_environment()

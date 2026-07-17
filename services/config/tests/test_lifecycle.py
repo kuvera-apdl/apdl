@@ -92,3 +92,25 @@ async def test_advance_due_experiments_isolates_one_failed_candidate(monkeypatch
     )
 
     assert await lifecycle.advance_due_experiments(pool) == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, 86_401, True, 1.5])
+def test_lifecycle_interval_rejects_non_positive_or_unbounded_values(value):
+    with pytest.raises(ValueError, match="between 1 and 86400"):
+        lifecycle.validate_interval_seconds(value)
+
+
+@pytest.mark.parametrize("value", [1, 300, 86_400])
+def test_lifecycle_interval_accepts_bounded_positive_values(value):
+    assert lifecycle.validate_interval_seconds(value) == value
+
+
+@pytest.mark.asyncio
+async def test_monitor_rejects_invalid_interval_before_sweeping(monkeypatch):
+    sweep = AsyncMock()
+    monkeypatch.setattr(lifecycle, "advance_due_experiments", sweep)
+
+    with pytest.raises(ValueError, match="between 1 and 86400"):
+        await lifecycle.run_lifecycle_monitor(object(), interval_seconds=0)
+
+    sweep.assert_not_awaited()

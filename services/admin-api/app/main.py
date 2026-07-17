@@ -78,7 +78,7 @@ async def ready(request: Request):
     settings = request.app.state.settings
     upstreams = (
         ("ingestion", "/health", "ok"),
-        ("config", "/health", "ok"),
+        ("config", "/ready", "ready"),
         ("query", "/ready", "ready"),
     )
     for service, path, expected_status in upstreams:

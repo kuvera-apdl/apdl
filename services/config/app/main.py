@@ -2,13 +2,15 @@
 
 import asyncio
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 
 import asyncpg
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import outbox
 from app.auth import (
@@ -17,10 +19,11 @@ from app.auth import (
     Principal,
     authenticate_request,
 )
+from app.client_ip import parse_trusted_proxy_cidrs
 from app.experiments import lifecycle
 from app.routers import admin, evaluate, experiments, flags, stream
 from app.schema import assert_schema_ready
-from app.sse.broadcaster import SSEBroadcaster
+from app.sse.broadcaster import SSEBroadcaster, SSESettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,10 @@ async def _release_config_lock(pool, conn) -> None:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
+    sse_settings = _sse_settings_from_environment()
+    trusted_proxy_networks = parse_trusted_proxy_cidrs(
+        os.environ.get("CONFIG_TRUSTED_PROXY_CIDRS", "")
+    )
     pg_dsn = os.environ.get(
         "POSTGRES_URL",
         "postgresql://apdl:apdl_dev@localhost:5432/apdl",
@@ -82,7 +89,7 @@ async def lifespan(application: FastAPI):
         redis_client = aioredis.from_url(redis_url)
         logger.info("Redis connection initialized")
 
-        broadcaster = SSEBroadcaster()
+        broadcaster = SSEBroadcaster(sse_settings)
         await broadcaster.start()
         logger.info("SSE broadcaster started")
 
@@ -97,6 +104,7 @@ async def lifespan(application: FastAPI):
         application.state.authenticator = PostgresAuthenticator(pg_pool)
         application.state.redis = redis_client
         application.state.broadcaster = broadcaster
+        application.state.trusted_proxy_networks = trusted_proxy_networks
         application.state.outbox_task = outbox_task
         application.state.lifecycle_task = lifecycle_task
 
@@ -134,13 +142,71 @@ async def lifespan(application: FastAPI):
         logger.info("PostgreSQL connection pool closed")
 
 
+def _positive_int_environment(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _positive_float_environment(name: str, default: float) -> float:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive duration") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive duration")
+    return value
+
+
+def _sse_settings_from_environment() -> SSESettings:
+    return SSESettings(
+        queue_capacity=_positive_int_environment("SSE_QUEUE_CAPACITY", 256),
+        max_connections=_positive_int_environment("SSE_MAX_CONNECTIONS", 1000),
+        max_connections_per_project=_positive_int_environment(
+            "SSE_MAX_CONNECTIONS_PER_PROJECT",
+            100,
+        ),
+        max_connections_per_credential=_positive_int_environment(
+            "SSE_MAX_CONNECTIONS_PER_CREDENTIAL",
+            10,
+        ),
+        max_connections_per_ip=_positive_int_environment(
+            "SSE_MAX_CONNECTIONS_PER_IP",
+            20,
+        ),
+        ping_interval_seconds=_positive_float_environment(
+            "SSE_PING_INTERVAL_SECONDS",
+            15.0,
+        ),
+        send_timeout_seconds=_positive_float_environment(
+            "SSE_SEND_TIMEOUT_SECONDS",
+            10.0,
+        ),
+        max_lifetime_seconds=_positive_float_environment(
+            "SSE_MAX_LIFETIME_SECONDS",
+            300.0,
+        ),
+    )
+
+
 def _start_lifecycle_monitor(pg_pool) -> asyncio.Task | None:
     if os.environ.get("EXPERIMENT_LIFECYCLE_ENABLED", "true").lower() != "true":
         logger.info("Experiment lifecycle monitor disabled")
         return None
-    interval_seconds = int(
-        os.environ.get("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", "300")
-    )
+    raw_interval = os.environ.get("EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS", "300")
+    try:
+        interval_seconds = int(raw_interval)
+    except ValueError as exc:
+        raise ValueError(
+            "EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS must be an integer"
+        ) from exc
+    lifecycle.validate_interval_seconds(interval_seconds)
     logger.info("Starting experiment lifecycle monitor every %ds", interval_seconds)
     return asyncio.create_task(
         lifecycle.run_lifecycle_monitor(
@@ -186,26 +252,35 @@ async def authenticated_identity(
 
 @app.get("/health")
 async def health_check():
-    """Liveness/readiness probe -- checks PG, Redis, and SSE connection count."""
-    status = {"status": "ok", "service": "apdl-config"}
+    """Process liveness does not depend on downstream availability."""
+    return {"status": "ok", "service": "apdl-config"}
+
+
+@app.get("/ready")
+async def readiness_check(request: Request):
+    """Return non-2xx while a required dependency cannot serve traffic."""
+    checks = {"postgres": "not_ready", "redis": "not_ready"}
 
     try:
-        async with app.state.pg_pool.acquire() as conn:
+        async with request.app.state.pg_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        status["postgres"] = "ok"
+        checks["postgres"] = "ready"
     except Exception as exc:
-        logger.error("Health check: PostgreSQL error: %s", exc)
-        status["postgres"] = "error"
-        status["status"] = "degraded"
+        logger.error("Readiness check: PostgreSQL error: %s", exc)
 
     try:
-        await app.state.redis.ping()
-        status["redis"] = "ok"
+        await request.app.state.redis.ping()
+        checks["redis"] = "ready"
     except Exception as exc:
-        logger.error("Health check: Redis error: %s", exc)
-        status["redis"] = "error"
-        status["status"] = "degraded"
+        logger.error("Readiness check: Redis error: %s", exc)
 
-    status["sse_connections"] = await app.state.broadcaster.total_connection_count()
-
-    return status
+    payload = {
+        "status": "ready",
+        "service": "apdl-config",
+        "checks": checks,
+        "sse": await request.app.state.broadcaster.metrics_snapshot(),
+    }
+    if any(value != "ready" for value in checks.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload

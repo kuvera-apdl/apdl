@@ -271,7 +271,7 @@ and `curl` examples.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/events` | Ingest strict event batch (1–100 events, returns `202`) |
-| `GET` | `/health` | Health check |
+| `GET` | `/health`, `/ready` | Process liveness / dependency readiness |
 
 ### Config (`:8081`) — [full docs](services/config/README.md)
 

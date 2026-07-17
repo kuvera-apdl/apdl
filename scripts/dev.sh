@@ -254,7 +254,7 @@ cmd_status() {
     info "Service health"
     local failures=0
     check_health "Ingestion" "http://localhost:$INGESTION_HOST_PORT/health" || failures=$((failures+1))
-    check_health "Config"    "http://localhost:$CONFIG_HOST_PORT/health" || failures=$((failures+1))
+    check_health "Config"    "http://localhost:$CONFIG_HOST_PORT/ready" || failures=$((failures+1))
     check_health "Query"     "http://localhost:$QUERY_HOST_PORT/ready" || failures=$((failures+1))
     check_health "Gateway"   "http://localhost:$GATEWAY_HOST_PORT/" || failures=$((failures+1))
     if compose_service_running clickhouse-writer; then

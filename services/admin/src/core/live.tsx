@@ -52,6 +52,10 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           return
         }
         if (name === 'config') {
+          // The versioned config event is the project-wide synchronization
+          // barrier. Flags arrive inline; experiment state is not part of the
+          // SDK schema, so reconcile it with an authoritative refetch.
+          void queryClient.invalidateQueries({ queryKey: queryKeys.experiments(wsId) })
           const collection = flagCollectionSchema.safeParse(data)
           if (collection.success) {
             setServedFlags(new Map(collection.data.flags.map((flag) => [flag.key, flag])))

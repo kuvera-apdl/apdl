@@ -20,7 +20,7 @@ export interface ServiceHealthTarget {
 
 export const CORE_SERVICE_DESCRIPTORS: ServiceDescriptor[] = [
   { service: 'ingestion', label: 'Ingestion', hasReady: false },
-  { service: 'config', label: 'Config', hasReady: false },
+  { service: 'config', label: 'Config', hasReady: true },
   { service: 'query', label: 'Query', hasReady: true },
 ]
 

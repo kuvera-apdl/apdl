@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
+from app.models.schemas import GateRule
 from app.store import mutations
 
 
@@ -120,6 +122,49 @@ def make_experiment(overrides: dict | None = None) -> dict:
     return experiment
 
 
+class NeverPersistConn:
+    async def fetchrow(self, sql: str, *args):
+        raise AssertionError("invalid flag reached PostgreSQL")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["insert", "update"])
+async def test_persistence_boundary_rejects_noncanonical_rollout(operation):
+    flag = make_flag(
+        {
+            "fallthrough": {
+                "rollout": {
+                    "percentage": "100",
+                    "bucket_by": "user_id",
+                }
+            }
+        }
+    )
+    conn = NeverPersistConn()
+
+    with pytest.raises(ValidationError):
+        if operation == "insert":
+            await mutations._insert_flag(conn, flag)
+        else:
+            await mutations._update_flag(conn, flag, flag["version"])
+
+
+@pytest.mark.asyncio
+async def test_persistence_boundary_revalidates_mutated_model_instances():
+    rule = GateRule.model_validate(
+        {
+            "id": "rule",
+            "conditions": [],
+            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
+        }
+    )
+    rule.rollout.percentage = "100"
+    flag = make_flag({"rules": [rule]})
+
+    with pytest.raises(ValidationError):
+        await mutations._insert_flag(NeverPersistConn(), flag)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_stage", ["audit", "outbox"])
 async def test_flag_audit_or_outbox_failure_rolls_back_domain_row(
@@ -186,8 +231,16 @@ async def test_experiment_outbox_failure_rolls_back_flag_experiment_and_audit(
 
     async def enqueue_flag(current, action, flag):
         current.state["outbox"].append((action, flag["version"]))
+        return 7
 
-    async def fail_experiment_outbox(current, action, experiment):
+    async def fail_experiment_outbox(
+        current,
+        action,
+        experiment,
+        *,
+        project_version,
+    ):
+        assert project_version == 7
         current.state["outbox"].append((action, experiment["version"]))
         raise RuntimeError("injected experiment outbox failure")
 
@@ -501,13 +554,45 @@ def test_exposure_retry_ignores_only_generated_timestamp():
 
 
 def test_delivery_payloads_carry_authoritative_versions():
-    flag_payload = mutations._flag_delivery("flag_updated", make_flag())
+    flag_payload = mutations._flag_delivery(
+        "flag_updated",
+        make_flag(),
+        project_version=12,
+    )
     experiment_payload = mutations._experiment_delivery(
         "experiment_updated",
         make_experiment(),
+        project_version=12,
     )
 
-    assert flag_payload["version"] == 1
+    assert flag_payload["project_version"] == 12
     assert flag_payload["data"]["version"] == 1
-    assert experiment_payload["version"] == 1
+    assert experiment_payload["project_version"] == 12
     assert experiment_payload["data"]["version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paired_deliveries_share_one_project_version(monkeypatch):
+    next_version = AsyncMock(return_value=23)
+    insert_outbox = AsyncMock()
+    conn = object()
+    monkeypatch.setattr(mutations, "_next_project_version", next_version)
+    monkeypatch.setattr(mutations, "_insert_outbox", insert_outbox)
+
+    project_version = await mutations._enqueue_flag_change(
+        conn,
+        "flag_updated",
+        make_flag(),
+    )
+    await mutations._enqueue_experiment_change(
+        conn,
+        "experiment_updated",
+        make_experiment(),
+        project_version=project_version,
+    )
+
+    next_version.assert_awaited_once_with(conn, "apdl")
+    assert [
+        call.kwargs["payload"]["project_version"]
+        for call in insert_outbox.await_args_list
+    ] == [23, 23]

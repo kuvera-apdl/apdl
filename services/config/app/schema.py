@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 13
-MIGRATION_NAME = "013_disable_automatic_guardrails.sql"
+MIGRATION_VERSION = 17
+MIGRATION_NAME = "017_config_rollout_contract.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -48,6 +48,9 @@ REQUIRED_COLUMNS = frozenset(
         ("config_outbox", "processed_at"),
         ("config_outbox", "last_error"),
         ("config_outbox", "created_at"),
+        ("config_project_versions", "project_id"),
+        ("config_project_versions", "project_version"),
+        ("config_project_versions", "updated_at"),
     }
 )
 

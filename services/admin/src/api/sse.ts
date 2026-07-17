@@ -1,5 +1,5 @@
 // EventSource lifecycle for the same-origin admin proxy: exponential backoff with
-// jitter (1s → 30s cap) and a heartbeat watchdog (server emits every 35s; no
+// jitter (1s → 30s cap) and a heartbeat watchdog (server emits every 15s; no
 // event for 90s forces a reconnect). The browser sends its HttpOnly session
 // cookie; the proxy injects the service credential server-side.
 import { normalizeBaseUrl } from './http'

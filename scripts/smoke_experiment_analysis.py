@@ -578,7 +578,7 @@ def _run(args: argparse.Namespace) -> None:
     try:
         for name, url in (
             ("Ingestion", _join_url(args.ingestion_url, "/health")),
-            ("Config", _join_url(args.config_url, "/health")),
+            ("Config", _join_url(args.config_url, "/ready")),
             ("Query", _join_url(args.query_url, "/health")),
         ):
             _request_json(url, args.api_key, expected_status={200}, timeout=args.request_timeout)
