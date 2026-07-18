@@ -12,7 +12,7 @@
 > below describe revision `d095776`; they are intentionally preserved as the
 > audit evidence rather than rewritten after remediation. The eight minimum
 > developer-preview blockers derived from this audit are tracked in
-> [`oss-release-minimum-fixes.md`](oss-release-minimum-fixes.md). The 0.3.0
+> [`oss-release-minimum-fixes-2026-07-13.md`](oss-release-minimum-fixes-2026-07-13.md). The 0.3.0
 > release candidate implements those fixes or the explicit exclusions they
 > allow. Its current artifact and support contracts are authoritative in
 > `release-manifest.json` and `SUPPORT.md`. This does not reclassify every

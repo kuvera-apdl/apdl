@@ -1,7 +1,7 @@
 # Findings register — OSS unqualified post-remediation re-audit (2026-07-16)
 
 Tracking register for the findings in
-[`docs/oss-release-unqualified-reaudit-2026-07-16.md`](../oss-release-unqualified-reaudit-2026-07-16.md).
+[`docs/audits/oss-release-unqualified-reaudit-2026-07-16.md`](oss-release-unqualified-reaudit-2026-07-16.md).
 The full report is canonical for evidence, reproductions, and exact line references;
 this register exists to track remediation status per finding. When a fix merges,
 flip its Status to `Fixed` and link the PR/commit.
