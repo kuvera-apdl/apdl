@@ -16,7 +16,8 @@ How to use it:
 
 Severity language matches the audit reports: Critical / High / Medium / Low / Info.
 
-The register of currently-open findings is the newest audit report in `docs/` (currently
+The register of currently-open findings lives in `docs/audits/` (currently
+`docs/audits/reaudit-2026-07-16-findings-register.md`, tracking the full report at
 `docs/oss-release-unqualified-reaudit-2026-07-16.md`). Before writing or reviewing code on
 a surface it names, read its findings for that surface: do not re-introduce a pattern an
 open finding condemns, and do not assume a green suite covers it — the open findings are
