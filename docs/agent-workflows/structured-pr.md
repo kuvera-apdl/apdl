@@ -81,14 +81,13 @@ matching `make test-<area>` target when the change is non-trivial:
 | `sdk/javascript/` | `make lint-sdk` | `make test-sdk` |
 | `sdk/python/` | `make lint-sdk-python` | `make test-sdk-python` |
 | `pipeline/redis/` | `make lint-writer` | `make test-writer` |
-| `pipeline/etl/` | `make lint-etl` | `make test-etl` |
 
 CI on push/PR to `main` lints (`ruff`) and tests (`pytest`) all six Python
 services — `ingestion`, `config`, `query`, `agents`, `codegen` (source-only
-checks), and `admin-api` — plus the Python SDK, the ClickHouse writer, and the
-experimental ETL framework; lints, tests, and builds the JS SDK and the Admin
-Console; and runs release package contracts, a Python dependency audit, and
-hermetic fresh-install core/experiment smokes. Fix lint/test failures before
+checks), and `admin-api` — plus the Python SDK and the ClickHouse writer;
+lints, tests, and builds the JS SDK and the Admin Console; and runs release
+package contracts, a Python dependency audit, hermetic fresh-install
+core/experiment smokes, and a pinned-image ClickHouse upgrade smoke. Fix lint/test failures before
 proceeding. Do not open a PR with a red diff unless the user explicitly
 instructs you to and the failure is documented in the PR.
 
@@ -159,3 +158,6 @@ deliberately excluded, and any follow-ups the test plan flagged.
 - Prefer one coherent concern per PR.
 - Ask before bundling unrelated work.
 - Do not hide failing lint or tests. Fix them or disclose them.
+- When merging PRs (especially stacked ones), retargeting bases, resolving
+  conflicts against `main`, or interpreting CI results, follow
+  `docs/agent-workflows/ci-cd-safety.md`.

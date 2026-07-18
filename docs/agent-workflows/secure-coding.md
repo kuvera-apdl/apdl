@@ -16,6 +16,12 @@ How to use it:
 
 Severity language matches the audit reports: Critical / High / Medium / Low / Info.
 
+The register of currently-open findings is the newest audit report in `docs/` (currently
+`docs/oss-release-unqualified-reaudit-2026-07-16.md`). Before writing or reviewing code on
+a surface it names, read its findings for that surface: do not re-introduce a pattern an
+open finding condemns, and do not assume a green suite covers it — the open findings are
+precisely the defects the green suites did not catch.
+
 ---
 
 ## 1. Authentication & API keys
@@ -144,6 +150,10 @@ config field as untrusted.
 - Never assign server-controlled strings to `innerHTML` / `dangerouslySetInnerHTML`. Use
   `textContent`, or sanitize with a strict allowlist before insertion. Remove any
   "HTML allowed" affordance.
+- If a rich-content affordance must exist, sanitize with a strict **element and
+  attribute** allowlist: strip every inline event-handler attribute (`on*`), `style`,
+  and `srcdoc`, and apply the URL scheme allowlist to every URL-bearing attribute.
+  Filtering tag names alone is not sanitization — event handlers ride in on allowed tags.
 - Validate every URL prop (`href`, `src`, `imageUrl`, redirect targets) against a scheme
   allowlist (`https:`, `http:`, `mailto:`, relative). **Reject `javascript:`, `data:`,
   `vbscript:`.** Do this even when a CSP is present — defense in depth.
@@ -154,7 +164,8 @@ config field as untrusted.
   absolute URLs) — open-redirect guard.
 
 **Red flags:** `innerHTML`/`dangerouslySetInnerHTML`/`el.href = props.x` without a scheme
-check; a URL schema typed as bare `z.string()` instead of `.url().refine(startsWith('https://'))`;
+check; a sanitizer that allowlists element names but not attributes; a URL schema typed as
+bare `z.string()` instead of `.url().refine(startsWith('https://'))`;
 `target="_blank"` without `rel`.
 
 ---
@@ -228,6 +239,9 @@ request bodies, and webhook payloads all count as untrusted.
 - Apply warehouse query budgets (`max_execution_time`, `max_bytes_to_read`, `max_rows_to_read`,
   `max_memory_usage`) and per-project concurrency; prefer them over unbounded scans.
 - Bound Redis stream / DLQ growth with `maxlen`.
+- Bound the cost of **failed** authentication too: cap per-source rate/concurrency on
+  credential checks so valid-format invalid keys can't monopolize DB pool checkouts or
+  hashing CPU before quotas apply (pre-auth exhaustion).
 - Catch `RecursionError`/`ValueError` in JSON parsing and return a clean 4xx, not a 500.
 
 **Red flags:** `await request.body()` before any size check; a rate-limit call at the end of the
@@ -343,7 +357,10 @@ Linux, so a published port with no host-IP bind is reachable from the whole LAN/
   loopback-only.
 - Run app containers as a **non-root `USER`** (follow the `appuser`/`agent` pattern in the
   codegen Dockerfiles), so an app-level RCE isn't root-in-container.
-- **Pin base images by digest** (`FROM python:3.14-slim@sha256:...`) and avoid `:latest`.
+- **Pin base images by digest** (`FROM python:3.12-slim@sha256:...`) and avoid `:latest`.
+  Before moving a pinned runtime version, check dependency ceilings — e.g. `aider-chat`
+  requires Python `<3.13`, so a bump to `python:3.14-slim` breaks the codegen worker (see
+  `ci-cd-safety.md` on semantic merge conflicts).
 - Don't `curl … | bash` a remote install script at build time (e.g. NodeSource). Install from the
   distro package, or a checksum-verified tarball — especially in images that hold credentials
   (codegen API image carries the GitHub App key).
@@ -360,6 +377,65 @@ internet-reachable service; a `|| echo 0` GID fallback.
 
 ---
 
+## 17. Consent, privacy & data retention
+
+Browser collection is consent-gated and personal data is retention-bounded. The privacy
+state machine is part of the security surface, not product polish.
+
+**Do:**
+- Treat an **explicit current consent denial as authoritative**: it must override any
+  older persisted grant, immediately and before any collection starts. Persisted consent
+  is a cache of the last decision, never an escalation over the present one.
+- Scope persisted consent/identity state to the **deployment** (project + endpoint), so
+  state written by one deployment cannot authorize collection in another.
+- Default-deny: a fresh install collects nothing until the host opts in, and imports are
+  side-effect-free.
+- Store personal data (raw client IP, stable identifiers) only with a named runtime
+  consumer and an enforced retention boundary. Derived tables (profiles, aliases,
+  materialized views) inherit the **source table's** retention contract — never an
+  implicit "forever".
+- No deterministic device fingerprinting as an identity fallback; `cookieless` modes must
+  not derive stable IDs from device characteristics or silently split identity.
+- Redact event property values (potential PII) before they leave the deployment (LLM
+  prompts, third-party sinks).
+
+**Red flags:** a consent check that reads persisted storage ahead of the current explicit
+setting; collection that starts before the consent gate resolves; a personal-data column
+with no TTL/retention migration; a derived table whose retention outlives its source; an
+identity path hashing device characteristics.
+
+---
+
+## 18. Capability truthfulness & lifecycle integrity
+
+Readiness, capability, and lifecycle state drive autonomous actions. A false "ready" or a
+mutable "launched" is a safety failure, not a cosmetic bug.
+
+**Do:**
+- Capability/readiness endpoints report what is **executable for this tenant right now**
+  (credentials present, kill switches honored, runtime prerequisites met) — never a
+  global optimistic flag. Consumers fail closed (e.g. `424`) when a required capability
+  is disabled or unreachable.
+- Freeze enrollment authority at launch: `traffic_percentage`, targeting rules, and
+  variant sets are immutable while an experiment runs. Launched experiments are stopped
+  or archived — never hard-deleted while they anchor recorded analysis.
+- Make durable effects **idempotent**: exposure/event writes deduplicate server-side
+  across retries (bounded, shared state — not per-process memory); registry publication
+  is check-before-publish / verify-after, so identical reruns skip and mismatches fail.
+- Reject finality when data disagrees with authority: unknown variants in a final
+  analysis are an error, not a silent exclusion.
+- Give every queue/outbox lane **poison-row quarantine plus lag/health visibility**, so
+  one bad row cannot block a tenant forever and the blockage is observable.
+- Serialize autonomous execution **per project across all entry paths** — a workflow
+  resuming after approval shares the same execution lane as newly triggered ones.
+
+**Red flags:** a readiness payload that ignores per-tenant prerequisites; an
+UPDATE/DELETE path on launched-experiment fields without a state guard; an at-least-once
+effect with no dedupe key; an outbox consumer that retries the head row forever; two
+runners for the same project reachable via trigger + resume.
+
+---
+
 ## Quick pre-merge checklist
 
 - [ ] Every new query is parameterized and `project_id`-scoped.
@@ -373,5 +449,7 @@ internet-reachable service; a `|| echo 0` GID fallback.
 - [ ] CORS scoped on privileged endpoints; `https` enforced.
 - [ ] Agent tool output treated as untrusted; deterministic validator is the gate.
 - [ ] Containers: loopback-bound ports, non-root `USER`, digest-pinned base, no `curl|bash`.
-</content>
-</invoke>
+- [ ] Consent: an explicit current denial wins over persisted state; personal data has a
+      named consumer and a retention boundary.
+- [ ] Capabilities report tenant-executable truth; launched lifecycle state is immutable;
+      durable effects are idempotent.

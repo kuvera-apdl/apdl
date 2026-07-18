@@ -1,6 +1,6 @@
 ---
 name: secure-coding
-description: APDL's security conventions for writing and reviewing code — auth, tenant isolation, SQL/injection, XSS, SSRF, secrets, DoS, LLM-agent safety, webhooks, CI/CD, and container hardening. Use when writing or reviewing code that touches any of these, when the user asks to "check security", "review for vulnerabilities", "is this secure", or before merging changes to a service, SDK, pipeline, or infra file.
+description: APDL's security conventions for writing and reviewing code — auth, tenant isolation, SQL/injection, XSS, SSRF, secrets, DoS, LLM-agent safety, webhooks, CI/CD, container hardening, consent/privacy/data retention, and capability-readiness/lifecycle integrity. Use when writing or reviewing code that touches any of these, when the user asks to "check security", "review for vulnerabilities", "is this secure", or before merging changes to a service, SDK, pipeline, or infra file.
 ---
 
 # Secure coding & review

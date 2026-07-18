@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the user asks to create a PR, open a pull request, raise a PR, make commits for a PR branch, or ship the current branch or changes.
 - This is the canonical version of that workflow. The standalone service repos split out of this monorepo (`kuvera-edi`, `apdl-database-service`, `apdl-experiments-service`, `apdl-agent-service`) each carry their own adapted copy at the same path (`uv`/`ruff`/`mypy`/`pytest` directly instead of `make lint-<area>`, since they're single-package repos) plus the same `.claude/skills/structured-pr/` wrapper — keep them in sync if this workflow's shape changes.
-- Secure coding & review: follow `docs/agent-workflows/secure-coding.md` when writing or reviewing code that touches auth, tenant isolation, SQL/queries, request validation, subprocess/git, frontend/UI, outbound HTTP, secrets, deserialization, resource limits, CORS/transport, LLM-agent safety, webhooks, logging, CI/CD, or container/infra — and when the user asks to check security or review for vulnerabilities. It is the canonical security convention for the monorepo, wrapped as the `secure-coding` skill.
+- Secure coding & review: follow `docs/agent-workflows/secure-coding.md` when writing or reviewing code that touches auth, tenant isolation, SQL/queries, request validation, subprocess/git, frontend/UI, outbound HTTP, secrets, deserialization, resource limits, CORS/transport, LLM-agent safety, webhooks, logging, CI/CD, container/infra, consent/privacy/data retention, or capability-readiness/lifecycle integrity — and when the user asks to check security or review for vulnerabilities. It is the canonical security convention for the monorepo, wrapped as the `secure-coding` skill.
 - CI/CD safety: follow `docs/agent-workflows/ci-cd-safety.md` when merging or babysitting stacked PRs, retargeting PR bases, resolving merge conflicts against `main`, editing GitHub Actions workflows, interpreting CI results, or cutting a release. It is the canonical CI/CD operating convention for the monorepo, wrapped as the `ci-cd-safety` skill.
 
 ## What is APDL?
@@ -29,13 +29,15 @@ make dev-down           # Stop all containers
 make status             # Container status + service health endpoints
 make smoke              # End-to-end smoke test against the running stack
 make smoke-fresh        # Hermetic fresh-install core proof (clean volumes)
+make smoke-experiment-fresh # Hermetic fresh-install experiment lifecycle proof
+make test-clickhouse-upgrade # Pinned-image ClickHouse upgrade smoke
 make migrate-clickhouse # Apply ClickHouse SQL migrations
 make migrate-postgres   # Apply PostgreSQL SQL migrations
 ```
 
 `scripts/dev.sh` is the master entry point wrapping all of the above
 (`setup`, `up`, `up-core`, `up-full`, `smoke-fresh`, `status`, `smoke`,
-`test`, `lint`, `check`, `logs`, `down`, `reset`).
+`test`, `lint`, `fmt`, `check`, `logs`, `down`, `reset`).
 
 ### Running individual services (with hot-reload)
 
@@ -64,7 +66,6 @@ make run-admin      # Admin Console (Vite dev server) → localhost:5173
 | Admin API | `make test-admin-api` | `make lint-admin-api` |
 | Admin Console | `make test-admin` | `make lint-admin` |
 | ClickHouse Writer | `make test-writer` | `make lint-writer` |
-| ETL Framework (experimental) | `make test-etl` | `make lint-etl` |
 
 ### Running a single test
 
@@ -86,7 +87,7 @@ cd services/admin-api && .venv/bin/python -m pytest tests/test_proxy.py -v
 
 ## Architecture Overview
 
-The system is a monorepo with six Python services, a data pipeline (plus an experimental ETL framework), and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
+The system is a monorepo with six Python services, a data pipeline, and two client SDKs (a browser TypeScript SDK and a server-side Python SDK):
 
 ```
 SDK (TypeScript) ──POST /v1/events──→ Ingestion (Python/FastAPI :8080) ──→ Redis Streams
@@ -128,7 +129,6 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 - **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), Aider (model-agnostic editor via LiteLLM) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
 - **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Security gateway for the Admin Console: hashed sessions, CSRF/origin enforcement, login lockouts, memberships, and audited proxying to the core services
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
-- **ETL Framework** (`pipeline/etl/`): Python 3.12, experimental transform framework — uv, pytest, ruff. Outside the supported release surface
 
 ### Key Ports
 
@@ -153,7 +153,7 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 - **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
-- **CI runs on push/PR to main:** lint, tests, builds, package contracts, dependency audits, and isolated core/experiment smokes for the declared developer-preview surface
+- **CI runs on push/PR to main:** lint, tests, builds, package contracts, dependency audits, isolated core/experiment smokes for the declared developer-preview surface, and a pinned-image ClickHouse upgrade smoke
 - **Dependency updates:** manual, per `docs/dependency-policy.md` — Dependabot version updates are not enabled on this repository
 - **Releases:** the tag must match `release-manifest.json`; `v0.3.0` publishes the JavaScript SDK to npm, the Python SDK to PyPI, and source/checksum assets to GitHub Releases. No GHCR images are published for this release line
 
@@ -164,7 +164,8 @@ Infrastructure defaults for local dev (set via `make setup` from `.env.example`)
 ```
 REDIS_URL=redis://localhost:6379
 POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
-CLICKHOUSE_URL=http://localhost:8123 (HTTP) / clickhouse://apdl:apdl_dev@localhost:9000/apdl (native)
+CLICKHOUSE_URL=http://localhost:8123
+CLICKHOUSE_NATIVE_URL=clickhouse://apdl:apdl_dev@localhost:9000/apdl
 ```
 
 Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
