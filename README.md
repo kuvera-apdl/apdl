@@ -13,7 +13,6 @@
 </p>
 
 <p align="center">
-  <a href="https://apdl.dev">Website</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#using-the-sdks">SDKs</a> ·
   <a href="#architecture">Architecture</a> ·
