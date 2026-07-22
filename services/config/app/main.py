@@ -387,12 +387,20 @@ async def health_check():
 @app.get("/ready")
 async def readiness_check(request: Request):
     """Return non-2xx while a required dependency cannot serve traffic."""
-    checks = {"postgres": "not_ready", "redis": "not_ready"}
+    checks = {
+        "postgres": "not_ready",
+        "redis": "not_ready",
+        "outbox": "not_ready",
+    }
+    outbox_readiness = outbox.readiness_snapshot(outbox.empty_metrics())
 
     try:
         async with request.app.state.pg_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
-        checks["postgres"] = "ready"
+            checks["postgres"] = "ready"
+            outbox_metrics = await outbox.metrics_snapshot(conn)
+        outbox_readiness = outbox.readiness_snapshot(outbox_metrics)
+        checks["outbox"] = outbox_readiness["status"]
     except Exception as exc:
         logger.error("Readiness check: PostgreSQL error: %s", exc)
 
@@ -406,6 +414,7 @@ async def readiness_check(request: Request):
         "status": "ready",
         "service": "apdl-config",
         "checks": checks,
+        "outbox": outbox_readiness,
         "sse": await request.app.state.broadcaster.metrics_snapshot(),
     }
     if any(value != "ready" for value in checks.values()):
