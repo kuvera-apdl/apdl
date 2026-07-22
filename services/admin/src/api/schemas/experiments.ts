@@ -72,6 +72,8 @@ export const experimentEntrySchema = z
     version: z.number().int().min(1),
     created_at: awareDateTimeSchema,
     updated_at: awareDateTimeSchema,
+    archived_at: awareDateTimeSchema.nullable(),
+    archived_by: z.string().nullable(),
   })
   .strict()
 
@@ -134,6 +136,7 @@ export const experimentUpdateResponseSchema = z
 export const experimentDeleteResponseSchema = z
   .object({
     deleted: z.boolean(),
+    archived: z.boolean(),
     key: experimentPathKeySchema,
     flag_key: experimentPathKeySchema,
     version: z.number().int().min(1),

@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { toast } from 'sonner'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { deleteExperiment } from '../../src/api/experiments'
 import {
@@ -60,6 +61,16 @@ const EXPERIMENT = {
   version: 2,
   created_at: '2026-06-01T00:00:00+00:00',
   updated_at: '2026-06-09T00:00:00+00:00',
+  archived_at: null,
+  archived_by: null,
+}
+
+const ARCHIVED_EXPERIMENT = {
+  ...EXPERIMENT,
+  status: 'stopped',
+  version: 3,
+  archived_at: '2026-06-10T00:00:00+00:00',
+  archived_by: 'credential:operator',
 }
 
 let deleteRequestUrl = ''
@@ -72,7 +83,8 @@ const server = setupServer(
   http.delete('http://config.test/v1/admin/experiments/:key', ({ request, params }) => {
     deleteRequestUrl = request.url
     return HttpResponse.json({
-      deleted: true,
+      deleted: false,
+      archived: true,
       key: String(params.key),
       flag_key: 'checkout-test',
       version: 3,
@@ -90,7 +102,10 @@ const server = setupServer(
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
-afterEach(() => server.resetHandlers())
+afterEach(() => {
+  server.resetHandlers()
+  vi.restoreAllMocks()
+})
 afterAll(() => server.close())
 
 beforeEach(() => {
@@ -108,6 +123,9 @@ describe('experiment schemas', () => {
     expect(experimentEntrySchema.safeParse(withoutFlagKey).success).toBe(false)
     expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, status: 'scheduled' }).success).toBe(true)
     expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, start_date: '2026-06-01' }).success).toBe(false)
+    expect(experimentEntrySchema.safeParse(ARCHIVED_EXPERIMENT).success).toBe(true)
+    const { archived_by: _archivedBy, ...withoutArchivedBy } = ARCHIVED_EXPERIMENT
+    expect(experimentEntrySchema.safeParse(withoutArchivedBy).success).toBe(false)
   })
 
   test('write schemas require versions and response versions', () => {
@@ -135,7 +153,8 @@ describe('experiment schemas', () => {
     ).toBe(true)
     expect(
       experimentDeleteResponseSchema.safeParse({
-        deleted: true,
+        deleted: false,
+        archived: true,
         key: 'checkout-test',
         flag_key: 'checkout-flag',
         version: 4,
@@ -196,7 +215,7 @@ describe('experiment schemas', () => {
   test('delete sends the optimistic version as a query parameter', async () => {
     await expect(
       deleteExperiment({ baseUrl: 'http://config.test', actor: 'tester' }, 'checkout-test', 2),
-    ).resolves.toMatchObject({ deleted: true, version: 3 })
+    ).resolves.toMatchObject({ deleted: false, archived: true, version: 3 })
     expect(new URL(deleteRequestUrl).searchParams.get('version')).toBe('2')
   })
 
@@ -489,6 +508,31 @@ describe('ExperimentListPage', () => {
     // Sanity: row click target exists.
     await userEvent.hover(screen.getByText('checkout-test'))
   })
+
+  test('marks archived experiments as retained read-only records', async () => {
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [ARCHIVED_EXPERIMENT], count: 1 }),
+      ),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments']}>
+              <Routes>
+                <Route path="/experiments" element={<ExperimentListPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    expect(await screen.findByText('checkout-test')).toBeInTheDocument()
+    expect(screen.getByText('archived')).toBeInTheDocument()
+  })
 })
 
 describe('ExperimentDetailPage', () => {
@@ -532,5 +576,77 @@ describe('ExperimentDetailPage', () => {
     ]) {
       expect(updateBodies[0]).not.toHaveProperty(field)
     }
+  })
+
+  test('archives a launched experiment with archive-specific confirmation and toast', async () => {
+    const success = vi.spyOn(toast, 'success')
+    server.use(
+      http.delete(
+        '*/api/projects/demo/config/v1/admin/experiments/:key',
+        ({ request, params }) => {
+          deleteRequestUrl = request.url
+          return HttpResponse.json({
+            deleted: false,
+            archived: true,
+            key: String(params.key),
+            flag_key: 'checkout-test',
+            version: 3,
+          })
+        },
+      ),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+              <Routes>
+                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+                <Route path="/experiments" element={<div>experiment list</div>} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    await screen.findByDisplayValue('CTA experiment')
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }))
+    expect(screen.getByRole('heading', { name: 'Archive experiment "checkout-test"?' }))
+      .toBeInTheDocument()
+    expect(screen.getByText(/archives the experiment as an immutable record/i)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Archive' }))
+
+    expect(await screen.findByText('experiment list')).toBeInTheDocument()
+    expect(success).toHaveBeenCalledWith('Experiment "checkout-test" archived')
+  })
+
+  test('renders an archived experiment read-only without another removal action', async () => {
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [ARCHIVED_EXPERIMENT], count: 1 }),
+      ),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+              <Routes>
+                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    const description = await screen.findByDisplayValue('CTA experiment')
+    expect(description).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
+      .not.toBeInTheDocument()
+    expect(screen.getByText(/by credential:operator/i)).toBeInTheDocument()
   })
 })

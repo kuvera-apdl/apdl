@@ -740,15 +740,56 @@ def _run(args: argparse.Namespace) -> None:
                     expected_status={200},
                     timeout=args.request_timeout,
                 )
-                _assert_equal(deleted["deleted"], True, "Config cleanup acknowledgement")
-                _assert_equal(deleted["key"], experiment_key, "deleted experiment key")
-                _request_json(
-                    _join_url(args.config_url, experiment_path),
-                    args.api_key,
-                    expected_status={404},
-                    timeout=args.request_timeout,
+                _assert_keys(
+                    deleted,
+                    {"deleted", "archived", "key", "flag_key", "version"},
+                    "Config cleanup acknowledgement",
                 )
-                print("  ok  Config deleted the experiment and archived its backing flag")
+                _assert_equal(deleted["deleted"], False, "launched experiment deletion")
+                _assert_equal(deleted["archived"], True, "launched experiment archive")
+                _assert_equal(deleted["key"], experiment_key, "archived experiment key")
+                _assert_equal(deleted["flag_key"], flag_key, "archived backing flag")
+                _assert_equal(
+                    deleted["version"],
+                    created_version + 1,
+                    "archived experiment version",
+                )
+                if primary_failure is None:
+                    archive_version = int(deleted["version"])
+                    _, archived_projection = _request_json(
+                        _join_url(args.config_url, experiment_path),
+                        args.api_key,
+                        timeout=args.request_timeout,
+                    )
+                    _assert_projection(
+                        archived_projection,
+                        experiment_key=experiment_key,
+                        flag_key=flag_key,
+                        contract=contract,
+                        start=start,
+                        end=end,
+                        version=archive_version,
+                        expected_status="completed",
+                    )
+                    _, archived_analysis = _request_json(
+                        _join_url(args.query_url, query_path),
+                        args.api_key,
+                        timeout=args.request_timeout,
+                    )
+                    _assert_analysis(
+                        archived_analysis,
+                        experiment_key=experiment_key,
+                        flag_key=flag_key,
+                        contract=contract,
+                        runtime=runtime,
+                        start=start,
+                        end=end,
+                        version=archive_version,
+                    )
+                print(
+                    "  ok  Config archived the launched experiment and preserved "
+                    "its analysis authority"
+                )
             except Exception as exc:
                 cleanup_failures.append(f"Config cleanup: {exc}")
 

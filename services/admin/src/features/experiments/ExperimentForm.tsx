@@ -350,6 +350,7 @@ export interface ExperimentFormProps {
   onSubmit: () => void
   submitting: boolean
   keyError?: string | null
+  readOnly?: boolean
 }
 
 export function ExperimentForm({
@@ -360,6 +361,7 @@ export function ExperimentForm({
   onSubmit,
   submitting,
   keyError,
+  readOnly = false,
 }: ExperimentFormProps) {
   const [errors, setErrors] = useState<ExperimentFormErrors>({})
   const set = (patch: Partial<ExperimentFormValues>) => onChange({ ...values, ...patch })
@@ -384,7 +386,7 @@ export function ExperimentForm({
   }
 
   return (
-    <div className="max-w-2xl space-y-5">
+    <fieldset className="max-w-2xl space-y-5" disabled={readOnly}>
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label>Key</Label>
@@ -706,9 +708,11 @@ export function ExperimentForm({
         </p>
       </div>
 
-      <Button onClick={submit} disabled={submitting || values.key.trim() === ''}>
-        {isCreate ? 'Create experiment' : 'Save changes'}
-      </Button>
-    </div>
+      {!readOnly ? (
+        <Button onClick={submit} disabled={submitting || values.key.trim() === ''}>
+          {isCreate ? 'Create experiment' : 'Save changes'}
+        </Button>
+      ) : null}
+    </fieldset>
   )
 }

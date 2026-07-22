@@ -105,6 +105,14 @@ def _mutation_error(exc: mutations.MutationError) -> JSONResponse:
                 "fields": exc.fields,
             },
         )
+    if isinstance(exc, mutations.ArchivedExperimentError):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "experiment_archived",
+                "message": str(exc),
+            },
+        )
     return JSONResponse(
         status_code=409,
         content={"error": "conflict", "message": str(exc)},
@@ -512,6 +520,8 @@ def _experiment_to_response(e: dict) -> dict:
         "version": e.get("version", 1),
         "created_at": _iso_or_none(e.get("created_at")),
         "updated_at": _iso_or_none(e.get("updated_at")),
+        "archived_at": _iso_or_none(e.get("archived_at")),
+        "archived_by": e.get("archived_by"),
     }
 
 
@@ -701,6 +711,8 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
                 existing["version"],
             )
         )
+    if existing.get("archived_at") is not None:
+        return _mutation_error(mutations.ArchivedExperimentError(key))
 
     current_status = existing["status"]
     new_status = body.status if body.status is not None else current_status
@@ -821,7 +833,7 @@ async def delete_experiment(
     request: Request,
     version: int = Query(..., ge=1),
 ):
-    """Delete an experiment and archive its backing flag. Returns 404 if missing."""
+    """Delete a draft or archive a launched experiment and its backing flag."""
     project_id = authorized_project(request, "config:write")
 
     actor = _actor(request)
@@ -836,12 +848,43 @@ async def delete_experiment(
     except mutations.MutationError as exc:
         return _mutation_error(exc)
     flag_key = deleted["flag_key"]
-    logger.info("Experiment '%s' deleted for project %s (flag '%s' archived)", key, project_id, flag_key)
+    archived = deleted.get("archived_at") is not None
+    logger.info(
+        "Experiment '%s' %s for project %s (flag '%s' archived)",
+        key,
+        "archived" if archived else "deleted",
+        project_id,
+        flag_key,
+    )
     return JSONResponse(
         content={
-            "deleted": True,
+            "deleted": not archived,
+            "archived": archived,
             "key": key,
             "flag_key": flag_key,
             "version": deleted["version"],
+        }
+    )
+
+
+@router.get("/experiments/{key}/audit")
+async def get_experiment_audit(
+    key: str,
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Return lifecycle evidence retained across deletion and archival."""
+    project_id = authorized_project(request, "config:write")
+    entries = await pg_store.get_experiment_audit_entries(
+        request.app.state.pg_pool,
+        project_id,
+        key,
+        limit=limit,
+    )
+    return JSONResponse(
+        content={
+            "experiment_key": key,
+            "audit": entries,
+            "count": len(entries),
         }
     )

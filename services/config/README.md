@@ -66,7 +66,8 @@ never from query parameters. See
 | `GET /flags/{key}/audit` | Audit history (`?limit`, default 50, max 200) |
 | `GET /experiments` / `POST /experiments` | List / create experiments |
 | `PUT /experiments/{key}` | Atomically update an experiment and its backing flag; body requires current `version` |
-| `DELETE /experiments/{key}?version=N` | Atomically delete an experiment and archive its backing flag |
+| `DELETE /experiments/{key}?version=N` | Hard-delete a draft, or preserve a launched experiment as an immutable archive; always archive its backing flag |
+| `GET /experiments/{key}/audit` | Retained experiment lifecycle history (`?limit`, default 50, max 200) |
 
 Create a flag:
 

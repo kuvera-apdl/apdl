@@ -23,7 +23,8 @@ EXPERIMENT_COLUMNS = """
     key, project_id, status, description, flag_key, default_variant,
     variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
     traffic_percentage, start_date, end_date, version, creation_idempotency_key,
-    creation_idempotency_request_sha256, created_at, updated_at
+    creation_idempotency_request_sha256, created_at, updated_at, archived_at,
+    archived_by
 """
 
 
@@ -95,6 +96,8 @@ def _row_to_experiment(row) -> dict:
         ),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "archived_at": row["archived_at"],
+        "archived_by": row["archived_by"],
     }
 
 
@@ -216,8 +219,10 @@ async def get_due_experiments(pool, now) -> list[dict]:
     """Return scheduled starts and running completions due at ``now``."""
     sql = (
         f"SELECT {EXPERIMENT_COLUMNS} FROM experiments "
-        "WHERE (status = 'scheduled' AND start_date <= $1) "
-        "   OR (status = 'running' AND end_date <= $1) "
+        "WHERE archived_at IS NULL AND ("
+        "       (status = 'scheduled' AND start_date <= $1) "
+        "    OR (status = 'running' AND end_date <= $1)"
+        ") "
         "ORDER BY project_id, key"
     )
     rows = await pool.fetch(sql, now)
@@ -243,3 +248,41 @@ async def get_experiment_by_creation_idempotency_key(
     )
     row = await pool.fetchrow(sql, project_id, idempotency_key)
     return _row_to_experiment(row) if row is not None else None
+
+
+async def get_experiment_audit_entries(
+    pool,
+    project_id: str,
+    experiment_key: str,
+    *,
+    limit: int = 50,
+) -> list[dict]:
+    """Fetch retained lifecycle evidence for an experiment."""
+    rows = await pool.fetch(
+        """
+        SELECT id, project_id, experiment_key, action, actor,
+               previous_version, new_version, before, after, created_at
+        FROM experiment_audit_log
+        WHERE project_id = $1 AND experiment_key = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3
+        """,
+        project_id,
+        experiment_key,
+        limit,
+    )
+    return [
+        {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "experiment_key": row["experiment_key"],
+            "action": row["action"],
+            "actor": row["actor"],
+            "previous_version": row["previous_version"],
+            "new_version": row["new_version"],
+            "before": _json_field(row["before"], None),
+            "after": _json_field(row["after"], None),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]

@@ -150,6 +150,8 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "version": 1,
         "created_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
+        "archived_at": None,
+        "archived_by": None,
     }
     if overrides:
         experiment.update(overrides)
@@ -263,6 +265,9 @@ async def test_experiment_outbox_failure_rolls_back_flag_experiment_and_audit(
     async def audit_flag(current, **kwargs):
         current.state["audits"].append(kwargs)
 
+    async def audit_experiment(current, **kwargs):
+        current.state["audits"].append(kwargs)
+
     async def enqueue_flag(current, action, flag):
         current.state["outbox"].append((action, flag["version"]))
         return 7
@@ -281,6 +286,7 @@ async def test_experiment_outbox_failure_rolls_back_flag_experiment_and_audit(
     monkeypatch.setattr(mutations, "_insert_flag", insert_flag)
     monkeypatch.setattr(mutations, "_insert_experiment", insert_experiment)
     monkeypatch.setattr(mutations, "_audit_flag", audit_flag)
+    monkeypatch.setattr(mutations, "_audit_experiment", audit_experiment)
     monkeypatch.setattr(mutations, "_enqueue_flag_change", enqueue_flag)
     monkeypatch.setattr(
         mutations,
@@ -489,6 +495,7 @@ async def test_experiment_lifecycle_binds_typed_database_timestamps(
         AsyncMock(return_value=make_flag({"version": 2})),
     )
     monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(mutations, "_audit_experiment", AsyncMock())
     monkeypatch.setattr(
         mutations,
         "_enqueue_flag_change",
@@ -511,6 +518,178 @@ async def test_experiment_lifecycle_binds_typed_database_timestamps(
     assert isinstance(end_date, datetime)
     assert updated["start_date"] is start_date
     assert updated["end_date"] is end_date
+
+
+@pytest.mark.asyncio
+async def test_delete_authority_hard_deletes_only_locked_draft(monkeypatch):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    experiment = make_experiment({"status": "draft"})
+    archived_flag = make_flag(
+        {"state": "archived", "enabled": False, "version": 2}
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=experiment),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_flag",
+        AsyncMock(return_value=make_flag()),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_archive_flag",
+        AsyncMock(return_value=archived_flag),
+    )
+    delete_draft = AsyncMock()
+    archive_launched = AsyncMock()
+    monkeypatch.setattr(mutations, "_delete_draft_experiment", delete_draft)
+    monkeypatch.setattr(mutations, "_archive_experiment", archive_launched)
+    audit_experiment = AsyncMock()
+    monkeypatch.setattr(mutations, "_audit_experiment", audit_experiment)
+    monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_flag_change",
+        AsyncMock(return_value=7),
+    )
+    enqueue_experiment = AsyncMock()
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_experiment_change",
+        enqueue_experiment,
+    )
+
+    removed, _ = await mutations.delete_experiment_bundle(
+        pool,
+        project_id="apdl",
+        key="checkout_exp",
+        expected_version=1,
+        actor="credential:test",
+    )
+
+    delete_draft.assert_awaited_once_with(conn, experiment)
+    archive_launched.assert_not_awaited()
+    assert removed["archived_at"] is None
+    audit_experiment.assert_awaited_once_with(
+        conn,
+        action="experiment_deleted",
+        actor="credential:test",
+        before=experiment,
+        after=None,
+    )
+    assert enqueue_experiment.await_args.args[1] == "experiment_deleted"
+
+
+@pytest.mark.asyncio
+async def test_delete_authority_archives_locked_launched_row_after_race(monkeypatch):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    launched = make_experiment(
+        {
+            "status": "running",
+            "start_date": "2026-07-01T00:00:00+00:00",
+            "end_date": "2026-08-01T00:00:00+00:00",
+        }
+    )
+    archived_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    archived_experiment = make_experiment(
+        {
+            "status": "stopped",
+            "version": 2,
+            "archived_at": archived_at,
+            "archived_by": "credential:test",
+        }
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=launched),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_flag",
+        AsyncMock(return_value=make_flag()),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_archive_flag",
+        AsyncMock(return_value=make_flag({"version": 2})),
+    )
+    delete_draft = AsyncMock()
+    archive_launched = AsyncMock(return_value=archived_experiment)
+    monkeypatch.setattr(mutations, "_delete_draft_experiment", delete_draft)
+    monkeypatch.setattr(mutations, "_archive_experiment", archive_launched)
+    audit_experiment = AsyncMock()
+    monkeypatch.setattr(mutations, "_audit_experiment", audit_experiment)
+    monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_flag_change",
+        AsyncMock(return_value=7),
+    )
+    enqueue_experiment = AsyncMock()
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_experiment_change",
+        enqueue_experiment,
+    )
+
+    removed, _ = await mutations.delete_experiment_bundle(
+        pool,
+        project_id="apdl",
+        key="checkout_exp",
+        expected_version=1,
+        actor="credential:test",
+    )
+
+    delete_draft.assert_not_awaited()
+    archive_launched.assert_awaited_once_with(
+        conn,
+        launched,
+        actor="credential:test",
+    )
+    assert removed == archived_experiment
+    audit_experiment.assert_awaited_once_with(
+        conn,
+        action="experiment_archived",
+        actor="credential:test",
+        before=launched,
+        after=archived_experiment,
+    )
+    assert enqueue_experiment.await_args.args[1] == "experiment_archived"
+
+
+@pytest.mark.asyncio
+async def test_atomic_update_rejects_archived_experiment_before_flag_lock(monkeypatch):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    archived = make_experiment(
+        {
+            "status": "running",
+            "archived_at": datetime(2026, 7, 20, tzinfo=timezone.utc),
+            "archived_by": "credential:archiver",
+        }
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=archived),
+    )
+    locked_flag = AsyncMock()
+    monkeypatch.setattr(mutations, "_locked_flag", locked_flag)
+
+    with pytest.raises(mutations.ArchivedExperimentError):
+        await mutations.update_experiment_bundle(
+            pool,
+            desired={**archived, "description": "rewrite"},
+            expected_version=1,
+            actor="credential:test",
+        )
+
+    locked_flag.assert_not_awaited()
 
 
 def test_atomic_authority_allows_status_only_change_after_draft():

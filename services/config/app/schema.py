@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 31
-MIGRATION_NAME = "031_experiment_enrollment_immutability.sql"
+MIGRATION_VERSION = 32
+MIGRATION_NAME = "032_experiment_archive_lifecycle.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -40,6 +40,18 @@ REQUIRED_COLUMNS = frozenset(
         ("experiments", "start_date"),
         ("experiments", "end_date"),
         ("experiments", "version"),
+        ("experiments", "archived_at"),
+        ("experiments", "archived_by"),
+        ("experiment_audit_log", "id"),
+        ("experiment_audit_log", "project_id"),
+        ("experiment_audit_log", "experiment_key"),
+        ("experiment_audit_log", "action"),
+        ("experiment_audit_log", "actor"),
+        ("experiment_audit_log", "previous_version"),
+        ("experiment_audit_log", "new_version"),
+        ("experiment_audit_log", "before"),
+        ("experiment_audit_log", "after"),
+        ("experiment_audit_log", "created_at"),
         ("config_outbox", "id"),
         ("config_outbox", "project_id"),
         ("config_outbox", "kind"),

@@ -10,6 +10,7 @@ import { DataTable } from '@/components/shared/DataTable'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState } from '@/components/shared/PanelStates'
 import { RelativeTime } from '@/components/shared/RelativeTime'
+import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
 import { serviceConnection, useWorkspace } from '@/core/workspace'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
@@ -33,7 +34,12 @@ export function ExperimentListPage() {
         }),
         columnHelper.accessor('status', {
           header: 'Status',
-          cell: (info) => <ExperimentStatusPill status={info.getValue()} />,
+          cell: (info) =>
+            info.row.original.archived_at ? (
+              <StatePill state="archived" />
+            ) : (
+              <ExperimentStatusPill status={info.getValue()} />
+            ),
         }),
         columnHelper.accessor('traffic_percentage', {
           header: 'Traffic',
@@ -81,6 +87,7 @@ export function ExperimentListPage() {
         error={experimentsQuery.error}
         onRetry={() => void experimentsQuery.refetch()}
         onRowClick={(experiment) => navigate(`/experiments/${encodeURIComponent(experiment.key)}`)}
+        rowClassName={(experiment) => (experiment.archived_at ? 'opacity-60' : undefined)}
         emptyState={
           <EmptyState
             title="No experiments yet"

@@ -21,6 +21,17 @@ class FreshSmokeContractTests(unittest.TestCase):
         ).read_text()
         self.assertNotIn("ALTER TABLE", experiment_smoke)
         self.assertNotIn("mutations_sync", experiment_smoke)
+        self.assertIn(
+            '_assert_equal(deleted["deleted"], False, "launched experiment deletion")',
+            experiment_smoke,
+        )
+        self.assertIn(
+            '_assert_equal(deleted["archived"], True, "launched experiment archive")',
+            experiment_smoke,
+        )
+        self.assertNotIn("expected_status={404}", experiment_smoke)
+        self.assertIn("archived_projection", experiment_smoke)
+        self.assertIn("archived_analysis", experiment_smoke)
         self.assertIn("smoke-fresh:\n\t@bash scripts/smoke_fresh_install.sh core", makefile)
         self.assertIn(
             "smoke-experiment-fresh:\n"
