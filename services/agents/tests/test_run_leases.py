@@ -31,6 +31,16 @@ def _is_active(run: dict[str, Any]) -> bool:
     )
 
 
+def _holds_execution_lane(run: dict[str, Any]) -> bool:
+    return run["status"] not in {
+        "completed",
+        "completed_with_errors",
+        "failed",
+        "cancelled",
+        "manual_intervention",
+    }
+
+
 class _Transaction:
     async def __aenter__(self) -> None:
         return None
@@ -160,7 +170,7 @@ class _Conn:
             active_projects = {
                 str(run.get("project_id") or "demo")
                 for run in self.runs.values()
-                if _is_active(run) or run.get("status") == "waiting_approval"
+                if _holds_execution_lane(run)
             }
             reopened: list[dict[str, Any]] = []
             for proposal_id, proposal in self.proposals.items():
@@ -252,6 +262,9 @@ class _Conn:
                 phase=str(args[2]),
                 updated_at=self.now,
             )
+            run["execution_lane_project_id"] = (
+                run["project_id"] if _holds_execution_lane(run) else None
+            )
             if args[1] != "running":
                 run["lease_owner_id"] = None
                 run["lease_expires_at"] = None
@@ -307,7 +320,7 @@ def _run(
     expires: datetime | None = None,
     updated: datetime | None = None,
 ) -> dict[str, Any]:
-    return {
+    run = {
         "project_id": project_id,
         "status": status,
         "phase": phase,
@@ -315,6 +328,10 @@ def _run(
         "lease_expires_at": expires,
         "updated_at": updated or now,
     }
+    run["execution_lane_project_id"] = (
+        project_id if _holds_execution_lane(run) else None
+    )
+    return run
 
 
 def _proposal(
@@ -450,11 +467,19 @@ async def test_expiry_recovers_only_the_abandoned_run_and_its_claim() -> None:
             phase="code_implementation_approval",
             updated=now - timedelta(days=10),
         ),
+        "run-effect": _run(
+            now,
+            project_id="effects",
+            status="approval_queued",
+            phase="code_implementation_approval",
+            updated=now - timedelta(days=10),
+        ),
     }
     proposals = {
         "proposal-dead": _proposal("implementing", "run-dead"),
         "proposal-live": _proposal("implementing", "run-live"),
         "proposal-gated": _proposal("implementing", "run-gated"),
+        "proposal-effect": _proposal("implementing", None, project_id="effects"),
         "proposal-unowned": _proposal("implementing", None),
     }
     pool = _Pool(now, runs, proposals)
@@ -470,6 +495,7 @@ async def test_expiry_recovers_only_the_abandoned_run_and_its_claim() -> None:
     assert proposals["proposal-dead"]["status"] == "implementing"
     assert proposals["proposal-live"]["status"] == "implementing"
     assert proposals["proposal-gated"]["status"] == "implementing"
+    assert proposals["proposal-effect"]["status"] == "implementing"
     assert proposals["proposal-unowned"]["status"] == "implementing"
 
     assert (await requeue_expired_runs(pool)).requeued_run_ids == ()

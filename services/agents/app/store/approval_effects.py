@@ -745,6 +745,7 @@ async def enqueue_approval_command(
                 SET status = 'approval_queued', updated_at = now(),
                     lease_owner_id = NULL, lease_expires_at = NULL
                 WHERE run_id = $1
+                  AND execution_lane_project_id = project_id
                 """,
                 run_id,
             )
@@ -801,42 +802,107 @@ async def _claim_effect(
 ) -> _ClaimedEffect | None:
     async with pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
+            # The run row is the lock-order authority for claim, cancellation,
+            # and settlement.  Locking it first makes either the claim or the
+            # cancellation win atomically without holding a transaction across
+            # downstream egress.  SKIP LOCKED preserves cross-project worker
+            # concurrency while serializing claims for one project lane.
+            candidate = await conn.fetchrow(
                 """
-                WITH candidate AS (
-                    SELECT effect.effect_id
-                    FROM agent_approval_effects AS effect
-                    JOIN agent_approval_commands AS command
-                      ON command.command_id = effect.command_id
-                    JOIN agent_runs AS run
-                      ON run.run_id = effect.run_id
-                     AND run.project_id = effect.project_id
-                    LEFT JOIN agent_approval_effects AS dependency
-                      ON dependency.effect_id = effect.depends_on_effect_id
-                    WHERE (
+                SELECT effect.effect_id, effect.run_id, effect.project_id,
+                       run.status AS run_status
+                FROM agent_approval_effects AS effect
+                JOIN agent_approval_commands AS command
+                  ON command.command_id = effect.command_id
+                JOIN agent_runs AS run
+                  ON run.run_id = effect.run_id
+                 AND run.project_id = effect.project_id
+                LEFT JOIN agent_approval_effects AS dependency
+                  ON dependency.effect_id = effect.depends_on_effect_id
+                WHERE (
+                    (
+                      run.status = 'approval_queued'
+                      AND (
                         (effect.status IN ('queued', 'retryable_failed')
                          AND effect.next_attempt_at <= now())
                         OR (
                             effect.status = 'processing'
                             AND effect.lease_expires_at <= now()
                         )
+                      )
                     )
-                      AND (dependency.effect_id IS NULL OR dependency.status = 'succeeded')
-                      AND command.status IN ('queued', 'processing')
-                      AND run.status = 'approval_queued'
-                    ORDER BY effect.next_attempt_at, effect.effect_order,
-                             effect.created_at, effect.effect_id
-                    FOR UPDATE OF effect SKIP LOCKED
-                    LIMIT 1
+                    OR (
+                      run.status = 'cancelling'
+                      AND (
+                        (effect.status = 'retryable_failed'
+                         AND effect.next_attempt_at <= now())
+                        OR (
+                            effect.status = 'processing'
+                            AND effect.lease_expires_at <= now()
+                        )
+                      )
+                    )
                 )
+                  AND (dependency.effect_id IS NULL OR dependency.status = 'succeeded')
+                  AND command.status IN ('queued', 'processing')
+                  AND run.execution_lane_project_id = run.project_id
+                ORDER BY effect.next_attempt_at, effect.effect_order,
+                         effect.created_at, effect.effect_id
+                FOR UPDATE OF run SKIP LOCKED
+                LIMIT 1
+                """
+            )
+            if candidate is None:
+                return None
+
+            row = await conn.fetchrow(
+                """
                 UPDATE agent_approval_effects AS effect
                 SET status = 'processing',
                     lease_owner_id = $1,
                     lease_expires_at = now() + ($2 * interval '1 second'),
                     attempt_count = effect.attempt_count + 1,
                     updated_at = now()
-                FROM candidate
-                WHERE effect.effect_id = candidate.effect_id
+                WHERE effect.effect_id = $3
+                  AND (
+                    (
+                      $4 = 'approval_queued'
+                      AND (
+                        (effect.status IN ('queued', 'retryable_failed')
+                         AND effect.next_attempt_at <= now())
+                        OR (
+                            effect.status = 'processing'
+                            AND effect.lease_expires_at <= now()
+                        )
+                      )
+                    )
+                    OR (
+                      $4 = 'cancelling'
+                      AND (
+                        (effect.status = 'retryable_failed'
+                         AND effect.next_attempt_at <= now())
+                        OR (
+                            effect.status = 'processing'
+                            AND effect.lease_expires_at <= now()
+                        )
+                      )
+                    )
+                  )
+                  AND EXISTS (
+                    SELECT 1
+                    FROM agent_approval_commands AS command
+                    WHERE command.command_id = effect.command_id
+                      AND command.status IN ('queued', 'processing')
+                  )
+                  AND (
+                    effect.depends_on_effect_id IS NULL
+                    OR EXISTS (
+                      SELECT 1
+                      FROM agent_approval_effects AS dependency
+                      WHERE dependency.effect_id = effect.depends_on_effect_id
+                        AND dependency.status = 'succeeded'
+                    )
+                  )
                 RETURNING effect.effect_id, effect.command_id, effect.run_id,
                           effect.project_id, effect.item_id, effect.effect_type,
                           effect.payload, effect.idempotency_key,
@@ -845,6 +911,8 @@ async def _claim_effect(
                 """,
                 owner_id,
                 lease_seconds,
+                candidate["effect_id"],
+                candidate["run_status"],
             )
             if row is None:
                 return None
@@ -1023,6 +1091,162 @@ def _classify_effect_error(exc: Exception) -> Exception:
     return exc
 
 
+async def _lock_effect_run(conn: Any, effect: _ClaimedEffect) -> str:
+    """Lock the owning run before mutating a claimed effect.
+
+    Claim and cancellation use the same run-first lock order.  Settlement must
+    do so as well or cancellation could hold the run while waiting for an
+    effect row whose worker is waiting for that same run.
+    """
+    status = await conn.fetchval(
+        """
+        SELECT status
+        FROM agent_runs
+        WHERE run_id = $1 AND project_id = $2
+        FOR UPDATE
+        """,
+        effect.run_id,
+        effect.project_id,
+    )
+    if status is None:
+        raise RuntimeError(f"Approval effect {effect.effect_id} has no owning run")
+    return str(status)
+
+
+async def _finalize_cancellation_if_reconciled(
+    conn: Any,
+    *,
+    run_id: str,
+    project_id: str,
+) -> bool:
+    """Release a cancelling run's lane only after every live effect settles."""
+    status = await conn.fetchval(
+        """
+        SELECT status
+        FROM agent_runs
+        WHERE run_id = $1 AND project_id = $2
+        FOR UPDATE
+        """,
+        run_id,
+        project_id,
+    )
+    if status != "cancelling":
+        return False
+
+    # A cancellation never starts work that was still queued.  Retried or
+    # processing work has crossed an egress boundary and must instead settle
+    # under its stable downstream idempotency key.
+    await conn.execute(
+        """
+        UPDATE agent_approval_effects
+        SET status = 'manual_intervention',
+            last_error = COALESCE(
+                last_error,
+                'Owning run was cancelled before effect claim'
+            ),
+            completed_at = now(), updated_at = now()
+        WHERE run_id = $1 AND project_id = $2 AND status = 'queued'
+        """,
+        run_id,
+        project_id,
+    )
+    live_effects = await conn.fetch(
+        """
+        SELECT effect_id, status
+        FROM agent_approval_effects
+        WHERE run_id = $1 AND project_id = $2
+          AND status IN ('processing', 'retryable_failed')
+        FOR UPDATE
+        """,
+        run_id,
+        project_id,
+    )
+    if live_effects:
+        phase = (
+            "cancellation_draining"
+            if any(str(row["status"]) == "processing" for row in live_effects)
+            else "cancellation_reconciliation"
+        )
+        await conn.execute(
+            """
+            UPDATE agent_runs
+            SET phase = $3, updated_at = now()
+            WHERE run_id = $1 AND project_id = $2 AND status = 'cancelling'
+            """,
+            run_id,
+            project_id,
+            phase,
+        )
+        return False
+
+    await conn.execute(
+        """
+        UPDATE agent_approval_commands
+        SET status = 'manual_intervention',
+            last_error = COALESCE(last_error, 'Owning run was cancelled'),
+            completed_at = now(), updated_at = now()
+        WHERE run_id = $1 AND project_id = $2
+          AND status IN ('queued', 'processing')
+        """,
+        run_id,
+        project_id,
+    )
+    await conn.execute(
+        """
+        UPDATE feature_proposals
+        SET status = 'approved', claim_run_id = NULL,
+            error = NULL, updated_at = now()
+        WHERE project_id = $2 AND claim_run_id = $1
+          AND status = 'implementing'
+        """,
+        run_id,
+        project_id,
+    )
+    released = await conn.fetchval(
+        """
+        UPDATE agent_runs
+        SET status = 'cancelled', phase = 'cancelled',
+            lease_owner_id = NULL, lease_expires_at = NULL,
+            updated_at = now()
+        WHERE run_id = $1 AND project_id = $2 AND status = 'cancelling'
+        RETURNING run_id
+        """,
+        run_id,
+        project_id,
+    )
+    if released is None:
+        return False
+    await conn.execute(
+        """
+        INSERT INTO agent_audit_log (
+            run_id, action_type, config, safety_result, approval_status,
+            idempotency_key
+        )
+        VALUES (
+            $1, 'run_cancellation_reconciled', $2::jsonb, $3::jsonb,
+            'cancelled', $4
+        )
+        ON CONFLICT (run_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
+        DO NOTHING
+        """,
+        run_id,
+        json.dumps(
+            {
+                "project_id": project_id,
+                "reason": "all_claimed_approval_effects_settled",
+            },
+            sort_keys=True,
+        ),
+        json.dumps(
+            {"passed": True, "checks": ["approval_effects_reconciled"]},
+            sort_keys=True,
+        ),
+        f"run-cancellation-reconciled:{run_id}",
+    )
+    return True
+
+
 async def _finalize_command_if_terminal(conn: Any, command_id: str) -> None:
     rows = await conn.fetch(
         """
@@ -1052,6 +1276,7 @@ async def _finalize_command_if_terminal(conn: Any, command_id: str) -> None:
             SET status = $2, phase = 'resuming', updated_at = now(),
                 lease_owner_id = NULL, lease_expires_at = NULL
             WHERE run_id = $1 AND status = 'approval_queued'
+              AND execution_lane_project_id = project_id
             """,
             command["run_id"],
             command["resume_status"],
@@ -1091,10 +1316,15 @@ async def _finalize_command_if_terminal(conn: Any, command_id: str) -> None:
                 lease_owner_id = NULL, lease_expires_at = NULL,
                 completed_at = now(), updated_at = now()
             WHERE command_id = $1
-              AND status IN ('queued', 'retryable_failed')
+              AND status = 'queued'
             """,
             uuid.UUID(command_id),
         )
+        if statuses & {"processing", "retryable_failed"}:
+            # Another effect from this command crossed the egress boundary and
+            # is still draining or reconciling. Its settlement will re-enter
+            # this function while the run continues to own the project lane.
+            return
         command = await conn.fetchrow(
             """
             UPDATE agent_approval_commands
@@ -1127,6 +1357,7 @@ async def _complete_effect(
 ) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
+            run_status = await _lock_effect_run(conn, effect)
             updated = await conn.fetchval(
                 """
                 UPDATE agent_approval_effects
@@ -1158,7 +1389,14 @@ async def _complete_effect(
                 idempotency_key=f"approval-effect-succeeded:{effect.effect_id}",
                 correlation_id=uuid.UUID(effect.command_id),
             )
-            await _finalize_command_if_terminal(conn, effect.command_id)
+            if run_status == "cancelling":
+                await _finalize_cancellation_if_reconciled(
+                    conn,
+                    run_id=effect.run_id,
+                    project_id=effect.project_id,
+                )
+            else:
+                await _finalize_command_if_terminal(conn, effect.command_id)
 
 
 async def _fail_effect(
@@ -1178,6 +1416,7 @@ async def _fail_effect(
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            run_status = await _lock_effect_run(conn, effect)
             updated = await conn.fetchval(
                 """
                 UPDATE agent_approval_effects
@@ -1223,7 +1462,14 @@ async def _fail_effect(
                 ),
                 correlation_id=uuid.UUID(effect.command_id),
             )
-            await _finalize_command_if_terminal(conn, effect.command_id)
+            if run_status == "cancelling":
+                await _finalize_cancellation_if_reconciled(
+                    conn,
+                    run_id=effect.run_id,
+                    project_id=effect.project_id,
+                )
+            else:
+                await _finalize_command_if_terminal(conn, effect.command_id)
 
 
 async def process_one_approval_effect(

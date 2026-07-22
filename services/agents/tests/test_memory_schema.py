@@ -50,14 +50,15 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 28
-    assert MIGRATION_NAME == "028_admin_execution_authority.sql"
+    assert MIGRATION_VERSION == 34
+    assert MIGRATION_NAME == "034_agent_project_execution_lane.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
     assert (
         "admin_project_execution_authorizations",
         "authorization_source",
     ) in REQUIRED_COLUMNS
     assert ("feature_proposals", "project_id") in REQUIRED_COLUMNS
+    assert ("agent_runs", "execution_lane_project_id") in REQUIRED_COLUMNS
     assert ("custom_agent_test_runs", "lease_expires_at") in REQUIRED_COLUMNS
     assert (
         "agent_mutation_quota_reservations",

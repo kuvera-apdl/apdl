@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import Any
 
+import asyncpg
 import pytest
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
@@ -16,9 +17,16 @@ from app.routers import triggers
 
 
 class _FakeConn:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        active_run_id: str | None = None,
+        insert_exception: Exception | None = None,
+    ) -> None:
         self.executed: list[tuple[str, tuple]] = []
         self.custom_rows: list[dict[str, Any]] = []
+        self.active_run_id = active_run_id
+        self.insert_exception = insert_exception
         self.transaction_entries = 0
         self.transaction_exits = 0
 
@@ -27,9 +35,13 @@ class _FakeConn:
 
     async def execute(self, query: str, *args: Any):
         self.executed.append((query, args))
+        if "INSERT INTO agent_runs" in query and self.insert_exception is not None:
+            raise self.insert_exception
 
     async def fetchval(self, query: str, *args: Any):
-        # No active run exists — the concurrency guard passes.
+        self.executed.append((query, args))
+        if "execution_lane_project_id" in query:
+            return self.active_run_id
         return None
 
     async def fetch(self, query: str, *args: Any):
@@ -63,8 +75,16 @@ class _Acquire:
 
 
 class _FakePool:
-    def __init__(self) -> None:
-        self.conn = _FakeConn()
+    def __init__(
+        self,
+        *,
+        active_run_id: str | None = None,
+        insert_exception: Exception | None = None,
+    ) -> None:
+        self.conn = _FakeConn(
+            active_run_id=active_run_id,
+            insert_exception=insert_exception,
+        )
 
     def acquire(self) -> _Acquire:
         return _Acquire(self.conn)
@@ -187,6 +207,12 @@ async def test_trigger_starts_run_and_serializes_config():
     assert "lease_owner_id, lease_expires_at" in query
     assert "NULL, NULL" in query
     assert "$5::jsonb" in query
+    lane_query = next(
+        statement
+        for statement, _ in pool.conn.executed
+        if "SELECT run_id FROM agent_runs" in statement
+    )
+    assert "execution_lane_project_id = $1" in lane_query
     config_arg = args[-1]
     assert isinstance(config_arg, str)
     assert json.loads(config_arg) == {
@@ -196,6 +222,40 @@ async def test_trigger_starts_run_and_serializes_config():
 
     # The request only commits a queue row. Replica dispatchers execute it.
     assert "run_supervisor" not in triggers.__dict__
+
+
+@pytest.mark.asyncio
+async def test_waiting_or_approval_work_keeps_the_project_execution_lane():
+    pool = _FakePool(active_run_id="run-waiting")
+
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "demo", "trigger_type": "manual"},
+        )
+
+    assert response.status_code == 409
+    assert "run-waiting" in response.json()["detail"]
+    assert not any(
+        "INSERT INTO agent_runs" in statement
+        for statement, _ in pool.conn.executed
+    )
+
+
+@pytest.mark.asyncio
+async def test_database_execution_lane_race_returns_a_conflict():
+    lane_conflict = asyncpg.UniqueViolationError("lane already occupied")
+    lane_conflict.constraint_name = triggers.EXECUTION_LANE_INDEX
+    pool = _FakePool(insert_exception=lane_conflict)
+
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={"project_id": "demo", "trigger_type": "manual"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Project demo already has an active run."
 
 
 class _ConcurrentRunState:

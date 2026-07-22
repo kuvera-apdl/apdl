@@ -19,11 +19,19 @@ from app.store.run_leases import RunLeaseLostError
 
 
 def _run_row(run_id: str, project_id: str = "demo", status: str = "completed") -> dict:
+    terminal = status in {
+        "completed",
+        "completed_with_errors",
+        "failed",
+        "cancelled",
+        "manual_intervention",
+    }
     return {
         "run_id": run_id,
         "project_id": project_id,
         "status": status,
         "phase": "done",
+        "execution_lane_project_id": None if terminal else project_id,
         "insights_count": 2,
         "experiments_count": 1,
         "started_at": datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
@@ -42,6 +50,14 @@ class FakeConn:
         self.executes: list[tuple[str, tuple]] = []
 
     async def fetch(self, query: str, *args):
+        if "FROM agent_approval_effects AS effect" in query:
+            return [
+                effect
+                for effect in self.store.get("effects", [])
+                if effect["run_id"] == args[0]
+                and effect["project_id"] == args[1]
+                and effect["status"] in {"queued", "processing", "retryable_failed"}
+            ]
         if "FROM agent_runs" in query:
             rows = [r for r in self.store["runs"] if r["project_id"] == args[0]]
             if "status = $2" in query:
@@ -69,7 +85,11 @@ class FakeConn:
         if "SELECT status, phase" in query and "FROM agent_runs" in query:
             return next(
                 (
-                    {"status": row["status"], "phase": row["phase"]}
+                    {
+                        "status": row["status"],
+                        "phase": row["phase"],
+                        "execution_lane_project_id": row["execution_lane_project_id"],
+                    }
                     for row in self.store["runs"]
                     if row["run_id"] == args[0] and row["project_id"] == args[1]
                 ),
@@ -82,10 +102,27 @@ class FakeConn:
 
     async def execute(self, query: str, *args):
         self.executes.append((query, args))
-        if "UPDATE agent_runs" in query and "SET status = 'cancelled'" in query:
+        if (
+            "UPDATE agent_approval_effects AS effect" in query
+            and "effect.status = 'queued'" in query
+        ):
+            for effect in self.store.get("effects", []):
+                if (
+                    effect["run_id"] == args[0]
+                    and effect["project_id"] == args[1]
+                    and effect["status"] == "queued"
+                ):
+                    effect["status"] = "manual_intervention"
+        if "UPDATE agent_runs" in query and "SET status = $3" in query:
             for row in self.store["runs"]:
                 if row["run_id"] == args[0] and row["project_id"] == args[1]:
-                    row.update(status="cancelled", phase="cancelled")
+                    row.update(
+                        status=args[2],
+                        phase=args[3],
+                        execution_lane_project_id=(
+                            None if args[2] == "cancelled" else row["project_id"]
+                        ),
+                    )
         return "UPDATE 1"
 
 
@@ -166,6 +203,7 @@ STORE = {
             "created_at": datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
         },
     ],
+    "effects": [],
 }
 
 
@@ -215,13 +253,16 @@ async def test_cancel_run_is_tenant_scoped_audited_and_idempotent():
     assert replay.status_code == 200
     assert replay.json()["previous_status"] == "cancelled"
     assert hidden.status_code == 404
-    assert next(row for row in store["runs"] if row["run_id"] == "run-2")[
-        "status"
-    ] == "cancelled"
+    assert (
+        next(row for row in store["runs"] if row["run_id"] == "run-2")["status"]
+        == "cancelled"
+    )
 
     pool = app.state.pg_pool
     audit_calls = [
-        args for query, args in pool.conn.executes if "INSERT INTO agent_audit_log" in query
+        args
+        for query, args in pool.conn.executes
+        if "INSERT INTO agent_audit_log" in query
     ]
     assert len(audit_calls) == 1
     assert json.loads(audit_calls[0][1]) == {
@@ -236,7 +277,52 @@ async def test_cancel_run_is_tenant_scoped_audited_and_idempotent():
         for query, _ in pool.conn.executes
         if "UPDATE agent_approval_effects AS effect" in query
     )
-    assert "'queued', 'processing', 'retryable_failed'" in effect_query
+    assert "effect.status = 'queued'" in effect_query
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_retains_lane_while_claimed_effect_is_draining():
+    store = copy.deepcopy(STORE)
+    store["effects"] = [
+        {
+            "effect_id": "22222222-2222-4222-8222-222222222222",
+            "run_id": "run-2",
+            "project_id": "demo",
+            "status": "processing",
+        }
+    ]
+
+    async with _client(store) as client:
+        response = await client.post("/v1/agents/run-2/cancel")
+        replay = await client.post("/v1/agents/run-2/cancel")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-2",
+        "previous_status": "running",
+        "status": "cancelling",
+    }
+    assert replay.json() == {
+        "run_id": "run-2",
+        "previous_status": "cancelling",
+        "status": "cancelling",
+    }
+    run = next(row for row in store["runs"] if row["run_id"] == "run-2")
+    assert run["phase"] == "cancellation_draining"
+    assert run["execution_lane_project_id"] == "demo"
+    assert store["effects"][0]["status"] == "processing"
+
+    pool = app.state.pg_pool
+    assert not any(
+        "UPDATE feature_proposals" in query for query, _ in pool.conn.executes
+    )
+    pending_audits = [
+        args
+        for query, args in pool.conn.executes
+        if "INSERT INTO agent_audit_log" in query
+    ]
+    assert all(args[3] == "run-cancellation-requested:run-2" for args in pending_audits)
+    assert all(args[5] == "cancelling" for args in pending_audits)
 
 
 @pytest.mark.asyncio
@@ -312,6 +398,7 @@ async def test_persist_results_upserts_jsonb():
     )
     query, args = pool.conn.executes[0]
     assert "FROM agent_runs" in query and "FOR UPDATE" in query
+    assert "execution_lane_project_id = project_id" in query
     assert "INSERT INTO agent_run_results" in query
     assert "ON CONFLICT (run_id, agent_name)" in query
     assert args[0] == "run-9"
@@ -344,6 +431,4 @@ async def test_persist_results_fences_a_stale_owner():
     pool.conn.execute = stale_execute
 
     with pytest.raises(RunLeaseLostError):
-        await _persist_results(
-            pool, "run-9", "x", "insights", [], {}, "worker-stale"
-        )
+        await _persist_results(pool, "run-9", "x", "insights", [], {}, "worker-stale")
