@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 22
-MIGRATION_NAME = "022_agents_durable_effects.sql"
+MIGRATION_VERSION = 31
+MIGRATION_NAME = "031_experiment_enrollment_immutability.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),

@@ -391,7 +391,25 @@ async def test_stale_experiment_version_fails_before_touching_backing_flag(
 
 
 @pytest.mark.asyncio
-async def test_atomic_authority_freezes_analysis_fields_after_draft(monkeypatch):
+@pytest.mark.parametrize(
+    ("field", "value", "api_field"),
+    [
+        ("default_variant", "treatment", "default_variant"),
+        ("traffic_percentage", 50.0, "traffic_percentage"),
+        (
+            "targeting_rules_json",
+            '[{"id":"paid-plan","conditions":[],"rollout":'
+            '{"percentage":100.0,"bucket_by":"user_id"}}]',
+            "targeting_rules",
+        ),
+    ],
+)
+async def test_atomic_authority_freezes_analysis_fields_after_draft(
+    monkeypatch,
+    field,
+    value,
+    api_field,
+):
     conn = FakeConn()
     pool = FakePool(conn)
     existing = make_experiment(
@@ -420,12 +438,12 @@ async def test_atomic_authority_freezes_analysis_fields_after_draft(monkeypatch)
     with pytest.raises(mutations.ImmutableExperimentError) as caught:
         await mutations.update_experiment_bundle(
             pool,
-            desired={**existing, "default_variant": "treatment"},
+            desired={**existing, field: value},
             expected_version=1,
             actor="credential:test",
         )
 
-    assert caught.value.fields == ["default_variant"]
+    assert caught.value.fields == [api_field]
     locked_flag.assert_not_awaited()
     assert conn.last_transaction.rolled_back is True
 

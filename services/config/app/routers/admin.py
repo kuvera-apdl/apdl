@@ -452,6 +452,8 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 _FROZEN_EXPERIMENT_REQUEST_FIELDS = frozenset(
     {
         "default_variant",
+        "traffic_percentage",
+        "targeting_rules",
         "variants",
         "primary_metric",
         "statistical_plan",

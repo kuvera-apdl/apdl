@@ -215,17 +215,18 @@ export function buildUpdate(
 
   if (values.status !== base.status) update.status = values.status
   if (values.description !== base.description) update.description = values.description
-  if (values.traffic_percentage !== base.traffic_percentage) {
-    update.traffic_percentage = values.traffic_percentage
-  }
-
-  const targetingRules = parseTargetingRules(values.targetingRulesJson).value ?? []
-  if (!same(targetingRules, base.targeting_rules)) update.targeting_rules = targetingRules
 
   // Config freezes analysis-defining fields as soon as an experiment leaves
   // draft. Merely echoing their current values still counts as an attempted
   // mutation, so non-draft updates must omit them entirely.
   if (base.status === 'draft') {
+    if (values.traffic_percentage !== base.traffic_percentage) {
+      update.traffic_percentage = values.traffic_percentage
+    }
+
+    const targetingRules = parseTargetingRules(values.targetingRulesJson).value ?? []
+    if (!same(targetingRules, base.targeting_rules)) update.targeting_rules = targetingRules
+
     const startDate = toAwareDateTime(values.start_date)
     const endDate = toAwareDateTime(values.end_date)
     const variants = projectVariants(values.variants)
@@ -539,6 +540,8 @@ export function ExperimentForm({
             onChange={(event) =>
               set({ traffic_percentage: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })
             }
+            disabled={analysisFieldsLocked}
+            aria-label="Traffic percentage"
             className="tabular-nums"
           />
         </div>
@@ -694,6 +697,7 @@ export function ExperimentForm({
           className="min-h-24 font-mono text-xs"
           aria-label="Targeting rules JSON"
           placeholder="[]"
+          disabled={analysisFieldsLocked}
         />
         {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
         <p className="text-xs text-muted-foreground">
