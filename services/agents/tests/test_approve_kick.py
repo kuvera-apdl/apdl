@@ -70,7 +70,8 @@ def _client() -> AsyncClient:
 
 @pytest.fixture(autouse=True)
 def codegen_available(monkeypatch):
-    async def available() -> str:
+    async def available(project_id: str) -> str:
+        assert project_id == "demo"
         return "available"
 
     monkeypatch.setattr(approvals, "codegen_changeset_capability", available)
@@ -136,7 +137,8 @@ async def test_post_returns_only_the_queued_command_envelope(monkeypatch) -> Non
 async def test_post_rejects_codegen_effect_when_capability_is_disabled(
     monkeypatch,
 ) -> None:
-    async def disabled() -> str:
+    async def disabled(project_id: str) -> str:
+        assert project_id == "demo"
         return "disabled"
 
     async def fake_enqueue(pool: Any, **kwargs: Any) -> ApprovalCommandView:

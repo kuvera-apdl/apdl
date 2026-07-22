@@ -41,6 +41,57 @@ async def test_open_changeset_posts_task(monkeypatch):
     assert captured["payload"]["task"]["constraints"] == ["keeps tests green"]
 
 
+@pytest.mark.asyncio
+async def test_changeset_capability_is_project_scoped_and_strict(monkeypatch):
+    async def fake_get(project_id: str, path: str, params=None):
+        assert project_id == "demo"
+        assert path == "/v1/capabilities/changeset-creation"
+        assert params == {"project_id": "demo"}
+        return {
+            "project_id": "demo",
+            "changeset_creation": "available",
+            "reasons": [],
+            "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+        }
+
+    monkeypatch.setattr(code, "_get", fake_get)
+
+    assert await code.get_changeset_creation_capability("demo") == "available"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"project_id": "other"},
+        {"unknown": True},
+        {"changeset_creation": "available", "reasons": ["runtime_unavailable"]},
+    ],
+)
+async def test_changeset_capability_rejects_ambiguous_responses(
+    mutation,
+    monkeypatch,
+):
+    payload = {
+        "project_id": "demo",
+        "changeset_creation": "disabled",
+        "reasons": ["runtime_unavailable"],
+        "checks": {
+            **dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+            "runtime": "blocked",
+        },
+    }
+    payload.update(mutation)
+
+    async def fake_get(*_args, **_kwargs):
+        return payload
+
+    monkeypatch.setattr(code, "_get", fake_get)
+
+    with pytest.raises(ValueError, match="capability response"):
+        await code.get_changeset_creation_capability("demo")
+
+
 @pytest.mark.parametrize(
     "idempotency_key",
     ["", "contains whitespace", "-starts-with-punctuation", "x" * 201],

@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 import httpx
 
+from app.tools.code import get_changeset_creation_capability
+
 _PROBE_TIMEOUT_SECONDS = 2.0
 
 CodegenChangesetCapability = Literal["available", "disabled", "unavailable"]
@@ -96,7 +98,7 @@ async def _probe_codegen_readiness(
         or body.get("service") != "apdl-codegen"
         or not isinstance(capabilities, dict)
         or set(capabilities) != {"changeset_creation"}
-        or capabilities.get("changeset_creation") not in {"available", "disabled"}
+        or capabilities.get("changeset_creation") not in {"tenant_scoped", "disabled"}
     ):
         return {
             "configured": True,
@@ -232,14 +234,12 @@ async def capability_report() -> dict[str, Any]:
     }
 
 
-async def codegen_changeset_capability() -> CodegenChangesetCapability:
-    """Return the authoritative capability used at the approval boundary."""
-    probe = _service_probes()["codegen"]
-    timeout = httpx.Timeout(_PROBE_TIMEOUT_SECONDS)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        result = await _probe_codegen_readiness(
-            client,
-            configured=probe["configured"],
-            url=probe["url"],
-        )
-    return result["changeset_creation"]
+async def codegen_changeset_capability(
+    project_id: str,
+) -> CodegenChangesetCapability:
+    """Return authenticated, executable capability for exactly one project."""
+    try:
+        capability = await get_changeset_creation_capability(project_id)
+    except (httpx.HTTPError, RuntimeError, TypeError, ValueError):
+        return "unavailable"
+    return capability  # type: ignore[return-value]

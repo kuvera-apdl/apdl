@@ -66,7 +66,7 @@ from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
-from app.routers import changesets, connections, webhooks
+from app.routers import capabilities, changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
@@ -183,7 +183,7 @@ async def _close_maintenance_monitor(connection, task, listener) -> None:
     await connection.close()
 
 
-ChangesetCreationCapability = Literal["available", "disabled"]
+ChangesetCreationCapability = Literal["tenant_scoped", "disabled"]
 
 
 def _make_editor(stage: RolloutStage | None = None) -> Editor:
@@ -574,6 +574,7 @@ app.add_middleware(
 
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(connections.router, dependencies=auth_dependencies)
+app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(changesets.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
 
@@ -599,7 +600,7 @@ async def readiness_check():
     changeset_creation: ChangesetCreationCapability = (
         "disabled"
         if stage in {RolloutStage.offline, RolloutStage.shadow}
-        else "available"
+        else "tenant_scoped"
     )
     capabilities = {"changeset_creation": changeset_creation}
     try:

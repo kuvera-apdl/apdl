@@ -32,7 +32,7 @@ async def test_capability_report_separates_configuration_and_reachability(
         return {
             "configured": True,
             "reachable": True,
-            "changeset_creation": "available",
+            "changeset_creation": "tenant_scoped",
         }
 
     monkeypatch.setattr(readiness, "_probe_endpoint", fake_probe)
@@ -55,7 +55,7 @@ async def test_capability_report_separates_configuration_and_reachability(
     assert capabilities["codegen"] == {
         "configured": True,
         "reachable": True,
-        "changeset_creation": "available",
+        "changeset_creation": "tenant_scoped",
     }
     assert len(probed_urls) == 4
     assert "openai-secret" not in str(report)

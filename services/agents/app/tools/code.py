@@ -23,6 +23,28 @@ CODEGEN_SERVICE_URL = os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084")
 _TIMEOUT = 30.0
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 _IDEMPOTENCY_SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_CAPABILITY_REASONS = frozenset(
+    {
+        "rollout_stage_blocked",
+        "automation_disabled",
+        "repository_grant_missing",
+        "github_app_unconfigured",
+        "provider_unconfigured",
+        "worker_unavailable",
+        "runtime_unavailable",
+    }
+)
+_CAPABILITY_CHECKS = frozenset(
+    {
+        "rollout_stage",
+        "automation",
+        "repository_grant",
+        "github_app",
+        "provider",
+        "worker",
+        "runtime",
+    }
+)
 
 
 def _seg(value: str) -> str:
@@ -95,6 +117,44 @@ async def open_changeset(
     if base_branch is not None:
         payload["base_branch"] = base_branch
     return await _post(project_id, "/v1/changesets", payload)
+
+
+async def get_changeset_creation_capability(project_id: str) -> str:
+    """Return Codegen's strict authenticated capability for one project."""
+    payload = await _get(
+        project_id,
+        "/v1/capabilities/changeset-creation",
+        params={"project_id": project_id},
+    )
+    if not isinstance(payload, dict) or set(payload) != {
+        "project_id",
+        "changeset_creation",
+        "reasons",
+        "checks",
+    }:
+        raise ValueError("Codegen capability response has an invalid schema")
+    if payload["project_id"] != project_id:
+        raise ValueError("Codegen capability response crossed project authority")
+    state = payload["changeset_creation"]
+    if state not in {"available", "disabled"}:
+        raise ValueError("Codegen capability response has an invalid state")
+    reasons = payload["reasons"]
+    if (
+        not isinstance(reasons, list)
+        or len(reasons) != len(set(reasons))
+        or any(reason not in _CAPABILITY_REASONS for reason in reasons)
+    ):
+        raise ValueError("Codegen capability response has invalid reasons")
+    checks = payload["checks"]
+    if (
+        not isinstance(checks, dict)
+        or set(checks) != _CAPABILITY_CHECKS
+        or any(value not in {"ready", "blocked"} for value in checks.values())
+    ):
+        raise ValueError("Codegen capability response has invalid checks")
+    if (state == "available") != (not reasons and all(v == "ready" for v in checks.values())):
+        raise ValueError("Codegen capability response is internally inconsistent")
+    return state
 
 
 async def get_changeset(project_id: str, changeset_id: str) -> dict[str, Any]:

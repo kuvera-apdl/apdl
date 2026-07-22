@@ -15,7 +15,7 @@ import asyncpg
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
 from app.auth import require_project
-from app.evaluations.models import RolloutStage
+from app.capabilities import evaluate_changeset_creation
 from app.jobs.runner import run_changeset_job
 from app.models.changeset import (
     RETRYABLE_STATUSES,
@@ -30,7 +30,6 @@ from app.models.observations import ChangesetObservationHistory
 from app.runtime.models import RuntimeEvidenceObservation
 from app.safety.policy import resolve_effective_policy
 from app.store import changesets as store
-from app.store import connections as connections_store
 from app.store import observations as observation_store
 from app.store import runtime_evidence as runtime_evidence_store
 
@@ -46,19 +45,6 @@ def _derived_idempotency_key(operation: str, changeset_id: str) -> str:
     """Build a canonical stable key for one server-owned child operation."""
     digest = hashlib.sha256(changeset_id.encode("utf-8")).hexdigest()
     return f"codegen:{operation}:{digest}"
-
-
-def _require_publication_stage(app: Any) -> None:
-    """Reject production work while this deployment is evaluation-only."""
-    stage = getattr(app.state, "codegen_rollout_stage", None)
-    if stage in {RolloutStage.offline, RolloutStage.shadow}:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Codegen is configured for the '{stage.value}' evaluation stage; "
-                "GitHub branch and pull-request publication are disabled."
-            ),
-        )
 
 
 def _maybe_enqueue(app: Any, background_tasks: BackgroundTasks, changeset_id: str) -> None:
@@ -83,14 +69,23 @@ def _policy_provenance(app: Any, connection: Any) -> tuple[Any, str]:
     return tenant, effective.canonical_digest()
 
 
-async def _current_connection(pool: asyncpg.Pool, project_id: str) -> Any:
-    connection = await connections_store.get_connection(pool, project_id)
-    if connection is None:
+async def _require_creation_capability(
+    app: Any,
+    pool: asyncpg.Pool,
+    project_id: str,
+) -> Any:
+    evaluation = await evaluate_changeset_creation(app, pool, project_id)
+    if evaluation.report.changeset_creation != "available":
         raise HTTPException(
-            status_code=404,
-            detail=f"Project '{project_id}' has no connected repository.",
+            status_code=409,
+            detail={
+                "code": "changeset_creation_disabled",
+                "reasons": evaluation.report.reasons,
+            },
         )
-    return connection
+    if evaluation.connection is None:
+        raise RuntimeError("available capability requires a repository connection")
+    return evaluation.connection
 
 
 async def _authorized_changeset(
@@ -133,8 +128,11 @@ async def create_changeset(
     if existing is not None:
         return existing
 
-    _require_publication_stage(request.app)
-    connection = await _current_connection(pool, body.project_id)
+    connection = await _require_creation_capability(
+        request.app,
+        pool,
+        body.project_id,
+    )
     tenant_policy, effective_policy_sha256 = _policy_provenance(
         request.app, connection
     )
@@ -311,8 +309,11 @@ async def revert_changeset(
     if existing is not None:
         return existing
 
-    _require_publication_stage(request.app)
-    connection = await _current_connection(pool, original.project_id)
+    connection = await _require_creation_capability(
+        request.app,
+        pool,
+        original.project_id,
+    )
     tenant_policy, effective_policy_sha256 = _policy_provenance(
         request.app, connection
     )
@@ -391,8 +392,11 @@ async def retry_changeset(
     if existing is not None:
         return existing
 
-    _require_publication_stage(request.app)
-    connection = await _current_connection(pool, original.project_id)
+    connection = await _require_creation_capability(
+        request.app,
+        pool,
+        original.project_id,
+    )
     tenant_policy, effective_policy_sha256 = _policy_provenance(
         request.app, connection
     )

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import capabilities
 from app.main import app
 from app.evaluations.models import RolloutStage
 from app.models.observations import CIVerificationObservation, ExternalCIStatus
@@ -17,6 +18,33 @@ from app.routers import changesets as changesets_router
 from app.safety.policy import TenantCodegenConnectionPolicy
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
+
+
+@pytest.fixture(autouse=True)
+def executable_changeset_runtime(monkeypatch):
+    """Give lifecycle tests an executable runtime without external Docker/GitHub."""
+    app.state.codegen_rollout_stage = RolloutStage.development_pr
+    app.state.job_deps = {
+        "editor": object(),
+        "mint_read_token": object(),
+        "mint_write_token": object(),
+        "mint_pr_write_token": object(),
+        "branch_publisher": object(),
+        "open_pr": object(),
+        "find_pr": object(),
+        "close_pr": object(),
+        "publication_gate": object(),
+    }
+    monkeypatch.setattr(capabilities, "_github_app_configured", lambda: True)
+    monkeypatch.setattr(capabilities, "_provider_configured", lambda: True)
+    monkeypatch.setattr(capabilities, "_assert_runtime_ready", lambda *_: None)
+    monkeypatch.setattr(changesets_router, "_maybe_enqueue", lambda *_: None)
+    monkeypatch.delenv("CODEGEN_KILL_SWITCH", raising=False)
+    monkeypatch.delenv("CODEGEN_DISABLED_PROJECTS", raising=False)
+    yield
+    for name in ("codegen_rollout_stage", "job_deps"):
+        if hasattr(app.state, name):
+            delattr(app.state, name)
 
 
 def _client(pool: FakePool) -> AsyncClient:
@@ -35,7 +63,11 @@ async def test_create_changeset_requires_connection():
                 "task": {"title": "x", "spec": "do the thing"},
             },
         )
-    assert resp.status_code == 404
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {
+        "code": "changeset_creation_disabled",
+        "reasons": ["repository_grant_missing"],
+    }
 
 
 @pytest.mark.asyncio
@@ -54,10 +86,13 @@ async def test_evaluation_only_stage_rejects_changeset_before_queueing():
                 },
             )
     finally:
-        del app.state.codegen_rollout_stage
+        app.state.codegen_rollout_stage = RolloutStage.development_pr
 
     assert response.status_code == 409
-    assert "publication are disabled" in response.json()["detail"]
+    assert response.json()["detail"] == {
+        "code": "changeset_creation_disabled",
+        "reasons": ["rollout_stage_blocked", "runtime_unavailable"],
+    }
     assert pool.store["changesets"] == {}
 
 
