@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APDLClient } from '../../src/core/client';
 import { resolveConfig, type APDLConfig } from '../../src/core/config';
 import { SDK_IDENTIFIER } from '../../src/core/constants';
+import {
+  scopedBrowserStorageKey,
+  type BrowserStorageKind,
+} from '../../src/core/storage-scope';
 import type { TrackEvent } from '../../src/core/types';
 import {
   CLIENT_KEY,
@@ -13,6 +17,7 @@ import {
 
 // Mock fetch globally
 const fetchMock = vi.fn(mockApiFetch);
+const SECOND_ENDPOINT = 'https://api.second.test';
 
 vi.stubGlobal('fetch', fetchMock);
 
@@ -1326,6 +1331,62 @@ describe('APDLClient', () => {
       expect(queue.length).toBe(0);
     });
 
+    it('should make explicit current consent authoritative over a persisted grant', async () => {
+      const consentKey = browserStorageKey('consent', 'apdl');
+      localStorage.setItem(consentKey, JSON.stringify({
+        analytics: true,
+        personalization: true,
+        experiments: true,
+      }));
+
+      const deniedClient = new APDLClient(createTestConfig({
+        autoCapture: true,
+        persistence: 'localStorage',
+        consent: {
+          analytics: false,
+          personalization: false,
+          experiments: false,
+        },
+      }));
+
+      expect(deniedClient.consent.get()).toEqual({
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      });
+      expect(deniedClient.debug.getQueue()).toEqual([]);
+      expect(JSON.parse(localStorage.getItem(consentKey) ?? 'null')).toEqual({
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      });
+
+      await deniedClient.shutdown();
+    });
+
+    it('should restore scoped consent only when current consent was omitted', async () => {
+      const consentKey = browserStorageKey('consent', 'apdl');
+      localStorage.setItem(consentKey, JSON.stringify({
+        analytics: true,
+        personalization: false,
+        experiments: false,
+      }));
+      const omittedConsentConfig = createTestConfig({
+        persistence: 'localStorage',
+      });
+      delete omittedConsentConfig.consent;
+
+      const restoredClient = new APDLClient(omittedConsentConfig);
+
+      expect(restoredClient.consent.get()).toEqual({
+        analytics: true,
+        personalization: false,
+        experiments: false,
+      });
+
+      await restoredClient.shutdown();
+    });
+
     it('should clear accepted events and stop auto-capture until consent is regranted', async () => {
       const captureClient = new APDLClient(createTestConfig({
         autoCapture: {
@@ -1502,15 +1563,15 @@ describe('APDLClient', () => {
       await personalizedClient.shutdown();
     });
 
-    it('should namespace browser identity, session, consent, and flags by project', async () => {
-      localStorage.setItem('apdl_anonymous_id', 'legacy-anonymous-id');
-      localStorage.setItem('apdl_session', JSON.stringify({ id: 'legacy-session' }));
-      localStorage.setItem('apdl_consent', JSON.stringify({
+    it('should namespace browser identity, session, consent, and flags by deployment and project', async () => {
+      localStorage.setItem('apdl_anonymous_id_apdl', 'legacy-anonymous-id');
+      localStorage.setItem('apdl_session_apdl', JSON.stringify({ id: 'legacy-session' }));
+      localStorage.setItem('apdl_consent_apdl', JSON.stringify({
         analytics: false,
         personalization: false,
         experiments: false,
       }));
-      localStorage.setItem('apdl_flags', JSON.stringify({ flags: ['legacy'] }));
+      localStorage.setItem('apdl_flags_apdl', JSON.stringify({ flags: ['legacy'] }));
 
       const projectA = new APDLClient(createTestConfig({
         persistence: 'localStorage',
@@ -1527,25 +1588,44 @@ describe('APDLClient', () => {
         auth: { clientKey: 'client_projectb_0123456789abcdef' },
         persistence: 'localStorage',
       }));
+      const secondDeployment = new APDLClient(createTestConfig({
+        endpoint: SECOND_ENDPOINT,
+        persistence: 'localStorage',
+      }));
       projectA.track('project_a');
       projectB.track('project_b');
+      secondDeployment.track('second_deployment');
       await flushAsync();
 
-      for (const prefix of [
-        'apdl_anonymous_id',
-        'apdl_session',
-        'apdl_consent',
-        'apdl_flags',
-      ]) {
-        expect(localStorage.getItem(`${prefix}_apdl`)).not.toBeNull();
-        expect(localStorage.getItem(`${prefix}_projectb`)).not.toBeNull();
+      for (const kind of [
+        'anonymous_id',
+        'session',
+        'consent',
+        'flags',
+      ] satisfies BrowserStorageKind[]) {
+        expect(localStorage.getItem(browserStorageKey(kind, 'apdl'))).not.toBeNull();
+        expect(localStorage.getItem(browserStorageKey(kind, 'projectb'))).not.toBeNull();
+        expect(localStorage.getItem(
+          browserStorageKey(kind, 'apdl', SECOND_ENDPOINT)
+        )).not.toBeNull();
       }
-      expect(localStorage.getItem('apdl_anonymous_id_apdl'))
-        .not.toBe('legacy-anonymous-id');
+      expect(localStorage.getItem('apdl_anonymous_id_apdl')).toBeNull();
+      expect(localStorage.getItem('apdl_session_apdl')).toBeNull();
+      expect(localStorage.getItem('apdl_consent_apdl')).toBeNull();
+      expect(localStorage.getItem('apdl_flags_apdl')).toBeNull();
+      expect(localStorage.getItem(browserStorageKey('anonymous_id', 'apdl')))
+        .not.toBe(localStorage.getItem(
+          browserStorageKey('anonymous_id', 'apdl', SECOND_ENDPOINT)
+        ));
       expect(projectA.consent.get().analytics).toBe(true);
       expect(projectB.consent.get().analytics).toBe(true);
+      expect(secondDeployment.consent.get().analytics).toBe(true);
 
-      await Promise.all([projectA.shutdown(), projectB.shutdown()]);
+      await Promise.all([
+        projectA.shutdown(),
+        projectB.shutdown(),
+        secondDeployment.shutdown(),
+      ]);
     });
 
     it('should keep identity, session, consent, flags, and offline storage in memory mode', async () => {
@@ -1607,7 +1687,18 @@ async function flushAsync(): Promise<void> {
 }
 
 function flagStorageKey(projectId: string): string {
-  return `apdl_flags_${projectId}`;
+  return browserStorageKey('flags', projectId);
+}
+
+function browserStorageKey(
+  kind: BrowserStorageKind,
+  projectId: string,
+  endpoint: string = ENDPOINT
+): string {
+  return scopedBrowserStorageKey(kind, {
+    deploymentOrigin: endpoint,
+    projectId,
+  });
 }
 
 function featureFlagExposures(

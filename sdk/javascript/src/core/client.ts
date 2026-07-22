@@ -13,6 +13,11 @@ import {
 } from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
+import {
+  rejectLegacyProjectStorage,
+  scopedBrowserStorageKey,
+  type DeploymentStorageScope,
+} from './storage-scope';
 import { EventQueue } from './event-queue';
 import { ManualCapture } from '../capture/manual';
 import { SessionManager } from '../capture/session';
@@ -119,13 +124,20 @@ export class APDLClient implements APDLApi {
   };
 
   constructor(config: PartialAPDLConfig) {
+    const consentWasExplicitlySupplied = Object.prototype.hasOwnProperty.call(
+      config,
+      'consent'
+    );
     this.config = resolveConfig(config, { strict: true });
+    const storageScope = this.storageScope();
+    rejectLegacyProjectStorage(this.config.projectId, this.config.persistence);
 
     // Privacy subsystems
     this.consentManager = new ConsentManager(
       this.config.consent,
       this.config.persistence,
-      this.config.projectId
+      storageScope,
+      consentWasExplicitlySupplied
     );
     this.analyticsCaptureEnabled = this.consentManager.isGranted('analytics');
     this.personalizationEnabled = this.consentManager.isGranted('personalization');
@@ -137,6 +149,7 @@ export class APDLClient implements APDLApi {
       debug: this.config.debug,
     });
     this.storage = new OfflineStorage({
+      deploymentOrigin: storageScope.deploymentOrigin,
       projectId: this.config.projectId,
       persistence: this.config.persistence,
     });
@@ -151,7 +164,7 @@ export class APDLClient implements APDLApi {
     // Session and context
     this.sessionManager = new SessionManager(
       this.config.persistence,
-      this.config.projectId
+      storageScope
     );
     this.contextCollector = new ContextCollector();
 
@@ -742,11 +755,18 @@ export class APDLClient implements APDLApi {
   }
 
   private flagStorageKey(): string {
-    return `apdl_flags_${this.config.projectId}`;
+    return scopedBrowserStorageKey('flags', this.storageScope());
   }
 
   private anonymousIdStorageKey(): string {
-    return `apdl_anonymous_id_${this.config.projectId}`;
+    return scopedBrowserStorageKey('anonymous_id', this.storageScope());
+  }
+
+  private storageScope(): DeploymentStorageScope {
+    return {
+      deploymentOrigin: this.config.endpoint,
+      projectId: this.config.projectId,
+    };
   }
 
   private handleAnalyticsConsent(granted: boolean): void {
