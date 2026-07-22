@@ -66,6 +66,25 @@ class FakePool:
         return _Context(self.conn)
 
 
+class ExposureConflictConn:
+    def __init__(self, existing_payload: dict):
+        self.existing_payload = existing_payload
+        self.insert_sql = ""
+        self.select_sql = ""
+
+    def transaction(self):
+        return _Context(None)
+
+    async def fetchrow(self, sql: str, *args):
+        if "INSERT INTO config_outbox" in sql:
+            self.insert_sql = sql
+            return None
+        if "SELECT payload" in sql:
+            self.select_sql = sql
+            return {"payload": self.existing_payload}
+        raise AssertionError(sql)
+
+
 class StrictExperimentTimestampConn:
     """Minimal asyncpg contract double for experiment lifecycle persistence."""
 
@@ -920,6 +939,46 @@ def test_exposure_retry_ignores_only_generated_timestamp():
 
     assert mutations._same_exposure_payload(first, retry)
     assert not mutations._same_exposure_payload(first, conflict)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflicting", [False, True])
+async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting):
+    existing_event = {
+        "message_id": "eval_stable_001",
+        "timestamp": "2026-07-22T10:00:00Z",
+        "user_id": "user-1",
+    }
+    requested_event = {
+        **existing_event,
+        "timestamp": "2026-07-22T10:00:01Z",
+    }
+    if conflicting:
+        requested_event["user_id"] = "user-2"
+    existing_payload = {
+        "stream_key": "events:raw:apdl",
+        "event": existing_event,
+    }
+    conn = ExposureConflictConn(existing_payload)
+    pool = FakePool(conn)
+
+    command = mutations.enqueue_exposure(
+        pool,
+        project_id="apdl",
+        message_id="eval_stable_001",
+        stream_key="events:raw:apdl",
+        event=requested_event,
+    )
+    if conflicting:
+        with pytest.raises(mutations.IntegrityError, match="was reused"):
+            await command
+    else:
+        await command
+
+    assert "ON CONFLICT (project_id, kind, dedup_key) DO NOTHING" in conn.insert_sql
+    assert "project_id = $1 AND kind = 'exposure' AND dedup_key = $2" in (
+        conn.select_sql
+    )
 
 
 def test_delivery_payloads_carry_authoritative_versions():

@@ -409,6 +409,16 @@ class GateEvaluateRequest(StrictModel):
     page: str = Field(default="", max_length=MAX_EVAL_PAGE_LENGTH)
     component: str = Field(default="", max_length=MAX_STRING_LENGTH)
 
+    @model_validator(mode="after")
+    def validate_exposure_idempotency(self):
+        if self.log_exposure and (
+            not self.message_id or self.message_id != self.message_id.strip()
+        ):
+            raise ValueError(
+                "log_exposure requires a stable nonblank message_id"
+            )
+        return self
+
 
 class GateEvaluateResponse(StrictModel):
     key: str

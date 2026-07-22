@@ -237,3 +237,62 @@ async def test_disable_flag_sends_version_without_source_alias(monkeypatch):
         },
         "params": {"project_id": "apdl"},
     }
+
+
+@pytest.mark.asyncio
+async def test_evaluate_gate_defaults_to_non_logging_request(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"reason": "fallthrough"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, path, *, json, headers):
+            captured.update(path=path, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        flags.httpx,
+        "AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+
+    await flags.evaluate_gate("apdl", "checkout", user_id="user-1")
+
+    assert captured["path"] == "/v1/evaluate"
+    assert captured["payload"]["log_exposure"] is False
+    assert captured["payload"]["message_id"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_id", ["", "   ", " padded "])
+async def test_evaluate_gate_rejects_invalid_logging_contract(
+    monkeypatch,
+    message_id,
+):
+    def client(**kwargs):
+        pytest.fail("invalid request reached transport")
+
+    monkeypatch.setattr(flags.httpx, "AsyncClient", client)
+
+    with pytest.raises(
+        ValueError,
+        match="log_exposure requires a stable nonblank message_id",
+    ):
+        await flags.evaluate_gate(
+            "apdl",
+            "checkout",
+            user_id="user-1",
+            log_exposure=True,
+            message_id=message_id,
+        )
