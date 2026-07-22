@@ -1,4 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
+import { requireSafeUiUrl } from '../url-policy';
 
 /**
  * Content card component.
@@ -25,9 +26,15 @@ export const CardComponent: ComponentDefinition = {
     const title = (props.title as string) || '';
     const description = props.description as string | undefined;
     const imageUrl = props.imageUrl as string | undefined;
+    const safeImageUrl = imageUrl === undefined
+      ? null
+      : requireSafeUiUrl(imageUrl, 'card.imageUrl');
     const imageAlt = (props.imageAlt as string) || title;
     const ctaText = props.ctaText as string | undefined;
     const ctaHref = props.ctaHref as string | undefined;
+    const safeCtaHref = ctaHref === undefined
+      ? null
+      : requireSafeUiUrl(ctaHref, 'card.ctaHref');
     const width = (props.width as string) || '320px';
 
     const card = document.createElement('div');
@@ -45,9 +52,9 @@ export const CardComponent: ComponentDefinition = {
     `;
 
     // Image
-    if (imageUrl) {
+    if (safeImageUrl !== null) {
       const img = document.createElement('img');
-      img.src = imageUrl;
+      img.src = safeImageUrl;
       img.alt = imageAlt;
       img.style.cssText = `
         width: 100%;
@@ -98,9 +105,14 @@ export const CardComponent: ComponentDefinition = {
 
     // CTA button
     if (ctaText) {
-      const cta = document.createElement('a');
+      const cta = document.createElement(safeCtaHref === null ? 'button' : 'a');
       cta.textContent = ctaText;
-      cta.href = ctaHref || '#';
+      if (safeCtaHref === null) {
+        (cta as HTMLButtonElement).type = 'button';
+      } else {
+        (cta as HTMLAnchorElement).href = safeCtaHref;
+        (cta as HTMLAnchorElement).rel = 'noopener noreferrer';
+      }
       cta.style.cssText = `
         display: inline-block;
         padding: 8px 16px;
@@ -113,12 +125,17 @@ export const CardComponent: ComponentDefinition = {
         text-align: center;
         cursor: pointer;
         align-self: flex-start;
+        border: none;
       `;
       cta.addEventListener('click', (e) => {
-        if (!ctaHref || ctaHref === '#') {
+        if (safeCtaHref === null) {
           e.preventDefault();
         }
-        context.track('card_cta_clicked', { title, ctaText, ctaHref });
+        context.track('card_cta_clicked', {
+          title,
+          ctaText,
+          ctaHref: safeCtaHref ?? undefined,
+        });
       });
       content.appendChild(cta);
     }

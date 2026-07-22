@@ -116,7 +116,7 @@ export const InlineMessageComponent: ComponentDefinition = {
     // Dismiss button
     if (dismissible) {
       const closeBtn = document.createElement('button');
-      closeBtn.innerHTML = '&times;';
+      closeBtn.textContent = '\u00D7';
       closeBtn.setAttribute('aria-label', 'Dismiss');
       closeBtn.style.cssText = `
         background: none;

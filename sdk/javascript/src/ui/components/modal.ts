@@ -1,4 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
+import { requireSafeUiUrl } from '../url-policy';
 
 /**
  * Modal overlay component.
@@ -12,7 +13,7 @@ export const ModalComponent: ComponentDefinition = {
     required: ['title'],
     properties: {
       title: { type: 'string', description: 'Modal title text' },
-      body: { type: 'string', description: 'Modal body content (HTML allowed)' },
+      body: { type: 'string', description: 'Modal body text' },
       ctaText: { type: 'string', description: 'Primary action button text' },
       ctaHref: { type: 'string', description: 'Primary action button link' },
       cancelText: { type: 'string', description: 'Cancel/secondary button text' },
@@ -26,6 +27,9 @@ export const ModalComponent: ComponentDefinition = {
     const body = (props.body as string) || '';
     const ctaText = props.ctaText as string | undefined;
     const ctaHref = props.ctaHref as string | undefined;
+    const safeCtaHref = ctaHref === undefined
+      ? null
+      : requireSafeUiUrl(ctaHref, 'modal.ctaHref');
     const cancelText = props.cancelText as string | undefined;
     const width = (props.width as string) || '480px';
     const closeOnBackdrop = props.closeOnBackdrop !== false;
@@ -71,7 +75,7 @@ export const ModalComponent: ComponentDefinition = {
 
     // Close button
     const closeBtn = document.createElement('button');
-    closeBtn.innerHTML = '&times;';
+    closeBtn.textContent = '\u00D7';
     closeBtn.setAttribute('aria-label', 'Close');
     closeBtn.style.cssText = `
       position: absolute;
@@ -116,7 +120,7 @@ export const ModalComponent: ComponentDefinition = {
         font-size: 14px;
         line-height: 1.6;
       `;
-      bodyEl.innerHTML = body;
+      bodyEl.textContent = body;
       modal.appendChild(bodyEl);
     }
 
@@ -150,9 +154,16 @@ export const ModalComponent: ComponentDefinition = {
       }
 
       if (ctaText) {
-        const ctaBtn = document.createElement('a');
+        const ctaBtn = document.createElement(
+          safeCtaHref === null ? 'button' : 'a'
+        );
         ctaBtn.textContent = ctaText;
-        ctaBtn.href = ctaHref || '#';
+        if (safeCtaHref === null) {
+          (ctaBtn as HTMLButtonElement).type = 'button';
+        } else {
+          (ctaBtn as HTMLAnchorElement).href = safeCtaHref;
+          (ctaBtn as HTMLAnchorElement).rel = 'noopener noreferrer';
+        }
         ctaBtn.style.cssText = `
           display: inline-block;
           padding: 8px 20px;
@@ -166,10 +177,14 @@ export const ModalComponent: ComponentDefinition = {
           border: none;
         `;
         ctaBtn.addEventListener('click', (e) => {
-          if (!ctaHref || ctaHref === '#') {
+          if (safeCtaHref === null) {
             e.preventDefault();
           }
-          context.track('modal_cta_clicked', { title, ctaText, ctaHref });
+          context.track('modal_cta_clicked', {
+            title,
+            ctaText,
+            ctaHref: safeCtaHref ?? undefined,
+          });
         });
         footer.appendChild(ctaBtn);
       }

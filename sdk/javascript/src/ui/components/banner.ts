@@ -1,4 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
+import { requireSafeUiUrl } from '../url-policy';
 
 /**
  * Dismissible banner component.
@@ -29,6 +30,9 @@ export const BannerComponent: ComponentDefinition = {
     const text = (props.text as string) || '';
     const ctaText = props.ctaText as string | undefined;
     const ctaHref = props.ctaHref as string | undefined;
+    const safeCtaHref = ctaHref === undefined
+      ? null
+      : requireSafeUiUrl(ctaHref, 'banner.ctaHref');
     const backgroundColor = (props.backgroundColor as string) || '#1a73e8';
     const textColor = (props.textColor as string) || '#ffffff';
     const dismissible = props.dismissible !== false;
@@ -59,9 +63,14 @@ export const BannerComponent: ComponentDefinition = {
 
     // CTA button
     if (ctaText) {
-      const cta = document.createElement('a');
+      const cta = document.createElement(safeCtaHref === null ? 'button' : 'a');
       cta.textContent = ctaText;
-      cta.href = ctaHref || '#';
+      if (safeCtaHref === null) {
+        (cta as HTMLButtonElement).type = 'button';
+      } else {
+        (cta as HTMLAnchorElement).href = safeCtaHref;
+        (cta as HTMLAnchorElement).rel = 'noopener noreferrer';
+      }
       cta.style.cssText = `
         display: inline-block;
         padding: 6px 16px;
@@ -73,12 +82,16 @@ export const BannerComponent: ComponentDefinition = {
         font-size: 13px;
         white-space: nowrap;
         cursor: pointer;
+        border: none;
       `;
       cta.addEventListener('click', (e) => {
-        if (!ctaHref || ctaHref === '#') {
+        if (safeCtaHref === null) {
           e.preventDefault();
         }
-        context.track('banner_cta_clicked', { text: ctaText, href: ctaHref });
+        context.track('banner_cta_clicked', {
+          text: ctaText,
+          href: safeCtaHref ?? undefined,
+        });
       });
       banner.appendChild(cta);
     }
@@ -86,7 +99,7 @@ export const BannerComponent: ComponentDefinition = {
     // Dismiss button
     if (dismissible) {
       const dismiss = document.createElement('button');
-      dismiss.innerHTML = '&times;';
+      dismiss.textContent = '\u00D7';
       dismiss.setAttribute('aria-label', 'Dismiss');
       dismiss.style.cssText = `
         position: absolute;
