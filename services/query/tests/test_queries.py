@@ -69,7 +69,8 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert "positionCaseSensitive" in sql
+        assert "position(JSONExtractString" in sql
+        assert "positionCaseSensitive" not in sql
         assert params["unit_filter_0_value"] == "Start"
 
     def test_in_filter_uses_parameterized_value_list(self):

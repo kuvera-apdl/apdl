@@ -78,7 +78,7 @@ def _build_filter_condition(
         value_param = f"{prefix}_value"
         params[value_param] = filter_.value
         extractor = f"JSONExtractString({properties_column}, %({property_param})s)"
-        return f"({has_property} AND positionCaseSensitive({extractor}, %({value_param})s) > 0)"
+        return f"({has_property} AND position({extractor}, %({value_param})s) > 0)"
 
     if operator in {
         EventFilterOperator.gt,

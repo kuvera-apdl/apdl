@@ -176,6 +176,7 @@ jobs:
         working-directory: services/query
       - run: .venv/bin/python -m pytest -q
         working-directory: services/query
+      - run: make test-query-clickhouse
 
   agents-service:
     name: Agents Service
