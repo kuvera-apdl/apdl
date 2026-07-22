@@ -105,3 +105,36 @@ async def test_every_accepted_selector_operator_executes_on_pinned_clickhouse():
                 _selector(operator, value),
                 properties,
             ), operator
+
+
+@pytest.mark.asyncio
+async def test_typed_selectors_reject_cross_type_values_on_pinned_clickhouse():
+    cases = [
+        ("eq", "5", {"subject": 5}),
+        ("eq", 1, {"subject": "1"}),
+        ("eq", True, {"subject": 1}),
+        ("neq", "different", {"subject": 5}),
+        ("neq", 2, {"subject": "1"}),
+        ("neq", False, {"subject": 1}),
+        ("in", ["5"], {"subject": 5}),
+        ("in", [1], {"subject": "1"}),
+        ("in", [True], {"subject": 1}),
+        ("not_in", ["different"], {"subject": 5}),
+        ("not_in", [2], {"subject": "1"}),
+        ("not_in", [False], {"subject": 1}),
+        ("contains", "5", {"subject": 5}),
+        ("contains", "true", {"subject": True}),
+        ("gt", 4, {"subject": "5"}),
+        ("gt", 0, {"subject": True}),
+        ("gte", 5, {"subject": "5"}),
+        ("lt", 6, {"subject": "5"}),
+        ("lte", 5, {"subject": "5"}),
+    ]
+
+    async with _exact_clickhouse_client() as client:
+        for operator, value, properties in cases:
+            assert not await _selector_matches(
+                client,
+                _selector(operator, value),
+                properties,
+            ), (operator, value, properties)
