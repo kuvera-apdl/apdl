@@ -25,7 +25,17 @@ services:
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            clickhouse-server|*/clickhouse-server)
+              clickhouse-client --user apdl --password apdl_dev --query "SELECT 1"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       interval: 5s
       timeout: 3s
       retries: 5
@@ -41,7 +51,17 @@ services:
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apdl"]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            postgres|*/postgres)
+              pg_isready -U apdl -d apdl
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       interval: 5s
       timeout: 3s
       retries: 5
@@ -328,6 +348,7 @@ services:
       dockerfile: Dockerfile
     environment:
       REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
       CLICKHOUSE_NATIVE_URL: clickhouse://apdl:apdl_dev@clickhouse:9000/apdl
       CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: ${CLICKHOUSE_CONNECT_TIMEOUT_SECONDS:-5}
       CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS: ${CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS:-30}
@@ -338,6 +359,10 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
     stop_grace_period: 30s
 
   # Admin backend-for-frontend. Human sessions and tenant roles live in

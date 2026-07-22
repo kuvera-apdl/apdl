@@ -15,6 +15,147 @@ CONTRACT_FIXTURE = (
 )
 
 
+def test_each_maintenance_session_acquires_and_verifies_both_lock_ids() -> None:
+    class GuardConnection:
+        def __init__(self) -> None:
+            self.acquired: list[int] = []
+            self.heartbeat_query = ""
+
+        async def execute(self, query: str, lock_id: int) -> None:
+            assert query == "SELECT pg_advisory_lock_shared($1)"
+            self.acquired.append(lock_id)
+
+        async def fetchval(self, query: str, lock_ids: list[int]) -> int:
+            self.heartbeat_query = query
+            assert lock_ids == list(writer_module.MAINTENANCE_INHIBITOR_LOCK_IDS)
+            return 2
+
+    async def scenario() -> None:
+        connection = GuardConnection()
+        await writer_module._acquire_maintenance_inhibitor(connection)
+        await writer_module._heartbeat_maintenance_inhibitor(connection)
+
+        assert connection.acquired == [4_158_044_083, 4_158_044_084]
+        assert "pid = pg_backend_pid()" in connection.heartbeat_query
+        assert "objsubid = 1" in connection.heartbeat_query
+
+    asyncio.run(scenario())
+
+
+def test_maintenance_inhibitor_loss_stops_writer() -> None:
+    class LostConnection:
+        async def fetchval(self, _query: str, _lock_ids: list[int]) -> None:
+            raise ConnectionError("postgres connection lost")
+
+    class StoppableWriter:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self, *, flush_buffer: bool = True) -> None:
+            assert flush_buffer is False
+            self.stopped = True
+
+    async def scenario() -> None:
+        writer = StoppableWriter()
+        await asyncio.wait_for(
+            writer_module._monitor_maintenance_inhibitor(
+                LostConnection(),
+                writer,
+                asyncio.Event(),
+                heartbeat_seconds=0.001,
+            ),
+            timeout=0.1,
+        )
+        assert writer.stopped is True
+
+    asyncio.run(scenario())
+
+
+def test_loss_of_one_inhibitor_keeps_the_redundant_guard_alive_during_drain() -> None:
+    class GuardConnection:
+        def __init__(self) -> None:
+            self.heartbeats = 0
+
+        async def fetchval(self, _query: str, lock_ids: list[int]) -> int:
+            assert lock_ids == list(writer_module.MAINTENANCE_INHIBITOR_LOCK_IDS)
+            self.heartbeats += 1
+            return 2
+
+    class DrainingWriter:
+        def __init__(self) -> None:
+            self.drain_started = asyncio.Event()
+            self.allow_drain = asyncio.Event()
+
+        async def stop(self, *, flush_buffer: bool = True) -> None:
+            assert flush_buffer is False
+            self.drain_started.set()
+            await self.allow_drain.wait()
+
+    async def scenario() -> None:
+        writer = DrainingWriter()
+        lost_event = asyncio.Event()
+        lost_event.set()
+        surviving_connection = GuardConnection()
+        lost_monitor = asyncio.create_task(
+            writer_module._monitor_maintenance_inhibitor(
+                GuardConnection(),
+                writer,
+                lost_event,
+                heartbeat_seconds=0.001,
+            )
+        )
+        surviving_monitor = asyncio.create_task(
+            writer_module._monitor_maintenance_inhibitor(
+                surviving_connection,
+                writer,
+                asyncio.Event(),
+                heartbeat_seconds=0.001,
+            )
+        )
+
+        await asyncio.wait_for(writer.drain_started.wait(), timeout=0.1)
+        while surviving_connection.heartbeats == 0:
+            await asyncio.sleep(0)
+        assert lost_monitor.done() is False
+        assert surviving_monitor.done() is False
+
+        writer.allow_drain.set()
+        await asyncio.wait_for(lost_monitor, timeout=0.1)
+        surviving_monitor.cancel()
+        await asyncio.gather(surviving_monitor, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_hung_inhibitor_heartbeat_is_bounded_and_fences_writes() -> None:
+    class HungConnection:
+        async def fetchval(self, _query: str, _lock_ids: list[int]) -> None:
+            await asyncio.Event().wait()
+
+    class StoppableWriter:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self, *, flush_buffer: bool = True) -> None:
+            assert flush_buffer is False
+            self.stopped = True
+
+    async def scenario() -> None:
+        writer = StoppableWriter()
+        await asyncio.wait_for(
+            writer_module._monitor_maintenance_inhibitor(
+                HungConnection(),
+                writer,
+                asyncio.Event(),
+                heartbeat_seconds=0.001,
+            ),
+            timeout=0.1,
+        )
+        assert writer.stopped is True
+
+    asyncio.run(scenario())
+
+
 class FakePipeline:
     def __init__(self, redis_client, *, transaction):
         self.redis_client = redis_client
@@ -149,16 +290,56 @@ class FakeRedis:
         self.closed = True
 
 
+def external_event_rows(external_tables):
+    assert len(external_tables) == 1
+    table = external_tables[0]
+    assert table["name"] == "apdl_runtime_input"
+    assert table["structure"] == list(writer_module.EVENT_INPUT_STRUCTURE)
+    return table["data"]
+
+
 class FakeClickHouse:
     def __init__(self, *, fail=False):
         self.fail = fail
         self.inserts: list[list[dict]] = []
+        self.query_ids: list[str] = []
         self.disconnected = False
 
-    def execute(self, _query, rows, **_kwargs):
+    def execute(
+        self,
+        _query,
+        *,
+        external_tables=None,
+        query_id=None,
+        **_kwargs,
+    ):
+        assert _query == writer_module.EVENT_INSERT_QUERY
+        assert query_id is not None
+        rows = external_event_rows(external_tables)
+        self.query_ids.append(query_id)
         self.inserts.append(rows)
         if self.fail:
             raise RuntimeError("clickhouse unavailable")
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+class FakeClickHouseControl:
+    def __init__(self):
+        self.killed_query_ids: list[str] = []
+        self.inspected_query_ids: list[str] = []
+        self.disconnected = False
+
+    def execute(self, query, params=None, **_kwargs):
+        query_id = params["query_id"]
+        if query.startswith("KILL QUERY"):
+            self.killed_query_ids.append(query_id)
+            return []
+        if "system.processes" in query:
+            self.inspected_query_ids.append(query_id)
+            return [(0,)]
+        raise AssertionError(f"Unexpected ClickHouse control query: {query}")
 
     def disconnect(self):
         self.disconnected = True
@@ -169,18 +350,21 @@ def make_writer(
     *,
     redis_client=None,
     ch_client=None,
+    ch_control_client=None,
     buffer_size=10,
     **writer_kwargs,
 ):
     redis_client = redis_client or FakeRedis()
     ch_client = ch_client or FakeClickHouse()
+    ch_control_client = ch_control_client or FakeClickHouseControl()
+    clickhouse_clients = iter((ch_client, ch_control_client))
     monkeypatch.setattr(
         writer_module.redis, "from_url", lambda *_args, **_kwargs: redis_client
     )
     monkeypatch.setattr(
         writer_module.ClickHouseClient,
         "from_url",
-        lambda *_args, **_kwargs: ch_client,
+        lambda *_args, **_kwargs: next(clickhouse_clients),
     )
     writer = ClickHouseWriter(
         "redis://test",
@@ -237,14 +421,16 @@ async def wait_for_thread_event(event: threading.Event) -> None:
 def test_clickhouse_driver_receives_explicit_process_timeouts(monkeypatch):
     redis_client = FakeRedis()
     ch_client = FakeClickHouse()
+    ch_control_client = FakeClickHouseControl()
     captured_urls = []
+    clickhouse_clients = iter((ch_client, ch_control_client))
     monkeypatch.setattr(
         writer_module.redis, "from_url", lambda *_args, **_kwargs: redis_client
     )
     monkeypatch.setattr(
         writer_module.ClickHouseClient,
         "from_url",
-        lambda url: captured_urls.append(url) or ch_client,
+        lambda url: captured_urls.append(url) or next(clickhouse_clients),
     )
 
     writer = ClickHouseWriter(
@@ -254,6 +440,8 @@ def test_clickhouse_driver_receives_explicit_process_timeouts(monkeypatch):
         clickhouse_send_receive_timeout=12.0,
         clickhouse_sync_request_timeout=2.5,
     )
+    assert len(captured_urls) == 2
+    assert captured_urls[0] == captured_urls[1]
     query = parse_qs(urlsplit(captured_urls[0]).query)
 
     assert query == {
@@ -272,10 +460,10 @@ def test_slow_clickhouse_insert_does_not_block_event_loop(monkeypatch):
             self.started = threading.Event()
             self.release = threading.Event()
 
-        def execute(self, query, rows, **kwargs):
+        def execute(self, query, **kwargs):
             self.started.set()
             assert self.release.wait(timeout=1.0)
-            super().execute(query, rows, **kwargs)
+            super().execute(query, **kwargs)
 
         def disconnect(self):
             self.release.set()
@@ -313,10 +501,10 @@ def test_cancelled_flush_observes_original_insert_before_retrying(monkeypatch):
             self.started = threading.Event()
             self.release = threading.Event()
 
-        def execute(self, query, rows, **kwargs):
+        def execute(self, query, **kwargs):
             self.started.set()
             assert self.release.wait(timeout=1.0)
-            super().execute(query, rows, **kwargs)
+            super().execute(query, **kwargs)
 
         def disconnect(self):
             self.release.set()
@@ -339,10 +527,346 @@ def test_cancelled_flush_observes_original_insert_before_retrying(monkeypatch):
         ch_client.release.set()
         assert await writer._flush() is True
         assert len(ch_client.inserts) == 1
+        assert len(ch_client.query_ids) == 1
         assert redis_client.acks == [
             ("events:raw:demo", "clickhouse-writer", ("1-0",))
         ]
         await writer.stop()
+
+    asyncio.run(scenario())
+
+
+def test_every_native_insert_gets_a_unique_stable_query_id(monkeypatch):
+    async def scenario():
+        writer, _, ch_client = make_writer(monkeypatch)
+        writer.buffer.append(buffered_event("1-0"))
+        assert await writer._flush() is True
+        writer.buffer.append(buffered_event("2-0"))
+        assert await writer._flush() is True
+
+        assert len(ch_client.query_ids) == 2
+        assert len(set(ch_client.query_ids)) == 2
+        assert all(
+            query_id.startswith("apdl-runtime-writer-")
+            for query_id in ch_client.query_ids
+        )
+        await writer.stop()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("gate_state", "expected_success"),
+    (("open", True), ("blocked", False), ("missing", False)),
+)
+def test_insert_requires_the_exact_durable_maintenance_gate(
+    monkeypatch,
+    gate_state,
+    expected_success,
+):
+    class GateAwareClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.queries: list[str] = []
+            self.external_table_payloads: list[list[dict]] = []
+
+        def execute(
+            self,
+            query,
+            *,
+            external_tables=None,
+            query_id=None,
+            **kwargs,
+        ):
+            self.queries.append(query)
+            self.external_table_payloads.append(external_tables)
+            external_event_rows(external_tables)
+            if gate_state == "blocked":
+                raise ServerException("maintenance", code=395)
+            if gate_state == "missing":
+                raise ServerException("unknown table", code=60)
+            return super().execute(
+                query,
+                external_tables=external_tables,
+                query_id=query_id,
+                **kwargs,
+            )
+
+    async def scenario():
+        ch_client = GateAwareClickHouse()
+        writer, redis_client, _ = make_writer(monkeypatch, ch_client=ch_client)
+        delivery = buffered_event()
+        writer.buffer.append(delivery)
+
+        assert await writer._flush() is expected_success
+        assert ch_client.queries == [writer_module.EVENT_INSERT_QUERY]
+        assert "FROM apdl_runtime_input" in ch_client.queries[0]
+        assert len(ch_client.external_table_payloads) == 1
+        external_table = ch_client.external_table_payloads[0][0]
+        assert external_table["name"] == "apdl_runtime_input"
+        assert external_table["structure"] == list(writer_module.EVENT_INPUT_STRUCTURE)
+        assert external_table["data"] == [delivery.row]
+        assert "SELECT (count() = 0) OR" in ch_client.queries[0]
+        assert "argMax(writes_blocked, generation) != 0" in ch_client.queries[0]
+        assert "authority = 'runtime-writes'" in ch_client.queries[0]
+
+        if expected_success:
+            assert writer.buffer == []
+            assert redis_client.acks == [
+                ("events:raw:demo", "clickhouse-writer", ("1-0",))
+            ]
+        else:
+            assert writer.buffer == [delivery]
+            assert redis_client.acks == []
+            assert writer.stats["errors"] == 1
+
+        await writer.stop(flush_buffer=False)
+
+    asyncio.run(scenario())
+
+
+def test_executor_rechecks_insert_gate_after_work_was_queued(monkeypatch):
+    writer, _, ch_client = make_writer(monkeypatch)
+    writer._accepting_inserts = False
+
+    with pytest.raises(RuntimeError, match="INSERTs are fenced"):
+        writer._execute_insert([buffered_event()], "apdl-runtime-writer-queued")
+
+    assert ch_client.inserts == []
+    asyncio.run(writer.stop(flush_buffer=False))
+
+
+def test_shutdown_kills_registered_insert_and_proves_it_absent(monkeypatch):
+    class RegisteredInsertClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.active_query_ids: set[str] = set()
+            self.started = threading.Event()
+            self.killed = threading.Event()
+
+        def execute(
+            self,
+            _query,
+            *,
+            external_tables=None,
+            query_id=None,
+            **_kwargs,
+        ):
+            assert query_id is not None
+            rows = external_event_rows(external_tables)
+            self.query_ids.append(query_id)
+            self.inserts.append(rows)
+            self.active_query_ids.add(query_id)
+            self.started.set()
+            assert self.killed.wait(timeout=1.0)
+            raise RuntimeError("query killed")
+
+        def disconnect(self):
+            self.disconnected = True
+
+    class RegisteredQueryControl(FakeClickHouseControl):
+        def __init__(self, data_client):
+            super().__init__()
+            self.data_client = data_client
+
+        def execute(self, query, params=None, **_kwargs):
+            query_id = params["query_id"]
+            if query.startswith("KILL QUERY"):
+                assert query_id in self.data_client.active_query_ids
+                self.killed_query_ids.append(query_id)
+                self.data_client.active_query_ids.remove(query_id)
+                self.data_client.killed.set()
+                return []
+            if "system.processes" in query:
+                self.inspected_query_ids.append(query_id)
+                return [(int(query_id in self.data_client.active_query_ids),)]
+            raise AssertionError(f"Unexpected ClickHouse control query: {query}")
+
+    async def scenario():
+        ch_client = RegisteredInsertClickHouse()
+        control_client = RegisteredQueryControl(ch_client)
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            ch_client=ch_client,
+            ch_control_client=control_client,
+            shutdown_timeout=0.01,
+        )
+        writer.buffer.append(buffered_event())
+
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.started)
+        await writer.stop()
+
+        assert await asyncio.wait_for(flush_task, timeout=0.2) is False
+        assert control_client.killed_query_ids == ch_client.query_ids
+        assert control_client.inspected_query_ids == ch_client.query_ids
+        assert ch_client.active_query_ids == set()
+        assert redis_client.acks == []
+        assert writer.buffer == [buffered_event()]
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_waits_out_query_registration_race_before_releasing(monkeypatch):
+    class LateRegisteringClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.thread_started = threading.Event()
+            self.allow_registration = threading.Event()
+            self.registered = threading.Event()
+            self.killed = threading.Event()
+            self.active_query_ids: set[str] = set()
+
+        def execute(
+            self,
+            _query,
+            *,
+            external_tables=None,
+            query_id=None,
+            **_kwargs,
+        ):
+            assert query_id is not None
+            rows = external_event_rows(external_tables)
+            self.query_ids.append(query_id)
+            self.inserts.append(rows)
+            self.thread_started.set()
+            assert self.allow_registration.wait(timeout=1.0)
+            self.active_query_ids.add(query_id)
+            self.registered.set()
+            assert self.killed.wait(timeout=1.0)
+            raise RuntimeError("query killed")
+
+        def disconnect(self):
+            self.disconnected = True
+
+    class RegistrationRaceControl(FakeClickHouseControl):
+        def __init__(self, data_client):
+            super().__init__()
+            self.data_client = data_client
+            self.first_kill = threading.Event()
+
+        def execute(self, query, params=None, **_kwargs):
+            query_id = params["query_id"]
+            if query.startswith("KILL QUERY"):
+                self.killed_query_ids.append(query_id)
+                self.first_kill.set()
+                if query_id in self.data_client.active_query_ids:
+                    self.data_client.active_query_ids.remove(query_id)
+                    self.data_client.killed.set()
+                return []
+            if "system.processes" in query:
+                self.inspected_query_ids.append(query_id)
+                return [(int(query_id in self.data_client.active_query_ids),)]
+            raise AssertionError(f"Unexpected ClickHouse control query: {query}")
+
+    async def scenario():
+        ch_client = LateRegisteringClickHouse()
+        control_client = RegistrationRaceControl(ch_client)
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            ch_client=ch_client,
+            ch_control_client=control_client,
+            shutdown_timeout=0.01,
+        )
+        writer.buffer.append(buffered_event())
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.thread_started)
+
+        stop_task = asyncio.create_task(writer.stop())
+        await wait_for_thread_event(control_client.first_kill)
+        assert writer._closed is False
+        assert writer._inflight_insert is not None
+        assert control_client.inspected_query_ids == []
+
+        ch_client.allow_registration.set()
+        await wait_for_thread_event(ch_client.registered)
+        await asyncio.wait_for(stop_task, timeout=0.5)
+
+        assert writer._closed is True
+        assert ch_client.active_query_ids == set()
+        assert control_client.inspected_query_ids == ch_client.query_ids
+        assert redis_client.acks == []
+        assert await asyncio.wait_for(flush_task, timeout=0.2) is False
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_during_unproven_shutdown_keeps_retrying(monkeypatch):
+    class AbortableInsertClickHouse(FakeClickHouse):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def execute(
+            self,
+            _query,
+            *,
+            external_tables=None,
+            query_id=None,
+            **_kwargs,
+        ):
+            assert query_id is not None
+            rows = external_event_rows(external_tables)
+            self.query_ids.append(query_id)
+            self.inserts.append(rows)
+            self.started.set()
+            assert self.release.wait(timeout=1.0)
+            raise RuntimeError("data connection closed")
+
+        def disconnect(self):
+            self.disconnected = True
+            self.release.set()
+
+    class RetryingControl(FakeClickHouseControl):
+        def __init__(self):
+            super().__init__()
+            self.first_inspection = threading.Event()
+            self.allow_absence = threading.Event()
+
+        def execute(self, query, params=None, **_kwargs):
+            query_id = params["query_id"]
+            if query.startswith("KILL QUERY"):
+                self.killed_query_ids.append(query_id)
+                return []
+            if "system.processes" in query:
+                self.inspected_query_ids.append(query_id)
+                self.first_inspection.set()
+                return [(0 if self.allow_absence.is_set() else 1,)]
+            raise AssertionError(f"Unexpected ClickHouse control query: {query}")
+
+    async def scenario():
+        ch_client = AbortableInsertClickHouse()
+        control_client = RetryingControl()
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            ch_client=ch_client,
+            ch_control_client=control_client,
+            shutdown_timeout=0.01,
+        )
+        writer.buffer.append(buffered_event())
+        flush_task = asyncio.create_task(writer._flush())
+        await wait_for_thread_event(ch_client.started)
+
+        stop_task = asyncio.create_task(writer.stop())
+        await wait_for_thread_event(control_client.first_inspection)
+        stop_task.cancel()
+        await asyncio.sleep(0)
+
+        assert writer._closed is False
+        assert writer._inflight_insert is not None
+        assert redis_client.closed is False
+
+        control_client.allow_absence.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop_task, timeout=0.5)
+
+        assert writer._closed is True
+        assert writer._inflight_insert is None
+        assert redis_client.acks == []
+        assert writer.buffer == [buffered_event()]
+        assert len(control_client.killed_query_ids) >= 2
+        assert await asyncio.wait_for(flush_task, timeout=0.2) is False
 
     asyncio.run(scenario())
 
@@ -354,7 +878,8 @@ def test_shutdown_aborts_slow_insert_and_leaves_delivery_pending(monkeypatch):
             self.started = threading.Event()
             self.release = threading.Event()
 
-        def execute(self, _query, rows, **_kwargs):
+        def execute(self, _query, *, external_tables=None, **_kwargs):
+            rows = external_event_rows(external_tables)
             self.inserts.append(rows)
             self.started.set()
             assert self.release.wait(timeout=1.0)
@@ -504,7 +1029,8 @@ def test_crash_after_insert_replay_converges_on_one_storage_identity(monkeypatch
             super().__init__()
             self.rows: dict[tuple[str, str], dict] = {}
 
-        def execute(self, _query, rows, **_kwargs):
+        def execute(self, _query, *, external_tables=None, **_kwargs):
+            rows = external_event_rows(external_tables)
             self.inserts.append(rows)
             for row in rows:
                 self.rows[(row["project_id"], row["message_id"])] = row
@@ -1143,7 +1669,8 @@ def test_dlq_failure_leaves_reject_pending_while_valid_event_flushes(monkeypatch
 
 def test_insert_poison_isolated_without_blocking_valid_row(monkeypatch):
     class RowRejectingClickHouse(FakeClickHouse):
-        def execute(self, _query, rows, **_kwargs):
+        def execute(self, _query, *, external_tables=None, **_kwargs):
+            rows = external_event_rows(external_tables)
             self.inserts.append(rows)
             if any(row["event_name"] == "poison" for row in rows):
                 raise TypeMismatchError("local row serialization failed")
@@ -1187,7 +1714,8 @@ def test_insert_poison_isolated_without_blocking_valid_row(monkeypatch):
 
 def test_server_schema_error_is_not_bisected_or_dead_lettered(monkeypatch):
     class SchemaErrorClickHouse(FakeClickHouse):
-        def execute(self, _query, rows, **_kwargs):
+        def execute(self, _query, *, external_tables=None, **_kwargs):
+            rows = external_event_rows(external_tables)
             self.inserts.append(rows)
             raise ServerException("server schema mismatch", code=53)
 

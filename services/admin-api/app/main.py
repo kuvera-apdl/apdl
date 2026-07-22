@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -14,6 +16,8 @@ from fastapi.responses import JSONResponse
 from app import auth, credentials, projects, proxy
 from app.config import Settings
 
+logger = logging.getLogger(__name__)
+
 ReadinessState = Literal["ready", "not_ready"]
 _CORE_UPSTREAMS = {
     "ingestion": ("/health", "ok"),
@@ -24,6 +28,108 @@ _CAPABILITY_UPSTREAMS = {
     "agents": ("/ready", "ready"),
     "codegen": ("/ready", "ready"),
 }
+MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
+MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+MAINTENANCE_HEARTBEAT_SECONDS = 1.0
+MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS = 2.0
+
+
+async def _acquire_maintenance_inhibitor(connection) -> None:
+    """Block startup during maintenance and inhibit it while this connection lives."""
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        MAINTENANCE_INHIBITOR_LOCK_ID,
+    )
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        MAINTENANCE_GUARD_LOCK_ID,
+    )
+
+
+async def _reset_maintenance_inhibitor(connection) -> None:
+    """Apply asyncpg's default reset, then restore the session inhibitor."""
+    reset_query = connection.get_reset_query()
+    if reset_query:
+        await connection.execute(reset_query)
+    await _acquire_maintenance_inhibitor(connection)
+
+
+async def _assert_maintenance_inhibitor_held(
+    connection,
+    *,
+    heartbeat_timeout_seconds: float = MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS,
+) -> None:
+    held = await asyncio.wait_for(
+        connection.fetchval(
+            "SELECT count(*) = 2 FROM pg_catalog.pg_locks "
+            "WHERE pid = pg_backend_pid() AND locktype = 'advisory' "
+            "AND mode = 'ShareLock' AND granted "
+            "AND classid = 0 AND objsubid = 1 "
+            "AND objid IN ($1::bigint::oid, $2::bigint::oid)",
+            MAINTENANCE_INHIBITOR_LOCK_ID,
+            MAINTENANCE_GUARD_LOCK_ID,
+        ),
+        timeout=heartbeat_timeout_seconds,
+    )
+    if held is not True:
+        raise RuntimeError("maintenance inhibitor locks were lost")
+
+
+async def _monitor_maintenance_inhibitor(
+    connection,
+    connection_lost: asyncio.Event,
+    *,
+    heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+    heartbeat_timeout_seconds: float = MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS,
+) -> None:
+    """Terminate the process when its dedicated inhibitor session is uncertain."""
+    while not connection_lost.is_set():
+        try:
+            await asyncio.wait_for(connection_lost.wait(), timeout=heartbeat_seconds)
+        except TimeoutError:
+            try:
+                await _assert_maintenance_inhibitor_held(
+                    connection,
+                    heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                connection_lost.set()
+    logger.critical("PostgreSQL maintenance inhibitor was lost; terminating service")
+    _abort_process_on_maintenance_loss()
+
+
+def _abort_process_on_maintenance_loss() -> None:
+    """Immediately stop in-flight work after the database barrier is lost."""
+    os._exit(1)
+
+
+async def _start_maintenance_monitor(connection):
+    loop = asyncio.get_running_loop()
+    connection_lost = asyncio.Event()
+
+    def mark_connection_lost(_connection) -> None:
+        loop.call_soon_threadsafe(connection_lost.set)
+
+    connection.add_termination_listener(mark_connection_lost)
+    try:
+        await _assert_maintenance_inhibitor_held(connection)
+    except BaseException:
+        connection.remove_termination_listener(mark_connection_lost)
+        raise
+    task = asyncio.create_task(
+        _monitor_maintenance_inhibitor(connection, connection_lost),
+        name="maintenance-inhibitor-monitor",
+    )
+    return task, mark_connection_lost
+
+
+async def _close_maintenance_monitor(connection, task, listener) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    connection.remove_termination_listener(listener)
+    await connection.close()
 
 
 def _upstream_timeout(settings: Settings) -> httpx.Timeout:
@@ -71,17 +177,41 @@ async def _probe_upstream(
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     settings = Settings.from_env()
-    pool = await asyncpg.create_pool(settings.postgres_url, min_size=2, max_size=10)
-    client = httpx.AsyncClient(
-        timeout=_upstream_timeout(settings), follow_redirects=False
+    pool = await asyncpg.create_pool(
+        settings.postgres_url,
+        min_size=2,
+        max_size=10,
+        init=_acquire_maintenance_inhibitor,
+        reset=_reset_maintenance_inhibitor,
+        max_inactive_connection_lifetime=0,
     )
-    application.state.settings = settings
-    application.state.pg_pool = pool
-    application.state.http_client = client
+    maintenance_connection = None
+    maintenance_task = None
+    maintenance_listener = None
+    client = None
     try:
+        maintenance_connection = await pool.acquire()
+        maintenance_task, maintenance_listener = await _start_maintenance_monitor(
+            maintenance_connection
+        )
+        client = httpx.AsyncClient(
+            timeout=_upstream_timeout(settings), follow_redirects=False
+        )
+        application.state.settings = settings
+        application.state.pg_pool = pool
+        application.state.http_client = client
         yield
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
+        if maintenance_task is not None:
+            await _close_maintenance_monitor(
+                maintenance_connection,
+                maintenance_task,
+                maintenance_listener,
+            )
+        elif maintenance_connection is not None:
+            await maintenance_connection.close()
         await pool.close()
 
 

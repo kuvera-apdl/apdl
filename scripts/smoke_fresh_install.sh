@@ -187,11 +187,7 @@ else
         --api-key "$APDL_DEV_API_KEY" \
         --ingestion-url "$APDL_INGESTION_URL" \
         --config-url "$APDL_CONFIG_URL" \
-        --query-url "$APDL_QUERY_URL" \
-        --clickhouse-cleanup-url \
-            "http://127.0.0.1:$APDL_CLICKHOUSE_HTTP_HOST_PORT" \
-        --clickhouse-user apdl \
-        --clickhouse-password apdl_dev
+        --query-url "$APDL_QUERY_URL"
 fi
 
 echo "==> Fresh-install $SMOKE_SUITE smoke passed"

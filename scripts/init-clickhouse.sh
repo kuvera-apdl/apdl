@@ -21,6 +21,9 @@ CLICKHOUSE_MIGRATIONS_DIR="${CLICKHOUSE_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/click
 CLICKHOUSE_BACKFILLS_DIR="${CLICKHOUSE_BACKFILLS_DIR:-$ROOT_DIR/pipeline/clickhouse/backfills}"
 CLICKHOUSE_READY_RETRIES="${CLICKHOUSE_READY_RETRIES:-30}"
 CLICKHOUSE_READY_INTERVAL="${CLICKHOUSE_READY_INTERVAL:-2}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
+POSTGRES_USER="${POSTGRES_USER:-apdl}"
+POSTGRES_DB="${POSTGRES_DB:-apdl}"
 
 if [[ ! "$CLICKHOUSE_DB" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
     echo "Invalid ClickHouse database name: $CLICKHOUSE_DB" >&2
@@ -38,7 +41,8 @@ if [ ! -d "$CLICKHOUSE_BACKFILLS_DIR" ]; then
 fi
 
 echo "==> Initializing ClickHouse"
-docker compose "${COMPOSE_ARGS[@]}" up -d "$CLICKHOUSE_SERVICE" >/dev/null
+docker compose "${COMPOSE_ARGS[@]}" up -d \
+    "$CLICKHOUSE_SERVICE" "$POSTGRES_SERVICE" >/dev/null
 
 container_id="$(docker compose "${COMPOSE_ARGS[@]}" ps -q "$CLICKHOUSE_SERVICE")"
 if [ -z "$container_id" ]; then
@@ -48,7 +52,20 @@ fi
 
 ready=0
 for _ in $(seq 1 "$CLICKHOUSE_READY_RETRIES"); do
-    if docker exec "$container_id" clickhouse-client \
+    # The official image starts a temporary child server while its PID 1
+    # entrypoint creates CLICKHOUSE_DB, then stops that child and execs the
+    # durable server. A successful query against the temporary server is not a
+    # startup guarantee: migrations launched in that window lose their client
+    # during the handoff. Require PID 1 to be the final ClickHouse executable
+    # before accepting the readiness query.
+    if docker exec "$container_id" sh -c '
+        command="$(tr "\000" "\n" </proc/1/cmdline | head -n 1)" || exit 1
+        case "$command" in
+            clickhouse-server|*/clickhouse-server) exit 0 ;;
+            *) exit 1 ;;
+        esac
+    ' >/dev/null 2>&1 \
+        && docker exec "$container_id" clickhouse-client \
         --user "$CLICKHOUSE_USER" \
         --password "$CLICKHOUSE_PASSWORD" \
         --query "SELECT 1" >/dev/null 2>&1; then
@@ -59,7 +76,36 @@ for _ in $(seq 1 "$CLICKHOUSE_READY_RETRIES"); do
 done
 
 if [ "$ready" -ne 1 ]; then
-    echo "ClickHouse did not become ready in time." >&2
+    echo "ClickHouse final server process did not become ready in time." >&2
+    exit 1
+fi
+
+postgres_container_id="$(
+    docker compose "${COMPOSE_ARGS[@]}" ps -q "$POSTGRES_SERVICE"
+)"
+if [ -z "$postgres_container_id" ]; then
+    echo "PostgreSQL container is not running for compose file: $COMPOSE_FILE" >&2
+    exit 1
+fi
+
+postgres_ready=0
+for _ in $(seq 1 "$CLICKHOUSE_READY_RETRIES"); do
+    if docker exec "$postgres_container_id" sh -c '
+        command="$(tr "\000" "\n" </proc/1/cmdline | head -n 1)" || exit 1
+        case "$command" in
+            postgres|*/postgres) exit 0 ;;
+            *) exit 1 ;;
+        esac
+    ' >/dev/null 2>&1 \
+        && docker exec "$postgres_container_id" pg_isready \
+        -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+        postgres_ready=1
+        break
+    fi
+    sleep "$CLICKHOUSE_READY_INTERVAL"
+done
+if [ "$postgres_ready" -ne 1 ]; then
+    echo "PostgreSQL final maintenance coordinator did not become ready in time." >&2
     exit 1
 fi
 
@@ -67,119 +113,16 @@ PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
     --anchor-container "$container_id" \
     --service clickhouse-writer
 
-docker exec "$container_id" clickhouse-client \
-    --user "$CLICKHOUSE_USER" \
-    --password "$CLICKHOUSE_PASSWORD" \
-    --query "CREATE DATABASE IF NOT EXISTS \`$CLICKHOUSE_DB\`" >/dev/null
-
 CLICKHOUSE_CONTAINER_ID="$container_id" \
 CLICKHOUSE_USER="$CLICKHOUSE_USER" \
 CLICKHOUSE_PASSWORD="$CLICKHOUSE_PASSWORD" \
 CLICKHOUSE_DB="$CLICKHOUSE_DB" \
 CLICKHOUSE_MIGRATIONS_DIR="$CLICKHOUSE_MIGRATIONS_DIR" \
-APDL_CLICKHOUSE_WRITERS_QUIESCED=1 \
+CLICKHOUSE_BACKFILLS_DIR="$CLICKHOUSE_BACKFILLS_DIR" \
+POSTGRES_CONTAINER_ID="$postgres_container_id" \
+POSTGRES_USER="$POSTGRES_USER" \
+POSTGRES_DB="$POSTGRES_DB" \
 PYTHONDONTWRITEBYTECODE=1 \
     python3 "$ROOT_DIR/pipeline/clickhouse/migrate.py"
-
-backfill_lock_dir="${TMPDIR:-/tmp}/apdl-clickhouse-backfills-$container_id.lock"
-backfill_snapshot=""
-
-cleanup_backfill() {
-    if [ -n "$backfill_snapshot" ]; then
-        rm -f "$backfill_snapshot"
-    fi
-    rmdir "$backfill_lock_dir" 2>/dev/null || true
-}
-
-if ! mkdir "$backfill_lock_dir" 2>/dev/null; then
-    echo "Another ClickHouse backfill runner holds: $backfill_lock_dir" >&2
-    exit 1
-fi
-trap cleanup_backfill EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-docker exec "$container_id" clickhouse-client \
-    --user "$CLICKHOUSE_USER" \
-    --password "$CLICKHOUSE_PASSWORD" \
-    --database "$CLICKHOUSE_DB" \
-    --query "
-        CREATE TABLE IF NOT EXISTS apdl_schema_backfills (
-            name String,
-            checksum FixedString(64),
-            completed_at DateTime64(3)
-        ) ENGINE = ReplacingMergeTree(completed_at)
-        ORDER BY (name, checksum)
-    " >/dev/null
-
-for backfill in "$CLICKHOUSE_BACKFILLS_DIR"/*.sql; do
-    [ -f "$backfill" ] || continue
-
-    backfill_name="$(basename "$backfill")"
-    if [[ ! "$backfill_name" =~ ^[0-9]{3}_[a-z0-9_]+\.sql$ ]]; then
-        echo "Invalid ClickHouse backfill name: $backfill_name" >&2
-        exit 1
-    fi
-
-    backfill_snapshot="$(mktemp "${TMPDIR:-/tmp}/apdl-clickhouse-backfill.XXXXXX.sql")"
-    cp "$backfill" "$backfill_snapshot"
-    if command -v sha256sum >/dev/null 2>&1; then
-        backfill_checksum="$(sha256sum "$backfill_snapshot" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-        backfill_checksum="$(shasum -a 256 "$backfill_snapshot" | awk '{print $1}')"
-    else
-        echo "A SHA-256 utility is required for ClickHouse backfills" >&2
-        exit 1
-    fi
-
-    recorded_checksum="$(docker exec "$container_id" clickhouse-client \
-        --user "$CLICKHOUSE_USER" \
-        --password "$CLICKHOUSE_PASSWORD" \
-        --database "$CLICKHOUSE_DB" \
-        --format TSVRaw \
-        --query "
-            SELECT multiIf(
-                count() = 0,
-                '',
-                uniqExact(checksum) = 1,
-                toString(any(checksum)),
-                '__multiple_checksums__'
-            )
-            FROM apdl_schema_backfills FINAL
-            WHERE name = '$backfill_name'
-        ")"
-
-    if [ -n "$recorded_checksum" ]; then
-        if [ "$recorded_checksum" != "$backfill_checksum" ]; then
-            echo "ClickHouse backfill checksum drift: $backfill_name" >&2
-            exit 1
-        fi
-        echo "  Already applied $backfill_name"
-        rm -f "$backfill_snapshot"
-        backfill_snapshot=""
-        continue
-    fi
-
-    echo "  Backfilling $backfill_name"
-    docker exec -i "$container_id" clickhouse-client \
-        --user "$CLICKHOUSE_USER" \
-        --password "$CLICKHOUSE_PASSWORD" \
-        --database "$CLICKHOUSE_DB" \
-        --multiquery < "$backfill_snapshot"
-    docker exec "$container_id" clickhouse-client \
-        --user "$CLICKHOUSE_USER" \
-        --password "$CLICKHOUSE_PASSWORD" \
-        --database "$CLICKHOUSE_DB" \
-        --query "
-            INSERT INTO apdl_schema_backfills
-                (name, checksum, completed_at)
-            VALUES ('$backfill_name', '$backfill_checksum', now64(3))
-        " >/dev/null
-    rm -f "$backfill_snapshot"
-    backfill_snapshot=""
-done
-
-trap - EXIT INT TERM
-cleanup_backfill
 
 echo "==> ClickHouse initialization complete"

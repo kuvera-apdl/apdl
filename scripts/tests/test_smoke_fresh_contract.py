@@ -16,7 +16,11 @@ class FreshSmokeContractTests(unittest.TestCase):
         self.assertIn('if [ "$SMOKE_SUITE" = "core" ]', script)
         self.assertEqual(script.count('scripts/smoke_core.py"'), 1)
         self.assertEqual(script.count('scripts/smoke_experiment_analysis.py"'), 1)
-        self.assertIn("--clickhouse-cleanup-url", script)
+        experiment_smoke = (
+            ROOT / "scripts" / "smoke_experiment_analysis.py"
+        ).read_text()
+        self.assertNotIn("ALTER TABLE", experiment_smoke)
+        self.assertNotIn("mutations_sync", experiment_smoke)
         self.assertIn("smoke-fresh:\n\t@bash scripts/smoke_fresh_install.sh core", makefile)
         self.assertIn(
             "smoke-experiment-fresh:\n"

@@ -21,7 +21,11 @@ CLICKHOUSE_MIGRATION_ENGINE = (
 
 
 def test_live_writer_and_query_use_the_events_table_only():
-    assert '"INSERT INTO events ("' in WRITER
+    assert 'f"INSERT INTO events (' in WRITER
+    assert 'EVENT_EXTERNAL_TABLE_NAME = "apdl_runtime_input"' in WRITER
+    assert 'f"FROM {EVENT_EXTERNAL_TABLE_NAME} "' in WRITER
+    assert "external_tables=[" in WRITER
+    assert "authority = 'runtime-writes'" in WRITER
     assert "events_v2" not in WRITER
     assert "FROM events AS" in QUERY_SOURCES
     assert "events_v2" not in QUERY_SOURCES

@@ -6,14 +6,13 @@ test: Config creates and projects the experiment, Ingestion accepts canonical
 events, the Redis/ClickHouse pipeline materializes them, and Query delegates
 the caller credential back to Config before executing its production SQL.
 
-The ClickHouse HTTP cleanup boundary is required: every run removes its
-immutable event and exposure rows after Config archives the unique experiment.
+The supported runner uses an isolated Compose project with disposable volumes,
+so immutable ClickHouse rows are removed by project teardown after every run.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import re
@@ -25,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
@@ -47,6 +46,8 @@ class Identity:
 
     def envelope(self) -> dict[str, str]:
         return {self.field: self.value}
+
+
 
 
 def _iso_milliseconds(value: datetime) -> str:
@@ -516,78 +517,6 @@ def _assert_analysis(
         )
 
 
-def _clickhouse_request(
-    base_url: str,
-    query: str,
-    parameters: dict[str, str],
-    *,
-    user: str,
-    password: str,
-    timeout: float,
-) -> None:
-    parts = urlsplit(base_url)
-    existing = dict(
-        item.split("=", 1) if "=" in item else (item, "")
-        for item in parts.query.split("&")
-        if item
-    )
-    existing.update({"database": "apdl", "mutations_sync": "2"})
-    existing.update({f"param_{key}": value for key, value in parameters.items()})
-    url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(existing), ""))
-    headers = {"Content-Type": "text/plain; charset=utf-8"}
-    if user or password:
-        token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-        headers["Authorization"] = f"Basic {token}"
-    request = Request(url, data=query.encode("utf-8"), headers=headers, method="POST")
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            body = response.read()
-            if response.status != 200:
-                raise SmokeFailure(
-                    f"ClickHouse cleanup returned {response.status}: "
-                    f"{body.decode('utf-8', errors='replace')[:500]}"
-                )
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
-        raise SmokeFailure(f"ClickHouse cleanup returned {exc.code}: {body}") from exc
-    except URLError as exc:
-        raise SmokeFailure(f"ClickHouse cleanup failed: {exc.reason}") from exc
-
-
-def _cleanup_clickhouse(
-    base_url: str,
-    *,
-    project_id: str,
-    flag_key: str,
-    message_prefix: str,
-    user: str,
-    password: str,
-    timeout: float,
-) -> None:
-    _clickhouse_request(
-        base_url,
-        (
-            "ALTER TABLE feature_flag_exposures DELETE WHERE "
-            "project_id = {project_id:String} AND flag_key = {flag_key:String}"
-        ),
-        {"project_id": project_id, "flag_key": flag_key},
-        user=user,
-        password=password,
-        timeout=timeout,
-    )
-    _clickhouse_request(
-        base_url,
-        (
-            "ALTER TABLE events DELETE WHERE project_id = {project_id:String} "
-            "AND startsWith(message_id, {message_prefix:String})"
-        ),
-        {"project_id": project_id, "message_prefix": message_prefix},
-        user=user,
-        password=password,
-        timeout=timeout,
-    )
-
-
 def _run(args: argparse.Namespace) -> None:
     match = CONFIDENTIAL_KEY.fullmatch(args.api_key or "")
     if match is None:
@@ -600,7 +529,6 @@ def _run(args: argparse.Namespace) -> None:
     run_id = uuid.uuid4().hex[:12]
     experiment_key = f"smoke_analysis_{run_id}"
     flag_key = f"smoke_flag_{run_id}"
-    message_prefix = f"smoke_{run_id}_"
     now = datetime.now(timezone.utc).replace(microsecond=0)
     start = now - timedelta(minutes=10)
     end = now + timedelta(seconds=10)
@@ -824,20 +752,6 @@ def _run(args: argparse.Namespace) -> None:
             except Exception as exc:
                 cleanup_failures.append(f"Config cleanup: {exc}")
 
-        try:
-            _cleanup_clickhouse(
-                args.clickhouse_cleanup_url,
-                project_id=project_id,
-                flag_key=flag_key,
-                message_prefix=message_prefix,
-                user=args.clickhouse_user,
-                password=args.clickhouse_password,
-                timeout=args.request_timeout,
-            )
-            print("  ok  ClickHouse removed the smoke event rows")
-        except Exception as exc:
-            cleanup_failures.append(f"ClickHouse cleanup: {exc}")
-
     if cleanup_failures:
         cleanup_message = "; ".join(cleanup_failures)
         if primary_failure is not None:
@@ -870,21 +784,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout", type=float, default=10.0)
     parser.add_argument("--pipeline-timeout", type=float, default=45.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)
-    parser.add_argument(
-        "--clickhouse-cleanup-url",
-        default=os.environ.get(
-            "APDL_SMOKE_CLICKHOUSE_HTTP_URL", "http://localhost:8123"
-        ),
-        help="Required ClickHouse HTTP URL used to delete immutable smoke rows",
-    )
-    parser.add_argument(
-        "--clickhouse-user",
-        default=os.environ.get("CLICKHOUSE_USER", "apdl"),
-    )
-    parser.add_argument(
-        "--clickhouse-password",
-        default=os.environ.get("CLICKHOUSE_PASSWORD", "apdl_dev"),
-    )
     return parser
 
 
@@ -894,10 +793,9 @@ def main() -> int:
         args.request_timeout <= 0
         or args.pipeline_timeout <= 0
         or args.poll_interval <= 0
-        or not args.clickhouse_cleanup_url
     ):
         print(
-            "Smoke failed: timeout values must be positive and ClickHouse cleanup URL is required",
+            "Smoke failed: timeout values must be positive",
             file=sys.stderr,
         )
         return 2
