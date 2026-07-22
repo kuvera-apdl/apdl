@@ -35,7 +35,7 @@ const COMMON_RESULT = {
     { variant: 'green', sample_size: 100, conversions: 15, conversion_rate: 0.15 },
   ],
   crossover_actors: 4,
-  unknown_variant_actors: 2,
+  unknown_variant_actors: 0,
   identity_conflict_actors: 0,
   identity_quality: 'unambiguous',
   data_completeness: 'not_verified',
@@ -185,5 +185,29 @@ describe('ExperimentResultsTab', () => {
     expect(screen.getByText(/underpowered variants/i)).toHaveTextContent('blue')
     expect(screen.queryByText('All treatment comparisons')).not.toBeInTheDocument()
     expect(screen.queryByText('Keep collecting data')).not.toBeInTheDocument()
+  })
+
+  test('renders unknown variant exposures as an explicit non-final state', async () => {
+    server.use(
+      http.get('*/api/projects/demo/query/v1/query/experiment/:key', () =>
+        HttpResponse.json({
+          analysis_status: 'non_final',
+          ...COMMON_RESULT,
+          unknown_variant_actors: 2,
+          reason: 'unknown_variant_exposures',
+          underpowered_variants: [],
+        }),
+      ),
+    )
+
+    renderResults()
+
+    expect(
+      await screen.findByText(
+        'Non-final analysis — Unknown experiment variants were exposed',
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/unknown-variant actors/i).parentElement).toHaveTextContent('2')
+    expect(screen.queryByText('All treatment comparisons')).not.toBeInTheDocument()
   })
 })

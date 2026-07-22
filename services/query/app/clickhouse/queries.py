@@ -514,7 +514,8 @@ WITH
             actor_id,
             argMin(variant, tuple(first_exposure, message_id)) AS assigned_variant,
             min(first_exposure) AS assigned_at,
-            uniqExact(variant) > 1 AS crossed_over
+            uniqExact(variant) > 1 AS crossed_over,
+            countIf(variant NOT IN %(declared_variants)s) > 0 AS has_unknown_variant
         FROM raw_exposures
         GROUP BY actor_id
     ),
@@ -549,6 +550,7 @@ WITH
             a.actor_id,
             a.assigned_variant,
             a.crossed_over,
+            a.has_unknown_variant,
             countIf(
                 m.timestamp >= a.assigned_at
                 AND m.timestamp < analysis_end
@@ -559,6 +561,7 @@ WITH
             a.actor_id,
             a.assigned_variant,
             a.crossed_over,
+            a.has_unknown_variant,
             a.assigned_at
     )
 SELECT
@@ -566,6 +569,7 @@ SELECT
     count() AS sample_size,
     countIf(converted) AS conversions,
     countIf(crossed_over) AS crossover_actors,
+    countIf(has_unknown_variant) AS unknown_variant_actors,
     identity_quality.identity_conflict_actors AS identity_conflict_actors
 FROM actor_outcomes
 CROSS JOIN identity_quality

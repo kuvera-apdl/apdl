@@ -403,14 +403,20 @@ def _assert_analysis(
             "analysis_status",
             "data_completeness",
             "deployment_readiness",
-            "inference_method",
-            "interval_method",
-            "correction",
-            "comparisons",
+            "reason",
+            "underpowered_variants",
         },
         "Query experiment analysis",
     )
-    _assert_equal(result["analysis_status"], "decision_snapshot", "analysis status")
+    _assert_equal(
+        result["analysis_status"], expected["analysis_status"], "analysis status"
+    )
+    _assert_equal(result["reason"], expected["reason"], "non-final reason")
+    _assert_equal(
+        result["underpowered_variants"],
+        expected["underpowered_variants"],
+        "underpowered variants",
+    )
     _assert_equal(result["experiment_key"], experiment_key, "analysis experiment key")
     _assert_equal(result["flag_key"], flag_key, "analysis flag key")
     _assert_equal(result["experiment_status"], "completed", "analysis experiment status")
@@ -459,62 +465,6 @@ def _assert_analysis(
     _assert_equal(result["identity_quality"], "unambiguous", "identity quality")
     _assert_equal(result["data_completeness"], "not_verified", "data completeness")
     _assert_equal(result["deployment_readiness"], "not_assessed", "deployment readiness")
-    _assert_equal(result["inference_method"], "fisher_exact_two_sided", "inference method")
-    _assert_equal(result["interval_method"], "newcombe_wilson", "interval method")
-    _assert_equal(result["correction"], "bonferroni", "multiple-test correction")
-
-    comparisons = result["comparisons"]
-    treatment_order = [
-        variant
-        for variant in contract["variants"]
-        if variant != contract["control_variant"]
-    ]
-    _assert_equal(
-        [comparison["treatment_variant"] for comparison in comparisons],
-        treatment_order,
-        "comparison order",
-    )
-    for comparison in comparisons:
-        _assert_keys(
-            comparison,
-            {
-                "control_variant",
-                "treatment_variant",
-                "control_rate",
-                "treatment_rate",
-                "rate_difference",
-                "confidence_interval",
-                "raw_p_value",
-                "adjusted_p_value",
-                "is_statistically_significant",
-            },
-            f"comparison {comparison.get('treatment_variant')}",
-        )
-        _assert_equal(
-            comparison["control_variant"], contract["control_variant"], "comparison control"
-        )
-        _assert_equal(comparison["control_rate"], 0.0, "comparison control rate")
-        _assert_equal(comparison["treatment_rate"], 0.0, "comparison treatment rate")
-        _assert_equal(comparison["rate_difference"], 0.0, "comparison rate difference")
-        lower, upper = comparison["confidence_interval"]
-        if not lower < 0.0 < upper:
-            raise SmokeFailure(
-                "all-zero Newcombe/Wilson interval must be finite and span zero: "
-                f"{comparison['confidence_interval']!r}"
-            )
-        _assert_equal(
-            comparison["raw_p_value"], expected["raw_p_value"], "raw p-value"
-        )
-        _assert_equal(
-            comparison["adjusted_p_value"],
-            expected["adjusted_p_value"],
-            "adjusted p-value",
-        )
-        _assert_equal(
-            comparison["is_statistically_significant"],
-            False,
-            "significance verdict",
-        )
 
 
 def _run(args: argparse.Namespace) -> None:
@@ -720,8 +670,8 @@ def _run(args: argparse.Namespace) -> None:
         )
         print(
             "  ok  first assignment, namespaced identities, non-first control, "
-            "multi-treatment, unknown arms, all-zero statistics, and millisecond "
-            "half-open boundaries"
+            "multi-treatment, unknown arms fail closed, and millisecond half-open "
+            "boundaries"
         )
     except Exception as exc:  # preserve the primary failure through cleanup
         primary_failure = exc

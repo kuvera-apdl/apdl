@@ -616,6 +616,7 @@ class _ExperimentAnalysisBase(_FiniteExperimentModel):
 
 class ExperimentAnalysisDecisionSnapshot(_ExperimentAnalysisBase):
     analysis_status: Literal["decision_snapshot"] = "decision_snapshot"
+    unknown_variant_actors: Literal[0] = 0
     inference_method: Literal["fisher_exact_two_sided"] = "fisher_exact_two_sided"
     interval_method: Literal["newcombe_wilson"] = "newcombe_wilson"
     correction: Literal["bonferroni"] = "bonferroni"
@@ -634,6 +635,7 @@ class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
         "underpowered_arms",
         "non_finite_statistics",
         "identity_alias_conflicts",
+        "unknown_variant_exposures",
     ]
     underpowered_variants: list[str]
 

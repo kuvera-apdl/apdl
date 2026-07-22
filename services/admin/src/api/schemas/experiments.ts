@@ -195,6 +195,7 @@ export const experimentAnalysisDecisionSnapshotSchema = z
   .object({
     analysis_status: z.literal('decision_snapshot'),
     ...experimentAnalysisBaseShape,
+    unknown_variant_actors: z.literal(0),
     inference_method: z.literal('fisher_exact_two_sided'),
     interval_method: z.literal('newcombe_wilson'),
     correction: z.literal('bonferroni'),
@@ -216,6 +217,7 @@ export const experimentAnalysisNonFinalSchema = z
       'underpowered_arms',
       'non_finite_statistics',
       'identity_alias_conflicts',
+      'unknown_variant_exposures',
     ]),
     underpowered_variants: z.array(z.string().min(1)),
   })

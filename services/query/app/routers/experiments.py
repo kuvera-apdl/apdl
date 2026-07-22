@@ -106,13 +106,14 @@ def _aggregate_arms(
             row.get("sample_size"),
             row.get("conversions"),
             row.get("crossover_actors"),
+            row.get("unknown_variant_actors"),
         )
         if any(type(value) is not int for value in values):
             raise HTTPException(
                 status_code=503,
                 detail="ClickHouse returned invalid experiment aggregates",
             )
-        sample_size, conversions, crossovers = values
+        sample_size, conversions, crossovers, row_unknown_variants = values
         row_identity_conflicts = row.get("identity_conflict_actors")
         if type(row_identity_conflicts) is not int or row_identity_conflicts < 0:
             raise HTTPException(
@@ -132,6 +133,8 @@ def _aggregate_arms(
             or conversions > sample_size
             or crossovers < 0
             or crossovers > sample_size
+            or row_unknown_variants < 0
+            or row_unknown_variants > sample_size
         ):
             raise HTTPException(
                 status_code=503,
@@ -139,8 +142,8 @@ def _aggregate_arms(
             )
 
         crossover_actors += crossovers
+        unknown_variant_actors += row_unknown_variants
         if variant not in declared:
-            unknown_variant_actors += sample_size
             continue
         aggregates[variant] = (sample_size, conversions)
 
@@ -362,6 +365,7 @@ async def experiment_results(
             "project_id": pid,
             "flag_key": metadata.flag_key,
             "metric_event": metadata.metric_event,
+            "declared_variants": tuple(metadata.variants),
             "start_ms": _datetime64_boundary_milliseconds(metadata.start_date),
             "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
         },
@@ -389,6 +393,12 @@ async def experiment_results(
         for arm in arms
         if arm.sample_size < required_sample_size
     ]
+    if unknown_variant_actors:
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="unknown_variant_exposures",
+            underpowered_variants=underpowered,
+        )
     if identity_conflict_actors:
         return ExperimentAnalysisNonFinal(
             **common,

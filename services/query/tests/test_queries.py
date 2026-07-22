@@ -343,6 +343,8 @@ class TestQueryBuilders:
         assert "exposure.flag_key = %(flag_key)s" in sql
         assert "argMin(variant, tuple(first_exposure, message_id))" in sql
         assert "uniqExact(variant) > 1 AS crossed_over" in sql
+        assert "variant NOT IN %(declared_variants)s" in sql
+        assert "countIf(has_unknown_variant) AS unknown_variant_actors" in sql
         assert "LEFT JOIN metric_events" in sql
         assert "countIf(converted) AS conversions" in sql
         assert "INNER JOIN" not in sql

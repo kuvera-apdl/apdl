@@ -26,6 +26,7 @@
       "sample_size": 20,
       "conversions": 0,
       "crossover_actors": 1,
+      "unknown_variant_actors": 0,
       "identity_conflict_actors": 0
     },
     {
@@ -33,6 +34,7 @@
       "sample_size": 20,
       "conversions": 0,
       "crossover_actors": 0,
+      "unknown_variant_actors": 0,
       "identity_conflict_actors": 0
     },
     {
@@ -40,6 +42,7 @@
       "sample_size": 20,
       "conversions": 0,
       "crossover_actors": 0,
+      "unknown_variant_actors": 0,
       "identity_conflict_actors": 0
     },
     {
@@ -47,18 +50,18 @@
       "sample_size": 2,
       "conversions": 1,
       "crossover_actors": 1,
+      "unknown_variant_actors": 2,
       "identity_conflict_actors": 0
     }
   ],
   "expected": {
-    "analysis_status": "decision_snapshot",
+    "analysis_status": "non_final",
+    "reason": "unknown_variant_exposures",
+    "underpowered_variants": [],
     "arm_order": ["blue", "baseline", "green"],
-    "comparison_order": ["blue", "green"],
     "crossover_actors": 2,
     "identity_conflict_actors": 0,
-    "unknown_variant_actors": 2,
-    "raw_p_value": 1.0,
-    "adjusted_p_value": 1.0
+    "unknown_variant_actors": 2
   },
   "runtime_smoke": {
     "actors_per_declared_arm": 20,
@@ -79,6 +82,11 @@
         "first_variant": "retired",
         "actor_index": 0,
         "later_variant": "blue"
+      },
+      {
+        "first_variant": "baseline",
+        "actor_index": 2,
+        "later_variant": "retired"
       }
     ],
     "boundary_cases": {
@@ -91,7 +99,10 @@
       "actor_index": 1
     },
     "expected": {
-      "accepted_events": 71,
+      "analysis_status": "non_final",
+      "reason": "unknown_variant_exposures",
+      "underpowered_variants": [],
+      "accepted_events": 72,
       "arm_sample_sizes": {
         "blue": 20,
         "baseline": 20,
@@ -102,11 +113,9 @@
         "baseline": 0,
         "green": 0
       },
-      "crossover_actors": 2,
+      "crossover_actors": 3,
       "identity_conflict_actors": 0,
-      "unknown_variant_actors": 3,
-      "raw_p_value": 1.0,
-      "adjusted_p_value": 1.0
+      "unknown_variant_actors": 4
     }
   }
 }

@@ -129,10 +129,12 @@ non-converters, reports crossover and unknown-variant actors, and compares
 every treatment with the declared control. Two-sided Fisher exact tests are
 used for every treatment, p-values are Bonferroni-adjusted, and effect
 intervals use simultaneous Newcombe/Wilson bounds. Running, stopped,
-underpowered, identity-conflicted, pre-horizon, and pre-settlement results are
-strict `non_final` responses with no comparisons. A completed experiment whose
-horizon, settlement hold, and arm targets have elapsed returns a
-`decision_snapshot`, never a winner verdict.
+underpowered, identity-conflicted, unknown-variant, pre-horizon, and
+pre-settlement results are strict `non_final` responses with no comparisons.
+Unknown assigned variants use the machine-readable reason
+`unknown_variant_exposures`. A completed experiment whose horizon, settlement
+hold, and arm targets have elapsed returns a `decision_snapshot`, never a
+winner verdict.
 
 The pipeline has no durable processed-through watermark. Therefore every
 snapshot explicitly reports `data_completeness: not_verified`, and late

@@ -61,6 +61,10 @@ const NON_FINAL_COPY: Record<
     title: 'Identity aliases are ambiguous',
     description: 'Conflicting tenant-bound aliases prevent an authoritative actor-level snapshot.',
   },
+  unknown_variant_exposures: {
+    title: 'Unknown experiment variants were exposed',
+    description: 'Exposure data contains variants outside the authoritative experiment definition.',
+  },
 }
 
 function formatRate(value: number): string {
