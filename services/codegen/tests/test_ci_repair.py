@@ -17,6 +17,7 @@ from app.editor.prompts import (
     serialized_prompt_bytes,
 )
 from app.evaluations.models import RiskLevel
+from app.github.publisher import UnsafeCandidateTreeError
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
 from app.models.observations import (
@@ -367,6 +368,60 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
         by_sequence[2].prompt_evidence[0].evidence_id
     ]
     assert by_sequence[1].attempt_id == by_sequence[2].attempt_id
+
+
+@pytest.mark.asyncio
+async def test_binary_candidate_rejection_precedes_repair_write_token_mint(
+    monkeypatch,
+):
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
+    monkeypatch.setenv("CODEGEN_CI_REPAIR_BUDGET_SECONDS", "3600")
+    pool, failed = await _seed_failed()
+    editor = FakeEditor(
+        EditResult(
+            success=True,
+            diff_stat={"files": 1, "additions": 0, "deletions": 0},
+            changed_paths=["assets/payload.png"],
+            diff_text="Binary files /dev/null and assets/payload.png differ",
+            head_sha="head-repaired",
+            base_sha=failed.head_sha,
+            candidate_tree_sha="b" * 40,
+            patch_base64=base64.b64encode(b"binary candidate patch").decode(),
+        )
+    )
+    publisher = FakeBranchPublisher()
+    publisher.prepare_error = UnsafeCandidateTreeError(
+        "candidate changed blob contains possible github token secret material"
+    )
+    write_mints: list[str] = []
+
+    @asynccontextmanager
+    async def forbidden_write_mint(changeset_id: str):
+        write_mints.append(changeset_id)
+        raise AssertionError("unsafe repair must not mint a write token")
+        yield "unreachable"
+
+    await repair_failed_ci(
+        pool,
+        failed,
+        editor=editor,
+        mint_read_token=_mint,
+        mint_write_token=forbidden_write_mint,
+        branch_publisher=publisher,
+        publication_gate=allowing_publication_gate(),
+    )
+
+    final = await changeset_store.get_changeset(pool, "cs-repair")
+    attempts = await list_ci_remediation_attempts(pool, "cs-repair")
+    assert final.head_sha == failed.head_sha
+    assert final.ci_remediation_status is CIRemediationStatus.exhausted
+    assert write_mints == []
+    assert len(publisher.prepare_calls) == 1
+    assert publisher.push_calls == []
+    assert any(
+        "github token secret material" in (attempt.error or "")
+        for attempt in attempts
+    )
 
 
 @pytest.mark.asyncio

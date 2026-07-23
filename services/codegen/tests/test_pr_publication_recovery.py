@@ -15,7 +15,7 @@ from app.github.pulls import (
     PullRequestDiscoveryError,
     PullRequestIdentityError,
 )
-from app.github.publisher import PublishedBranch
+from app.github.publisher import PublishedBranch, UnsafeCandidateTreeError
 from app.jobs.pr_publication import resume_pull_request_publication
 from app.models.changeset import ChangesetStatus
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
@@ -110,6 +110,48 @@ async def _seed(changeset_id: str) -> tuple[FakePool, FakeBranchPublisher]:
     pool.add_changeset(changeset_id, "demo", status="pushing")
     await publication_store.record_intent(pool, _intent(changeset_id))
     return pool, FakeBranchPublisher()
+
+
+@pytest.mark.asyncio
+async def test_binary_candidate_rejection_precedes_all_write_token_mints():
+    pool, publisher = await _seed("cs_binary_secret_rejected")
+    publisher.prepare_error = UnsafeCandidateTreeError(
+        "candidate changed blob contains possible github token secret material"
+    )
+    write_mints: list[str] = []
+
+    @asynccontextmanager
+    async def forbidden_write_mint(changeset_id: str):
+        write_mints.append(changeset_id)
+        raise AssertionError("unsafe candidate must not mint a write token")
+        yield "unreachable"
+
+    async def forbidden_github_call(**_kwargs):
+        raise AssertionError("unsafe candidate must not start PR publication")
+
+    completed = await resume_pull_request_publication(
+        pool,
+        "cs_binary_secret_rejected",
+        mint_read_token=_mint,
+        mint_write_token=forbidden_write_mint,
+        mint_pr_write_token=forbidden_write_mint,
+        branch_publisher=publisher,
+        open_pr=forbidden_github_call,
+        find_pr=forbidden_github_call,
+        close_pr=forbidden_github_call,
+    )
+
+    final = await changeset_store.get_changeset(pool, "cs_binary_secret_rejected")
+    events = await publication_store.list_events(pool, "cs_binary_secret_rejected")
+    manual = next(
+        event for event in events if isinstance(event, PublicationManualIntervention)
+    )
+    assert completed is True
+    assert final.status is ChangesetStatus.error
+    assert write_mints == []
+    assert len(publisher.prepare_calls) == 1
+    assert publisher.push_calls == []
+    assert "github token secret material" in manual.reason
 
 
 def _cleanup_request(

@@ -14,10 +14,13 @@ class FakeBranchPublisher:
         self.push_calls: list[tuple[PreparedBranch, str]] = []
         self.recover_calls: list[dict] = []
         self.published: dict[str, PublishedBranch] = {}
+        self.prepare_error: Exception | None = None
 
     @asynccontextmanager
     async def prepare(self, **kwargs):
         self.prepare_calls.append(dict(kwargs))
+        if self.prepare_error is not None:
+            raise self.prepare_error
         prepared = PreparedBranch(
             repository=kwargs["repository"],
             branch=kwargs["branch"],

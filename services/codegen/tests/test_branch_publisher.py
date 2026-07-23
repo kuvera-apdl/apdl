@@ -29,7 +29,13 @@ def _git(path: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     ).stdout
 
 
-def _candidate(tmp_path: Path, *, symlink: bool = False) -> dict[str, str]:
+def _candidate(
+    tmp_path: Path,
+    *,
+    symlink: bool = False,
+    changed_files: dict[str, bytes] | None = None,
+) -> dict[str, str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     source = tmp_path / "source"
     remote = tmp_path / "remote.git"
     source.mkdir()
@@ -48,9 +54,17 @@ def _candidate(tmp_path: Path, *, symlink: bool = False) -> dict[str, str]:
         check=True,
     )
 
+    if symlink and changed_files is not None:
+        raise ValueError("symlink and changed_files are mutually exclusive")
     if symlink:
         os.symlink("/etc/passwd", source / "outside")
         _git(source, "add", "outside")
+    elif changed_files is not None:
+        for relative_path, content in changed_files.items():
+            target = source / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        _git(source, "add", "--", *changed_files)
     else:
         (source / "README.md").write_text("base\ncandidate\n")
         _git(source, "add", "README.md")
@@ -252,6 +266,187 @@ async def test_prepare_rejects_candidate_symlinks(monkeypatch, tmp_path):
             read_token="read-token",
         ):
             pytest.fail("symlink candidate unexpectedly prepared")
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_secret_embedded_in_permitted_binary_blob(
+    monkeypatch,
+    tmp_path,
+):
+    token = b"ghp_" + (b"A" * 32)
+    candidate = _candidate(
+        tmp_path,
+        changed_files={
+            "assets/payload\nwith-tab\t.png": (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00binary-metadata:"
+                + token
+                + b"\x00"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: candidate["remote"],
+    )
+
+    with pytest.raises(
+        BranchPublicationError,
+        match="possible github token secret material",
+    ):
+        async with GitBranchPublisher().prepare(
+            repository="owner/repo",
+            branch="apdl/change-cs_123",
+            base_branch="main",
+            expected_base_sha=candidate["base_sha"],
+            expected_remote_sha=None,
+            candidate_head_sha=candidate["head_sha"],
+            candidate_tree_sha=candidate["tree_sha"],
+            patch_base64=candidate["patch_base64"],
+            commit_title="Apply the candidate",
+            read_token="read-token",
+        ):
+            pytest.fail("secret-bearing binary candidate unexpectedly prepared")
+
+    remote = Path(candidate["remote"])
+    unpublished = subprocess.run(
+        [
+            "git",
+            "-C",
+            remote.as_posix(),
+            "show-ref",
+            "--verify",
+            "refs/heads/apdl/change-cs_123",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    assert unpublished.returncode != 0
+
+
+@pytest.mark.asyncio
+async def test_prepare_accepts_bounded_secret_free_permitted_binary(
+    monkeypatch,
+    tmp_path,
+):
+    candidate = _candidate(
+        tmp_path,
+        changed_files={
+            "assets/icon.png": (
+                b"\x89PNG\r\n\x1a\n\x00bounded-secret-free-image-data\x00"
+            )
+        },
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: candidate["remote"],
+    )
+
+    async with GitBranchPublisher().prepare(
+        repository="owner/repo",
+        branch="apdl/change-cs_123",
+        base_branch="main",
+        expected_base_sha=candidate["base_sha"],
+        expected_remote_sha=None,
+        candidate_head_sha=candidate["head_sha"],
+        candidate_tree_sha=candidate["tree_sha"],
+        patch_base64=candidate["patch_base64"],
+        commit_title="Apply the candidate",
+        read_token="read-token",
+    ) as prepared:
+        assert prepared.tree_sha == candidate["tree_sha"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_unsupported_binary_type(monkeypatch, tmp_path):
+    candidate = _candidate(
+        tmp_path,
+        changed_files={"assets/payload.bin": b"\x00unclassified-binary\xff"},
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: candidate["remote"],
+    )
+
+    with pytest.raises(BranchPublicationError, match="unsupported binary type"):
+        async with GitBranchPublisher().prepare(
+            repository="owner/repo",
+            branch="apdl/change-cs_123",
+            base_branch="main",
+            expected_base_sha=candidate["base_sha"],
+            expected_remote_sha=None,
+            candidate_head_sha=candidate["head_sha"],
+            candidate_tree_sha=candidate["tree_sha"],
+            patch_base64=candidate["patch_base64"],
+            commit_title="Apply the candidate",
+            read_token="read-token",
+        ):
+            pytest.fail("unsupported binary candidate unexpectedly prepared")
+
+
+@pytest.mark.asyncio
+async def test_prepare_enforces_per_blob_and_aggregate_scan_limits(
+    monkeypatch,
+    tmp_path,
+):
+    per_blob_candidate = _candidate(
+        tmp_path / "per-blob",
+        changed_files={"large.txt": b"x" * 17},
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: per_blob_candidate["remote"],
+    )
+    monkeypatch.setattr(publisher_module, "_MAX_CHANGED_BLOB_BYTES", 16)
+
+    with pytest.raises(BranchPublicationError, match="16-byte safety limit"):
+        async with GitBranchPublisher().prepare(
+            repository="owner/repo",
+            branch="apdl/change-cs_123",
+            base_branch="main",
+            expected_base_sha=per_blob_candidate["base_sha"],
+            expected_remote_sha=None,
+            candidate_head_sha=per_blob_candidate["head_sha"],
+            candidate_tree_sha=per_blob_candidate["tree_sha"],
+            patch_base64=per_blob_candidate["patch_base64"],
+            commit_title="Apply the candidate",
+            read_token="read-token",
+        ):
+            pytest.fail("oversized candidate blob unexpectedly prepared")
+
+    aggregate_candidate = _candidate(
+        tmp_path / "aggregate",
+        changed_files={"first.txt": b"a" * 12, "second.txt": b"b" * 12},
+    )
+    monkeypatch.setattr(
+        publisher_module,
+        "_repository_url",
+        lambda _repository: aggregate_candidate["remote"],
+    )
+    monkeypatch.setattr(publisher_module, "_MAX_CHANGED_BLOB_BYTES", 16)
+    monkeypatch.setattr(publisher_module, "_MAX_CHANGED_BLOBS_BYTES", 20)
+
+    with pytest.raises(
+        BranchPublicationError,
+        match="20-byte aggregate safety limit",
+    ):
+        async with GitBranchPublisher().prepare(
+            repository="owner/repo",
+            branch="apdl/change-cs_123",
+            base_branch="main",
+            expected_base_sha=aggregate_candidate["base_sha"],
+            expected_remote_sha=None,
+            candidate_head_sha=aggregate_candidate["head_sha"],
+            candidate_tree_sha=aggregate_candidate["tree_sha"],
+            patch_base64=aggregate_candidate["patch_base64"],
+            commit_title="Apply the candidate",
+            read_token="read-token",
+        ):
+            pytest.fail("aggregate-oversized candidate unexpectedly prepared")
 
 
 def test_git_credentials_are_encoded_only_in_the_subprocess_environment():
