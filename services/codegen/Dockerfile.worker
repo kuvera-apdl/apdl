@@ -16,8 +16,9 @@
 #   * Docker --network none + a read-only attested proxy Unix socket; a sealed
 #     loopback relay preserves normal HTTP proxy clients without bridge access
 #   * direct public, APDL, private, link-local, metadata, and DNS egress probes
-# A read-only install token is consumed from stdin and never enters the container
-# environment. The controller owns reconstruction and push.
+# A strict, bounded task request and read-only install token are consumed in one
+# versioned stdin envelope and never enter process arguments or environment. The
+# controller owns reconstruction and push.
 # Repository-defined lint, test, hook, shell-suggestion, and browser commands are
 # disabled; GitHub CI remains the execution authority.
 ARG CODEGEN_REVISION

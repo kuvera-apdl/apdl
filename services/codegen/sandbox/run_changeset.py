@@ -12,11 +12,12 @@ Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
 on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
-Token custody: a short-lived read-only installation token arrives through a
-single JSON line on stdin, never process environment. We consume that pipe
-before cloning; ``AiderEditor`` uses the token only for the one-shot clone
-header. The worker never receives repository write authority; the sandbox also
-never receives the GitHub App private key, Postgres DSN, or internal token.
+Input custody: one strict, bounded ``codegen_worker_request@1`` JSON object
+arrives on stdin. Task text and the short-lived read-only installation token
+therefore never enter process arguments or environment. ``AiderEditor`` uses
+the token only for the one-shot clone header. The worker never receives
+repository write authority; the sandbox also never receives the GitHub App
+private key, Postgres DSN, or internal token.
 """
 
 from __future__ import annotations
@@ -29,77 +30,21 @@ import os
 import sys
 
 from app.editor.aider_editor import AiderEditor
-from app.editor.base import EditRequest, EditResult
-from app.inspection.preflight import RepositoryPreflightAttestation
-from app.requirements.models import RequirementLedger
-from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
-from app.safety.policy import EffectiveCodegenSafetyPolicy
-
-
-def _read_token() -> str:
-    try:
-        payload = json.loads(sys.stdin.readline())
-    except (json.JSONDecodeError, OSError) as exc:
-        raise ValueError("missing repository read credential") from exc
-    if not isinstance(payload, dict) or set(payload) != {"read_token"}:
-        raise ValueError("invalid repository read credential envelope")
-    token = payload["read_token"]
-    if not isinstance(token, str) or not token:
-        raise ValueError("missing repository read credential")
-    return token
-
-
-def _request_from_env(token: str) -> EditRequest:
-    """Build the EditRequest from the env the orchestrator passed via ``docker -e``."""
-    safety_policy = EffectiveCodegenSafetyPolicy.model_validate_json(
-        os.environ["CS_SAFETY_POLICY"]
-    )
-    expected_policy_sha256 = os.environ["CS_SAFETY_POLICY_SHA256"]
-    if safety_policy.canonical_digest() != expected_policy_sha256:
-        raise ValueError("effective safety policy digest does not match its payload")
-    request = EditRequest(
-        repo=os.environ["CS_REPO"],
-        project_scope=os.environ.get("CS_PROJECT_SCOPE", os.environ["CS_REPO"]),
-        base_branch=os.environ["CS_BASE"],
-        branch=os.environ["CS_BRANCH"],
-        token=token,
-        title=os.environ.get("CS_TITLE", ""),
-        spec=os.environ["CS_SPEC"],
-        constraints=json.loads(os.environ.get("CS_CONSTRAINTS", "[]")),
-        test_cmd=(os.environ.get("CS_TEST_CMD") or None),
-        safety_policy=safety_policy,
-        revert_sha=(os.environ.get("CS_REVERT_SHA") or None),
-        existing_branch=os.environ.get("CS_EXISTING_BRANCH") == "true",
-        expected_head_sha=(os.environ.get("CS_EXPECTED_HEAD_SHA") or None),
-        risk_level=os.environ.get("CS_RISK_LEVEL", "low"),
-        requirement_ledger=(
-            RequirementLedger.model_validate_json(os.environ["CS_REQUIREMENT_LEDGER"])
-            if os.environ.get("CS_REQUIREMENT_LEDGER")
-            else None
-        ),
-        runtime_acceptance_plan=(
-            RuntimeAcceptancePlan.model_validate_json(
-                os.environ["CS_RUNTIME_ACCEPTANCE_PLAN"]
-            )
-            if os.environ.get("CS_RUNTIME_ACCEPTANCE_PLAN")
-            else None
-        ),
-        repository_preflight=RepositoryPreflightAttestation.model_validate_json(
-            os.environ["CS_REPOSITORY_PREFLIGHT"]
-        ),
-        runtime_acceptance_policy=RuntimeAcceptancePolicy.model_validate_json(
-            os.environ.get("CS_RUNTIME_ACCEPTANCE_POLICY", "{}")
-        ),
-    )
-    return request
+from app.editor.base import EditResult
+from app.editor.worker_contract import (
+    CodegenWorkerRequestError,
+    read_codegen_worker_request,
+)
 
 
 def main() -> int:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stderr)
     try:
-        request = _request_from_env(_read_token())
-    except (KeyError, ValueError) as exc:
-        print(json.dumps({"success": False, "error": f"invalid sandbox input: {exc}"}))
+        request = read_codegen_worker_request(sys.stdin.buffer).to_edit_request()
+    except CodegenWorkerRequestError as exc:
+        print(
+            json.dumps({"success": False, "error": f"invalid sandbox input: {exc}"})
+        )
         return 1
 
     result: EditResult = asyncio.run(AiderEditor().implement(request))

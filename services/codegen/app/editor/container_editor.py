@@ -7,9 +7,10 @@ launches an ephemeral container from the hardened sandbox image
 after a separate provider-free inspection container attests the exact source
 tree. The untrusted repo code therefore never executes in
 the API container that holds the GitHub App key, the Postgres DSN, and the
-internal token. The read installation token is consumed from stdin rather than
-placed in either container's environment. Only the second container receives
-the model provider key. It returns a binary patch and Git object identities;
+internal token. The inspection credential and the editor's complete task
+request are consumed from bounded stdin contracts rather than process metadata.
+Only the second container receives the model provider key. It returns a binary
+patch and Git object identities;
 the controller reconstructs and publishes the approved tree with a separate
 just-in-time write credential.
 
@@ -62,6 +63,10 @@ from app.egress import (
 from app.editor.base import EditRequest, EditResult
 from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
+from app.editor.worker_contract import (
+    encode_codegen_worker_request,
+    validate_codegen_worker_request_source,
+)
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
@@ -250,6 +255,9 @@ class ContainerAiderEditor:
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
+            # Validate and bound all task-bearing input before even the
+            # provider-free inspection container is allowed to start.
+            validate_codegen_worker_request_source(request)
             run_id = uuid.uuid4().hex
             inspection_name = f"apdl-codegen-inspect-{run_id}"
             if self._proxy_environment:
@@ -263,7 +271,7 @@ class ContainerAiderEditor:
                 self._preflight_argv(request, container_name=inspection_name),
                 self._docker_control_env(),
                 container_name=inspection_name,
-                stdin_data=self._credential_envelope(request.token),
+                stdin_data=self._preflight_credential_envelope(request.token),
             )
             attestation = self._parse_preflight_result(rc, out, err, request)
             editor_request = replace(
@@ -279,11 +287,12 @@ class ContainerAiderEditor:
                     self._attest_egress_policy,
                     launch_id=container_name,
                 )
+            worker_input = encode_codegen_worker_request(editor_request)
             rc, out, err = await self._run_docker(
                 self._docker_argv(editor_request, container_name=container_name),
                 self._docker_env(editor_request),
                 container_name=container_name,
-                stdin_data=self._credential_envelope(request.token),
+                stdin_data=worker_input,
             )
             return self._parse_result(rc, out, err, editor_request)
         except Exception as exc:  # an attempt must never raise to the job runner
@@ -304,57 +313,16 @@ class ContainerAiderEditor:
         if request.repository_preflight is None:
             raise ValueError("sandbox editor requires repository preflight evidence")
         argv = self._sandbox_argv(container_name=container_name, role="editor")
-        # Non-secret task inputs — safe to pass as values.
+        # Task data is carried exclusively by the bounded stdin contract. This
+        # argv contains only sandbox/runtime configuration and provider-key
+        # names, never task text, repository authority, or tenant policy.
         argv += [
-            "-e", f"CS_REPO={request.repo}",
-            "-e", f"CS_PROJECT_SCOPE={request.project_scope or request.repo}",
-            "-e", f"CS_BASE={request.base_branch}",
-            "-e", f"CS_BRANCH={request.branch}",
-            "-e", f"CS_TITLE={request.title}",
-            "-e", f"CS_SPEC={request.spec}",
-            "-e", f"CS_RISK_LEVEL={request.risk_level}",
-            "-e", f"CS_CONSTRAINTS={json.dumps(request.constraints)}",
             "-e", f"CODEGEN_MODEL={self._model}",
             "-e", "HOME=/workspace/home",
             "-e", "TMPDIR=/workspace/tmp",
-            "-e",
-            "CS_REPOSITORY_PREFLIGHT="
-            + request.repository_preflight.model_dump_json(),
         ]
         for name, value in self._proxy_environment.items():
             argv += ["-e", f"{name}={value}"]
-        if request.test_cmd:
-            argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
-        argv += [
-            "-e",
-            "CS_SAFETY_POLICY="
-            + json.dumps(request.safety_policy.model_dump(mode="json")),
-            "-e",
-            f"CS_SAFETY_POLICY_SHA256={request.safety_policy.canonical_digest()}",
-        ]
-        if request.revert_sha:
-            argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
-        if request.existing_branch:
-            argv += ["-e", "CS_EXISTING_BRANCH=true"]
-        if request.expected_head_sha:
-            argv += ["-e", f"CS_EXPECTED_HEAD_SHA={request.expected_head_sha}"]
-        if request.requirement_ledger is not None:
-            argv += [
-                "-e",
-                "CS_REQUIREMENT_LEDGER="
-                + json.dumps(request.requirement_ledger.model_dump(mode="json")),
-            ]
-        if request.runtime_acceptance_plan is not None:
-            argv += [
-                "-e",
-                "CS_RUNTIME_ACCEPTANCE_PLAN="
-                + json.dumps(request.runtime_acceptance_plan.model_dump(mode="json")),
-            ]
-        argv += [
-            "-e",
-            "CS_RUNTIME_ACCEPTANCE_POLICY="
-            + json.dumps(request.runtime_acceptance_policy.model_dump(mode="json")),
-        ]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
@@ -456,7 +424,7 @@ class ContainerAiderEditor:
         return env
 
     @staticmethod
-    def _credential_envelope(token: str) -> bytes:
+    def _preflight_credential_envelope(token: str) -> bytes:
         return (json.dumps({"read_token": token}) + "\n").encode()
 
     @staticmethod

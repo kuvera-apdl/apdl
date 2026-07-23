@@ -15,6 +15,10 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.editor.environment import MODEL_PROVIDER_ENV
+from app.editor.worker_contract import (
+    decode_codegen_worker_request,
+    encode_codegen_worker_request,
+)
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling import RepoProfile
@@ -72,22 +76,32 @@ def test_docker_argv_names_container_for_forced_cleanup():
     assert argv[name_index + 1] == "apdl-codegen-test"
 
 
-def test_docker_argv_passes_nonsecret_inputs_as_values():
-    argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
-    assert "CS_REPO=acme/widgets" in argv
-    assert "CS_PROJECT_SCOPE=acme/widgets" in argv
-    assert "CS_BRANCH=apdl/x" in argv
-    assert "CS_TEST_CMD=python -m pytest -q" in argv
-    assert 'CS_CONSTRAINTS=["keep tests green"]' in argv
+def test_docker_argv_contains_no_task_request_values():
+    request = _req(
+        title="sentinel-title",
+        spec="sentinel task secret",
+        constraints=["sentinel-constraint"],
+        test_cmd="sentinel-test-command",
+    )
+    editor = ContainerAiderEditor()
+    argv = " ".join(editor._docker_argv(request))
+    environment = "\0".join(editor._docker_env(request).values())
+    for value in (
+        "acme/widgets",
+        "apdl/x",
+        "sentinel-title",
+        "sentinel task secret",
+        "sentinel-constraint",
+        "sentinel-test-command",
+        "ghs_secrettoken",
+    ):
+        assert value not in argv
+        assert value not in environment
+    assert "CS_" not in argv
     assert "HOME=/workspace/home" in argv
 
 
-def test_docker_argv_omits_test_cmd_when_unset():
-    argv = " ".join(ContainerAiderEditor()._docker_argv(_req(test_cmd=None)))
-    assert "CS_TEST_CMD" not in argv
-
-
-def test_docker_argv_passes_effective_safety_policy_and_revert_sha():
+def test_worker_envelope_carries_effective_safety_policy_and_revert_sha():
     safety_policy = resolve_effective_policy(
         TenantCodegenConnectionPolicy(
             gates=TenantCodegenGatesPolicy(max_files=5)
@@ -95,14 +109,12 @@ def test_docker_argv_passes_effective_safety_policy_and_revert_sha():
         PlatformCodegenSafetyPolicy(),
     )
     req = _req(safety_policy=safety_policy, revert_sha="cafebabe")
-    argv = " ".join(ContainerAiderEditor()._docker_argv(req))
-    assert (
-        "CS_SAFETY_POLICY="
-        + json.dumps(safety_policy.model_dump(mode="json"))
-    ) in argv
-    assert f"CS_SAFETY_POLICY_SHA256={safety_policy.canonical_digest()}" in argv
-    assert "CS_GATES_POLICY" not in argv
-    assert "CS_REVERT_SHA=cafebabe" in argv
+    envelope = decode_codegen_worker_request(
+        encode_codegen_worker_request(req)
+    )
+    assert envelope.safety_policy == safety_policy
+    assert envelope.safety_policy_sha256 == safety_policy.canonical_digest()
+    assert envelope.revert_sha == "cafebabe"
 
 
 def test_docker_argv_forwards_editor_config(monkeypatch):
@@ -480,6 +492,24 @@ async def test_implement_never_raises_on_docker_fault(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oversized_task_is_rejected_before_any_container_launch(monkeypatch):
+    editor = ContainerAiderEditor()
+    launched = False
+
+    async def run(*_args, **_kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("oversized input must not reach Docker")
+
+    monkeypatch.setattr(editor, "_run_docker", run)
+    result = await editor.implement(_req(spec="x" * (256 * 1024 + 1)))
+
+    assert result.success is False
+    assert "strict schema" in (result.error or "")
+    assert launched is False
+
+
+@pytest.mark.asyncio
 async def test_implement_reattests_egress_immediately_before_worker(monkeypatch):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
@@ -503,8 +533,8 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
 
     async def run(_argv, _env, *, container_name, stdin_data):
         assert container_name.startswith("apdl-codegen-")
-        assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
         if "app.inspection.preflight_cli" in _argv:
+            assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
             events.append("preflight")
             return (
                 0,
@@ -518,6 +548,7 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
                 ),
                 "",
             )
+        assert decode_codegen_worker_request(stdin_data).spec == "do the thing"
         events.append("editor")
         return 0, json.dumps({"success": True, "branch": "apdl/x"}), ""
 
@@ -894,7 +925,10 @@ async def test_implement_parses_a_successful_run(monkeypatch):
     assert container_names[1].startswith("apdl-codegen-edit-")
     assert container_names[0] != container_names[1]
     assert json.loads(launches[0][2]) == {"read_token": "ghs_secrettoken"}
-    assert json.loads(launches[1][2]) == {"read_token": "ghs_secrettoken"}
+    worker_request = decode_codegen_worker_request(launches[1][2])
+    assert worker_request.schema_version == "codegen_worker_request@1"
+    assert worker_request.read_token == "ghs_secrettoken"
+    assert worker_request.spec == "do the thing"
     assert "GH_TOKEN" not in launches[0][1]
     assert "GH_TOKEN" not in launches[1][1]
 
