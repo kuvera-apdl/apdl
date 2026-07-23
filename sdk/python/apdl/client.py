@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from copy import deepcopy
 from types import TracebackType
@@ -31,6 +32,20 @@ from .types import (
 
 logger = logging.getLogger("apdl")
 FEATURE_FLAG_ASSIGNMENT_REASONS = frozenset({"rule_match", "fallthrough"})
+MAX_SUCCESSFUL_EXPOSURE_KEYS = 10_000
+MAX_MISSING_FLAG_WARNINGS = 1_000
+
+
+def _remember_bounded_fifo_key(
+    keys: OrderedDict[str, None], key: str, limit: int
+) -> bool:
+    if key in keys:
+        return False
+    keys[key] = None
+    if len(keys) > limit:
+        keys.popitem(last=False)
+    return True
+
 
 # Server-side evaluation is per-request, so a config change can't carry a single
 # "new variant" — it signals "configs updated; re-evaluate against your context".
@@ -70,8 +85,8 @@ class APDLClient:
         self._evaluator = FlagEvaluator(self._flag_cache)
 
         self._variant_listeners: dict[str, set[VariantChangeCallback]] = {}
-        self._exposure_keys: set[str] = set()
-        self._missing_flag_warnings: set[str] = set()
+        self._exposure_keys: OrderedDict[str, None] = OrderedDict()
+        self._missing_flag_warnings: OrderedDict[str, None] = OrderedDict()
         self._state_lock = threading.Lock()
 
         # The server SDK has no real user sessions, but the ingestion contract
@@ -456,15 +471,22 @@ class APDLClient:
                     "APDL: feature flag exposure could not be enqueued: %s", exc
                 )
                 return
-            self._exposure_keys.add(dedupe_key)
+            _remember_bounded_fifo_key(
+                self._exposure_keys,
+                dedupe_key,
+                MAX_SUCCESSFUL_EXPOSURE_KEYS,
+            )
 
     def _warn_missing_flag(self, result: GateEvaluationResult) -> None:
         if result.reason != "not_found":
             return
         with self._state_lock:
-            if result.key in self._missing_flag_warnings:
+            if not _remember_bounded_fifo_key(
+                self._missing_flag_warnings,
+                result.key,
+                MAX_MISSING_FLAG_WARNINGS,
+            ):
                 return
-            self._missing_flag_warnings.add(result.key)
         logger.warning(
             "APDL: feature flag '%s' is missing or archived; returning None.", result.key
         )

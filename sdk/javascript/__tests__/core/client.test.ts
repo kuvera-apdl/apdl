@@ -655,6 +655,33 @@ describe('APDLClient', () => {
       warn.mockRestore();
     });
 
+    it('should bound missing-flag warning dedupe with FIFO eviction', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      for (let index = 0; index < 1_000; index += 1) {
+        client.getVariant(`missing-${index}`);
+      }
+      expect(warn).toHaveBeenCalledTimes(1_000);
+
+      // A hit does not refresh insertion order, so missing-0 remains oldest.
+      client.getVariant('missing-0');
+      expect(warn).toHaveBeenCalledTimes(1_000);
+
+      client.getVariant('missing-1000');
+      expect(warn).toHaveBeenCalledTimes(1_001);
+      client.getVariant('missing-0');
+      expect(warn).toHaveBeenCalledTimes(1_002);
+
+      const warningKeys = (
+        client as unknown as { missingFlagWarnings: Set<string> }
+      ).missingFlagWarnings;
+      expect(warningKeys.size).toBe(1_000);
+      expect(warningKeys.has('missing-0')).toBe(true);
+      expect(warningKeys.has('missing-1')).toBe(false);
+
+      warn.mockRestore();
+    });
+
     it('should evaluate flags from initial fetch', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -880,6 +907,64 @@ describe('APDLClient', () => {
       });
       expect(exposures[0].properties?.rollout_bucket).toBeTypeOf('number');
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
+    });
+
+    it('should bound successful exposure dedupe with FIFO eviction', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('bounded-exposure-flag')],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient(createTestConfig({
+        batchSize: 100,
+        maxQueueSize: 20_000,
+      }));
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      // Keep accepted events queued so the test can count enqueue behavior.
+      const eventQueue = (
+        flaggedClient as unknown as {
+          eventQueue: { flush: () => Promise<unknown> };
+        }
+      ).eventQueue;
+      eventQueue.flush = vi.fn(async () => undefined);
+
+      for (let index = 0; index < 10_000; index += 1) {
+        flaggedClient.getVariant('bounded-exposure-flag', {
+          page: '/bounded',
+          component: `component-${index}`,
+        });
+      }
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(10_000);
+
+      // A hit does not refresh insertion order, so component-0 remains oldest.
+      flaggedClient.getVariant('bounded-exposure-flag', {
+        page: '/bounded',
+        component: 'component-0',
+      });
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(10_000);
+
+      flaggedClient.getVariant('bounded-exposure-flag', {
+        page: '/bounded',
+        component: 'component-10000',
+      });
+      flaggedClient.getVariant('bounded-exposure-flag', {
+        page: '/bounded',
+        component: 'component-0',
+      });
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(10_002);
+
+      const exposureKeys = (
+        flaggedClient as unknown as { featureFlagExposureKeys: Set<string> }
+      ).featureFlagExposureKeys;
+      expect(exposureKeys.size).toBe(10_000);
     });
 
     it('should return the fallback without exposing rollout-excluded actors', async () => {

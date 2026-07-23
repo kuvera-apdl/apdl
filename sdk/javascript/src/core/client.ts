@@ -54,6 +54,27 @@ const FEATURE_FLAG_ASSIGNMENT_REASONS: ReadonlySet<FlagEvaluationReason> = new S
   'rule_match',
   'fallthrough',
 ]);
+const MAX_SUCCESSFUL_EXPOSURE_KEYS = 10_000;
+const MAX_MISSING_FLAG_WARNINGS = 1_000;
+
+function rememberBoundedFifoKey(
+  keys: Set<string>,
+  key: string,
+  limit: number
+): boolean {
+  if (keys.has(key)) {
+    return false;
+  }
+
+  keys.add(key);
+  if (keys.size > limit) {
+    const oldest = keys.values().next();
+    if (!oldest.done) {
+      keys.delete(oldest.value);
+    }
+  }
+  return true;
+}
 
 interface ActiveFlagState {
   variant: string;
@@ -603,7 +624,11 @@ export class APDLClient implements APDLApi {
         page,
         component,
       });
-      this.featureFlagExposureKeys.add(dedupeKey);
+      rememberBoundedFifoKey(
+        this.featureFlagExposureKeys,
+        dedupeKey,
+        MAX_SUCCESSFUL_EXPOSURE_KEYS
+      );
     } catch (error) {
       // Assignment is product control flow; optional telemetry must never make
       // it fail. Leave the key eligible for a later retry and surface the
@@ -620,11 +645,17 @@ export class APDLClient implements APDLApi {
   }
 
   private warnMissingFlag(result: FlagEvaluationResult): void {
-    if (result.reason !== 'not_found' || this.missingFlagWarnings.has(result.key)) {
+    if (
+      result.reason !== 'not_found'
+      || !rememberBoundedFifoKey(
+        this.missingFlagWarnings,
+        result.key,
+        MAX_MISSING_FLAG_WARNINGS
+      )
+    ) {
       return;
     }
 
-    this.missingFlagWarnings.add(result.key);
     console.warn(
       `APDL: Feature flag '${result.key}' is missing or archived; returning null variant.`
     );

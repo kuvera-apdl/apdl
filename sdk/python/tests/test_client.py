@@ -174,6 +174,36 @@ def test_exposure_logged_once_per_identity_version_variant():
     assert isinstance(exposures[0]["session_id"], str) and exposures[0]["session_id"]
 
 
+def test_successful_exposure_dedupe_is_bounded_with_fifo_eviction():
+    transport = RecordingTransport()
+    client = make_client(
+        transport,
+        log_exposures=True,
+        batch_size=100,
+        flush_interval=3600.0,
+        max_queue_size=100_000,
+    )
+    client.set_flags([make_flag("g")])
+
+    for index in range(10_000):
+        client.get_variant("g", user_id=f"user-{index}")
+    client.flush()
+    assert len(transport.all_events()) == 10_000
+
+    # A hit does not refresh insertion order, so user-0 remains oldest.
+    client.get_variant("g", user_id="user-0")
+    client.flush()
+    assert len(transport.all_events()) == 10_000
+
+    client.get_variant("g", user_id="user-10000")
+    client.get_variant("g", user_id="user-0")
+    client.flush()
+    assert len(transport.all_events()) == 10_002
+    assert len(client._exposure_keys) == 10_000
+
+    client.shutdown()
+
+
 def test_exposure_queue_failure_does_not_change_variant_or_commit_dedupe():
     transport = RecordingTransport()
     client = make_client(transport, log_exposures=True, max_queue_size=1)
@@ -236,6 +266,40 @@ def test_not_found_flag_does_not_log_exposure():
     client.flush()
     client.shutdown()
     assert transport.all_events() == []
+
+
+def test_missing_flag_warning_dedupe_is_bounded_with_fifo_eviction(caplog):
+    client = make_client(RecordingTransport())
+
+    with caplog.at_level("WARNING", logger="apdl"):
+        for index in range(1_000):
+            client.get_variant(f"missing-{index}", log_exposure=False)
+
+        warning_records = [
+            record
+            for record in caplog.records
+            if record.message.startswith("APDL: feature flag 'missing-")
+        ]
+        assert len(warning_records) == 1_000
+
+        # A hit does not refresh insertion order, so missing-0 remains oldest.
+        client.get_variant("missing-0", log_exposure=False)
+        assert len(caplog.records) == 1_000
+
+        client.get_variant("missing-1000", log_exposure=False)
+        client.get_variant("missing-0", log_exposure=False)
+
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("APDL: feature flag 'missing-")
+    ]
+    assert len(warning_records) == 1_002
+    assert len(client._missing_flag_warnings) == 1_000
+    assert "missing-0" in client._missing_flag_warnings
+    assert "missing-1" not in client._missing_flag_warnings
+
+    client.shutdown()
 
 
 def test_rollout_exclusion_returns_fallback_without_logging_exposure():
