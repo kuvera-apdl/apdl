@@ -53,6 +53,12 @@ plus up to 25 property filters, AND-combined. Supported operators: `eq`, `neq`,
 See the [main README](../../README.md) for more selector examples across
 endpoints.
 
+Every value-bearing selector is strict about the property's JSON scalar type.
+Strings, numbers, and booleans are compared only with filters of the same
+canonical type; wrong-type values never satisfy a selector, including `neq`
+and `not_in`. Integer and floating-point JSON values share the numeric filter
+type.
+
 ## Typed property breakdowns
 
 Property breakdowns preserve JSON scalar types instead of coercing every value

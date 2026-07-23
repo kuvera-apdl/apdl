@@ -53,6 +53,7 @@ class TestSelectorSql:
 
         assert "event_name = %(unit_event_name)s" in sql
         assert "JSONHas(properties, %(unit_filter_0_property)s)" in sql
+        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
         assert "JSONExtractString(properties, %(unit_filter_0_property)s)" in sql
         assert "= %(unit_filter_0_value)s" in sql
         assert "/catalog" not in sql
@@ -69,6 +70,7 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
+        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
         assert "position(JSONExtractString" in sql
         assert "positionCaseSensitive" not in sql
         assert params["unit_filter_0_value"] == "Start"
@@ -82,6 +84,7 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
+        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
         assert "IN (%(unit_filter_0_value_0)s, %(unit_filter_0_value_1)s)" in sql
         assert params["unit_filter_0_value_0"] == "pro"
         assert params["unit_filter_0_value_1"] == "team"
@@ -95,6 +98,10 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
+        assert (
+            "JSONType(properties, %(unit_filter_0_property)s) "
+            "IN ('Int64', 'UInt64', 'Double')"
+        ) in sql
         assert "JSONExtractFloat(properties, %(unit_filter_0_property)s)" in sql
         assert ">= %(unit_filter_0_value)s" in sql
         assert params["unit_filter_0_value"] == 100
@@ -110,6 +117,43 @@ class TestSelectorSql:
 
         assert sql.count("JSONHas(properties, %(unit_filter_0_property)s)") == 1
         assert "unit_filter_0_value" not in params
+
+    def test_boolean_filter_requires_boolean_json_type(self):
+        selector = _selector(
+            "checkout",
+            [{"property": "is_primary", "operator": "eq", "value": True}],
+        )
+        params = {}
+
+        sql = build_selector_condition(selector, params, "unit")
+
+        assert "JSONType(properties, %(unit_filter_0_property)s) = 'Bool'" in sql
+        assert "JSONExtractBool(properties, %(unit_filter_0_property)s)" in sql
+        assert params["unit_filter_0_value"] == 1
+
+    @pytest.mark.parametrize(
+        ("operator", "value"),
+        [
+            ("eq", "pro"),
+            ("neq", "pro"),
+            ("in", ["pro", "team"]),
+            ("not_in", ["pro", "team"]),
+            ("contains", "pro"),
+            ("gt", 1),
+            ("gte", 1),
+            ("lt", 1),
+            ("lte", 1),
+        ],
+    )
+    def test_every_typed_operator_guards_json_type(self, operator, value):
+        selector = _selector(
+            "checkout",
+            [{"property": "subject", "operator": operator, "value": value}],
+        )
+
+        sql = build_selector_condition(selector, {}, "unit")
+
+        assert "JSONType(properties, %(unit_filter_0_property)s)" in sql
 
     def test_selector_label_includes_structured_filters(self):
         selector = _selector(
