@@ -15,7 +15,7 @@ import socket
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import asyncpg
 
@@ -54,7 +54,7 @@ class RecoveryResult:
 class RunCancellationResult:
     run_id: str
     previous_status: str
-    status: str = "cancelled"
+    status: Literal["cancelled", "cancelling"] = "cancelled"
 
 
 def new_lease_owner_id() -> str:
@@ -84,6 +84,7 @@ async def acquire_run_lease(
                 lease_expires_at = now() + ($3 * interval '1 second'),
                 updated_at = now()
             WHERE run_id = $1
+              AND execution_lane_project_id = project_id
               AND (status IN ('started', 'running')
                    OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
               AND (lease_owner_id IS NULL
@@ -114,6 +115,7 @@ async def renew_run_lease(
             SET lease_expires_at = now() + ($3 * interval '1 second'),
                 updated_at = now()
             WHERE run_id = $1
+              AND execution_lane_project_id = project_id
               AND lease_owner_id = $2
               AND lease_expires_at > now()
               AND (status IN ('started', 'running')
@@ -148,6 +150,7 @@ async def handoff_run_to_queue(
                 lease_expires_at = now() + ($3 * interval '1 second'),
                 updated_at = now()
             WHERE run_id = $1
+              AND execution_lane_project_id = project_id
               AND lease_owner_id = $2
               AND lease_expires_at > now()
               AND phase = 'resuming'
@@ -171,16 +174,16 @@ async def cancel_run(
 ) -> RunCancellationResult:
     """Atomically cancel live work, its queued effects, and its proposal claims.
 
-    Provider requests already past the egress boundary cannot be recalled, so
-    processing approval effects are recorded as manual-intervention outcomes.
-    Clearing the run lease immediately fences every later governed LLM egress;
-    the supervisor's lease monitor then cancels its local task.
+    Never-started effects are cancelled in place. Effects that crossed an
+    egress boundary keep the run in ``cancelling`` so its generated project
+    lane remains occupied until their stable identities are reconciled.
+    Claim, cancellation, and settlement all lock the run row first.
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
-                SELECT status, phase
+                SELECT status, phase, execution_lane_project_id
                 FROM agent_runs
                 WHERE run_id = $1 AND project_id = $2
                 FOR UPDATE
@@ -195,41 +198,53 @@ async def cancel_run(
             if previous_status == "cancelled":
                 return RunCancellationResult(run_id, previous_status)
             phase = str(row["phase"] or "")
-            cancellable = previous_status in {
-                "started",
-                "running",
-                "waiting_approval",
-                "approval_queued",
-            } or (phase == "resuming" and previous_status in {"approved", "rejected"})
-            if not cancellable:
+            if row["execution_lane_project_id"] != project_id:
                 raise RunCancellationConflictError(
                     f"Run {run_id} is already terminal with status {previous_status}"
                 )
 
-            await conn.execute(
+            live_effects = await conn.fetch(
                 """
-                UPDATE agent_runs
-                SET status = 'cancelled', phase = 'cancelled',
-                    lease_owner_id = NULL, lease_expires_at = NULL,
-                    updated_at = now()
-                WHERE run_id = $1 AND project_id = $2
+                SELECT effect.effect_id, effect.status
+                FROM agent_approval_effects AS effect
+                JOIN agent_approval_commands AS command
+                  ON command.command_id = effect.command_id
+                WHERE command.run_id = $1 AND command.project_id = $2
+                  AND effect.status IN (
+                      'queued', 'processing', 'retryable_failed'
+                  )
+                FOR UPDATE OF effect
                 """,
                 run_id,
                 project_id,
             )
+            pending_statuses = {
+                str(effect["status"])
+                for effect in live_effects
+                if str(effect["status"]) in {"processing", "retryable_failed"}
+            }
+            cancellation_pending = bool(pending_statuses)
+            if "processing" in pending_statuses:
+                target_phase = "cancellation_draining"
+            elif cancellation_pending:
+                target_phase = "cancellation_reconciliation"
+            else:
+                target_phase = "cancelled"
+            target_status: Literal["cancelled", "cancelling"] = (
+                "cancelling" if cancellation_pending else "cancelled"
+            )
+
             await conn.execute(
                 """
                 UPDATE agent_approval_effects AS effect
                 SET status = 'manual_intervention',
-                    last_error = 'Owning run was cancelled; external outcome may be unknown',
+                    last_error = 'Owning run was cancelled before effect claim',
                     lease_owner_id = NULL, lease_expires_at = NULL,
                     completed_at = now(), updated_at = now()
                 FROM agent_approval_commands AS command
                 WHERE effect.command_id = command.command_id
                   AND command.run_id = $1 AND command.project_id = $2
-                  AND effect.status IN (
-                      'queued', 'processing', 'retryable_failed'
-                  )
+                  AND effect.status = 'queued'
                 """,
                 run_id,
                 project_id,
@@ -242,20 +257,51 @@ async def cancel_run(
                     completed_at = now(), updated_at = now()
                 WHERE run_id = $1 AND project_id = $2
                   AND status IN ('queued', 'processing')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM agent_approval_effects AS effect
+                      WHERE effect.command_id = agent_approval_commands.command_id
+                        AND effect.status IN ('processing', 'retryable_failed')
+                  )
                 """,
                 run_id,
                 project_id,
             )
+            if not cancellation_pending:
+                await conn.execute(
+                    """
+                    UPDATE feature_proposals
+                    SET status = 'approved', claim_run_id = NULL,
+                        error = NULL, updated_at = now()
+                    WHERE project_id = $2 AND claim_run_id = $1
+                      AND status = 'implementing'
+                    """,
+                    run_id,
+                    project_id,
+                )
             await conn.execute(
                 """
-                UPDATE feature_proposals
-                SET status = 'approved', claim_run_id = NULL,
-                    error = NULL, updated_at = now()
-                WHERE project_id = $2 AND claim_run_id = $1
-                  AND status = 'implementing'
+                UPDATE agent_runs
+                SET status = $3, phase = $4,
+                    lease_owner_id = NULL, lease_expires_at = NULL,
+                    updated_at = now()
+                WHERE run_id = $1 AND project_id = $2
+                  AND execution_lane_project_id = $2
                 """,
                 run_id,
                 project_id,
+                target_status,
+                target_phase,
+            )
+            audit_action = (
+                "run_cancellation_requested"
+                if cancellation_pending
+                else "run_cancelled"
+            )
+            audit_key = (
+                f"run-cancellation-requested:{run_id}"
+                if cancellation_pending
+                else f"run-cancelled:{run_id}"
             )
             await conn.execute(
                 """
@@ -264,7 +310,7 @@ async def cancel_run(
                     idempotency_key
                 )
                 VALUES (
-                    $1, 'run_cancelled', $2::jsonb, $3::jsonb, 'cancelled', $4
+                    $1, $5, $2::jsonb, $3::jsonb, $6, $4
                 )
                 ON CONFLICT (run_id, idempotency_key)
                     WHERE idempotency_key IS NOT NULL
@@ -287,10 +333,12 @@ async def cancel_run(
                     },
                     sort_keys=True,
                 ),
-                f"run-cancelled:{run_id}",
+                audit_key,
+                audit_action,
+                target_status,
             )
 
-    return RunCancellationResult(run_id, previous_status)
+    return RunCancellationResult(run_id, previous_status, target_status)
 
 
 async def maintain_run_lease(
@@ -447,6 +495,7 @@ async def requeue_expired_runs(
                     updated_at = now()
                 WHERE (status IN ('started', 'running')
                        OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
+                  AND execution_lane_project_id = project_id
                   AND lease_owner_id IS NOT NULL
                   AND (
                       (lease_expires_at IS NOT NULL
@@ -488,9 +537,7 @@ async def requeue_expired_runs(
                 RETURNING proposal.proposal_id
                 """
             )
-            reopened_ids.extend(
-                str(row["proposal_id"]) for row in terminal_claim_rows
-            )
+            reopened_ids.extend(str(row["proposal_id"]) for row in terminal_claim_rows)
 
             # Rolling upgrades can leave pre-claim_run_id rows permanently in
             # implementing. Reopen only old NULL claims, and only when the
@@ -510,14 +557,7 @@ async def requeue_expired_runs(
                   AND NOT EXISTS (
                       SELECT 1
                       FROM agent_runs AS active_run
-                      WHERE active_run.project_id = proposal.project_id
-                        AND (
-                            active_run.status IN ('started', 'running', 'waiting_approval')
-                            OR (
-                                active_run.phase = 'resuming'
-                                AND active_run.status IN ('approved', 'rejected')
-                            )
-                        )
+                      WHERE active_run.execution_lane_project_id = proposal.project_id
                   )
                 RETURNING proposal.proposal_id
                 """,

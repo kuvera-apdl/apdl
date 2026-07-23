@@ -10,9 +10,7 @@ from app.framework.tool_catalog import TOOL_CATALOG
 ROOT = Path(__file__).resolve().parents[3]
 POSTGRES_MIGRATIONS = ROOT / "pipeline" / "postgres" / "migrations"
 CLICKHOUSE_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
-AUTH_CREDENTIALS_SQL = (
-    POSTGRES_MIGRATIONS / "001_auth_credentials.sql"
-).read_text()
+AUTH_CREDENTIALS_SQL = (POSTGRES_MIGRATIONS / "001_auth_credentials.sql").read_text()
 AGENTS_CORE_SQL = (POSTGRES_MIGRATIONS / "004_agents_core.sql").read_text()
 OBSERVABILITY_SQL = (POSTGRES_MIGRATIONS / "005_agent_observability.sql").read_text()
 CONFIG_SQL = (POSTGRES_MIGRATIONS / "006_config.sql").read_text()
@@ -32,11 +30,12 @@ CUSTOM_AGENT_CONTRACT_SQL = (
 RETENTION_COHORT_MODE_SQL = (
     POSTGRES_MIGRATIONS / "019_retention_cohort_mode.sql"
 ).read_text()
-AGENTS_GOVERNANCE_SQL = (
-    POSTGRES_MIGRATIONS / "020_agents_governance.sql"
-).read_text()
+AGENTS_GOVERNANCE_SQL = (POSTGRES_MIGRATIONS / "020_agents_governance.sql").read_text()
 AGENTS_MUTATION_QUOTAS_SQL = (
     POSTGRES_MIGRATIONS / "021_agents_mutation_quotas.sql"
+).read_text()
+AGENTS_EXECUTION_LANE_SQL = (
+    POSTGRES_MIGRATIONS / "034_agent_project_execution_lane.sql"
 ).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
@@ -151,6 +150,44 @@ def test_agents_mutation_quota_ledger_has_one_strict_canonical_identity():
     assert "btrim(idempotency_key) <> ''" in sql
     assert "agent_mutation_quota_reservations_lookup_idx" in sql
     assert "(project_id, action_type, policy_version, occurred_at DESC)" in sql
+
+
+def test_agents_execution_lane_is_database_authoritative_and_fail_closed():
+    sql = AGENTS_EXECUTION_LANE_SQL
+
+    assert "ADD CONSTRAINT agent_runs_status_check" in sql
+    assert "execution_lane_project_id TEXT" in sql
+    assert "GENERATED ALWAYS AS" in sql
+    for terminal_status in (
+        "completed",
+        "completed_with_errors",
+        "failed",
+        "cancelled",
+        "manual_intervention",
+    ):
+        assert f"'{terminal_status}'" in sql
+    for lane_status in (
+        "started",
+        "running",
+        "waiting_approval",
+        "approval_queued",
+        "cancelling",
+        "approved",
+        "rejected",
+    ):
+        assert f"'{lane_status}'" in sql
+    assert "HAVING count(*) > 1" in sql
+    assert "Terminalize all but one run" in sql
+    assert "VALIDATE CONSTRAINT agent_runs_status_check" in sql
+    assert "CREATE UNIQUE INDEX agent_runs_one_execution_lane_per_project_idx" in sql
+    assert "WHERE execution_lane_project_id IS NOT NULL" in sql
+    assert "validate_existing_approval_effect_lanes" in sql
+    assert "run.execution_lane_project_id IS NULL" in sql
+    assert "effect.status IN ('queued', 'processing', 'retryable_failed')" in sql
+    assert "CREATE TRIGGER agent_runs_guard_execution_lane_release" in sql
+    assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_insert" in sql
+    assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_update" in sql
+    assert "FOR UPDATE;" in sql
 
 
 def test_observability_migration_uses_text_tenant_and_run_identifiers():

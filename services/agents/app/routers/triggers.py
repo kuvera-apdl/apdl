@@ -18,6 +18,8 @@ from app.store.custom_agents import fetch_active_by_slugs
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
+EXECUTION_LANE_INDEX = "agent_runs_one_execution_lane_per_project_idx"
+
 
 class TriggerType(str, Enum):
     scheduled = "scheduled"
@@ -96,12 +98,11 @@ async def trigger_agent_run(
 
     run_id = str(uuid.uuid4())
 
-    # One pipeline per project at a time: concurrent runs duplicate LLM spend
-    # and can deploy duplicate experiments from the same insight. Serialize the
-    # check + insert with a transaction-scoped, project-keyed advisory lock so
-    # concurrent requests on different service replicas cannot both observe an
-    # empty slot. Runs parked at waiting_approval do not block because they are
-    # not executing.
+    # One lane per project at a time: concurrent runs duplicate LLM spend and
+    # can deploy stale or duplicate changes from the same evidence.  The
+    # transaction lock gives API callers a stable conflict response; migration
+    # 034's generated lane column and unique index remain the database authority
+    # even for writers that do not participate in this advisory-lock protocol.
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -115,9 +116,7 @@ async def trigger_agent_run(
             active = await conn.fetchval(
                 """
                 SELECT run_id FROM agent_runs
-                WHERE project_id = $1
-                  AND (status IN ('started', 'running')
-                       OR (phase = 'resuming' AND status IN ('approved', 'rejected')))
+                WHERE execution_lane_project_id = $1
                 LIMIT 1
                 """,
                 body.project_id,
@@ -130,25 +129,33 @@ async def trigger_agent_run(
                     ),
                 )
 
-            await conn.execute(
-                """
-                INSERT INTO agent_runs
-                    (run_id, project_id, trigger_type, autonomy_level, status, phase,
-                     lease_owner_id, lease_expires_at, config)
-                VALUES ($1, $2, $3, $4, 'started', 'initializing', NULL, NULL,
-                        $5::jsonb)
-                """,
-                run_id,
-                body.project_id,
-                body.trigger_type.value,
-                body.autonomy_level,
-                json.dumps(
-                    {
-                        "analysis_types": body.analysis_types,
-                        "time_range_days": body.time_range_days,
-                    }
-                ),
-            )
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO agent_runs
+                        (run_id, project_id, trigger_type, autonomy_level, status,
+                         phase, lease_owner_id, lease_expires_at, config)
+                    VALUES ($1, $2, $3, $4, 'started', 'initializing', NULL, NULL,
+                            $5::jsonb)
+                    """,
+                    run_id,
+                    body.project_id,
+                    body.trigger_type.value,
+                    body.autonomy_level,
+                    json.dumps(
+                        {
+                            "analysis_types": body.analysis_types,
+                            "time_range_days": body.time_range_days,
+                        }
+                    ),
+                )
+            except asyncpg.UniqueViolationError as exc:
+                if exc.constraint_name != EXECUTION_LANE_INDEX:
+                    raise
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Project {body.project_id} already has an active run.",
+                ) from exc
 
     logger.info("Agent run %s durably queued for project %s", run_id, body.project_id)
 

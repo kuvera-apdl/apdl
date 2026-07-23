@@ -64,6 +64,7 @@ async def _update_run(
                 lease_owner_id = CASE WHEN $2 = 'running' THEN lease_owner_id ELSE NULL END,
                 lease_expires_at = CASE WHEN $2 = 'running' THEN lease_expires_at ELSE NULL END
             WHERE run_id = $1
+              AND execution_lane_project_id = project_id
               AND lease_owner_id = $6
               AND lease_expires_at > now()
             """,
@@ -105,6 +106,7 @@ async def _persist_results(
                     SELECT run_id
                     FROM agent_runs
                     WHERE run_id = $1
+                      AND execution_lane_project_id = project_id
                       AND lease_owner_id = $6
                       AND lease_expires_at > now()
                     FOR UPDATE

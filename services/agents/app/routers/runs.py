@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -63,7 +63,7 @@ class RunAuditResponse(BaseModel):
 class RunCancellationResponse(BaseModel):
     run_id: str
     previous_status: str
-    status: str
+    status: Literal["cancelled", "cancelling"]
 
 
 @router.get("/runs", response_model=RunListResponse)
@@ -110,7 +110,7 @@ async def _require_run(pool: asyncpg.Pool, run_id: str, project_id: str) -> None
 
 @router.post("/{run_id}/cancel", response_model=RunCancellationResponse)
 async def cancel_agent_run(run_id: str, request: Request) -> RunCancellationResponse:
-    """Cancel a live or approval-gated run and fence all later effects."""
+    """Fence new work and retain the project lane while claimed effects drain."""
     principal = require_role(request, "agents:run")
     pool: asyncpg.Pool = request.app.state.pg_pool
     try:

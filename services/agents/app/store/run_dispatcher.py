@@ -132,6 +132,7 @@ async def _quarantine_invalid_run(conn: Any, row: Any, error: Exception) -> bool
                 updated_at = now()
             WHERE run_id = $1
               AND project_id = $2
+              AND execution_lane_project_id = $2
               AND lease_owner_id IS NULL
               AND (
                   status IN ('started', 'running')
@@ -178,6 +179,7 @@ async def fetch_dispatchable_runs(
             SELECT run_id, project_id, autonomy_level, status, phase, config
             FROM agent_runs
             WHERE lease_owner_id IS NULL
+              AND execution_lane_project_id = project_id
               AND (
                   status IN ('started', 'running')
                   OR (phase = 'resuming' AND status IN ('approved', 'rejected'))

@@ -116,6 +116,7 @@ async def test_fetch_dispatches_new_and_approved_resume_rows() -> None:
     assert rows[1].target_proposal_id == "p1"
     query, _ = pool.conn.queries[0]
     assert "lease_owner_id IS NULL" in query
+    assert "execution_lane_project_id = project_id" in query
     assert "status IN ('started', 'running')" in query
     assert "status IN ('approved', 'rejected')" in query
 
@@ -132,6 +133,7 @@ async def test_invalid_legacy_config_is_atomically_terminalized_and_audited(
     assert "WITH quarantined AS" in query
     assert "SET status = 'failed'" in query
     assert "phase = 'invalid_config'" in query
+    assert "execution_lane_project_id = $2" in query
     assert "config IS NOT DISTINCT FROM $3::jsonb" in query
     assert "INSERT INTO agent_audit_log" in query
     assert "run_dispatch_invalid_config" in query

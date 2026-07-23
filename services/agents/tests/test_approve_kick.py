@@ -336,6 +336,8 @@ class _CommandConn:
             }
             self.effect_rows.append(row)
             return row
+        if "FROM agent_approval_effects AS effect" in query:
+            return None
         raise AssertionError(f"Unexpected fetchrow query: {query}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
@@ -370,6 +372,27 @@ class _Pool:
 
     def acquire(self) -> _Acquire:
         return _Acquire(self.conn)
+
+
+@pytest.mark.asyncio
+async def test_effect_claim_locks_run_before_effect_and_reconciles_cancellation():
+    conn = _CommandConn()
+
+    assert await approval_effects._claim_effect(_Pool(conn), "worker-1") is None
+
+    claim_query = next(
+        query
+        for query, _ in conn.statements
+        if "FROM agent_approval_effects AS effect" in query
+    )
+    assert "FOR UPDATE OF run SKIP LOCKED" in claim_query
+    assert "run.status = 'approval_queued'" in claim_query
+    assert "run.status = 'cancelling'" in claim_query
+    assert "effect.status = 'retryable_failed'" in claim_query
+    assert (
+        "effect.status = 'queued'"
+        not in claim_query.split("run.status = 'cancelling'", 1)[1]
+    )
 
 
 @pytest.mark.asyncio
@@ -409,9 +432,12 @@ async def test_enqueue_persists_decision_audit_and_effect_before_queue_transitio
         "approval_effect_planned",
         "approval_command_queued",
     ]
-    assert any(
-        "SET status = 'approval_queued'" in query for query, _ in conn.statements
+    queue_transition = next(
+        query
+        for query, _ in conn.statements
+        if "SET status = 'approval_queued'" in query
     )
+    assert "execution_lane_project_id = project_id" in queue_transition
 
 
 @pytest.mark.asyncio
