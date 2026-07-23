@@ -48,6 +48,12 @@ class RegistrationRequest(BaseModel):
     password: str = Field(min_length=12, max_length=1024)
 
 
+class AuthCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registration_enabled: bool
+
+
 class ProjectCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

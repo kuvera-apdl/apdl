@@ -34,7 +34,23 @@ export const authIdentitySchema = z
 
 export type AuthIdentity = z.infer<typeof authIdentitySchema>
 
+export const authCapabilitiesSchema = z
+  .object({
+    registration_enabled: z.boolean(),
+  })
+  .strict()
+
+export type AuthCapabilities = z.infer<typeof authCapabilitiesSchema>
+
 const authConnection = { baseUrl: '', actor: '' }
+
+export function getAuthCapabilities(signal?: AbortSignal): Promise<AuthCapabilities> {
+  return request(authConnection, '/api/auth/capabilities', {
+    signal,
+    schema: authCapabilitiesSchema,
+    redirectOnUnauthorized: false,
+  })
+}
 
 export function loginAdmin(email: string, password: string): Promise<AuthIdentity> {
   return request(authConnection, '/api/auth/login', {

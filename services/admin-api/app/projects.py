@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from app.auth import AdminSession, require_csrf, require_session
 from app.models import ProjectAccess, ProjectCreateRequest, UserIdentity
@@ -28,13 +29,45 @@ async def create_project(
     body: ProjectCreateRequest,
     request: Request,
     session: AdminSession = Depends(require_session),
-) -> UserIdentity:
+) -> UserIdentity | Response:
     settings = request.app.state.settings
     require_allowed_origin(request, settings)
     require_csrf(request, session)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
+            user = await conn.fetchrow(
+                """
+                SELECT active
+                FROM admin_users
+                WHERE user_id = $1
+                FOR UPDATE
+                """,
+                uuid.UUID(session.user_id),
+            )
+            if user is None or not user["active"]:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Account is no longer active",
+                )
+            project_count = int(
+                await conn.fetchval(
+                    """
+                    SELECT count(*)
+                    FROM admin_projects
+                    WHERE created_by = $1
+                    """,
+                    uuid.UUID(session.user_id),
+                )
+            )
+            if project_count >= settings.max_projects_per_user:
+                return JSONResponse(
+                    status_code=status.HTTP_409_CONFLICT,
+                    content={
+                        "error": "project_quota_reached",
+                        "message": "This account has reached its project creation limit",
+                    },
+                )
             project_id = await conn.fetchval(
                 """
                 INSERT INTO admin_projects (project_id, created_by)

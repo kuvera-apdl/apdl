@@ -160,7 +160,14 @@ class FakePool:
 
     @asynccontextmanager
     async def acquire(self):
-        yield self.connection
+        if hasattr(self.connection, "pool_acquisitions"):
+            self.connection.pool_acquisitions += 1
+            self.connection.pool_depth += 1
+        try:
+            yield self.connection
+        finally:
+            if hasattr(self.connection, "pool_depth"):
+                self.connection.pool_depth -= 1
 
 
 def make_client(connection, *, settings=None) -> TestClient:
@@ -207,7 +214,7 @@ def test_login_sets_opaque_httponly_session_and_returns_no_service_secret() -> N
     )
     assert "HttpOnly" in device_cookie
     assert "SameSite=strict" in device_cookie
-    assert "Path=/api/auth/login" in device_cookie
+    assert "Path=/api/auth" in device_cookie
 
     insert = next(
         item
@@ -454,22 +461,58 @@ def test_login_rejects_cross_site_origins_before_checking_credentials() -> None:
 
 
 class RegistrationConnection:
-    def __init__(self, *, account_exists: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        account_exists: bool = False,
+        account_count: int = 0,
+        locked_account_count: int | None = None,
+    ) -> None:
         self.user_id = uuid.UUID("30000000-0000-4000-8000-000000000003")
         self.account_exists = account_exists
+        self.account_count = account_count
+        self.locked_account_count = locked_account_count
+        self.count_reads = 0
+        self.rate_buckets: dict[tuple[str, str], tuple[datetime, int]] = {}
         self.executions: list[tuple[str, tuple[object, ...]]] = []
         self.insert_attempts = 0
+        self.pool_acquisitions = 0
+        self.pool_depth = 0
 
     @asynccontextmanager
     async def transaction(self):
         yield
 
+    async def fetchrow(self, query: str, *args):
+        assert "INSERT INTO admin_login_rate_buckets" in query
+        scope, key_hash, window_seconds, now = args
+        key = (str(scope), str(key_hash))
+        previous = self.rate_buckets.get(key)
+        if (
+            previous is None
+            or previous[0] <= now - timedelta(seconds=int(window_seconds))
+        ):
+            value = (now, 1)
+        else:
+            value = (previous[0], previous[1] + 1)
+        self.rate_buckets[key] = value
+        return {"window_started_at": value[0], "attempt_count": value[1]}
+
     async def fetchval(self, query: str, *args):
+        self.executions.append((query, args))
+        if "SELECT count(*) FROM admin_users" in query:
+            self.count_reads += 1
+            if self.count_reads >= 2 and self.locked_account_count is not None:
+                return self.locked_account_count
+            return self.account_count
         assert "INSERT INTO admin_users" in query
         self.insert_attempts += 1
         assert args[1] == "new-admin@example.com"
         assert str(args[2]).startswith("$argon2id$")
-        return None if self.account_exists else self.user_id
+        if self.account_exists:
+            return None
+        self.account_count += 1
+        return self.user_id
 
     async def execute(self, query: str, *args):
         self.executions.append((query, args))
@@ -503,6 +546,10 @@ def test_registration_creates_zero_project_user_and_starts_session() -> None:
         cookie.startswith("apdl_admin_session=") and "HttpOnly" in cookie
         for cookie in response.headers.get_list("set-cookie")
     )
+    assert any(
+        cookie.startswith("apdl_admin_device=") and "Path=/api/auth" in cookie
+        for cookie in response.headers.get_list("set-cookie")
+    )
 
 
 def test_registration_rejects_existing_email_without_starting_session() -> None:
@@ -518,10 +565,154 @@ def test_registration_rejects_existing_email_without_starting_session() -> None:
         )
 
     assert response.status_code == 409
-    assert response.json() == {"detail": "An account already exists for this email"}
+    assert response.json() == {
+        "error": "account_exists",
+        "message": "An account already exists for this email",
+    }
     assert not any(
         "INSERT INTO admin_sessions" in query for query, _ in connection.executions
     )
+
+
+def test_registration_is_disabled_before_rate_limit_database_or_hashing(
+    monkeypatch,
+) -> None:
+    connection = RegistrationConnection()
+
+    async def unexpected_hash(*_args):
+        raise AssertionError("disabled registration must not hash")
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", unexpected_hash)
+    settings = make_settings(registration_enabled=False)
+    with make_client(connection, settings=settings) as client:
+        capabilities = client.get("/api/auth/capabilities")
+        response = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert capabilities.json() == {"registration_enabled": False}
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "registration_disabled",
+        "message": "Public account registration is disabled",
+    }
+    assert connection.pool_acquisitions == 0
+    assert connection.executions == []
+
+
+def test_registration_hashes_outside_the_database_pool(monkeypatch) -> None:
+    connection = RegistrationConnection()
+    observed_depths: list[int] = []
+
+    async def checked_to_thread(function, *args):
+        observed_depths.append(connection.pool_depth)
+        return function(*args)
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", checked_to_thread)
+    with make_client(connection) as client:
+        response = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 201
+    assert observed_depths == [0]
+    statements = [query for query, _ in connection.executions]
+    lock_index = next(
+        index for index, query in enumerate(statements)
+        if "pg_advisory_xact_lock" in query
+    )
+    exact_count_index = next(
+        index for index, query in enumerate(statements[lock_index + 1 :], lock_index + 1)
+        if "SELECT count(*) FROM admin_users" in query
+    )
+    insert_index = next(
+        index for index, query in enumerate(statements)
+        if "INSERT INTO admin_users" in query
+    )
+    assert lock_index < exact_count_index < insert_index
+
+
+def test_registration_rejects_approximate_and_locked_account_capacity(
+    monkeypatch,
+) -> None:
+    async def unexpected_hash(*_args):
+        raise AssertionError("approximate capacity must reject before hashing")
+
+    at_capacity = RegistrationConnection(account_count=1)
+    monkeypatch.setattr(auth.asyncio, "to_thread", unexpected_hash)
+    with make_client(at_capacity, settings=make_settings(max_accounts=1)) as client:
+        early = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert early.status_code == 409
+    assert early.json()["error"] == "account_capacity_reached"
+    assert at_capacity.insert_attempts == 0
+
+    raced = RegistrationConnection(account_count=0, locked_account_count=1)
+
+    async def hash_after_preflight(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", hash_after_preflight)
+    with make_client(raced, settings=make_settings(max_accounts=1)) as client:
+        locked = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert locked.status_code == 409
+    assert locked.json()["error"] == "account_capacity_reached"
+    assert raced.insert_attempts == 0
+    assert not any(
+        "INSERT INTO admin_sessions" in query for query, _ in raced.executions
+    )
+
+
+def test_registration_consumes_the_shared_auth_rate_limit() -> None:
+    connection = RegistrationConnection()
+    settings = make_settings(login_global_rate_limit=1)
+    with make_client(connection, settings=settings) as client:
+        first = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+        second = client.post(
+            "/api/auth/register",
+            headers={"Origin": "http://admin.test"},
+            json={
+                "email": "another-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 429
+    assert second.json()["error"] == "auth_throttled"
+    assert second.headers["retry-after"] == "60"
 
 
 def test_registration_rejects_unknown_fields_and_cross_site_origin() -> None:

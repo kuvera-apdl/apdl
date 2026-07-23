@@ -20,6 +20,7 @@ export function createQueryClient(): QueryClient {
 // Keys are namespaced by workspace id. Audit keys live under the flags prefix
 // so one invalidation covers list, detail, and audit after a flag_update.
 export const queryKeys = {
+  authCapabilities: ['auth', 'capabilities'] as const,
   flagsPrefix: (wsId: string) => [wsId, 'flags'] as const,
   flags: (wsId: string) => [wsId, 'flags', 'list'] as const,
   flagAudit: (wsId: string, key: string, limit: number) =>

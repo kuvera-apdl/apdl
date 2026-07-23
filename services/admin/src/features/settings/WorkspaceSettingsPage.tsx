@@ -38,7 +38,9 @@ export function WorkspaceSettingsPage() {
       setProjectId('')
       toast.success(`Project "${parsed.data}" created`)
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 409) {
+      if (caught instanceof ApiError && caught.code === 'project_quota_reached') {
+        setError('This account has reached its project limit. Ask an operator for access.')
+      } else if (caught instanceof ApiError && caught.status === 409) {
         setError('That project ID already exists.')
       } else {
         setError('Unable to create the project. Try again shortly.')

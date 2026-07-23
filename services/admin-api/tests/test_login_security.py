@@ -110,7 +110,7 @@ def test_login_source_uses_a_persistent_httponly_device_cookie() -> None:
     assert "HttpOnly" in cookie
     assert "SameSite=strict" in cookie
     assert "Secure" in cookie
-    assert "Path=/api/auth/login" in cookie
+    assert "Path=/api/auth" in cookie
 
     repeated = build_login_source(
         _request(peer="198.51.100.5", device_token=source.device_token),

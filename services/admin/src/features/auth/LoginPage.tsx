@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
+import { useAuthCapabilities } from '@/features/auth/hooks'
 
 const loginSchema = z
   .object({
@@ -25,6 +26,7 @@ function safeReturnPath(value: unknown): string {
 
 export function LoginPage() {
   const { authenticated, initializing, login, logoutReason } = useAuth()
+  const capabilities = useAuthCapabilities()
   const location = useLocation()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
@@ -139,12 +141,14 @@ export function LoginPage() {
               Sign in
             </Button>
           </form>
-          <p className="mt-5 text-center text-sm text-muted-foreground">
-            Have an invitation?{' '}
-            <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/register">
-              Create your account
-            </Link>
-          </p>
+          {capabilities.isSuccess && capabilities.data.registration_enabled ? (
+            <p className="mt-5 text-center text-sm text-muted-foreground">
+              Have an invitation?{' '}
+              <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/register">
+                Create your account
+              </Link>
+            </p>
+          ) : null}
         </CardContent>
       </Card>
     </main>
