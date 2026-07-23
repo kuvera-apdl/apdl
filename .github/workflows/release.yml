@@ -108,7 +108,7 @@ jobs:
 
   publish-npm:
     name: Publish npm Package
-    needs: build-artifacts
+    needs: [build-artifacts, smoke-published-core]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -158,7 +158,7 @@ jobs:
 
   publish-pypi:
     name: Publish Python Package
-    needs: build-artifacts
+    needs: [build-artifacts, smoke-published-core]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -402,9 +402,61 @@ jobs:
           retention-days: 7
           path: published-image/${{ matrix.name }}.json
 
+  smoke-published-core:
+    name: Smoke Published Core Images
+    needs: [build-artifacts, publish-docker-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+          path: release-artifacts
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: published-image-*
+          path: published-images
+          merge-multiple: true
+      - name: Bind Compose to the exact published image digests
+        shell: bash
+        run: >-
+          python scripts/release_container_images.py
+          --manifest release-artifacts/release-manifest.json
+          --records-dir published-images
+          --index release-runtime/container-images.json
+          --compose-override release-runtime/compose.release-images.yml
+      - name: Prove the published core images from an anonymous pull
+        shell: bash
+        env:
+          APDL_SMOKE_COMPOSE_OVERRIDE: ${{ github.workspace }}/release-runtime/compose.release-images.yml
+          APDL_SMOKE_NO_BUILD: "true"
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          make smoke-fresh
+          make smoke-experiment-fresh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tested-container-image-index
+          if-no-files-found: error
+          retention-days: 7
+          path: release-runtime/container-images.json
+
   github-release:
     name: Create GitHub Release
-    needs: [build-artifacts, publish-npm, publish-pypi, publish-docker-images]
+    needs:
+      - build-artifacts
+      - publish-npm
+      - publish-pypi
+      - publish-docker-images
+      - smoke-published-core
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -415,53 +467,12 @@ jobs:
           path: release-artifacts
       - uses: actions/download-artifact@v8
         with:
-          pattern: published-image-*
-          path: published-images
-          merge-multiple: true
-      - name: Assemble the immutable container image index
+          name: tested-container-image-index
+          path: release-artifacts
+      - name: Add the tested container image index checksum
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import json
-          import re
-          from pathlib import Path
-
-          release_dir = Path("release-artifacts")
-          manifest = json.loads((release_dir / "release-manifest.json").read_text())
-          records = [
-              json.loads(path.read_text())
-              for path in sorted(Path("published-images").glob("*.json"))
-          ]
-          expected = {
-              image["name"]: image["repository"]
-              for image in manifest["docker_images"]
-          }
-          actual = {record.get("name"): record.get("repository") for record in records}
-          if actual != expected or len(records) != len(expected):
-              raise SystemExit("published image records differ from the release manifest")
-          for record in records:
-              if set(record) != {"name", "repository", "digest", "tag", "version"}:
-                  raise SystemExit(f"invalid published image record: {record.get('name')}")
-              if re.fullmatch(r"sha256:[0-9a-f]{64}", record["digest"]) is None:
-                  raise SystemExit(f"invalid image digest: {record['name']}")
-              if record["tag"] != manifest["tag"]:
-                  raise SystemExit(f"image tag differs from manifest: {record['name']}")
-              if record["version"] != manifest["version"]:
-                  raise SystemExit(f"image version differs from manifest: {record['name']}")
-              record["reference"] = f"{record['repository']}@{record['digest']}"
-          records.sort(key=lambda record: list(expected).index(record["name"]))
-          index = {
-              "schema_version": 1,
-              "version": manifest["version"],
-              "tag": manifest["tag"],
-              "images": records,
-          }
-          (release_dir / "container-images.json").write_text(
-              json.dumps(index, indent=2, sort_keys=True) + "\n",
-              encoding="utf-8",
-          )
-          PY
           (cd release-artifacts && sha256sum container-images.json >> SHA256SUMS)
       - uses: softprops/action-gh-release@v3
         with:

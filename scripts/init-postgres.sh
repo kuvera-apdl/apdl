@@ -9,6 +9,17 @@ if [[ "$COMPOSE_FILE" != /* ]]; then
 fi
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+if [ -n "${POSTGRES_COMPOSE_OVERRIDE_FILE:-}" ]; then
+    COMPOSE_OVERRIDE_FILE="$POSTGRES_COMPOSE_OVERRIDE_FILE"
+    if [[ "$COMPOSE_OVERRIDE_FILE" != /* ]]; then
+        COMPOSE_OVERRIDE_FILE="$ROOT_DIR/$COMPOSE_OVERRIDE_FILE"
+    fi
+    [ -f "$COMPOSE_OVERRIDE_FILE" ] || {
+        echo "PostgreSQL Compose override not found: $COMPOSE_OVERRIDE_FILE" >&2
+        exit 1
+    }
+    COMPOSE_ARGS+=(-f "$COMPOSE_OVERRIDE_FILE")
+fi
 [ -f "$ROOT_DIR/.env" ] && COMPOSE_ARGS=(--env-file "$ROOT_DIR/.env" "${COMPOSE_ARGS[@]}")
 
 env_file_value() {
@@ -26,6 +37,8 @@ POSTGRES_DB="${POSTGRES_DB:-apdl}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_file_value POSTGRES_PASSWORD)}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-apdl_dev}"
 MIGRATIONS_DIR="${POSTGRES_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/postgres/migrations}"
+POSTGRES_MIGRATOR_BUILD="${POSTGRES_MIGRATOR_BUILD:-true}"
+POSTGRES_USE_PACKAGED_MIGRATIONS="${POSTGRES_USE_PACKAGED_MIGRATIONS:-false}"
 DEV_CREDENTIAL_SQL="$ROOT_DIR/scripts/provision-dev-credential.sql"
 MAINTENANCE_INHIBITOR_LOCK_ID=4158044083
 MAINTENANCE_GUARD_LOCK_ID=4158044084
@@ -68,10 +81,20 @@ done
     exit 1
 }
 
-# Resolve all image/build work before the final local drain check. The migrator
-# then takes the database-authoritative exclusive inhibitor, which closes the
-# remaining check/apply race and detects participants outside this Compose project.
-docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
+# Resolve all image/build work before the final local drain check. Release
+# verification supplies and pre-pulls an immutable migrator image, while local
+# development retains the source-build default.
+case "$POSTGRES_MIGRATOR_BUILD" in
+    true)
+        docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
+        ;;
+    false)
+        ;;
+    *)
+        echo "POSTGRES_MIGRATOR_BUILD must be true or false" >&2
+        exit 1
+        ;;
+esac
 
 quiescence_args=(
     --anchor-container "$container_id"
@@ -88,6 +111,19 @@ quiescence_args=(
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
     "${quiescence_args[@]}"
 
+migration_mount_args=()
+case "$POSTGRES_USE_PACKAGED_MIGRATIONS" in
+    true)
+        ;;
+    false)
+        migration_mount_args=(-v "$MIGRATIONS_DIR:/migrations:ro")
+        ;;
+    *)
+        echo "POSTGRES_USE_PACKAGED_MIGRATIONS must be true or false" >&2
+        exit 1
+        ;;
+esac
+
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGHOST="$POSTGRES_SERVICE" \
     -e PGPORT=5432 \
@@ -95,7 +131,7 @@ docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGPASSWORD="$POSTGRES_PASSWORD" \
     -e PGDATABASE="$POSTGRES_DB" \
     -e POSTGRES_MIGRATIONS_DIR=/migrations \
-    -v "$MIGRATIONS_DIR:/migrations:ro" \
+    "${migration_mount_args[@]}" \
     "$POSTGRES_MIGRATOR_SERVICE"
 
 # Explicit local-development bootstrap. Production deployments should provision

@@ -219,10 +219,9 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertIn("name: published-image-${{ matrix.name }}", workflow)
         self.assertIn("release-artifacts/container-images.json", workflow)
         self.assertIn("sha256sum container-images.json >> SHA256SUMS", workflow)
-        self.assertIn(
-            "needs: [build-artifacts, publish-npm, publish-pypi, publish-docker-images]",
-            workflow,
-        )
+        self.assertIn("smoke-published-core:", workflow)
+        self.assertIn("      - smoke-published-core", workflow)
+        self.assertIn("name: tested-container-image-index", workflow)
 
 
 if __name__ == "__main__":
