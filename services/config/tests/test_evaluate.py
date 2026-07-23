@@ -33,6 +33,7 @@ async def test_evaluate_requires_api_key():
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_auth_001",
             },
         )
 
@@ -59,6 +60,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_checkout_001",
                 "page": "/checkout",
                 "component": "CheckoutPage",
             },
@@ -85,6 +87,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     kwargs = enqueue.await_args.kwargs
     assert enqueue.await_args.args == (app.state.pg_pool,)
     assert kwargs["stream_key"] == "events:raw:apdl"
+    assert kwargs["message_id"] == "eval_checkout_001"
     published = kwargs["event"]
     assert published["event"] == "$feature_flag_exposure"
     assert published["type"] == "track"
@@ -110,7 +113,9 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypatch):
+async def test_evaluate_server_gate_derives_metadata_from_stable_message_id(
+    monkeypatch,
+):
     monkeypatch.setattr(
         evaluate.pg_store,
         "get_flag",
@@ -128,6 +133,7 @@ async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypa
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"anonymous_id": "anon_123", "attributes": {}},
+                "message_id": "eval_checkout_002",
             },
         )
 
@@ -135,7 +141,7 @@ async def test_evaluate_server_gate_logs_exposure_with_default_metadata(monkeypa
     enqueue.assert_awaited_once()
     published = enqueue.await_args.kwargs["event"]
     assert published["anonymous_id"] == "anon_123"
-    assert published["message_id"].startswith("srv_")
+    assert published["message_id"] == "eval_checkout_002"
     assert published["session_id"] == f"server:{published['message_id']}"
     assert published["properties"]["source"] == "server"
     assert published["properties"]["page"] == ""
@@ -178,6 +184,7 @@ async def test_evaluate_reports_corrupt_rollout_without_exposure(
                     "project_id": "apdl",
                     "key": "checkout",
                     "context": {"user_id": "user_123", "attributes": {}},
+                    "message_id": "eval_corrupt_001",
                 },
             )
 
@@ -224,6 +231,7 @@ async def test_evaluate_rejects_client_only_gate(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_client_only_001",
             },
         )
 
@@ -245,12 +253,72 @@ async def test_evaluate_requires_identity_when_logging_exposure(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"attributes": {}},
+                "message_id": "eval_identity_001",
             },
         )
 
     assert response.status_code == 422
     assert response.json()["error"] == "identity_required"
     get_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_id", [None, "", "   "])
+async def test_evaluate_requires_caller_owned_message_id_before_storage(
+    monkeypatch,
+    message_id,
+):
+    get_flag = AsyncMock()
+    monkeypatch.setattr(evaluate.pg_store, "get_flag", get_flag)
+    payload = {
+        "project_id": "apdl",
+        "key": "checkout",
+        "context": {"user_id": "user_123", "attributes": {}},
+    }
+    if message_id is not None:
+        payload["message_id"] = message_id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/evaluate", json=payload)
+
+    assert response.status_code == 422
+    assert "stable nonblank message_id" in response.text
+    get_flag.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_maps_message_id_payload_reuse_to_conflict(monkeypatch):
+    monkeypatch.setattr(
+        evaluate.pg_store,
+        "get_flag",
+        AsyncMock(return_value=make_flag({"evaluation_mode": "server"})),
+    )
+    monkeypatch.setattr(
+        evaluate.mutations,
+        "enqueue_exposure",
+        AsyncMock(
+            side_effect=evaluate.mutations.IntegrityError(
+                "Exposure message_id 'eval_conflict_001' was reused"
+            )
+        ),
+    )
+    app.state.pg_pool = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/evaluate",
+            json={
+                "project_id": "apdl",
+                "key": "checkout",
+                "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_conflict_001",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "message_id_conflict"
 
 
 @pytest.mark.asyncio
@@ -349,6 +417,7 @@ async def test_evaluate_fails_closed_when_exposure_intent_cannot_persist(monkeyp
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_persistence_001",
             },
         )
 

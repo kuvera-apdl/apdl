@@ -478,11 +478,25 @@ export const gateEvaluateRequestSchema = z
     context: evalContextSchema,
     log_exposure: z.boolean(),
     session_id: z.string().optional(),
-    message_id: z.string().optional(),
+    message_id: z.string().max(MAX_IDENTIFIER_LENGTH).optional(),
     page: z.string().optional(),
     component: z.string().optional(),
   })
   .strict()
+  .superRefine((request, ctx) => {
+    if (
+      request.log_exposure &&
+      (request.message_id === undefined ||
+        request.message_id === '' ||
+        request.message_id !== request.message_id.trim())
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['message_id'],
+        message: 'log_exposure requires a stable nonblank message_id',
+      })
+    }
+  })
 
 export const gateEvaluationReasonSchema = z.enum([
   'not_found',

@@ -1,7 +1,6 @@
 """Trusted server-side feature flag evaluation."""
 
 import logging
-import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
@@ -180,7 +179,7 @@ async def _enqueue_exposure(
 ) -> None:
     user_id = body.context.user_id
     anonymous_id = body.context.anonymous_id
-    message_id = body.message_id or f"srv_{uuid.uuid4()}"
+    message_id = body.message_id
     session_id = body.session_id or f"server:{message_id}"
     timestamp = _timestamp()
     event: dict = {

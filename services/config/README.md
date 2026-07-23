@@ -21,7 +21,9 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
 - Evaluates `server`/`both`-mode gates on behalf of trusted backends
   (`POST /v1/evaluate`), durably enqueueing `$feature_flag_exposure` events
   through the same bounded, non-trimming Redis admission policy as Ingestion;
-  stream pressure leaves the PostgreSQL outbox row pending for retry.
+  stream pressure leaves the PostgreSQL outbox row pending for retry. Requests
+  with `log_exposure: true` must carry a caller-owned stable `message_id`; a
+  retry reuses that ID and cannot create a second exposure.
 - Owns the canonical FNV-1a 32-bit bucketing implementation: hash of
   `{flag_key}:{salt}:{unit_id}` with a per-flag salt generated at create time.
   The JS and Python SDKs are byte-for-byte compatible, so a user buckets

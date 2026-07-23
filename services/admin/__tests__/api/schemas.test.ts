@@ -13,6 +13,7 @@ import {
   flagTransitionSchema,
   flagUpdateSchema,
   flagUpdatePayloadSchema,
+  gateEvaluateRequestSchema,
   guardrailConfigSchema,
   staleFlagSchema,
 } from '../../src/api/schemas/flags'
@@ -246,5 +247,33 @@ describe('flagUpdatePayloadSchema (SSE)', () => {
         version: 4,
       }).success,
     ).toBe(false)
+  })
+})
+
+describe('gateEvaluateRequestSchema', () => {
+  const request = {
+    project_id: 'demo',
+    key: 'checkout-cta',
+    context: { user_id: 'user-1', attributes: {} },
+    log_exposure: false,
+  }
+
+  test('allows non-logging evaluation without an exposure message ID', () => {
+    expect(gateEvaluateRequestSchema.safeParse(request).success).toBe(true)
+  })
+
+  test('requires one stable nonblank message ID when logging exposure', () => {
+    expect(
+      gateEvaluateRequestSchema.safeParse({
+        ...request,
+        log_exposure: true,
+        message_id: 'eval-checkout-001',
+      }).success,
+    ).toBe(true)
+    for (const message_id of [undefined, '', '   ', ' padded ']) {
+      expect(
+        gateEvaluateRequestSchema.safeParse({ ...request, log_exposure: true, message_id }).success,
+      ).toBe(false)
+    }
   })
 })

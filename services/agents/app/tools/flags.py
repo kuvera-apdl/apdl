@@ -253,9 +253,15 @@ async def evaluate_gate(
     message_id: str = "",
     page: str = "",
     component: str = "",
-    log_exposure: bool = True,
+    log_exposure: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a server-side feature flag through the trusted Config API."""
+    if log_exposure and (
+        not message_id or message_id != message_id.strip()
+    ):
+        raise ValueError(
+            "log_exposure requires a stable nonblank message_id"
+        )
     payload = {
         "project_id": project_id,
         "key": key,

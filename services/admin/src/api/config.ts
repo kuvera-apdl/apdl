@@ -17,6 +17,7 @@ import {
   flagsListResponseSchema,
   flagUpdateResponseSchema,
   flagUpdateSchema,
+  gateEvaluateRequestSchema,
   gateEvaluateResponseSchema,
   staleFlagsResponseSchema,
 } from './schemas/flags'
@@ -158,7 +159,7 @@ export function evaluateFlagOnServer(
 ): Promise<GateEvaluateResponse> {
   return request(conn, '/v1/evaluate', {
     method: 'POST',
-    body,
+    body: gateEvaluateRequestSchema.parse(body),
     schema: gateEvaluateResponseSchema,
   })
 }
