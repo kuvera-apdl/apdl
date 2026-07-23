@@ -1,5 +1,9 @@
 import { generateId } from '../core/types';
 import type { PersistenceMode } from '../core/config';
+import {
+  scopedBrowserStorageKey,
+  type DeploymentStorageScope,
+} from '../core/storage-scope';
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -22,10 +26,10 @@ export class SessionManager {
 
   constructor(
     persistence: PersistenceMode = 'localStorage',
-    projectId: string
+    scope: DeploymentStorageScope
   ) {
     this.persistence = persistence;
-    this.storageKey = `apdl_session_${projectId}`;
+    this.storageKey = scopedBrowserStorageKey('session', scope);
     this.session = this.restore() ?? this.createSession();
   }
 

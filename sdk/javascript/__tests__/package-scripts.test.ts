@@ -22,6 +22,7 @@ describe('package workflow scripts', () => {
       clean: 'rm -rf dist',
       build: 'npm run clean && rollup -c rollup.config.ts --configPlugin typescript && node scripts/normalize-declarations.mjs',
       test: 'vitest run',
+      'test:built-browser': 'node scripts/test-built-browser.mjs',
       typecheck: 'tsc --noEmit',
       lint: 'npm run typecheck && tsc -p __tests__/tsconfig.json --noEmit',
       'lint:package': 'publint',
@@ -32,7 +33,7 @@ describe('package workflow scripts', () => {
 
   it('runs lint, tests, build, and package dry-run during release validation', () => {
     expect(packageJson.scripts?.['release:check'])
-      .toBe('npm run lint && npm test && npm run build && npm run lint:package && npm run pack:dry-run');
+      .toBe('npm run lint && npm test && npm run build && npm run test:built-browser && npm run lint:package && npm run pack:dry-run');
   });
 
   it('packages the built dist artifacts only', () => {

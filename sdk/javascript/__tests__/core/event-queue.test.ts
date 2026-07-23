@@ -76,12 +76,17 @@ describe('EventQueue', () => {
     vi.useFakeTimers();
     config = createConfig();
     transport = new Transport(CLIENT_KEY);
-    storage = new OfflineStorage({ projectId: config.projectId });
+    const storageScope = {
+      deploymentOrigin: config.endpoint,
+      projectId: config.projectId,
+    };
+    storage = new OfflineStorage(storageScope);
     scrubber = new Scrubber(false); // No built-in scrubbers for testing
     consentManager = new ConsentManager(
       { analytics: true, personalization: true, experiments: true },
       'memory',
-      config.projectId
+      storageScope,
+      true
     );
     queue = new EventQueue(config, transport, storage, scrubber, consentManager);
   });

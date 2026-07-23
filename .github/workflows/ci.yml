@@ -31,6 +31,8 @@ jobs:
         working-directory: sdk/javascript
       - run: npm run build
         working-directory: sdk/javascript
+      - run: npm run test:built-browser
+        working-directory: sdk/javascript
       - run: npm run lint:package
         working-directory: sdk/javascript
 

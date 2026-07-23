@@ -12,6 +12,7 @@ import { ENDPOINT } from '../helpers';
 const PROJECT_A_KEY = 'client_projectA_0123456789abcdef';
 const PROJECT_A_ROTATED_KEY = 'client_projectA_abcdef0123456789';
 const PROJECT_B_KEY = 'client_projectB_fedcba9876543210';
+const SECOND_ENDPOINT = 'https://api.second.test';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 function createEvent(
@@ -38,12 +39,18 @@ function createLargeEvent(event: string, payloadBytes: number): TrackEvent {
   return createEvent(event, { payload: { value: 'x'.repeat(payloadBytes) } });
 }
 
-function storageForKey(clientKey: string): OfflineStorage {
+function storageForKey(
+  clientKey: string,
+  endpoint: string = ENDPOINT
+): OfflineStorage {
   const config = resolveConfig({
-    endpoint: ENDPOINT,
+    endpoint,
     auth: { clientKey },
   });
-  return new OfflineStorage({ projectId: config.projectId });
+  return new OfflineStorage({
+    deploymentOrigin: config.endpoint,
+    projectId: config.projectId,
+  });
 }
 
 async function readRawRecords(): Promise<Array<Record<string, unknown>>> {
@@ -69,7 +76,7 @@ async function addRawRecord(record: Record<string, unknown>): Promise<void> {
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('apdl-offline', 2);
+    const request = indexedDB.open('apdl-offline', 3);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
@@ -77,13 +84,19 @@ function openDatabase(): Promise<IDBDatabase> {
 
 async function createLegacyDatabase(event: TrackEvent): Promise<void> {
   const db = await new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open('apdl-offline', 1);
+    const request = indexedDB.open('apdl-offline', 2);
     request.onupgradeneeded = () => {
       const store = request.result.createObjectStore('events', {
         keyPath: 'id',
         autoIncrement: true,
       });
-      store.add({ data: event });
+      store.add({
+        schema_version: 2,
+        owner_id: 'project:projectA',
+        stored_at: Date.now(),
+        serialized_bytes: serializedBytes(event),
+        data: event,
+      });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -103,6 +116,7 @@ describe('OfflineStorage', () => {
   it('keeps offline retries in memory without opening IndexedDB in memory mode', async () => {
     const open = vi.spyOn(indexedDB, 'open');
     const storage = new OfflineStorage({
+      deploymentOrigin: ENDPOINT,
       projectId: 'projectA',
       persistence: 'memory',
     });
@@ -128,6 +142,18 @@ describe('OfflineStorage', () => {
     expect(await projectA.drain()).toEqual([projectAEvent]);
   });
 
+  it('isolates the same project across different deployment origins', async () => {
+    const firstDeployment = storageForKey(PROJECT_A_KEY, ENDPOINT);
+    const secondDeployment = storageForKey(PROJECT_A_KEY, SECOND_ENDPOINT);
+    const firstEvent = createEvent('first_deployment_event');
+
+    await firstDeployment.store([firstEvent]);
+
+    expect(await secondDeployment.drain()).toEqual([]);
+    expect(await secondDeployment.count()).toBe(0);
+    expect(await firstDeployment.drain()).toEqual([firstEvent]);
+  });
+
   it('persists a non-secret project owner marker instead of the client key', async () => {
     const storage = storageForKey(PROJECT_A_KEY);
     const event = createEvent('private_key_check');
@@ -138,8 +164,9 @@ describe('OfflineStorage', () => {
 
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
-      schema_version: 2,
-      owner_id: 'project:projectA',
+      schema_version: 3,
+      deployment_origin: ENDPOINT,
+      project_id: 'projectA',
       serialized_bytes: serializedBytes(event),
     });
     expect(serialized).not.toContain(PROJECT_A_KEY);
@@ -300,7 +327,7 @@ describe('OfflineStorage', () => {
     expect(await readRawRecords()).toEqual([]);
   });
 
-  it('discards unowned version 1 records during the database upgrade', async () => {
+  it('discards project-only version 2 records during the database upgrade', async () => {
     await createLegacyDatabase(createEvent('legacy_event'));
 
     const projectA = storageForKey(PROJECT_A_KEY);

@@ -56,13 +56,14 @@
     "clean": "rm -rf dist",
     "build": "npm run clean && rollup -c rollup.config.ts --configPlugin typescript && node scripts/normalize-declarations.mjs",
     "test": "vitest run",
+    "test:built-browser": "node scripts/test-built-browser.mjs",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "npm run typecheck && tsc -p __tests__/tsconfig.json --noEmit",
     "lint:package": "publint",
     "pack:dry-run": "npm pack --dry-run",
-    "release:check": "npm run lint && npm test && npm run build && npm run lint:package && npm run pack:dry-run",
+    "release:check": "npm run lint && npm test && npm run build && npm run test:built-browser && npm run lint:package && npm run pack:dry-run",
     "prepack": "npm run build"
   },
   "dependencies": {

@@ -1,4 +1,8 @@
 import type { ConsentState, PersistenceMode } from '../core/config';
+import {
+  scopedBrowserStorageKey,
+  type DeploymentStorageScope,
+} from '../core/storage-scope';
 
 type ConsentCategory = keyof ConsentState;
 type ConsentCallback = (state: ConsentState) => void;
@@ -17,13 +21,15 @@ export class ConsentManager {
   constructor(
     initialState: ConsentState,
     persistence: PersistenceMode = 'localStorage',
-    projectId: string
+    scope: DeploymentStorageScope,
+    initialStateIsExplicit = false
   ) {
     this.persistence = persistence;
-    this.storageKey = `apdl_consent_${projectId}`;
+    this.storageKey = scopedBrowserStorageKey('consent', scope);
 
-    // Try to restore from persistence, falling back to initial state
-    const restored = this.restore();
+    // A current host/CMP decision is authoritative. Persistence is consulted
+    // only when the caller omitted consent entirely.
+    const restored = initialStateIsExplicit ? null : this.restore();
     this.state = restored ?? { ...initialState };
     this.persist();
   }
@@ -116,17 +122,30 @@ export class ConsentManager {
 
       const parsed = JSON.parse(raw) as ConsentState;
 
-      // Validate shape
+      // Validate the one canonical persisted shape.
       if (
+        parsed === null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed) ||
+        Object.keys(parsed).length !== 3 ||
+        !Object.prototype.hasOwnProperty.call(parsed, 'analytics') ||
+        !Object.prototype.hasOwnProperty.call(parsed, 'personalization') ||
+        !Object.prototype.hasOwnProperty.call(parsed, 'experiments') ||
         typeof parsed.analytics !== 'boolean' ||
         typeof parsed.personalization !== 'boolean' ||
         typeof parsed.experiments !== 'boolean'
       ) {
+        localStorage.removeItem(this.storageKey);
         return null;
       }
 
       return parsed;
     } catch {
+      try {
+        localStorage.removeItem(this.storageKey);
+      } catch {
+        // Storage may be unavailable.
+      }
       return null;
     }
   }
