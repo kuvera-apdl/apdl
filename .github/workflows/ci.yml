@@ -251,6 +251,7 @@ jobs:
         working-directory: pipeline/redis
       - run: .venv/bin/python -m pytest -q
         working-directory: pipeline/redis
+      - run: make test-boundary-markers
 
   python-dependency-audit:
     name: Python Dependency Audit

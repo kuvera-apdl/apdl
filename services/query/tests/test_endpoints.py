@@ -52,6 +52,7 @@ def test_non_final_schema_has_canonical_unverified_completeness_reason():
 
     assert schema["properties"]["data_completeness"]["const"] == "not_verified"
     assert "data_completeness_unverified" in schema["properties"]["reason"]["enum"]
+    assert "pipeline_boundary_failed" in schema["properties"]["reason"]["enum"]
 
 
 def test_guardrail_response_schema_requires_canonical_window_boundaries():
@@ -1283,6 +1284,77 @@ async def test_historical_rows_without_provenance_prevent_snapshot(
     assert response.status_code == 200
     assert response.json()["reason"] == "pipeline_provenance_unavailable"
     persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "aggregates",
+    [
+        pytest.param([], id="no-exposures"),
+        pytest.param(
+            [
+                {
+                    "variant": variant,
+                    "sample_size": 1,
+                    "conversions": 0,
+                    "crossover_actors": 0,
+                    "unknown_variant_actors": 0,
+                    "identity_conflict_actors": 0,
+                }
+                for variant in ("control", "treatment")
+            ],
+            id="underpowered",
+        ),
+        pytest.param(
+            [
+                {
+                    "variant": variant,
+                    "sample_size": 20,
+                    "conversions": 2,
+                    "crossover_actors": 0,
+                    "unknown_variant_actors": 1,
+                    "identity_conflict_actors": 0,
+                }
+                for variant in ("control", "treatment")
+            ],
+            id="unknown-variant",
+        ),
+    ],
+)
+async def test_terminal_boundary_publication_failure_is_explicit(
+    client,
+    monkeypatch,
+    aggregates,
+):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    monkeypatch.setattr(app.state, "completeness_pool", object(), raising=False)
+    monkeypatch.setattr(
+        experiments,
+        "get_or_create_experiment_boundary",
+        AsyncMock(
+            return_value=experiments.ExperimentBoundaryAuthority(
+                state="quarantined",
+                marker_stream_id=None,
+                marker_stream_id_parts=None,
+                snapshot=None,
+                failure_reason="event_stream_capacity",
+            )
+        ),
+    )
+    app.state.ch_client.execute = AsyncMock(return_value=aggregates)
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "non_final"
+    assert response.json()["reason"] == "pipeline_boundary_failed"
 
 
 @pytest.mark.asyncio

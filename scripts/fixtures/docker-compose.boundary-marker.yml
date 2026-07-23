@@ -1,0 +1,42 @@
+services:
+  redis:
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "127.0.0.1::6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    environment:
+      POSTGRES_DB: apdl
+      POSTGRES_USER: apdl
+      POSTGRES_PASSWORD: apdl_dev
+    ports:
+      - "127.0.0.1::5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            postgres|*/postgres)
+              pg_isready -U apdl -d apdl
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+      interval: 2s
+      timeout: 2s
+      retries: 30

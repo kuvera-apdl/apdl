@@ -689,6 +689,7 @@ class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
         "unknown_variant_exposures",
         "data_completeness_unverified",
         "awaiting_pipeline_boundary",
+        "pipeline_boundary_failed",
         "pipeline_degraded",
         "pipeline_provenance_unavailable",
     ]

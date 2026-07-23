@@ -10,8 +10,8 @@ from app.config_client import assert_experiment_analysis_capability
 
 
 REQUIRED_POSTGRES_MIGRATION = (
-    38,
-    "038_experiment_data_completeness.sql",
+    41,
+    "041_boundary_marker_retry_quarantine.sql",
 )
 REQUIRED_CLICKHOUSE_MIGRATION = (
     16,
@@ -35,6 +35,13 @@ REQUIRED_POSTGRES_COLUMNS = frozenset(
         ("experiment_analysis_boundaries", "marker_stream_id"),
         ("experiment_analysis_boundaries", "requested_at"),
         ("experiment_analysis_boundaries", "marked_at"),
+        ("experiment_analysis_boundaries", "marker_publish_state"),
+        ("experiment_analysis_boundaries", "marker_publish_attempts"),
+        ("experiment_analysis_boundaries", "marker_publish_next_attempt_at"),
+        ("experiment_analysis_boundaries", "marker_publish_failure_code"),
+        ("experiment_analysis_boundaries", "marker_publish_last_error_at"),
+        ("experiment_analysis_boundaries", "marker_publish_quarantined_at"),
+        ("experiment_analysis_boundaries", "marker_publish_observed_stream_id"),
         ("experiment_analysis_snapshots", "project_id"),
         ("experiment_analysis_snapshots", "experiment_key"),
         ("experiment_analysis_snapshots", "config_version"),

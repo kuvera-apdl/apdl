@@ -55,7 +55,14 @@ class _Pool:
         return _Context(self.connection)
 
 
-def _boundary(marker_stream_id="10-2"):
+def _boundary(
+    marker_stream_id="10-2",
+    *,
+    publish_state=None,
+    failure_code=None,
+):
+    if publish_state is None:
+        publish_state = "published" if marker_stream_id is not None else "pending"
     return {
         "stream_key": "events:raw:demo",
         "window_start": datetime(2025, 1, 1, tzinfo=UTC),
@@ -68,6 +75,8 @@ def _boundary(marker_stream_id="10-2"):
             window_end=datetime(2025, 1, 2, tzinfo=UTC),
         ),
         "marker_stream_id": marker_stream_id,
+        "marker_publish_state": publish_state,
+        "marker_publish_failure_code": failure_code,
     }
 
 
@@ -217,3 +226,48 @@ async def test_degraded_watermark_never_covers_boundary():
 
     assert authority.state == "degraded"
     assert authority.failure_reason == "dead_lettered_event"
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_quarantine_is_not_reported_as_pending():
+    connection = _Connection(
+        boundary=_boundary(
+            None,
+            publish_state="quarantined",
+            failure_code="event_stream_capacity",
+        ),
+    )
+
+    authority = await get_or_create_experiment_boundary(
+        _Pool(connection),
+        project_id="demo",
+        experiment_key="experiment",
+        config_version=3,
+        window_start=datetime(2025, 1, 1, tzinfo=UTC),
+        window_end=datetime(2025, 1, 2, tzinfo=UTC),
+    )
+
+    assert authority.state == "quarantined"
+    assert authority.failure_reason == "event_stream_capacity"
+    assert authority.marker_stream_id is None
+    assert authority.marker_stream_id_parts is None
+
+
+@pytest.mark.asyncio
+async def test_boundary_publish_state_and_marker_identity_must_agree():
+    connection = _Connection(
+        boundary=_boundary("10-2", publish_state="pending"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="pending experiment boundary has a stream marker",
+    ):
+        await get_or_create_experiment_boundary(
+            _Pool(connection),
+            project_id="demo",
+            experiment_key="experiment",
+            config_version=3,
+            window_start=datetime(2025, 1, 1, tzinfo=UTC),
+            window_end=datetime(2025, 1, 2, tzinfo=UTC),
+        )

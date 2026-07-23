@@ -21,7 +21,7 @@ _MAX_STREAM_ID_PART = 2**64 - 1
 class ExperimentBoundaryAuthority:
     """One immutable analysis boundary and its current coverage state."""
 
-    state: Literal["pending", "covered", "degraded"]
+    state: Literal["pending", "covered", "degraded", "quarantined"]
     marker_stream_id: str | None
     marker_stream_id_parts: tuple[int, int] | None
     snapshot: ExperimentAnalysisDecisionSnapshot | None
@@ -160,7 +160,9 @@ async def get_or_create_experiment_boundary(
                     window_start,
                     window_end,
                     marker_token,
-                    marker_stream_id
+                    marker_stream_id,
+                    marker_publish_state,
+                    marker_publish_failure_code
                 FROM experiment_analysis_boundaries
                 WHERE project_id = $1
                   AND experiment_key = $2
@@ -196,9 +198,22 @@ async def get_or_create_experiment_boundary(
                 config_version,
             )
             marker_stream_id = _row_value(boundary, "marker_stream_id")
+            marker_publish_state = _row_value(
+                boundary,
+                "marker_publish_state",
+            )
+            marker_publish_failure_code = _row_value(
+                boundary,
+                "marker_publish_failure_code",
+            )
             if snapshot_row is not None:
-                if marker_stream_id is None or (
-                    _row_value(snapshot_row, "boundary_stream_id") != marker_stream_id
+                if (
+                    marker_publish_state != "published"
+                    or marker_stream_id is None
+                    or (
+                        _row_value(snapshot_row, "boundary_stream_id")
+                        != marker_stream_id
+                    )
                 ):
                     raise RuntimeError(
                         "experiment snapshot conflicts with its stream boundary"
@@ -214,12 +229,36 @@ async def get_or_create_experiment_boundary(
                     snapshot=snapshot,
                 )
 
-            if marker_stream_id is None:
+            if marker_publish_state == "quarantined":
+                if (
+                    marker_stream_id is not None
+                    or not isinstance(marker_publish_failure_code, str)
+                    or not marker_publish_failure_code
+                ):
+                    raise RuntimeError(
+                        "quarantined experiment boundary authority is invalid"
+                    )
+                return ExperimentBoundaryAuthority(
+                    state="quarantined",
+                    marker_stream_id=None,
+                    marker_stream_id_parts=None,
+                    snapshot=None,
+                    failure_reason=marker_publish_failure_code,
+                )
+            if marker_publish_state == "pending":
+                if marker_stream_id is not None:
+                    raise RuntimeError(
+                        "pending experiment boundary has a stream marker"
+                    )
                 return ExperimentBoundaryAuthority(
                     state="pending",
                     marker_stream_id=None,
                     marker_stream_id_parts=None,
                     snapshot=None,
+                )
+            if marker_publish_state != "published" or marker_stream_id is None:
+                raise RuntimeError(
+                    "experiment boundary publication state is invalid"
                 )
             marker_parts = parse_stream_id(marker_stream_id)
 

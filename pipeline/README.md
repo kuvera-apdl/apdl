@@ -41,7 +41,10 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   existing backlog is consumed on first discovery. The writer periodically uses
   `XAUTOCLAIM` to take over stale Pending Entries List deliveries from prior
   consumers. Messages are atomically XACKed and XDEL'd only after ClickHouse or
-  the DLQ accepts their rows. This keeps `XLEN` equal to outstanding work so
+  the DLQ accepts their rows. Durable finalization is isolated per stream:
+  PostgreSQL verification/frontier waits are bounded, a blocked stream retains
+  only its own IDs, and healthy streams continue to be read and finalized.
+  This keeps `XLEN` equal to outstanding work so
   both event producers can enforce the shared 1,000,000-entry capacity without
   trimming accepted data. A crash between insert and ACK may replay an insert,
   but the stable client
@@ -64,6 +67,22 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   backoff shared by the consumer and periodic flusher; events are not dropped
   after an arbitrary retry count. Only narrow client-side row serialization
   errors are terminal—server/schema failures retain the batch.
+- **Experiment boundaries:** marker publication selects at most one due marker
+  per project per sweep. Each marker failure is isolated from later tenants and
+  persists a server-time exponential-backoff deadline in PostgreSQL. Transient
+  failures enter terminal quarantine on the fifth failed publication attempt;
+  malformed markers quarantine immediately. Both paths persist a fixed safe
+  failure code. Existing Redis dedup IDs are atomically checked against the
+  exact stream entry and marker fields before reuse. The first valid observed
+  stream ID is retained across retries; a quarantined observed delivery is
+  ACKed only after its project completeness frontier is permanently degraded.
+  A poisoned dedup ID already owned by another boundary is quarantined without
+  stealing that ID, while genuine post-XADD observations remain mandatory.
+  Redis insertion remains token-idempotent, and the original project,
+  experiment, version, window, stream, token, and observed identity never
+  changes. Startup holds the migration guards while proving the exact migration
+  041 ledger checksum, columns, canonical constraint definitions, and exact
+  monotone/terminal trigger function before taking singleton writer authority.
 - **Shutdown:** SIGINT/SIGTERM trigger a bounded final flush and stats log.
   Cancellation never marks a still-running synchronous insert as complete. If
   the shutdown deadline expires, the writer closes the native ClickHouse socket
