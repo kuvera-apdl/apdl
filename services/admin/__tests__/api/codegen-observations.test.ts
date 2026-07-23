@@ -93,6 +93,21 @@ describe('codegen observation history', () => {
     expect(changesetObservationHistorySchema.safeParse(bad).success).toBe(false)
   })
 
+  test.each([
+    'javascript:alert(1)',
+    'http://github.example/acme/widgets/pull/17',
+    'https://operator:secret@github.example/acme/widgets/pull/17',
+    'https://github.example/acme/widgets/pull/17#https://attacker.example',
+  ])('rejects an unsafe rendered observation URL: %s', (githubUrl) => {
+    const fixture = makeChangesetObservationHistory()
+    const bad = {
+      ...fixture,
+      pull_requests: [{ ...fixture.pull_requests[0], github_url: githubUrl }],
+    }
+
+    expect(changesetObservationHistorySchema.safeParse(bad).success).toBe(false)
+  })
+
   test('rejects mutable-looking remediation identity drift', () => {
     const fixture = makeChangesetObservationHistory()
     const bad = {

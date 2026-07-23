@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { externalCIStatusSchema } from './codegen-observations'
+import { externalHttpsUrlSchema } from './urls'
 
 const requirementIdSchema = z.string().regex(/^REQ-[0-9]{3}$/)
 const headShaSchema = z.string().regex(/^[A-Za-z0-9._-]{1,128}$/)
@@ -255,9 +256,7 @@ const runtimeJobLogEvidenceSchema = z
     source_byte_count: z.number().int().nonnegative(),
     truncated: z.boolean(),
     redacted: z.boolean(),
-    github_url: z.string().min(1).max(2000).url().refine((value) => value.startsWith('https://'), {
-      message: 'GitHub job URL must use HTTPS',
-    }),
+    github_url: externalHttpsUrlSchema,
   })
   .strict()
   .refine(
@@ -275,7 +274,7 @@ const runtimeArtifactObservationSchema = z
     status: runtimeEvidenceStatusSchema,
     requirement_ids: z.array(requirementIdSchema).min(1),
     files: z.array(artifactFileEvidenceSchema),
-    github_url: z.string().nullable(),
+    github_url: externalHttpsUrlSchema.nullable(),
     unverified_reason: z.string().nullable(),
   })
   .strict()

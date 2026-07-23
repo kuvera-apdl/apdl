@@ -68,4 +68,19 @@ describe('codegen runtime evidence', () => {
 
     expect(runtimeEvidenceObservationSchema.safeParse(bad).success).toBe(false)
   })
+
+  test('rejects unsafe artifact and job links before rendering them', () => {
+    const fixture = makeRuntimeEvidenceObservation()
+    expect(runtimeEvidenceObservationSchema.safeParse({
+      ...fixture,
+      artifacts: [{ ...fixture.artifacts[0], github_url: 'http://github.example/artifact' }],
+    }).success).toBe(false)
+    expect(runtimeEvidenceObservationSchema.safeParse({
+      ...fixture,
+      job_logs: [{
+        ...fixture.job_logs[0],
+        github_url: 'https://user:password@github.example/job',
+      }],
+    }).success).toBe(false)
+  })
 })
