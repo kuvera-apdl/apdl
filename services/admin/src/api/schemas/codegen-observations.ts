@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { externalHttpsUrlSchema } from './urls'
+
 export const githubPRStatusSchema = z.enum(['draft', 'open', 'merged', 'closed'])
 export const externalCIStatusSchema = z.enum([
   'pending',
@@ -42,7 +44,7 @@ const ciSignalSchema = z
     kind: z.enum(['check_run', 'commit_status']),
     name: z.string().min(1),
     conclusion: z.enum(['pending', 'passed', 'failed', 'neutral', 'skipped']),
-    github_url: z.string().nullable(),
+    github_url: externalHttpsUrlSchema.nullable(),
     check_suite_id: z.number().int().min(1).nullable(),
     check_run_id: z.number().int().min(1).nullable(),
     summary: z.string().nullable(),
@@ -191,7 +193,7 @@ export const pullRequestObservationSchema = z
       'reopened',
       'polled',
     ]),
-    github_url: z.string().min(1),
+    github_url: externalHttpsUrlSchema,
     merge_sha: z.string().nullable(),
     github_updated_at: awareDateTimeSchema,
     observed_at: awareDateTimeSchema,

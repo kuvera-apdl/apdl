@@ -1,11 +1,12 @@
 """HTTP transport with typed outcomes and retry/backoff over httpx.
 
 Mirrors the retry policy of ``sdk/javascript/src/core/transport.ts``: 2xx is
-accepted; 408/425/429, 5xx, and network errors are retryable; and every other
-final HTTP status is a permanent rejection. Retries use exponential backoff and
-honor ``Retry-After`` on 429. The backoff schedule is shorter than the browser
-SDK's since a blocked server flush thread should fail fast rather than stall
-for minutes.
+accepted; 408/425/429, 5xx, and network errors are retryable; 400/413/422 are
+payload rejections that the queue may isolate; and every other final HTTP status
+is a permanent request rejection. Retries use exponential backoff and honor
+``Retry-After`` on 429. The backoff schedule is shorter than the browser SDK's
+since a blocked server flush thread should fail fast rather than stall for
+minutes.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ logger = logging.getLogger("apdl")
 DEFAULT_RETRY_BACKOFF: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0)
 _MAX_RETRY_AFTER = 60.0
 _RETRYABLE_CLIENT_STATUSES = frozenset({408, 425, 429})
+_PAYLOAD_REJECTION_STATUSES = frozenset({400, 413, 422})
 
 
 class TransportOutcome(str, Enum):
@@ -33,6 +35,7 @@ class TransportOutcome(str, Enum):
 
     ACCEPTED = "accepted"
     RETRYABLE = "retryable"
+    PAYLOAD_REJECTED = "payload_rejected"
     PERMANENT_REJECTION = "permanent_rejection"
 
 
@@ -95,6 +98,12 @@ class Transport:
                     return TransportOutcome.ACCEPTED
 
                 status = response.status_code
+                if status in _PAYLOAD_REJECTION_STATUSES:
+                    if self._debug:
+                        logger.warning(
+                            "APDL: payload rejected with %d from %s", status, url
+                        )
+                    return TransportOutcome.PAYLOAD_REJECTED
                 if (
                     status not in _RETRYABLE_CLIENT_STATUSES
                     and not 500 <= status < 600

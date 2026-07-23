@@ -237,8 +237,7 @@ async def test_waiting_or_approval_work_keeps_the_project_execution_lane():
     assert response.status_code == 409
     assert "run-waiting" in response.json()["detail"]
     assert not any(
-        "INSERT INTO agent_runs" in statement
-        for statement, _ in pool.conn.executed
+        "INSERT INTO agent_runs" in statement for statement, _ in pool.conn.executed
     )
 
 
@@ -433,7 +432,7 @@ async def test_trigger_rejects_slug_not_active_in_project():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disabled", ["personalization", "experiment_evaluation"])
+@pytest.mark.parametrize("disabled", ["personalization"])
 async def test_trigger_rejects_disabled_builtin(disabled):
     """Disabled built-ins are rejected before a run or job is created."""
 
@@ -452,6 +451,29 @@ async def test_trigger_rejects_disabled_builtin(disabled):
     assert resp.status_code == 422
     assert disabled in resp.json()["detail"]
     assert pool.conn.executed == []
+
+
+@pytest.mark.asyncio
+async def test_trigger_accepts_evidence_only_experiment_evaluation():
+    pool = _FakePool()
+
+    async with _client(pool) as client:
+        response = await client.post(
+            "/v1/agents/trigger",
+            json={
+                "project_id": "demo",
+                "trigger_type": "manual",
+                "analysis_types": ["experiment_evaluation"],
+            },
+        )
+
+    assert response.status_code == 200
+    _, args = next(
+        (query, values)
+        for query, values in pool.conn.executed
+        if "INSERT INTO agent_runs" in query
+    )
+    assert json.loads(args[-1])["analysis_types"] == ["experiment_evaluation"]
 
 
 @pytest.mark.asyncio

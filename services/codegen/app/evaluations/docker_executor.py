@@ -9,7 +9,11 @@ import re
 import uuid
 from collections.abc import Mapping
 
-from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
+from app.editor.environment import (
+    CODEGEN_BEHAVIOR_ENV,
+    MODEL_PROVIDER_CREDENTIAL_ENV,
+    MODEL_PROVIDER_ENV,
+)
 from app.egress import (
     EGRESS_PROXY_ENV,
     EgressPolicyAttestation,
@@ -78,23 +82,19 @@ class DockerEvaluationExecutor:
         self._max_output_bytes = max_output_bytes
         self._environment = sanitized_evaluation_environment(environment)
         self._probe_image = validate_proxy_image_id(probe_image)
-        self._egress_policy_sha256 = validate_policy_sha256(
-            egress_policy_sha256
-        )
-        self._egress_proxy_image_id = validate_proxy_image_id(
-            egress_proxy_image_id
-        )
-        self._egress_socket_volume = validate_socket_volume(
-            egress_socket_volume
-        )
+        self._egress_policy_sha256 = validate_policy_sha256(egress_policy_sha256)
+        self._egress_proxy_image_id = validate_proxy_image_id(egress_proxy_image_id)
+        self._egress_socket_volume = validate_socket_volume(egress_socket_volume)
         self._proxy_environment = (
-            proxy_environment(proxy_url) if proxy_url is not None else proxy_environment()
+            proxy_environment(proxy_url)
+            if proxy_url is not None
+            else proxy_environment()
         )
         self._environment.update(self._proxy_environment)
         self._protected_values = tuple(
             value
             for key, value in self._environment.items()
-            if key in MODEL_PROVIDER_ENV and len(value) >= 8
+            if key in MODEL_PROVIDER_CREDENTIAL_ENV and len(value) >= 8
         )
         self._image_revision_validated = False
         self._egress_attestations: dict[str, EgressPolicyAttestation] = {}
@@ -129,7 +129,9 @@ class DockerEvaluationExecutor:
     ) -> list[str]:
         workspace = invocation.workspace.resolve()
         if not workspace.is_dir() or not (workspace / ".git").is_dir():
-            raise ValueError("evaluation workspace must be a materialized Git repository")
+            raise ValueError(
+                "evaluation workspace must be a materialized Git repository"
+            )
         if "," in str(workspace):
             raise ValueError("evaluation workspace path cannot contain a comma")
         uid = os.getuid() if hasattr(os, "getuid") else 1000
@@ -237,7 +239,9 @@ class DockerEvaluationExecutor:
                 )
             raise
         except OSError as exc:
-            raise EvaluationExecutorError("Docker evaluation executor could not start") from exc
+            raise EvaluationExecutorError(
+                "Docker evaluation executor could not start"
+            ) from exc
 
         assert process.stdin is not None
         assert process.stdout is not None
@@ -267,7 +271,9 @@ class DockerEvaluationExecutor:
                 stdout_task,
                 stderr_task,
             )
-            raise EvaluationExecutorError("Docker evaluation executor timed out") from exc
+            raise EvaluationExecutorError(
+                "Docker evaluation executor timed out"
+            ) from exc
         except (BrokenPipeError, ConnectionResetError) as exc:
             await self._finish_cleanup_uninterruptibly(
                 container_name,
@@ -275,7 +281,9 @@ class DockerEvaluationExecutor:
                 stdout_task,
                 stderr_task,
             )
-            raise EvaluationExecutorError("Docker evaluation executor closed its input") from exc
+            raise EvaluationExecutorError(
+                "Docker evaluation executor closed its input"
+            ) from exc
         except asyncio.CancelledError:
             try:
                 await self._finish_cleanup_uninterruptibly(
@@ -311,7 +319,9 @@ class DockerEvaluationExecutor:
             stderr_task,
         )
         if stdout.total_bytes + stderr.total_bytes > self._max_output_bytes:
-            raise EvaluationExecutorError("Docker evaluation executor exceeded its output limit")
+            raise EvaluationExecutorError(
+                "Docker evaluation executor exceeded its output limit"
+            )
         if process.returncode != 0:
             raise EvaluationExecutorError(
                 f"Docker evaluation executor exited with status {process.returncode}"
@@ -365,7 +375,9 @@ class DockerEvaluationExecutor:
                 "Docker evaluation could not inspect the candidate image"
             ) from exc
         if process.returncode != 0:
-            raise EvaluationExecutorError("Docker evaluation candidate image is unavailable")
+            raise EvaluationExecutorError(
+                "Docker evaluation candidate image is unavailable"
+            )
         try:
             observed = stdout.decode("utf-8", errors="strict").strip()
         except UnicodeDecodeError:
@@ -394,9 +406,7 @@ class DockerEvaluationExecutor:
             await _terminate_process_tree(process)
             await self._remove_container(container_name)
 
-        cleanup_task = asyncio.create_task(
-            asyncio.wait_for(cleanup(), timeout=45)
-        )
+        cleanup_task = asyncio.create_task(asyncio.wait_for(cleanup(), timeout=45))
         cancellation_interrupted_cleanup = False
         while not cleanup_task.done():
             try:
@@ -480,8 +490,7 @@ class DockerEvaluationExecutor:
             combined = f"{remove_detail}\n{inspect_detail}".strip()
             normalized = combined.casefold()
             if inspect_rc not in (None, 0) and (
-                "no such container" in normalized
-                or "no such object" in normalized
+                "no such container" in normalized or "no such object" in normalized
             ):
                 return
             last_detail = combined

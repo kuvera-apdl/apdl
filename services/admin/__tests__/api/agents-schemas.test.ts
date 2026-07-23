@@ -2,10 +2,73 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  agentDefinitionsResponseSchema,
   approvalRequestSchema,
   approvalResponseSchema,
   customAgentSpecSchema,
+  projectExecutionCapabilitiesSchema,
+  triggerResponseSchema,
 } from '../../src/api/schemas/agents'
+
+describe('agent capability schemas', () => {
+  const definition = {
+    name: 'behavior_analysis',
+    display_name: 'Behavior analysis',
+    description: 'Produces insights.',
+    order: 10,
+    produces: 'insights',
+    requires: [],
+    model_tier: 'reasoning',
+    is_custom: false,
+  }
+
+  test('requires the canonical started response and non-empty fields', () => {
+    expect(triggerResponseSchema.safeParse({ run_id: 'run-1', status: 'started' }).success).toBe(true)
+    expect(triggerResponseSchema.safeParse({ run_id: '', status: 'started' }).success).toBe(false)
+    expect(triggerResponseSchema.safeParse({ run_id: 'run-1', status: 'queued' }).success).toBe(false)
+    expect(
+      agentDefinitionsResponseSchema.safeParse({ agents: [definition], tool_catalog: [] }).success,
+    ).toBe(true)
+    expect(
+      agentDefinitionsResponseSchema.safeParse({
+        agents: [{ ...definition, description: '' }],
+        tool_catalog: [],
+      }).success,
+    ).toBe(false)
+  })
+
+  test('rejects duplicate definition names', () => {
+    expect(
+      agentDefinitionsResponseSchema.safeParse({
+        agents: [definition, { ...definition, display_name: 'Duplicate' }],
+        tool_catalog: [],
+      }).success,
+    ).toBe(false)
+  })
+
+  test('requires the strict project execution capability contract', () => {
+    const capability = {
+      schema_version: 'agents_project_execution_capabilities@1',
+      project_id: 'demo',
+      autonomous_mutations_operator_enabled: false,
+      codegen_changeset_creation: 'unavailable',
+    }
+    expect(projectExecutionCapabilitiesSchema.safeParse(capability).success).toBe(true)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({ ...capability, project_id: 'other/project' })
+        .success,
+    ).toBe(false)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({ ...capability, inferred: true }).success,
+    ).toBe(false)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({
+        ...capability,
+        codegen_changeset_creation: 'tenant_scoped',
+      }).success,
+    ).toBe(false)
+  })
+})
 
 describe('approvalResponseSchema', () => {
   test('accepts the strict durable command envelope', () => {

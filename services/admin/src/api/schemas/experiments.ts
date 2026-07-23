@@ -3,8 +3,12 @@
 // record reuses the flag's variant/rule contracts rather than loose JSON.
 import { z } from 'zod'
 
-import { gateRuleSchema } from './flags'
-import { MAX_IDENTIFIER_LENGTH } from '@/core/evaluator/targetingContract'
+import { gateConditionSchema } from './flags'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_STRING_LENGTH,
+} from '@/core/evaluator/targetingContract'
 
 const MAX_EXPERIMENT_VARIANTS = 10
 const PATH_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
@@ -54,6 +58,17 @@ export const experimentStatisticalPlanSchema = z
   })
   .strict()
 
+// Experiment targeting declares eligibility only. traffic_percentage is the
+// single allocation authority and Config projects it onto the backing flag.
+// A per-rule rollout is deliberately rejected as a competing traffic shape.
+export const experimentTargetingRuleSchema = z
+  .object({
+    id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
+    name: z.string().max(MAX_STRING_LENGTH),
+    conditions: z.array(gateConditionSchema).max(MAX_CONDITIONS_PER_RULE),
+  })
+  .strict()
+
 // GET /v1/admin/experiments rows (routers/admin.py list_experiments).
 export const experimentEntrySchema = z
   .object({
@@ -64,7 +79,7 @@ export const experimentEntrySchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     traffic_percentage: z.number(),
     variants: z.array(experimentVariantSchema).min(2).max(MAX_EXPERIMENT_VARIANTS),
-    targeting_rules: z.array(gateRuleSchema),
+    targeting_rules: z.array(experimentTargetingRuleSchema),
     primary_metric: experimentMetricSchema.nullable(),
     statistical_plan: experimentStatisticalPlanSchema.nullable(),
     start_date: awareDateTimeSchema.nullable(),
@@ -97,7 +112,7 @@ export const experimentCreateSchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     primary_metric: experimentMetricSchema.optional(),
     statistical_plan: experimentStatisticalPlanSchema.optional(),
-    targeting_rules: z.array(gateRuleSchema),
+    targeting_rules: z.array(experimentTargetingRuleSchema),
   })
   .strict()
 
@@ -113,7 +128,7 @@ export const experimentUpdateSchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
     primary_metric: experimentMetricSchema.nullable().optional(),
     statistical_plan: experimentStatisticalPlanSchema.nullable().optional(),
-    targeting_rules: z.array(gateRuleSchema).optional(),
+    targeting_rules: z.array(experimentTargetingRuleSchema).optional(),
   })
   .strict()
 

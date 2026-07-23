@@ -73,6 +73,10 @@ from app.editor.deadlines import (
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
 from app.editor.prompts import append_prompt, replace_latest_prompt
+from app.editor.environment import (
+    PROCESS_ENV,
+    resolve_model_provider_environment,
+)
 from app.egress import EGRESS_PROXY_ENV
 from app.inspection import (
     DependencySlice,
@@ -210,33 +214,7 @@ def _tail(text: str, limit: int = _ERR_TAIL) -> str:
 # Env vars forwarded to the agent subprocess. LLM access only: the
 # GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
 # APDL_INTERNAL_TOKEN, POSTGRES_URL, …) are deliberately NOT in this allowlist.
-_ENV_PASSTHROUGH: tuple[str, ...] = (
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "OPENAI_API_KEY",
-    "OPENAI_API_BASE",
-    "OPENAI_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
-    "GOOGLE_API_KEY",
-    "GEMINI_API_KEY",
-    "VERTEXAI_PROJECT",
-    "VERTEXAI_LOCATION",
-    "OPENROUTER_API_KEY",
-    "MISTRAL_API_KEY",
-    "GROQ_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "COHERE_API_KEY",
-    "TOGETHERAI_API_KEY",
-    "FIREWORKS_API_KEY",
-    "XAI_API_KEY",
-    "OLLAMA_API_BASE",
-    "AZURE_API_KEY",
-    "AZURE_API_BASE",
-    "AZURE_API_VERSION",
-    *EGRESS_PROXY_ENV,
-)
+_ENV_PASSTHROUGH: tuple[str, ...] = (*PROCESS_ENV,)
 
 
 def _basic_auth_header(token: str) -> str:
@@ -245,12 +223,23 @@ def _basic_auth_header(token: str) -> str:
     return f"AUTHORIZATION: basic {raw}"
 
 
-def _agent_env(home: Path) -> dict[str, str]:
+def _agent_env(home: Path, *, model: str | None = None) -> dict[str, str]:
     """Minimal agent environment with an isolated home and no repo configuration."""
     home.mkdir(parents=True, exist_ok=True)
     tmp = home / "tmp"
     tmp.mkdir(exist_ok=True)
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
+    main_model = model or config.codegen_model()
+    # This subprocess performs only the Aider editing call. Auxiliary helper
+    # calls run in the controller, so forwarding helper-only credentials here
+    # would violate the minimum-environment contract.
+    env.update(
+        resolve_model_provider_environment(
+            os.environ,
+            model=main_model,
+            helper_model=main_model,
+        )
+    )
     env.setdefault("PATH", os.defpath)
     env["HOME"] = str(home)
     env["TMPDIR"] = str(tmp)
@@ -591,6 +580,7 @@ class AiderEditor:
         complete: CompleteFn | None = None,
     ) -> None:
         self._model = model or config.codegen_model()
+        self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
         self._aider_bin = aider_bin or config.codegen_aider_bin()
         self._cache_prompts = config.codegen_cache_prompts()
         self._conventions = config.codegen_conventions_enabled()
@@ -653,6 +643,15 @@ class AiderEditor:
         *,
         workspace: Path | None = None,
     ) -> EditResult:
+        # Validate both configured model paths before preparing a checkout. The
+        # helper runs in-process while Aider runs as a subprocess, but neither
+        # path may silently fall back to an unrelated credential in the service
+        # environment.
+        resolve_model_provider_environment(
+            os.environ,
+            model=self._model,
+            helper_model=self._helper_model,
+        )
         keep = config.codegen_keep_workdir()
         workspace_mode = workspace is not None
         if workspace_mode:
@@ -792,7 +791,11 @@ class AiderEditor:
             source_branch = (
                 request.branch if request.existing_branch else request.base_branch
             )
-            if not workspace_mode and config.codegen_isolated_worker() and preflight is None:
+            if (
+                not workspace_mode
+                and config.codegen_isolated_worker()
+                and preflight is None
+            ):
                 return fail(
                     "Isolated repository editing requires credential-free preflight "
                     "evidence."
@@ -1025,7 +1028,7 @@ class AiderEditor:
             fail_closed_auxiliary = request.risk_level in {"medium", "high"}
             complete = self._complete
             if complete is None and (need_brief or need_review):
-                complete = resolve_completer()
+                complete = resolve_completer(self._helper_model)
             if (
                 complete is None
                 and fail_closed_auxiliary
@@ -1257,7 +1260,7 @@ class AiderEditor:
                     rc, out = await self._exec(
                         [*argv, "--message", message],
                         cwd=repo_dir,
-                        env=_agent_env(work / "agent-home"),
+                        env=_agent_env(work / "agent-home", model=self._model),
                         timeout=self._agent_timeout,
                     )
                     if rc != 0:

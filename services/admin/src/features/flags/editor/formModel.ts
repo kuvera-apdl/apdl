@@ -349,8 +349,7 @@ export interface UpdatePlan {
 
 /**
  * Changed-fields-only FlagUpdate against the loaded base flag. Lifecycle state
- * is intentionally ignored here and changed only through LifecycleDialog;
- * review_by cannot be cleared through the API today (exclude_none strips null).
+ * is intentionally ignored here and changed only through LifecycleDialog.
  */
 export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, version: number): UpdatePlan {
   const payload: FlagUpdate = { version }
@@ -363,8 +362,9 @@ export function formToUpdatePlan(values: FlagFormValues, base: FlagConfig, versi
   if (values.name.trim() !== base.name) add('name', values.name.trim())
   if (values.description !== base.description) add('description', values.description)
   if (!same(values.owners, base.owners)) add('owners', values.owners)
-  if (values.review_by !== '' && values.review_by !== (base.review_by ?? '')) {
-    add('review_by', values.review_by)
+  const reviewBy = values.review_by === '' ? null : values.review_by
+  if (reviewBy !== base.review_by) {
+    add('review_by', reviewBy)
   }
 
   const variants = values.variants.map((variant) => ({ key: variant.key.trim(), weight: variant.weight }))

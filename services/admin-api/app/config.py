@@ -149,6 +149,9 @@ class Settings:
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
     allowed_origins: frozenset[str]
+    registration_enabled: bool
+    max_accounts: int
+    max_projects_per_user: int
     cookie_secure: bool
     session_ttl_seconds: int
     session_idle_seconds: int
@@ -195,6 +198,13 @@ class Settings:
                     "APDL_ADMIN_ALLOWED_ORIGINS",
                     '["http://localhost:5173","http://localhost:5174"]',
                 )
+            ),
+            registration_enabled=_bool(
+                "APDL_ADMIN_REGISTRATION_ENABLED", "false"
+            ),
+            max_accounts=_positive_int("APDL_ADMIN_MAX_ACCOUNTS", "100"),
+            max_projects_per_user=_positive_int(
+                "APDL_ADMIN_MAX_PROJECTS_PER_USER", "5"
             ),
             cookie_secure=_bool("APDL_ADMIN_COOKIE_SECURE", "true"),
             session_ttl_seconds=_positive_int(

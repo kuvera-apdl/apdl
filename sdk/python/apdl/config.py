@@ -24,12 +24,19 @@ _KEY_PATTERN = re.compile(r"^proj_([a-zA-Z0-9]{1,64})_([a-zA-Z0-9]{16,128})$")
 DEFAULT_BATCH_SIZE = 20
 MAX_BATCH_SIZE = 100
 DEFAULT_FLUSH_INTERVAL = 3.0
+MIN_FLUSH_INTERVAL = 0.1
+MAX_FLUSH_INTERVAL = 3600.0
 DEFAULT_MAX_QUEUE_SIZE = 1000
+MAX_QUEUE_SIZE = 100_000
 DEFAULT_FLAG_POLL_INTERVAL = 30.0
 DEFAULT_REQUEST_TIMEOUT = 10.0
 
 BatchSize = Annotated[StrictInt, Field(ge=1, le=MAX_BATCH_SIZE)]
-QueueSize = Annotated[StrictInt, Field(ge=1)]
+QueueSize = Annotated[StrictInt, Field(ge=1, le=MAX_QUEUE_SIZE)]
+FlushInterval = Annotated[
+    StrictFloat,
+    Field(ge=MIN_FLUSH_INTERVAL, le=MAX_FLUSH_INTERVAL),
+]
 PositiveSeconds = Annotated[StrictFloat, Field(gt=0)]
 
 
@@ -52,7 +59,7 @@ class APDLConfig(BaseModel):
 
     # Event batching
     batch_size: BatchSize = DEFAULT_BATCH_SIZE
-    flush_interval: PositiveSeconds = DEFAULT_FLUSH_INTERVAL
+    flush_interval: FlushInterval = DEFAULT_FLUSH_INTERVAL
     max_queue_size: QueueSize = DEFAULT_MAX_QUEUE_SIZE
 
     # Feature flags

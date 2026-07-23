@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 34
-MIGRATION_NAME = "034_agent_project_execution_lane.sql"
+MIGRATION_VERSION = 37
+MIGRATION_NAME = "037_llm_policy_operator_audit.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -129,6 +129,13 @@ REQUIRED_COLUMNS = frozenset(
             "output_cost_per_million_tokens_usd_micros",
         ),
         ("llm_project_provider_policies", "enabled"),
+        ("llm_project_policy_audit", "audit_id"),
+        ("llm_project_policy_audit", "project_id"),
+        ("llm_project_policy_audit", "actor"),
+        ("llm_project_policy_audit", "reason"),
+        ("llm_project_policy_audit", "previous_policy"),
+        ("llm_project_policy_audit", "next_policy"),
+        ("llm_project_policy_audit", "created_at"),
         ("llm_provider_attempts", "attempt_id"),
         ("llm_provider_attempts", "call_id"),
         ("llm_provider_attempts", "project_id"),

@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -19,6 +19,7 @@ import {
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
+import type { Workspace } from '../../src/core/workspace'
 import {
   buildCreate,
   buildUpdate,
@@ -30,7 +31,7 @@ import {
 } from '../../src/features/experiments/ExperimentForm'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
 import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
-import { seedWorkspace } from '../helpers/fixtures'
+import { makeWorkspace, seedWorkspace } from '../helpers/fixtures'
 
 const STATISTICAL_PLAN = {
   protocol: 'fixed_horizon_fisher_newcombe_cc_plan_v1',
@@ -75,6 +76,7 @@ const ARCHIVED_EXPERIMENT = {
 
 let deleteRequestUrl = ''
 const updateBodies: Record<string, unknown>[] = []
+const updateKeys: string[] = []
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
@@ -92,6 +94,7 @@ const server = setupServer(
   }),
   http.put('*/api/projects/demo/config/v1/admin/experiments/:key', async ({ request, params }) => {
     updateBodies.push((await request.json()) as Record<string, unknown>)
+    updateKeys.push(String(params.key))
     return HttpResponse.json({
       updated: true,
       key: String(params.key),
@@ -113,6 +116,7 @@ beforeEach(() => {
   seedWorkspace()
   deleteRequestUrl = ''
   updateBodies.length = 0
+  updateKeys.length = 0
 })
 
 describe('experiment schemas', () => {
@@ -308,18 +312,21 @@ describe('experiment schemas', () => {
 })
 
 describe('experiment form model', () => {
-  test('parseTargetingRules validates against the canonical GateRule schema', () => {
+  test('parseTargetingRules validates eligibility without a competing rollout', () => {
     expect(parseTargetingRules('')).toEqual({ value: [], error: null })
     const rule = {
       id: 'r1',
       name: '',
       conditions: [],
-      rollout: { percentage: 100, bucket_by: 'user_id' },
     }
     expect(parseTargetingRules(JSON.stringify([rule]))).toEqual({ value: [rule], error: null })
+    expect(parseTargetingRules(JSON.stringify([{
+      ...rule,
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    }])).error).toBe('Each rule needs exactly id, name, and conditions')
     expect(parseTargetingRules('{"a": 1}').error).toBe('Must be a JSON array of rules')
     expect(parseTargetingRules('[{"id":"r1"}]').error).toBe(
-      'Each rule needs id, name, conditions, and a rollout',
+      'Each rule needs exactly id, name, and conditions',
     )
     expect(parseTargetingRules('{nope').error).toBe('Invalid JSON')
   })
@@ -386,7 +393,6 @@ describe('experiment form model', () => {
         id: 'rule-pro',
         name: 'Pro users',
         conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-        rollout: { percentage: 100, bucket_by: 'user_id' },
       },
     ])
     expect(buildUpdate(draftValues, draft, 7)).toEqual({
@@ -398,7 +404,6 @@ describe('experiment form model', () => {
           id: 'rule-pro',
           name: 'Pro users',
           conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-          rollout: { percentage: 100, bucket_by: 'user_id' },
         },
       ],
       start_date: '2026-06-01T00:00:00Z',
@@ -422,7 +427,6 @@ describe('experiment form model', () => {
         id: 'rule-pro',
         name: 'Pro users',
         conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-        rollout: { percentage: 100, bucket_by: 'user_id' },
       },
     ])
 
@@ -544,9 +548,80 @@ describe('ExperimentListPage', () => {
     expect(await screen.findByText('checkout-test')).toBeInTheDocument()
     expect(screen.getByText('archived')).toBeInTheDocument()
   })
+
+  test('does not offer creation without config:write', async () => {
+    const workspace: Workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[workspace]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments']}>
+              <Routes>
+                <Route path="/experiments" element={<ExperimentListPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    expect(await screen.findByText('checkout-test')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new experiment/i })).not.toBeInTheDocument()
+  })
 })
 
 describe('ExperimentDetailPage', () => {
+  test('remounts form state and mutation identity when navigating between experiments', async () => {
+    const secondExperiment = {
+      ...EXPERIMENT,
+      key: 'pricing-test',
+      flag_key: 'pricing-test',
+      description: 'Pricing experiment',
+      version: 7,
+    }
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [EXPERIMENT, secondExperiment], count: 2 }),
+      ),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const router = createMemoryRouter(
+      [
+        { path: '/experiments/:key', element: <ExperimentDetailPage /> },
+        { path: '/experiments', element: <div>experiment list</div> },
+      ],
+      { initialEntries: ['/experiments/checkout-test?tab=setup'] },
+    )
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <RouterProvider router={router} />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    await screen.findByDisplayValue('CTA experiment')
+    await act(async () => {
+      await router.navigate('/experiments/pricing-test?tab=setup')
+    })
+
+    const description = await screen.findByDisplayValue('Pricing experiment')
+    expect(screen.queryByDisplayValue('CTA experiment')).not.toBeInTheDocument()
+    await userEvent.clear(description)
+    await userEvent.type(description, 'Updated pricing experiment')
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    expect(updateKeys).toEqual(['pricing-test'])
+    expect(updateBodies[0]).toEqual({
+      version: 7,
+      description: 'Updated pricing experiment',
+    })
+  })
+
   test('running to stopped omits every Config-frozen field from the update request', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
@@ -659,5 +734,28 @@ describe('ExperimentDetailPage', () => {
     expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
       .not.toBeInTheDocument()
     expect(screen.getByText(/by credential:operator/i)).toBeInTheDocument()
+  })
+
+  test('keeps a live experiment read-only without config:write', async () => {
+    const workspace: Workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[workspace]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+              <Routes>
+                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    expect(await screen.findByDisplayValue('CTA experiment')).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
+      .not.toBeInTheDocument()
+    expect(updateBodies).toEqual([])
   })
 })

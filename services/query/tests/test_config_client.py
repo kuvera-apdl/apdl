@@ -24,6 +24,8 @@ def _metadata(key: str = "exp_123") -> dict:
         "variants": ["control", "treatment"],
         "metric_event": "purchase",
         "metric_direction": "increase",
+        "enrollment_mode": "all",
+        "minimum_exposure_config_version": 3,
         "statistical_plan": {
             "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
             "baseline_conversion_rate": 0.5,

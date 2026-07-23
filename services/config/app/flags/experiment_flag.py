@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from app.models.schemas import (
     FallthroughConfig,
+    ExperimentTargetingRule,
     FlagCreate,
     GateRule,
     RolloutConfig,
@@ -51,13 +52,15 @@ def _flag_fields(
     variants: list[VariantConfig],
     default_variant: str,
     traffic_percentage: float,
-    targeting_rules: list[GateRule],
+    targeting_rules: list[ExperimentTargetingRule],
     bucket_by: str,
 ) -> dict:
     """Derived flag fields shared by the create and update projections.
 
-    Traffic gating is the fallthrough rollout percentage; the variant *split*
-    within that traffic is carried by the per-variant weights.
+    Experiment targeting rules express eligibility only.  The single global
+    ``traffic_percentage`` is projected onto every eligible rule.  When rules
+    exist, a zero-percent fallthrough excludes actors that match none of them;
+    otherwise the fallthrough enrolls the global traffic population.
     """
     state, enabled = status_to_flag_state(status)
     return {
@@ -67,9 +70,23 @@ def _flag_fields(
         "enabled": enabled,
         "default_variant": default_variant,
         "variants": variants,
-        "rules": targeting_rules,
+        "rules": [
+            GateRule(
+                id=rule.id,
+                name=rule.name,
+                conditions=rule.conditions,
+                rollout=RolloutConfig(
+                    percentage=traffic_percentage,
+                    bucket_by=bucket_by,
+                ),
+            )
+            for rule in targeting_rules
+        ],
         "fallthrough": FallthroughConfig(
-            rollout=RolloutConfig(percentage=traffic_percentage, bucket_by=bucket_by),
+            rollout=RolloutConfig(
+                percentage=0.0 if targeting_rules else traffic_percentage,
+                bucket_by=bucket_by,
+            ),
         ),
         "evaluation_mode": "client",
         "auto_disable": False,
@@ -85,7 +102,7 @@ def build_flag_create(
     variants: list[VariantConfig],
     default_variant: str,
     traffic_percentage: float,
-    targeting_rules: list[GateRule],
+    targeting_rules: list[ExperimentTargetingRule],
     bucket_by: str = DEFAULT_BUCKET_BY,
 ) -> FlagCreate:
     """Project an experiment onto a ``FlagCreate`` (validated by the flag model)."""
@@ -114,7 +131,7 @@ def build_flag_projection(
     variants: list[VariantConfig],
     default_variant: str,
     traffic_percentage: float,
-    targeting_rules: list[GateRule],
+    targeting_rules: list[ExperimentTargetingRule],
     bucket_by: str = DEFAULT_BUCKET_BY,
 ) -> dict:
     """Return lifecycle-owned fields for an experiment backing flag.

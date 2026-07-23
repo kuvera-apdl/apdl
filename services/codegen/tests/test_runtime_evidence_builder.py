@@ -91,3 +91,32 @@ def test_runtime_observation_rejects_a_stale_collection_head():
             collection=RuntimeEvidenceCollection(head_sha="head-old"),
             observed_at=datetime.now(UTC),
         )
+
+
+def test_runtime_observation_redacts_diagnostics_at_storage_boundary():
+    secret = "Authorization: Bearer opaque-bearer-value"
+    collection = RuntimeEvidenceCollection(
+        head_sha="head-a",
+        diagnostics=[
+            RuntimeCollectionDiagnostic(
+                code="actions_read_failed",
+                stage="collector",
+                head_sha="head-a",
+                message=secret,
+            )
+        ],
+    )
+
+    observation = build_runtime_evidence_observation(
+        changeset_id="cs-1",
+        repository="acme/widgets",
+        pr_number=17,
+        head_sha="head-a",
+        ci_observation=_ci("head-a", ExternalCIStatus.unverified_external_ci),
+        plan=_plan(),
+        collection=collection,
+        observed_at=datetime.now(UTC),
+    )
+
+    assert secret not in observation.collection_errors[0]
+    assert "[REDACTED]" in observation.collection_errors[0]

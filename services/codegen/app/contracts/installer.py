@@ -34,27 +34,12 @@ from app.contracts.models import (
     ContractResolution,
 )
 from app.egress import inherited_proxy_environment
+from app.safety.secrets import secret_environment_name
 
 
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _DEFAULT_OUTPUT_LIMIT = 32_000
 _TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_SECRET_MARKERS = (
-    "ANTHROPIC",
-    "APDL",
-    "DATABASE",
-    "GEMINI",
-    "GITHUB",
-    "GOOGLE",
-    "OPENAI",
-    "POSTGRES",
-    "PASSWORD",
-    "PRIVATE_KEY",
-    "SECRET",
-    "TOKEN",
-)
-
-
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -74,11 +59,6 @@ class CommandExecutor(Protocol):
         timeout_seconds: float,
         output_limit: int,
     ) -> CommandResult: ...
-
-
-def _secret_name(name: str) -> bool:
-    upper = name.upper()
-    return any(marker in upper for marker in _SECRET_MARKERS)
 
 
 def sanitized_environment(
@@ -103,7 +83,7 @@ def sanitized_environment(
     }
     environment.update(inherited_proxy_environment())
     for name, value in (extra or {}).items():
-        if _secret_name(name):
+        if secret_environment_name(name):
             raise ValueError(f"Refusing secret-like environment field: {name}")
         environment[name] = value
     return environment

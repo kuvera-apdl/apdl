@@ -73,7 +73,9 @@ def test_path_key_expands_tilde(monkeypatch, tmp_path):
 def test_inline_beats_base64_and_path(monkeypatch, tmp_path):
     (tmp_path / "k.pem").write_text("FROM_PATH")
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "FROM_INLINE")
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_BASE64", base64.b64encode(b"FROM_B64").decode())
+    monkeypatch.setenv(
+        "GITHUB_APP_PRIVATE_KEY_BASE64", base64.b64encode(b"FROM_B64").decode()
+    )
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(tmp_path / "k.pem"))
     assert config.github_app_private_key() == "FROM_INLINE"
 
@@ -81,7 +83,9 @@ def test_inline_beats_base64_and_path(monkeypatch, tmp_path):
 def test_base64_beats_path(monkeypatch, tmp_path):
     _clear(monkeypatch)
     (tmp_path / "k.pem").write_text("FROM_PATH")
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_BASE64", base64.b64encode(b"FROM_B64").decode())
+    monkeypatch.setenv(
+        "GITHUB_APP_PRIVATE_KEY_BASE64", base64.b64encode(b"FROM_B64").decode()
+    )
     monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_PATH", str(tmp_path / "k.pem"))
     assert config.github_app_private_key() == "FROM_B64"
 
@@ -105,7 +109,9 @@ def test_cors_origins_default_to_local_admin(monkeypatch):
 
 
 def test_cors_origins_parsed_from_env(monkeypatch):
-    monkeypatch.setenv("CODEGEN_CORS_ORIGINS", "https://admin.example.com, https://ops.example.com ")
+    monkeypatch.setenv(
+        "CODEGEN_CORS_ORIGINS", "https://admin.example.com, https://ops.example.com "
+    )
     assert config.codegen_cors_origins() == [
         "https://admin.example.com",
         "https://ops.example.com",
@@ -328,8 +334,8 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
 
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
     monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
-    monkeypatch.setenv("CODEGEN_MODEL", "test-model@1")
-    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "test-helper@1")
+    monkeypatch.setenv("CODEGEN_MODEL", "openai/test-model@1")
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "anthropic/test-helper@1")
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", controller)
     monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", candidate)
@@ -351,7 +357,7 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
     )
 
     assert captured == {
-        "expected_model": "test-model@1",
+        "expected_model": "openai/test-model@1",
         "expected_codegen_revision": "evaluated-revision",
         "expected_candidate_identity_sha256": identity.identity_sha256,
         "expected_egress_policy_sha256": egress_policy,
@@ -410,9 +416,7 @@ def test_evaluated_pr_stage_requires_network_none_workers(monkeypatch):
             _make_editor(RolloutStage.reviewed_pr)
 
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "")
-    assert isinstance(
-        _make_editor(RolloutStage.reviewed_pr), ContainerAiderEditor
-    )
+    assert isinstance(_make_editor(RolloutStage.reviewed_pr), ContainerAiderEditor)
 
 
 def test_development_pr_preflights_mutable_local_worker(monkeypatch):
@@ -436,9 +440,7 @@ def test_development_pr_preflights_mutable_local_worker(monkeypatch):
     monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
     monkeypatch.setattr(ContainerAiderEditor, "assert_runtime_ready", fake_preflight)
 
-    assert isinstance(
-        _make_editor(RolloutStage.development_pr), ContainerAiderEditor
-    )
+    assert isinstance(_make_editor(RolloutStage.development_pr), ContainerAiderEditor)
     assert observed == {
         "expected_revision": DEVELOPMENT_CODEGEN_REVISION,
         "require_immutable_image": False,

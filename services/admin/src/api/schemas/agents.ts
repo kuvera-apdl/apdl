@@ -24,8 +24,17 @@ export const triggerRequestSchema = z
 
 export const triggerResponseSchema = z
   .object({
-    run_id: z.string(),
-    status: z.string(),
+    run_id: z.string().min(1),
+    status: z.literal('started'),
+  })
+  .strict()
+
+export const projectExecutionCapabilitiesSchema = z
+  .object({
+    schema_version: z.literal('agents_project_execution_capabilities@1'),
+    project_id: z.string().regex(/^[A-Za-z0-9]{1,64}$/),
+    autonomous_mutations_operator_enabled: z.boolean(),
+    codegen_changeset_creation: z.enum(['available', 'disabled', 'unavailable']),
   })
   .strict()
 
@@ -257,15 +266,15 @@ export const customAgentListSchema = z.array(customAgentSchema)
 
 export const agentDefinitionSchema = z
   .object({
-    name: z.string(),
-    display_name: z.string(),
-    description: z.string(),
-    order: z.number().int(),
-    produces: z.string(),
-    requires: z.array(z.string()),
-    model_tier: z.string(),
+    name: z.string().min(1),
+    display_name: z.string().min(1),
+    description: z.string().min(1),
+    order: z.number().int().nonnegative(),
+    produces: z.string().min(1),
+    requires: z.array(z.string().min(1)),
+    model_tier: modelTierSchema,
     is_custom: z.boolean(),
-    agent_id: z.string().nullable().optional(),
+    agent_id: z.string().min(1).nullable().optional(),
   })
   .strict()
 
@@ -283,6 +292,19 @@ export const agentDefinitionsResponseSchema = z
     tool_catalog: z.array(toolCatalogEntrySchema),
   })
   .strict()
+  .superRefine((value, context) => {
+    const names = new Set<string>()
+    value.agents.forEach((agent, index) => {
+      if (names.has(agent.name)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['agents', index, 'name'],
+          message: `duplicate agent definition: ${agent.name}`,
+        })
+      }
+      names.add(agent.name)
+    })
+  })
 
 export const testRunRequestSchema = z
   .object({

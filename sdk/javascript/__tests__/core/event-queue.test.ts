@@ -840,6 +840,79 @@ describe('EventQueue', () => {
       ]);
     });
 
+    it('should bisect payload rejections and deliver valid neighboring events in order', async () => {
+      const sendSpy = vi.spyOn(transport, 'send').mockImplementation(
+        async (_url, payload) => {
+          const events = (payload as {
+            events: Array<{ event: string }>;
+          }).events;
+          return events.some((item) => item.event === 'invalid')
+            ? 'payload_rejected'
+            : 'accepted';
+        }
+      );
+
+      queue.enqueue(createEvent({
+        event: 'valid_before',
+        messageId: 'msg-before',
+      }));
+      queue.enqueue(createEvent({ event: 'invalid', messageId: 'msg-invalid' }));
+      queue.enqueue(createEvent({ event: 'valid_after', messageId: 'msg-after' }));
+
+      const report = await queue.flush();
+
+      expect(report.delivered).toBe(2);
+      expect(report.permanentRejections.map((item) => item.messageId)).toEqual([
+        'msg-invalid',
+      ]);
+      const attemptedEvents = sendSpy.mock.calls.map((call) => {
+        const payload = call[1] as { events: Array<{ event: string }> };
+        return payload.events.map((item) => item.event);
+      });
+      expect(attemptedEvents).toEqual([
+        ['valid_before', 'invalid', 'valid_after'],
+        ['valid_before'],
+        ['invalid', 'valid_after'],
+        ['invalid'],
+        ['valid_after'],
+      ]);
+    });
+
+    it('should not bisect a permanent request rejection', async () => {
+      const sendSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('permanent_rejection');
+      queue.enqueue(createEvent({ event: 'first', messageId: 'msg-first' }));
+      queue.enqueue(createEvent({ event: 'second', messageId: 'msg-second' }));
+
+      const report = await queue.flush();
+
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(report.delivered).toBe(0);
+      expect(report.permanentRejections.map((item) => item.messageId)).toEqual([
+        'msg-first',
+        'msg-second',
+      ]);
+    });
+
+    it('should retain a retryable subset and unattempted neighbors during bisection', async () => {
+      const sendSpy = vi.spyOn(transport, 'send')
+        .mockResolvedValueOnce('payload_rejected')
+        .mockResolvedValueOnce('retryable');
+      const messageIds = ['msg-first', 'msg-second', 'msg-third'];
+      messageIds.forEach((messageId, index) => {
+        queue.enqueue(createEvent({ event: `event_${index}`, messageId }));
+      });
+
+      const report = await queue.flush();
+
+      expect(sendSpy).toHaveBeenCalledTimes(2);
+      expect(report.delivered).toBe(0);
+      expect(report.permanentRejections).toEqual([]);
+      expect(report.pending.map((item) => item.messageId)).toEqual(messageIds);
+      expect(queue.getQueue().map((item) => item.messageId)).toEqual(messageIds);
+    });
+
     it('should quarantine a queued record mutated into a poison value', async () => {
       const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue('accepted');
       queue.enqueue(createEvent({ event: 'mutated', messageId: 'msg-mutated' }));
@@ -1019,6 +1092,29 @@ describe('EventQueue', () => {
 
       expect(storeSpy).toHaveBeenCalled();
       persistentQueue.stop();
+    });
+
+    it('should isolate a keepalive payload rejection', async () => {
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockImplementation(async (_url, payload) => {
+          const events = (payload as {
+            events: Array<{ event: string }>;
+          }).events;
+          return events.some((item) => item.event === 'invalid')
+            ? 'payload_rejected'
+            : 'accepted';
+        });
+      queue.enqueue(createEvent({ event: 'valid', messageId: 'msg-valid' }));
+      queue.enqueue(createEvent({ event: 'invalid', messageId: 'msg-invalid' }));
+
+      const report = await queue.flushOnUnload();
+
+      expect(keepaliveSpy).toHaveBeenCalledTimes(3);
+      expect(report.delivered).toBe(1);
+      expect(report.permanentRejections.map((item) => item.messageId)).toEqual([
+        'msg-invalid',
+      ]);
     });
   });
 

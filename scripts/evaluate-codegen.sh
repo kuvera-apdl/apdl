@@ -160,7 +160,7 @@ chmod 0600 "$artifact_dir/egress-proxy-image-id.txt"
 # accidentally carries evaluator-only answer material.
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --entrypoint sh "$candidate_image_id" -ec '
-  command -v apdl-codegen-evaluate-candidate >/dev/null
+  python -c "from app.evaluations.candidate import main; assert callable(main)"
   root="$(python -c "from pathlib import Path; import app.evaluations; print(Path(app.evaluations.__file__).parent)")"
   test ! -e "$root/oracles_v1.json"
   test ! -e "$root/corpus_v2.json"

@@ -1,5 +1,6 @@
 """Durable Config outbox delivery and retry tests."""
 
+import asyncio
 import json
 import logging
 from unittest.mock import AsyncMock
@@ -40,6 +41,26 @@ class RecordingClaimConn:
 class RecordingClaimPool:
     def __init__(self):
         self.conn = RecordingClaimConn()
+
+    def acquire(self):
+        return _Context(self.conn)
+
+
+class RecordingCleanupConn:
+    def __init__(self):
+        self.calls: list[tuple[str, tuple]] = []
+
+    def transaction(self):
+        return _Context(None)
+
+    async def fetch(self, sql: str, *args):
+        self.calls.append((sql, args))
+        return [{"id": 1}, {"id": 2}]
+
+
+class RecordingCleanupPool:
+    def __init__(self):
+        self.conn = RecordingCleanupConn()
 
     def acquire(self):
         return _Context(self.conn)
@@ -337,27 +358,106 @@ async def test_abandoned_final_attempt_is_terminalized_after_claim_timeout():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_uses_separate_bounded_skip_locked_horizons():
+    pool = RecordingCleanupPool()
+
+    assert await outbox.cleanup_once(pool) == {
+        "processed": 2,
+        "quarantined": 2,
+        "receipts": 2,
+    }
+
+    assert len(pool.conn.calls) == 3
+    processed, quarantined, receipts = pool.conn.calls
+    for sql, args in pool.conn.calls:
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert "LIMIT $1" in sql
+        assert args[0] == outbox.CLEANUP_BATCH_SIZE
+    assert "ORDER BY processed_at, id" in processed[0]
+    assert processed[1][1] == outbox.PROCESSED_RETENTION_SECONDS
+    assert "ORDER BY quarantined_at, id" in quarantined[0]
+    assert quarantined[1][1] == outbox.QUARANTINED_RETENTION_SECONDS
+    assert "FROM config_exposure_receipts AS receipt" in receipts[0]
+    assert "NOT EXISTS" in receipts[0]
+    assert "outbox.kind = 'exposure'" in receipts[0]
+    assert receipts[1][1] == outbox.EXPOSURE_RECEIPT_RETENTION_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_worker_invokes_cleanup_before_delivery(monkeypatch):
+    cleanup = AsyncMock(
+        return_value={"processed": 0, "quarantined": 0, "receipts": 0}
+    )
+    drain = AsyncMock(side_effect=asyncio.CancelledError)
+    monkeypatch.setattr(outbox, "cleanup_once", cleanup)
+    monkeypatch.setattr(outbox, "drain_once", drain)
+
+    with pytest.raises(asyncio.CancelledError):
+        await outbox.run_worker(object(), object(), object())
+
+    cleanup.assert_awaited_once()
+    drain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_continues_full_cleanup_batches_without_waiting(monkeypatch):
+    cleanup = AsyncMock(
+        side_effect=[
+            {
+                "processed": outbox.CLEANUP_BATCH_SIZE,
+                "quarantined": 0,
+                "receipts": 0,
+            },
+            asyncio.CancelledError,
+        ]
+    )
+    drain = AsyncMock(return_value=False)
+    sleep = AsyncMock()
+    monkeypatch.setattr(outbox, "cleanup_once", cleanup)
+    monkeypatch.setattr(outbox, "drain_once", drain)
+    monkeypatch.setattr(outbox.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await outbox.run_worker(object(), object(), object())
+
+    assert cleanup.await_count == 2
+    drain.assert_awaited_once()
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
     conn = AsyncMock()
     conn.fetchrow.return_value = {
         "pending_count": 4,
+        "processed_count": 12,
         "quarantined_count": 1,
+        "estimated_receipt_count": 350,
         "max_pending_attempts": 3,
         "oldest_pending_age_seconds": 45.5,
+        "oldest_processed_age_seconds": 3600.0,
         "oldest_quarantined_age_seconds": 12.25,
+        "oldest_receipt_age_seconds": 7200.0,
     }
 
     metrics = await outbox.metrics_snapshot(conn)
 
     assert metrics == {
         "pending_count": 4,
+        "processed_count": 12,
         "quarantined_count": 1,
+        "estimated_receipt_count": 350,
         "max_pending_attempts": 3,
         "oldest_pending_age_seconds": 45.5,
+        "oldest_processed_age_seconds": 3600.0,
         "oldest_quarantined_age_seconds": 12.25,
+        "oldest_receipt_age_seconds": 7200.0,
     }
     sql = conn.fetchrow.await_args.args[0]
     assert "FROM config_outbox" in sql
+    assert "FROM config_exposure_receipts" in sql
+    assert "pg_stat_user_tables" in sql
     assert "quarantined_at IS NULL" in sql
 
 
@@ -376,6 +476,36 @@ async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
             {"quarantined_count": outbox.READINESS_MAX_QUARANTINED_ROWS + 1},
             "quarantined_rows_exceeded",
         ),
+        (
+            {
+                "oldest_processed_age_seconds": (
+                    outbox.PROCESSED_RETENTION_SECONDS
+                    + outbox.CLEANUP_READINESS_GRACE_SECONDS
+                    + 1
+                )
+            },
+            "processed_cleanup_overdue",
+        ),
+        (
+            {
+                "oldest_quarantined_age_seconds": (
+                    outbox.QUARANTINED_RETENTION_SECONDS
+                    + outbox.CLEANUP_READINESS_GRACE_SECONDS
+                    + 1
+                )
+            },
+            "quarantined_cleanup_overdue",
+        ),
+        (
+            {
+                "oldest_receipt_age_seconds": (
+                    outbox.EXPOSURE_RECEIPT_RETENTION_SECONDS
+                    + outbox.CLEANUP_READINESS_GRACE_SECONDS
+                    + 1
+                )
+            },
+            "receipt_cleanup_overdue",
+        ),
     ],
 )
 def test_outbox_readiness_degrades_past_delivery_thresholds(
@@ -388,3 +518,10 @@ def test_outbox_readiness_degrades_past_delivery_thresholds(
 
     assert readiness["status"] == "degraded"
     assert readiness["degraded_reasons"] == [reason]
+
+
+def test_exposure_receipts_outlive_clickhouse_event_retention():
+    assert (
+        outbox.EXPOSURE_RECEIPT_RETENTION_SECONDS
+        > outbox.CLICKHOUSE_EVENT_RETENTION_MAX_SECONDS
+    )

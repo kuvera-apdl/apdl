@@ -3,7 +3,9 @@ import { createBrowserRouter, Navigate, Outlet, useLocation } from 'react-router
 
 import { AppShell } from '@/components/layout/AppShell'
 import { EmptyState } from '@/components/shared/PanelStates'
+import type { AdminRole } from '@/api/auth'
 import { useAuth } from '@/core/auth'
+import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
 
 function lazyRoute<TExport extends string>(
   load: () => Promise<Record<TExport, ComponentType>>,
@@ -22,6 +24,19 @@ export function RequireAuth() {
   if (!authenticated) {
     const from = `${location.pathname}${location.search}${location.hash}`
     return <Navigate to="/login" replace state={{ from }} />
+  }
+  return <Outlet />
+}
+
+export function RequireWorkspaceRole({ role }: { role: AdminRole }) {
+  const { active } = useWorkspace()
+  if (!hasWorkspaceRole(active, role)) {
+    return (
+      <EmptyState
+        title="Action unavailable"
+        description={`This route requires ${role} for the active project.`}
+      />
+    )
   }
   return <Outlet />
 }
@@ -71,13 +86,6 @@ export function createRouter() {
               lazy: lazyRoute(() => import('@/features/flags/FlagListPage'), 'FlagListPage'),
             },
             {
-              path: '/flags/new',
-              lazy: lazyRoute(
-                () => import('@/features/flags/editor/FlagEditorPage'),
-                'FlagEditorPage',
-              ),
-            },
-            {
               path: '/flags/hygiene',
               lazy: lazyRoute(() => import('@/features/flags/HygienePage'), 'HygienePage'),
             },
@@ -86,11 +94,30 @@ export function createRouter() {
               lazy: lazyRoute(() => import('@/features/flags/FlagDetailPage'), 'FlagDetailPage'),
             },
             {
-              path: '/flags/:key/edit',
-              lazy: lazyRoute(
-                () => import('@/features/flags/editor/FlagEditorPage'),
-                'FlagEditorPage',
-              ),
+              element: <RequireWorkspaceRole role="config:write" />,
+              children: [
+                {
+                  path: '/flags/new',
+                  lazy: lazyRoute(
+                    () => import('@/features/flags/editor/FlagEditorPage'),
+                    'FlagEditorPage',
+                  ),
+                },
+                {
+                  path: '/flags/:key/edit',
+                  lazy: lazyRoute(
+                    () => import('@/features/flags/editor/FlagEditorPage'),
+                    'FlagEditorPage',
+                  ),
+                },
+                {
+                  path: '/experiments/new',
+                  lazy: lazyRoute(
+                    () => import('@/features/experiments/ExperimentDetailPage'),
+                    'ExperimentCreatePage',
+                  ),
+                },
+              ],
             },
             {
               path: '/analytics/events',
@@ -119,13 +146,6 @@ export function createRouter() {
               ),
             },
             {
-              path: '/experiments/new',
-              lazy: lazyRoute(
-                () => import('@/features/experiments/ExperimentDetailPage'),
-                'ExperimentCreatePage',
-              ),
-            },
-            {
               path: '/experiments/:key',
               lazy: lazyRoute(
                 () => import('@/features/experiments/ExperimentDetailPage'),
@@ -137,10 +157,6 @@ export function createRouter() {
               lazy: lazyRoute(() => import('@/features/agents/RunsPage'), 'RunsPage'),
             },
             {
-              path: '/agents/trigger',
-              lazy: lazyRoute(() => import('@/features/agents/TriggerPage'), 'TriggerPage'),
-            },
-            {
               path: '/agents/custom',
               lazy: lazyRoute(
                 () => import('@/features/agents/custom/CustomAgentsPage'),
@@ -148,18 +164,32 @@ export function createRouter() {
               ),
             },
             {
-              path: '/agents/custom/new',
-              lazy: lazyRoute(
-                () => import('@/features/agents/custom/CustomAgentWizardPage'),
-                'CustomAgentWizardPage',
-              ),
+              element: <RequireWorkspaceRole role="agents:run" />,
+              children: [
+                {
+                  path: '/agents/trigger',
+                  lazy: lazyRoute(() => import('@/features/agents/TriggerPage'), 'TriggerPage'),
+                },
+              ],
             },
             {
-              path: '/agents/custom/:agentId/edit',
-              lazy: lazyRoute(
-                () => import('@/features/agents/custom/CustomAgentWizardPage'),
-                'CustomAgentWizardPage',
-              ),
+              element: <RequireWorkspaceRole role="agents:manage" />,
+              children: [
+                {
+                  path: '/agents/custom/new',
+                  lazy: lazyRoute(
+                    () => import('@/features/agents/custom/CustomAgentWizardPage'),
+                    'CustomAgentWizardPage',
+                  ),
+                },
+                {
+                  path: '/agents/custom/:agentId/edit',
+                  lazy: lazyRoute(
+                    () => import('@/features/agents/custom/CustomAgentWizardPage'),
+                    'CustomAgentWizardPage',
+                  ),
+                },
+              ],
             },
             {
               path: '/agents/runs/:runId',

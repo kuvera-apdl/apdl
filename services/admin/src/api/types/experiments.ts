@@ -11,6 +11,7 @@ import type {
   experimentEntrySchema,
   experimentMetricSchema,
   experimentStatisticalPlanSchema,
+  experimentTargetingRuleSchema,
   experimentResultSchema,
   experimentsListResponseSchema,
   experimentStatusSchema,
@@ -27,6 +28,7 @@ export type ExperimentStatus = z.infer<typeof experimentStatusSchema>
 export type ExperimentVariant = z.infer<typeof experimentVariantSchema>
 export type ExperimentMetric = z.infer<typeof experimentMetricSchema>
 export type ExperimentStatisticalPlan = z.infer<typeof experimentStatisticalPlanSchema>
+export type ExperimentTargetingRule = z.infer<typeof experimentTargetingRuleSchema>
 export type ExperimentCreateResponse = z.infer<typeof experimentCreateResponseSchema>
 export type ExperimentUpdateResponse = z.infer<typeof experimentUpdateResponseSchema>
 export type ExperimentDeleteResponse = z.infer<typeof experimentDeleteResponseSchema>

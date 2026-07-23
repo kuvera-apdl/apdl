@@ -75,6 +75,16 @@ describe('codegen schemas', () => {
     expect(changesetSchema.safeParse({ ...sample, extra: true }).success).toBe(false)
   })
 
+  it.each([
+    'javascript:alert(1)',
+    'http://github.example/acme/widgets/pull/1',
+    'https://operator:secret@github.example/acme/widgets/pull/1',
+    'https://github.example/acme/widgets/pull/1#https://attacker.example',
+    'not-a-url',
+  ])('rejects an unsafe rendered pull-request URL: %s', (prUrl) => {
+    expect(changesetSchema.safeParse({ ...sample, pr_url: prUrl }).success).toBe(false)
+  })
+
   it('parses strict tenant policy provenance', () => {
     const tenantPolicy = {
       schema_version: 'tenant_codegen_connection_policy@1' as const,

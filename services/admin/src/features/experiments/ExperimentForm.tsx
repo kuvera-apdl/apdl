@@ -1,24 +1,24 @@
 // Experiment setup form (gap G5): a structured editor over the canonical record.
 // An experiment owns a backing flag, so variants/default_variant/traffic map to
 // the flag and status drives flag serving through lifecycle-aware transitions.
-// Targeting stays a JSON editor but is validated against the canonical GateRule
-// schema rather than left raw.
+// Targeting stays a JSON editor but is validated against the experiment-only
+// eligibility schema rather than the feature-flag rollout schema.
 import { Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { z } from 'zod'
 
-import { gateRuleSchema } from '@/api/schemas/flags'
 import {
   experimentCreateStatusSchema,
   experimentPathKeySchema,
+  experimentTargetingRuleSchema,
 } from '@/api/schemas/experiments'
-import type { GateRule } from '@/api/types/flags'
 import type {
   ExperimentCreate,
   ExperimentEntry,
   ExperimentMetric,
   ExperimentStatisticalPlan,
   ExperimentStatus,
+  ExperimentTargetingRule,
   ExperimentUpdate,
   ExperimentVariant,
 } from '@/api/types/experiments'
@@ -124,7 +124,10 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
   }
 }
 
-export function parseTargetingRules(raw: string): { value: GateRule[] | null; error: string | null } {
+export function parseTargetingRules(raw: string): {
+  value: ExperimentTargetingRule[] | null
+  error: string | null
+} {
   if (raw.trim() === '') return { value: [], error: null }
   let parsed: unknown
   try {
@@ -133,9 +136,9 @@ export function parseTargetingRules(raw: string): { value: GateRule[] | null; er
     return { value: null, error: 'Invalid JSON' }
   }
   if (!Array.isArray(parsed)) return { value: null, error: 'Must be a JSON array of rules' }
-  const result = z.array(gateRuleSchema).safeParse(parsed)
+  const result = z.array(experimentTargetingRuleSchema).safeParse(parsed)
   if (!result.success) {
-    return { value: null, error: 'Each rule needs id, name, conditions, and a rollout' }
+    return { value: null, error: 'Each rule needs exactly id, name, and conditions' }
   }
   return { value: result.data, error: null }
 }
@@ -703,8 +706,9 @@ export function ExperimentForm({
         />
         {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
         <p className="text-xs text-muted-foreground">
-          Canonical GateRule[] — each rule needs <code>id</code>, <code>conditions</code>, and a{' '}
-          <code>rollout</code>. Leave empty to target everyone.
+          Eligibility rules need <code>id</code>, <code>name</code>, and <code>conditions</code>.
+          Traffic allocation is controlled only by the traffic percentage above. Leave empty to
+          target everyone.
         </p>
       </div>
 

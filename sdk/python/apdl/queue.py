@@ -3,10 +3,11 @@
 Server-side analogue of ``sdk/javascript/src/core/event-queue.ts``. Canonical
 JSON events are buffered and sent in count- and byte-bounded batches either
 when ``batch_size`` is reached or every ``flush_interval`` seconds by a daemon
-thread. Retryable batches are re-queued at the front without changing IDs; a
-permanent rejection is discarded so it cannot block valid neighboring events.
-Once ``max_queue_size`` is reached, new intake is rejected synchronously rather
-than evicting an event the SDK already accepted.
+thread. Retryable batches are re-queued at the front without changing IDs;
+payload rejections are bisected to isolate individual invalid events; and other
+permanent rejections are discarded without repeated requests. Once
+``max_queue_size`` is reached, new intake is rejected synchronously rather than
+evicting an event the SDK already accepted.
 """
 
 from __future__ import annotations
@@ -48,6 +49,13 @@ class DeliveryReport:
     @property
     def complete(self) -> bool:
         return not self.undelivered_events
+
+
+@dataclass(frozen=True)
+class _BatchDelivery:
+    accepted: int
+    permanently_rejected: int
+    retryable_events: tuple[dict[str, Any], ...]
 
 
 class EventQueue:
@@ -196,14 +204,17 @@ class EventQueue:
             batch = self._take_batch()
             if not batch:
                 return self._report(accepted, permanently_rejected)
-            outcome = self._send(batch)
-            if outcome is TransportOutcome.ACCEPTED:
-                accepted += len(batch)
-                continue
-            if outcome is TransportOutcome.PERMANENT_REJECTION:
-                permanently_rejected += len(batch)
-                continue
-            return self._report(accepted, permanently_rejected)
+            delivery = self._deliver_batch(batch)
+            accepted += delivery.accepted
+            permanently_rejected += delivery.permanently_rejected
+            if delivery.retryable_events:
+                retryable = list(delivery.retryable_events)
+                if self._config.debug:
+                    logger.warning(
+                        "APDL: batch send failed, re-queuing %d events", len(retryable)
+                    )
+                self._requeue_front(retryable)
+                return self._report(accepted, permanently_rejected)
 
     def _take_batch(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -222,8 +233,57 @@ class EventQueue:
                 batch.append(self._queue.popleft())
             return batch
 
-    def _send(self, batch: list[dict[str, Any]]) -> TransportOutcome:
-        """Send a batch, re-queuing only a retryable transport outcome."""
+    def _deliver_batch(self, batch: list[dict[str, Any]]) -> _BatchDelivery:
+        """Deliver a batch, bisecting only explicit payload rejections.
+
+        A retryable left-hand request also retains its unattempted right-hand
+        neighbors. This prevents recursive isolation from reordering or losing
+        any accepted queue record.
+        """
+        outcome = self._attempt_send(batch)
+        if outcome is TransportOutcome.ACCEPTED:
+            return _BatchDelivery(len(batch), 0, ())
+        if outcome is TransportOutcome.RETRYABLE:
+            return _BatchDelivery(0, 0, tuple(batch))
+        if (
+            outcome is TransportOutcome.PERMANENT_REJECTION
+            or len(batch) == 1
+        ):
+            logger.warning(
+                "APDL: permanently rejected %d events; batch will not be retried",
+                len(batch),
+            )
+            return _BatchDelivery(0, len(batch), ())
+
+        # Do not turn shutdown into as many as 2n-1 extra HTTP requests. The
+        # already-rejected bounded batch remains caller-owned for explicit replay.
+        if self._stopping.is_set():
+            return _BatchDelivery(0, 0, tuple(batch))
+
+        midpoint = len(batch) // 2
+        left = self._deliver_batch(batch[:midpoint])
+        if left.retryable_events:
+            return _BatchDelivery(
+                left.accepted,
+                left.permanently_rejected,
+                (*left.retryable_events, *batch[midpoint:]),
+            )
+        if self._stopping.is_set():
+            return _BatchDelivery(
+                left.accepted,
+                left.permanently_rejected,
+                tuple(batch[midpoint:]),
+            )
+
+        right = self._deliver_batch(batch[midpoint:])
+        return _BatchDelivery(
+            left.accepted + right.accepted,
+            left.permanently_rejected + right.permanently_rejected,
+            right.retryable_events,
+        )
+
+    def _attempt_send(self, batch: list[dict[str, Any]]) -> TransportOutcome:
+        """Attempt one request without changing queue ownership."""
         try:
             outcome = self._transport.post_json(self._url, {"events": batch})
             if not isinstance(outcome, TransportOutcome):
@@ -238,17 +298,6 @@ class EventQueue:
         except Exception:  # noqa: BLE001 - never let the flush thread die
             logger.exception("APDL: unexpected error during flush")
             outcome = TransportOutcome.RETRYABLE
-
-        if outcome is TransportOutcome.RETRYABLE:
-            if self._config.debug:
-                logger.warning("APDL: batch send failed, re-queuing %d events", len(batch))
-            self._requeue_front(batch)
-            return outcome
-        if outcome is TransportOutcome.PERMANENT_REJECTION:
-            logger.warning(
-                "APDL: permanently rejected %d events; batch will not be retried",
-                len(batch),
-            )
         return outcome
 
     def _requeue_front(self, batch: list[dict[str, Any]]) -> None:

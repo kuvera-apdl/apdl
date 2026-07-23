@@ -30,8 +30,18 @@ def test_post_success_sends_auth_headers(httpx_mock):
     transport.close()
 
 
-@pytest.mark.parametrize("status", [302, 400, 401, 403, 413, 422])
-def test_post_non_retryable_status_is_permanent_rejection(httpx_mock, status):
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_post_payload_status_is_distinct_rejection(httpx_mock, status):
+    httpx_mock.add_response(url=URL, status_code=status)
+    transport = make_transport()
+
+    assert transport.post_json(URL, {}) is TransportOutcome.PAYLOAD_REJECTED
+    assert len(httpx_mock.get_requests()) == 1  # not retried
+    transport.close()
+
+
+@pytest.mark.parametrize("status", [302, 401, 403, 404])
+def test_post_non_payload_status_is_permanent_rejection(httpx_mock, status):
     httpx_mock.add_response(url=URL, status_code=status)
     transport = make_transport()
 

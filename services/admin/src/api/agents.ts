@@ -6,6 +6,7 @@ import {
   customAgentListSchema,
   customAgentSchema,
   customAgentSpecSchema,
+  projectExecutionCapabilitiesSchema,
   runAuditResponseSchema,
   runResultsSchema,
   runsListResponseSchema,
@@ -21,6 +22,7 @@ import type {
   ApprovalResponse,
   CustomAgent,
   CustomAgentSpec,
+  ProjectExecutionCapabilities,
   RunAuditResponse,
   RunResults,
   RunsListResponse,
@@ -37,6 +39,23 @@ export function triggerRun(conn: ServiceConnection, body: TriggerRequest): Promi
     method: 'POST',
     body: triggerRequestSchema.parse(body),
     schema: triggerResponseSchema,
+  })
+}
+
+export function getProjectExecutionCapabilities(
+  conn: ServiceConnection,
+  projectId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<ProjectExecutionCapabilities> {
+  return request(conn, '/v1/agents/capabilities/execution', {
+    query: { project_id: projectId },
+    schema: projectExecutionCapabilitiesSchema,
+    signal: options.signal,
+  }).then((capabilities) => {
+    if (capabilities.project_id !== projectId) {
+      throw new Error('Agents execution capability crossed project authority')
+    }
+    return capabilities
   })
 }
 

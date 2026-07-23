@@ -5,7 +5,12 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { listAgentDefinitions, triggerRun, triggerRunCurl } from '@/api/agents'
+import {
+  getProjectExecutionCapabilities,
+  listAgentDefinitions,
+  triggerRun,
+  triggerRunCurl,
+} from '@/api/agents'
 import { ApiError } from '@/api/http'
 import { CurlButton } from '@/components/shared/CurlButton'
 import { Badge } from '@/components/ui/badge'
@@ -27,32 +32,9 @@ interface AnalysisOption {
   isCustom: boolean
 }
 
-// Static fallback: shown until /definitions responds, and kept when the
-// endpoint is unavailable (older agents service) — console convention.
-const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
-  {
-    type: 'behavior_analysis',
-    label: 'Behavior analysis',
-    description: 'Reads event history and produces insights — the input every other agent needs.',
-    isCustom: false,
-  },
-  {
-    type: 'experiment_design',
-    label: 'Experiment design',
-    description: 'Turns insights into experiment designs with flags and variants.',
-    isCustom: false,
-  },
-  {
-    type: 'feature_proposal',
-    label: 'Feature proposals',
-    description: 'Drafts prioritized feature proposals — always requires approval.',
-    isCustom: false,
-  },
-]
-
 // code_implementation is deliberately absent from the manual trigger list —
 // it runs via the approval flow. Filter it out of the live listing too.
-const HIDDEN_AGENTS = new Set(['code_implementation', 'experiment_evaluation'])
+const HIDDEN_AGENTS = new Set(['code_implementation'])
 
 const OUTCOME_STYLES: Record<GateOutcome, string> = {
   halt: 'text-muted-foreground',
@@ -82,9 +64,7 @@ function TriggerForm() {
   const navigate = useNavigate()
   // 'default' runs the full built-in loop; 'custom' hand-picks agents.
   const [mode, setMode] = useState<'default' | 'custom'>('default')
-  const [selected, setSelected] = useState<Set<string>>(
-    () => new Set<string>(['behavior_analysis']),
-  )
+  const [selected, setSelected] = useState<Set<string>>(() => new Set<string>())
   const [timeRangeDays, setTimeRangeDays] = useState(7)
   const [autonomyLevel, setAutonomyLevel] = useState(2)
   const [submitting, setSubmitting] = useState(false)
@@ -97,8 +77,26 @@ function TriggerForm() {
     enabled: Boolean(conn && projectId),
     queryFn: ({ signal }) => listAgentDefinitions(conn!, projectId!, { signal }),
   })
+  const executionCapabilitiesQuery = useQuery({
+    queryKey:
+      active && projectId
+        ? queryKeys.agentExecutionCapabilities(active.id, projectId)
+        : ['agent-execution-capabilities-idle'],
+    enabled: Boolean(conn && projectId),
+    queryFn: ({ signal }) => getProjectExecutionCapabilities(conn!, projectId!, { signal }),
+  })
+  const autonomousMutationsEnabled =
+    executionCapabilitiesQuery.isSuccess &&
+    executionCapabilitiesQuery.data.autonomous_mutations_operator_enabled
 
-  const analysisTypes: AnalysisOption[] = definitionsQuery.data
+  // A capability loss must also lower an already-selected L3/L4 value. The
+  // payload below independently clamps it, so a render/refetch race cannot
+  // submit an autonomy level that advertises automatic external effects.
+  useEffect(() => {
+    if (!autonomousMutationsEnabled && autonomyLevel > 2) setAutonomyLevel(2)
+  }, [autonomousMutationsEnabled, autonomyLevel])
+
+  const analysisTypes: AnalysisOption[] = definitionsQuery.isSuccess
     ? definitionsQuery.data.agents
         .filter((agent) => !HIDDEN_AGENTS.has(agent.name))
         .map((agent) => ({
@@ -107,7 +105,8 @@ function TriggerForm() {
           description: agent.description,
           isCustom: agent.is_custom,
         }))
-    : BUILTIN_ANALYSIS_TYPES
+    : []
+  const definitionsReady = definitionsQuery.isSuccess && analysisTypes.length > 0
 
   // The default loop = every built-in (non-custom) agent. Stable string dep so
   // the sync effect doesn't loop on analysisTypes' fresh array each render.
@@ -135,7 +134,7 @@ function TriggerForm() {
   }
 
   const body =
-    projectId && selected.size > 0
+    definitionsReady && projectId && selected.size > 0
       ? {
           project_id: projectId,
           trigger_type: 'manual' as const,
@@ -143,7 +142,7 @@ function TriggerForm() {
             .map((entry) => entry.type)
             .filter((type) => selected.has(type)),
           time_range_days: timeRangeDays,
-          autonomy_level: autonomyLevel,
+          autonomy_level: autonomousMutationsEnabled ? autonomyLevel : Math.min(autonomyLevel, 2),
         }
       : null
 
@@ -204,6 +203,29 @@ function TriggerForm() {
           </div>
         </CardHeader>
         <CardContent className="space-y-2">
+          {definitionsQuery.isPending ? (
+            <p className="rounded-md border p-3 text-sm text-muted-foreground" role="status">
+              Loading executable agent definitions…
+            </p>
+          ) : null}
+          {definitionsQuery.isError ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              Agent definitions are unavailable. Starting a run is disabled until the agents
+              service returns a valid capability list.
+            </p>
+          ) : null}
+          {definitionsQuery.isSuccess && analysisTypes.length === 0 ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              No executable agent definitions are available for this project. Starting a run is
+              disabled.
+            </p>
+          ) : null}
           {analysisTypes.map((entry) => (
             <label
               key={entry.type}
@@ -275,37 +297,78 @@ function TriggerForm() {
         <CardHeader>
           <CardTitle>Autonomy level</CardTitle>
           <CardDescription>
-            Feature proposals always require approval; failed safety checks always halt.
+            Feature proposals always require approval; failed safety checks always halt. L3/L4
+            require the operator-controlled autonomous mutation capability.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {executionCapabilitiesQuery.isPending ? (
+            <p className="rounded-md border p-3 text-sm text-muted-foreground" role="status">
+              Checking the operator mutation policy… L3/L4 remain unavailable.
+            </p>
+          ) : null}
+          {executionCapabilitiesQuery.isError ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              Autonomous mutation capability is unavailable. L3/L4 are disabled and submitted
+              runs remain approval-only.
+            </p>
+          ) : null}
+          {executionCapabilitiesQuery.isSuccess && !autonomousMutationsEnabled ? (
+            <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+              Autonomous mutations are not operator-enabled. L3/L4 are unavailable; L2 keeps every
+              passing action behind approval.
+            </p>
+          ) : null}
+          {executionCapabilitiesQuery.isSuccess &&
+          executionCapabilitiesQuery.data.codegen_changeset_creation !== 'available' ? (
+            <p className="text-xs text-muted-foreground">
+              Codegen changeset creation is{' '}
+              <strong>{executionCapabilitiesQuery.data.codegen_changeset_creation}</strong> for
+              this project. Code-backed approvals will remain blocked until it is available.
+            </p>
+          ) : null}
           <div className="grid gap-2 sm:grid-cols-2">
-            {AUTONOMY_LEVELS.map((def) => (
-              <label
-                key={def.level}
-                className="flex cursor-pointer items-start gap-2 rounded-md border p-3 has-[:checked]:border-foreground"
-              >
-                <input
-                  type="radio"
-                  name="autonomy"
-                  value={def.level}
-                  checked={autonomyLevel === def.level}
-                  onChange={() => setAutonomyLevel(def.level)}
-                  className="mt-1 accent-foreground"
-                />
-                <span>
-                  <span className="block text-sm font-medium">
-                    {def.label}
-                    {def.recommended ? (
-                      <span className="ml-2 rounded-full bg-secondary px-2 py-0.5 text-xs">
-                        recommended
+            {AUTONOMY_LEVELS.map((def) => {
+              const unavailable = def.level > 2 && !autonomousMutationsEnabled
+              return (
+                <label
+                  key={def.level}
+                  className={cn(
+                    'flex items-start gap-2 rounded-md border p-3 has-[:checked]:border-foreground',
+                    unavailable ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="autonomy"
+                    value={def.level}
+                    checked={autonomyLevel === def.level}
+                    onChange={() => setAutonomyLevel(def.level)}
+                    disabled={unavailable}
+                    className="mt-1 accent-foreground"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium">
+                      {def.label}
+                      {def.recommended ? (
+                        <span className="ml-2 rounded-full bg-secondary px-2 py-0.5 text-xs">
+                          recommended
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">{def.summary}</span>
+                    {unavailable ? (
+                      <span className="block text-xs text-amber-700 dark:text-amber-400">
+                        Operator enablement required
                       </span>
                     ) : null}
                   </span>
-                  <span className="block text-xs text-muted-foreground">{def.summary}</span>
-                </span>
-              </label>
-            ))}
+                </label>
+              )
+            })}
           </div>
 
           <div className="overflow-auto rounded-md border">
@@ -328,7 +391,7 @@ function TriggerForm() {
                   <tr key={row.label} className="border-b last:border-0">
                     <td className="p-2">{row.label}</td>
                     {AUTONOMY_LEVELS.map((def) => {
-                      const outcome = row.outcomes(def.level)
+                      const outcome = row.outcomes(def.level, autonomousMutationsEnabled)
                       return (
                         <td
                           key={def.level}

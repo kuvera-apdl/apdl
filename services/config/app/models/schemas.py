@@ -131,6 +131,22 @@ class GateRule(StrictModel):
     rollout: RolloutConfig
 
 
+class ExperimentTargetingRule(StrictModel):
+    """Eligibility-only rule for experiment enrollment.
+
+    Experiment traffic allocation has exactly one authority:
+    ``traffic_percentage``.  The backing flag projection supplies that rollout;
+    accepting a second per-rule rollout here would make enrollment ambiguous.
+    """
+
+    id: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+    name: str = Field(..., max_length=MAX_STRING_LENGTH)
+    conditions: list[GateCondition] = Field(
+        default_factory=list,
+        max_length=MAX_CONDITIONS_PER_RULE,
+    )
+
+
 class FallthroughConfig(StrictModel):
     rollout: RolloutConfig
 
@@ -310,6 +326,7 @@ class ExperimentConfig(BaseModel):
         strict=True,
         allow_inf_nan=False,
     )
+    minimum_exposure_config_version: int | None = Field(default=None, ge=1)
     start_date: AwareDatetime | None = None
     end_date: AwareDatetime | None = None
     version: int = Field(default=1, ge=1)
@@ -704,6 +721,8 @@ class ExperimentAnalysis(StrictModel):
     )
     metric_event: str = Field(..., min_length=1)
     metric_direction: Literal["increase", "decrease"]
+    enrollment_mode: Literal["all", "targeted"]
+    minimum_exposure_config_version: int = Field(..., ge=1)
     statistical_plan: ExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime
@@ -752,7 +771,7 @@ class ExperimentCreate(StrictModel):
     )
     primary_metric: ExperimentMetric | None = None
     statistical_plan: ExperimentStatisticalPlan | None = None
-    targeting_rules: list[GateRule] = Field(
+    targeting_rules: list[ExperimentTargetingRule] = Field(
         default_factory=list,
         max_length=MAX_RULES,
     )
@@ -802,7 +821,7 @@ class ExperimentUpdate(StrictModel):
     )
     primary_metric: ExperimentMetric | None = None
     statistical_plan: ExperimentStatisticalPlan | None = None
-    targeting_rules: list[GateRule] | None = Field(
+    targeting_rules: list[ExperimentTargetingRule] | None = Field(
         default=None,
         max_length=MAX_RULES,
     )

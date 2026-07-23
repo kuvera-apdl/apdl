@@ -211,6 +211,7 @@ class FakeRedis:
         self.read_args: list[dict] = []
         self.stream_lengths: dict[str, int] = {}
         self.stream_groups: dict[str, list[dict]] = {}
+        self.stream_info: dict[str, dict] = {}
         self.pending_summaries: dict[str, dict] = {}
         self.trim_calls: list[dict] = []
         self.xlen_calls: list[str] = []
@@ -224,6 +225,8 @@ class FakeRedis:
         self.fail_transaction_after_commit = False
         self.pipeline_transactions: list[bool] = []
         self.transaction_attempts: list[tuple] = []
+        self.scan_calls: list[dict] = []
+        self.scan_responses: list[tuple[int, list[str]]] = []
         self.closed = False
 
     def pipeline(self, *, transaction):
@@ -234,6 +237,12 @@ class FakeRedis:
         self.read_calls += 1
         self.read_args.append(kwargs)
         return []
+
+    async def scan(self, **kwargs):
+        self.scan_calls.append(kwargs)
+        if self.scan_responses:
+            return self.scan_responses.pop(0)
+        return 0, []
 
     async def xlen(self, stream_key):
         self.xlen_calls.append(stream_key)
@@ -249,8 +258,15 @@ class FakeRedis:
                     "pending": 0,
                     "lag": 0,
                     "last-delivered-id": "0-0",
+                    "entries-read": 0,
                 }
             ],
+        )
+
+    async def xinfo_stream(self, stream_key):
+        return self.stream_info.get(
+            stream_key,
+            {"max-deleted-entry-id": "0-0"},
         )
 
     async def xpending(self, stream_key, _group):
@@ -528,9 +544,7 @@ def test_cancelled_flush_observes_original_insert_before_retrying(monkeypatch):
         assert await writer._flush() is True
         assert len(ch_client.inserts) == 1
         assert len(ch_client.query_ids) == 1
-        assert redis_client.acks == [
-            ("events:raw:demo", "clickhouse-writer", ("1-0",))
-        ]
+        assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("1-0",))]
         await writer.stop()
 
     asyncio.run(scenario())
@@ -1022,18 +1036,24 @@ def test_finalize_retry_is_idempotent_after_unknown_exec_outcome(monkeypatch):
 
 
 def test_crash_after_insert_replay_converges_on_one_storage_identity(monkeypatch):
-    """A stable client message ID collapses an insert-before-ACK replay."""
+    """A stable Redis delivery ID collapses an insert-before-ACK replay."""
 
     class IdempotentClickHouse(FakeClickHouse):
         def __init__(self):
             super().__init__()
-            self.rows: dict[tuple[str, str], dict] = {}
+            self.rows: dict[tuple[str, str, str], dict] = {}
 
         def execute(self, _query, *, external_tables=None, **_kwargs):
             rows = external_event_rows(external_tables)
             self.inserts.append(rows)
             for row in rows:
-                self.rows[(row["project_id"], row["message_id"])] = row
+                self.rows[
+                    (
+                        row["project_id"],
+                        row["source_stream"],
+                        row["source_stream_id"],
+                    )
+                ] = row
 
     class FailedFinalizeRedis(FakeRedis):
         def __init__(self):
@@ -1068,10 +1088,8 @@ def test_crash_after_insert_replay_converges_on_one_storage_identity(monkeypatch
         assert await restarted._process_messages(delivery) == 1
 
         assert len(clickhouse.inserts) == 2
-        assert list(clickhouse.rows) == [("demo", "client-stable-id")]
-        assert redis_client.acks == [
-            ("events:raw:demo", "clickhouse-writer", ("1-0",))
-        ]
+        assert list(clickhouse.rows) == [("demo", "events:raw:demo", "1-0")]
+        assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("1-0",))]
 
     asyncio.run(scenario())
 
@@ -1131,9 +1149,7 @@ def test_reports_deleted_pending_ids_from_xautoclaim(monkeypatch, caplog):
     asyncio.run(scenario())
 
 
-def test_stream_pressure_logs_exact_values_at_a_bounded_interval(
-    monkeypatch, caplog
-):
+def test_stream_pressure_logs_exact_values_at_a_bounded_interval(monkeypatch, caplog):
     async def scenario():
         clock = [100.0]
         monkeypatch.setattr(writer_module.time, "monotonic", lambda: clock[0])
@@ -1321,7 +1337,7 @@ def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
         redis_client.group_creates.clear()
         redis_client.stream_groups["events:raw:demo"] = []
         assert await writer._get_stream_keys(["demo"]) == ["events:raw:demo"]
-        assert redis_client.group_creates[-1]["id"] == "0-0"
+        assert redis_client.group_creates == []
 
     asyncio.run(scenario())
 
@@ -1338,7 +1354,7 @@ def test_existing_consumer_group_avoids_group_creation_write(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_start_reconciles_existing_groups_before_group_creation(monkeypatch):
+def test_dynamic_start_forces_discovery_before_group_creation(monkeypatch):
     async def scenario():
         writer, _, _ = make_writer(monkeypatch)
         calls = []
@@ -1369,16 +1385,121 @@ def test_start_reconciles_existing_groups_before_group_creation(monkeypatch):
         monkeypatch.setattr(writer, "_consume_loop", no_op)
         monkeypatch.setattr(writer, "_flush_loop", no_op)
         monkeypatch.setattr(writer, "_monitor_loop", no_op)
+        monkeypatch.setattr(writer, "_stream_discovery_loop", no_op)
 
-        await writer.start(["demo"])
+        await writer.start()
 
         assert calls[:5] == [
             ("discover",),
             ("reconcile", ("events:raw:demo",), False),
-            ("ensure", ("demo",)),
-            ("get", ("demo",)),
+            ("ensure", ()),
+            ("get", ()),
             ("reconcile", ("events:raw:demo",), True),
         ]
+
+    asyncio.run(scenario())
+
+
+def test_fixed_project_start_never_scans_global_keyspace(monkeypatch):
+    async def scenario():
+        writer, redis_client, _ = make_writer(monkeypatch)
+
+        async def no_op(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(writer, "_consume_loop", no_op)
+        monkeypatch.setattr(writer, "_flush_loop", no_op)
+        monkeypatch.setattr(writer, "_monitor_loop", no_op)
+
+        await writer.start(["demo"])
+
+        assert redis_client.scan_calls == []
+        assert writer._known_stream_keys == {"events:raw:demo"}
+
+    asyncio.run(scenario())
+
+
+def test_discovery_loop_refreshes_registry_on_the_configured_interval(monkeypatch):
+    async def scenario():
+        writer, _, _ = make_writer(
+            monkeypatch,
+            stream_discovery_interval=0.001,
+        )
+        refresh_calls = 0
+
+        async def refresh():
+            nonlocal refresh_calls
+            refresh_calls += 1
+            writer.running = False
+            return ["events:raw:new"]
+
+        monkeypatch.setattr(writer, "_refresh_discovered_stream_registry", refresh)
+        writer.running = True
+
+        await asyncio.wait_for(writer._stream_discovery_loop(), timeout=0.1)
+
+        assert refresh_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
+    monkeypatch,
+):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:old"])
+        calls = []
+
+        async def discover():
+            calls.append(("discover",))
+            return ["events:raw:new", "events:raw:old"]
+
+        async def reconcile(stream_keys, *, require_group=True):
+            calls.append(("reconcile", tuple(stream_keys), require_group))
+
+        async def ensure(stream_keys):
+            calls.append(("ensure", tuple(stream_keys)))
+
+        monkeypatch.setattr(writer, "_discover_streams", discover)
+        monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
+        monkeypatch.setattr(writer, "_ensure_consumer_groups_for_streams", ensure)
+
+        snapshot = await writer._refresh_discovered_stream_registry()
+
+        assert snapshot == ["events:raw:new", "events:raw:old"]
+        assert await writer._get_stream_keys(None) == snapshot
+        assert calls == [
+            ("discover",),
+            (
+                "reconcile",
+                ("events:raw:new", "events:raw:old"),
+                False,
+            ),
+            ("ensure", ("events:raw:new", "events:raw:old")),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_failed_discovery_retains_last_valid_registry_snapshot(monkeypatch):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:stable"])
+        writer._last_stream_pressure_log["events:raw:stable"] = 123.0
+
+        async def unavailable():
+            raise ConnectionError("redis scan unavailable")
+
+        monkeypatch.setattr(writer, "_discover_streams", unavailable)
+
+        with pytest.raises(ConnectionError, match="scan unavailable"):
+            await writer._refresh_discovered_stream_registry()
+
+        assert await writer._get_stream_keys(None) == ["events:raw:stable"]
+        assert writer._last_stream_pressure_log == {
+            "events:raw:stable": 123.0,
+        }
 
     asyncio.run(scenario())
 
@@ -1527,15 +1648,17 @@ def test_legacy_alias_event_is_rejected(monkeypatch):
     with pytest.raises(ValueError, match="unknown fields"):
         writer._parse_event(
             {
-                "event_json": json.dumps({
-                    "event": "identify",
-                    "type": "identify",
-                    "userId": "user-1",
-                    "anonymousId": "anon-1",
-                    "timestamp": "2026-07-13T12:00:00.000Z",
-                    "context": {},
-                    "message_id": "message-alias",
-                })
+                "event_json": json.dumps(
+                    {
+                        "event": "identify",
+                        "type": "identify",
+                        "userId": "user-1",
+                        "anonymousId": "anon-1",
+                        "timestamp": "2026-07-13T12:00:00.000Z",
+                        "context": {},
+                        "message_id": "message-alias",
+                    }
+                )
             },
             "demo",
         )
@@ -1571,6 +1694,332 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
             "xack",
             "xdel",
         ]
+
+    asyncio.run(scenario())
+
+
+def test_stream_delivery_provenance_is_written_to_clickhouse_row(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+
+    row = writer._parse_event(
+        {"event_json": json.dumps(canonical_event())},
+        "demo",
+        source_stream="events:raw:demo",
+        source_stream_id="1738281601000-7",
+    )
+
+    assert row["source_stream"] == "events:raw:demo"
+    assert row["source_stream_id"] == "1738281601000-7"
+    assert row["source_stream_id_ms"] == 1_738_281_601_000
+    assert row["source_stream_id_seq"] == 7
+
+
+def test_boundary_marker_contract_is_strict():
+    token = "a" * 64
+    assert (
+        ClickHouseWriter._parse_boundary_marker(
+            {
+                "message_kind": "experiment_analysis_boundary",
+                "boundary_token": token,
+            }
+        )
+        == token
+    )
+    with pytest.raises(ValueError, match="fields are not canonical"):
+        ClickHouseWriter._parse_boundary_marker(
+            {
+                "message_kind": "experiment_analysis_boundary",
+                "boundary_token": token,
+                "event_json": "{}",
+            }
+        )
+
+
+def test_ack_advances_authority_only_after_clickhouse_durable_redis_ack(monkeypatch):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.updates = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *_args):
+            assert "FROM event_pipeline_watermarks" in query
+            return {
+                "stream_key": "events:raw:demo",
+                "provenance_start_stream_id": "0-0",
+                "contiguous_stream_id": "1-0",
+                "consumer_group_entries_read": 0,
+                "status": "healthy",
+            }
+
+        async def execute(self, query, *args):
+            self.updates.append((query, args))
+            return "UPDATE 1"
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        redis_client.stream_groups["events:raw:demo"] = [
+            {
+                "name": "clickhouse-writer",
+                "pending": 0,
+                "lag": 0,
+                "last-delivered-id": "2-3",
+                "entries-read": 1,
+            }
+        ]
+        writer._queue_durable_ack([buffered_event("2-3")])
+
+        assert await writer._ack_durable_messages() is True
+
+        frontier_updates = [
+            args
+            for query, args in connection.updates
+            if "SET contiguous_stream_id" in query
+        ]
+        assert frontier_updates == [("demo", "2-3", 1)]
+        assert redis_client.acks == [("events:raw:demo", "clickhouse-writer", ("2-3",))]
+
+    asyncio.run(scenario())
+
+
+def test_ack_fails_closed_when_entries_read_crosses_unfinalized_delivery(monkeypatch):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.status = "healthy"
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *_args):
+            assert "FROM event_pipeline_watermarks" in query
+            return {
+                "stream_key": "events:raw:demo",
+                "provenance_start_stream_id": "0-0",
+                "contiguous_stream_id": "1-0",
+                "consumer_group_entries_read": 0,
+                "status": self.status,
+            }
+
+        async def execute(self, query, *_args):
+            if "failure_reason = 'stream_state_unverifiable'" not in query:
+                raise AssertionError(query)
+            self.status = "degraded"
+            return "UPDATE 1"
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        redis_client.stream_groups["events:raw:demo"] = [
+            {
+                "name": "clickhouse-writer",
+                "pending": 0,
+                "lag": 0,
+                "last-delivered-id": "2-0",
+                "entries-read": 2,
+            }
+        ]
+        writer._queue_durable_ack([buffered_event("2-0")])
+
+        assert await writer._ack_durable_messages() is True
+        assert connection.status == "degraded"
+
+    asyncio.run(scenario())
+
+
+def test_first_finalize_requires_exact_ack_and_delete_counts(monkeypatch):
+    class InexactPipeline(FakePipeline):
+        async def execute(self):
+            return [0, 0]
+
+    class ResetRedis(FakeRedis):
+        def pipeline(self, *, transaction):
+            return InexactPipeline(self, transaction=transaction)
+
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch, redis_client=ResetRedis())
+        writer._queue_durable_ack([buffered_event("2-0")])
+
+        assert await writer._ack_durable_messages() is False
+        assert writer._durable_pending_ack == {"events:raw:demo": ["2-0"]}
+
+    asyncio.run(scenario())
+
+
+def test_unknown_finalize_outcome_accepts_only_idempotent_zero_retry(monkeypatch):
+    class UnknownThenZeroPipeline(FakePipeline):
+        async def execute(self):
+            self.redis_client.finalize_attempts += 1
+            if self.redis_client.finalize_attempts == 1:
+                raise ConnectionError("reply lost after EXEC")
+            return [0, 0]
+
+    class UnknownThenZeroRedis(FakeRedis):
+        def __init__(self):
+            super().__init__()
+            self.finalize_attempts = 0
+
+        def pipeline(self, *, transaction):
+            return UnknownThenZeroPipeline(self, transaction=transaction)
+
+    async def scenario():
+        writer, _, _ = make_writer(
+            monkeypatch,
+            redis_client=UnknownThenZeroRedis(),
+        )
+        writer._queue_durable_ack([buffered_event("2-0")])
+
+        assert await writer._ack_durable_messages() is False
+        assert await writer._ack_durable_messages() is True
+        assert writer._durable_pending_ack == {}
+        assert writer._uncertain_redis_finalizations == set()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "stream_groups",
+    [
+        [],
+        [
+            {
+                "name": "clickhouse-writer",
+                "pending": 0,
+                "lag": 0,
+                "last-delivered-id": "4-0",
+                "entries-read": 4,
+            }
+        ],
+        [
+            {
+                "name": "clickhouse-writer",
+                "pending": 0,
+                "lag": 0,
+                "last-delivered-id": "6-0",
+                "entries-read": 6,
+            }
+        ],
+        [
+            {
+                "name": "clickhouse-writer",
+                "pending": 0,
+                "lag": 0,
+                "last-delivered-id": "5-0",
+                "entries-read": 6,
+            }
+        ],
+    ],
+)
+def test_redis_group_loss_or_rollback_permanently_degrades_authority(
+    monkeypatch,
+    stream_groups,
+):
+    class Connection:
+        def __init__(self):
+            self.watermark = {
+                "stream_key": "events:raw:demo",
+                "contiguous_stream_id": "5-0",
+                "consumer_group_entries_read": 5,
+                "status": "healthy",
+                "failure_reason": None,
+            }
+
+        async def fetchrow(self, query, *_args):
+            if "FROM event_pipeline_watermarks" not in query:
+                raise AssertionError(query)
+            return dict(self.watermark)
+
+        async def execute(self, query, *_args):
+            if "status = 'degraded'" not in query:
+                raise AssertionError(query)
+            self.watermark["status"] = "degraded"
+            self.watermark["failure_reason"] = "stream_state_unverifiable"
+            return "INSERT 0 1"
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, redis_client, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        redis_client.stream_groups["events:raw:demo"] = stream_groups
+
+        await writer._ensure_consumer_group("events:raw:demo")
+
+        assert connection.watermark["status"] == "degraded"
+        assert connection.watermark["failure_reason"] == "stream_state_unverifiable"
 
     asyncio.run(scenario())
 

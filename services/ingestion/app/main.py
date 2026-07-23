@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.client_ip import parse_trusted_proxy_cidrs
+from app.middleware.rate_limit import PreAuthRateLimitMiddleware
 from app.routers import events
 
 logging.basicConfig(
@@ -233,6 +234,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(PreAuthRateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

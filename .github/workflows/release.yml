@@ -6,7 +6,9 @@ on:
       - "v*"
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Release tags share mutable convenience tags such as `latest`; serialize all
+  # publications so concurrent tags cannot race that pointer.
+  group: release-publication
   cancel-in-progress: false
 
 permissions:
@@ -26,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
+      docker_matrix: ${{ steps.release.outputs.docker_matrix }}
     permissions:
       contents: read
     env:
@@ -56,7 +59,14 @@ jobs:
           set -euo pipefail
           python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
           version=$(python -c 'import json; print(json.load(open("release-manifest.json"))["version"])')
+          egress_policy_sha256=$(python scripts/codegen-egress-policy-digest.py)
+          docker_matrix=$(python scripts/verify_release.py \
+            --tag "$GITHUB_REF_NAME" \
+            --docker-matrix \
+            --revision "$GITHUB_SHA" \
+            --egress-policy-sha256 "$egress_policy_sha256")
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "docker_matrix=$docker_matrix" >> "$GITHUB_OUTPUT"
       - name: Build and verify release artifacts once
         shell: bash
         env:
@@ -75,8 +85,10 @@ jobs:
           test -f "$npm_artifact"
           test -f "$python_wheel"
           test -f "$python_sdist"
+          cp release-manifest.json release-artifacts/release-manifest.json
 
           {
+            (cd release-artifacts && sha256sum release-manifest.json)
             (cd release-artifacts/npm && sha256sum "apdl-oss-sdk-${VERSION}.tgz")
             (cd release-artifacts/python && sha256sum \
               "apdl_sdk-${VERSION}-py3-none-any.whl" \
@@ -91,11 +103,12 @@ jobs:
             release-artifacts/npm/apdl-oss-sdk-${{ steps.release.outputs.version }}.tgz
             release-artifacts/python/apdl_sdk-${{ steps.release.outputs.version }}-py3-none-any.whl
             release-artifacts/python/apdl_sdk-${{ steps.release.outputs.version }}.tar.gz
+            release-artifacts/release-manifest.json
             release-artifacts/SHA256SUMS
 
   publish-npm:
     name: Publish npm Package
-    needs: build-artifacts
+    needs: [build-artifacts, smoke-published-core]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -145,7 +158,7 @@ jobs:
 
   publish-pypi:
     name: Publish Python Package
-    needs: build-artifacts
+    needs: [build-artifacts, smoke-published-core]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -185,9 +198,265 @@ jobs:
           --version "$VERSION"
           --artifacts-dir release-artifacts/python
 
+  publish-docker-images:
+    name: Publish ${{ matrix.name }} Image
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.build-artifacts.outputs.docker_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Derive canonical image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.repository }}
+          tags: |
+            type=raw,value=${{ github.ref_name }}
+            type=raw,value=${{ needs.build-artifacts.outputs.version }}
+            type=sha,prefix=sha-,format=long
+            type=raw,value=latest,enable=${{ !contains(needs.build-artifacts.outputs.version, '-') }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.build-artifacts.outputs.version }}
+      - name: Check immutable GHCR publication state
+        id: registry
+        shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ matrix.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: |
+          set -euo pipefail
+          inspection_dir=$(mktemp -d)
+
+          inspect_digest() {
+            local tag="$1"
+            local output_name="$2"
+            local reference="${IMAGE_REPOSITORY}:${tag}"
+            if docker buildx imagetools inspect \
+              "$reference" \
+              >"${inspection_dir}/${output_name}.txt" \
+              2>"${inspection_dir}/${output_name}.err"; then
+              local value
+              value=$(awk '$1 == "Digest:" { print $2; exit }' \
+                "${inspection_dir}/${output_name}.txt")
+              if [[ ! "$value" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "Registry returned no canonical digest for $reference" >&2
+                cat "${inspection_dir}/${output_name}.txt" >&2
+                return 1
+              fi
+              printf '%s\n' "$value"
+              return 0
+            fi
+            if grep -Eiq 'manifest unknown|manifest.*not found' \
+              "${inspection_dir}/${output_name}.err" \
+              || { grep -Fq "$reference" "${inspection_dir}/${output_name}.err" \
+                && grep -iq 'not found' "${inspection_dir}/${output_name}.err"; }; then
+              printf 'absent\n'
+              return 0
+            fi
+            cat "${inspection_dir}/${output_name}.err" >&2
+            return 1
+          }
+
+          version_digest=$(inspect_digest "$RELEASE_VERSION" version)
+          tag_digest=$(inspect_digest "$RELEASE_TAG" tag)
+          revision_digest=$(inspect_digest "sha-${GITHUB_SHA}" revision)
+          if test "$version_digest" = absent \
+            && test "$tag_digest" = absent \
+            && test "$revision_digest" = absent; then
+            echo "state=absent" >> "$GITHUB_OUTPUT"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test "$version_digest" = absent \
+            || test "$tag_digest" = absent \
+            || test "$revision_digest" = absent; then
+            echo "Immutable release tags are only partially published" >&2
+            exit 1
+          fi
+          if test "$version_digest" != "$tag_digest" \
+            || test "$version_digest" != "$revision_digest"; then
+            echo "Immutable release tags resolve to different image digests" >&2
+            exit 1
+          fi
+          echo "state=present" >> "$GITHUB_OUTPUT"
+          echo "digest=$version_digest" >> "$GITHUB_OUTPUT"
+      - name: Build and publish multi-platform image
+        if: steps.registry.outputs.state == 'absent'
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: ${{ matrix.build_args }}
+          cache-from: type=gha,scope=release-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.name }}
+          provenance: mode=max
+          sbom: true
+      - name: Attest the published image digest
+        if: steps.registry.outputs.state == 'absent'
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ matrix.repository }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Resolve the immutable image digest
+        id: image
+        shell: bash
+        env:
+          EXISTING_DIGEST: ${{ steps.registry.outputs.digest }}
+          PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}
+          REGISTRY_STATE: ${{ steps.registry.outputs.state }}
+        run: |
+          set -euo pipefail
+          case "$REGISTRY_STATE" in
+            absent) digest="$PUBLISHED_DIGEST" ;;
+            present) digest="$EXISTING_DIGEST" ;;
+            *) exit 1 ;;
+          esac
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Invalid published image digest" >&2
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Verify exact release provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ matrix.repository }}@${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          gh attestation verify \
+            "oci://$IMAGE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --deny-self-hosted-runners
+      - name: Verify anonymous digest access
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.repository }}@${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          for attempt in {1..12}; do
+            if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "GHCR package must be Public before an OSS release can complete: $IMAGE" >&2
+          exit 1
+      - name: Record the immutable published reference
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ matrix.name }}
+          IMAGE_REPOSITORY: ${{ matrix.repository }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build-artifacts.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p published-image
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "name": os.environ["IMAGE_NAME"],
+              "repository": os.environ["IMAGE_REPOSITORY"],
+              "digest": os.environ["IMAGE_DIGEST"],
+              "tag": os.environ["RELEASE_TAG"],
+              "version": os.environ["RELEASE_VERSION"],
+          }
+          target = Path("published-image") / f"{payload['name']}.json"
+          target.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-image-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+          path: published-image/${{ matrix.name }}.json
+
+  smoke-published-core:
+    name: Smoke Published Core Images
+    needs: [build-artifacts, publish-docker-images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-artifacts
+          path: release-artifacts
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: published-image-*
+          path: published-images
+          merge-multiple: true
+      - name: Bind Compose to the exact published image digests
+        shell: bash
+        run: >-
+          python scripts/release_container_images.py
+          --manifest release-artifacts/release-manifest.json
+          --records-dir published-images
+          --index release-runtime/container-images.json
+          --compose-override release-runtime/compose.release-images.yml
+      - name: Prove the published core images from an anonymous pull
+        shell: bash
+        env:
+          APDL_SMOKE_COMPOSE_OVERRIDE: ${{ github.workspace }}/release-runtime/compose.release-images.yml
+          APDL_SMOKE_NO_BUILD: "true"
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          make smoke-fresh
+          make smoke-experiment-fresh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tested-container-image-index
+          if-no-files-found: error
+          retention-days: 7
+          path: release-runtime/container-images.json
+
   github-release:
     name: Create GitHub Release
-    needs: [build-artifacts, publish-npm, publish-pypi]
+    needs:
+      - build-artifacts
+      - publish-npm
+      - publish-pypi
+      - publish-docker-images
+      - smoke-published-core
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -196,6 +465,15 @@ jobs:
         with:
           name: release-artifacts
           path: release-artifacts
+      - uses: actions/download-artifact@v8
+        with:
+          name: tested-container-image-index
+          path: release-artifacts
+      - name: Add the tested container image index checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release-artifacts && sha256sum container-images.json >> SHA256SUMS)
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
@@ -203,4 +481,6 @@ jobs:
             release-artifacts/npm/apdl-oss-sdk-${{ needs.build-artifacts.outputs.version }}.tgz
             release-artifacts/python/apdl_sdk-${{ needs.build-artifacts.outputs.version }}-py3-none-any.whl
             release-artifacts/python/apdl_sdk-${{ needs.build-artifacts.outputs.version }}.tar.gz
+            release-artifacts/release-manifest.json
+            release-artifacts/container-images.json
             release-artifacts/SHA256SUMS

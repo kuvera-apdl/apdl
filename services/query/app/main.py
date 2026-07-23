@@ -161,6 +161,7 @@ async def lifespan(application: FastAPI):
     try:
         application.state.ch_client = client
         application.state.auth_pool = auth_pool
+        application.state.completeness_pool = auth_pool
         application.state.authenticator = PostgresAuthenticator(auth_pool)
         logger.info("ClickHouse connection pool initialized")
         yield

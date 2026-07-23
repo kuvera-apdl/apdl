@@ -10,9 +10,11 @@ export function gateOutcome(
   autonomyLevel: number,
   risk: RiskLevel,
   alwaysRequireApproval = false,
+  autonomousMutationsEnabled = true,
 ): GateOutcome {
   if (autonomyLevel <= 1) return 'halt'
   if (alwaysRequireApproval) return 'approve'
+  if (!autonomousMutationsEnabled) return 'approve'
   if (autonomyLevel >= 4) return 'deploy'
   if (autonomyLevel >= 3 && risk === 'low') return 'deploy'
   if (autonomyLevel >= 2) return 'approve'
@@ -34,17 +36,34 @@ export const AUTONOMY_LEVELS: AutonomyLevelDef[] = [
     summary: 'Every passing action is held for your approval.',
     recommended: true,
   },
-  { level: 3, label: 'L3', summary: 'Low-risk actions auto-deploy; medium/high held for approval.' },
+  {
+    level: 3,
+    label: 'L3',
+    summary: 'When operator-enabled, low-risk actions auto-deploy; medium/high require approval.',
+  },
   {
     level: 4,
     label: 'L4',
-    summary: 'Every safety-passing action auto-deploys except actions explicitly marked always-gated.',
+    summary:
+      'When operator-enabled, safety-passing actions auto-deploy except those explicitly always-gated.',
   },
 ]
 
-export const MATRIX_ROWS: { label: string; outcomes: (level: number) => GateOutcome }[] = [
+export const MATRIX_ROWS: {
+  label: string
+  outcomes: (level: number, autonomousMutationsEnabled?: boolean) => GateOutcome
+}[] = [
   { label: 'Failed safety check', outcomes: () => 'halt' },
-  { label: 'Passed, low risk', outcomes: (level) => gateOutcome(level, 'low') },
-  { label: 'Passed, medium/high risk', outcomes: (level) => gateOutcome(level, 'medium') },
-  { label: 'Feature proposals (always gated)', outcomes: (level) => gateOutcome(level, 'low', true) },
+  {
+    label: 'Passed, low risk',
+    outcomes: (level, enabled = true) => gateOutcome(level, 'low', false, enabled),
+  },
+  {
+    label: 'Passed, medium/high risk',
+    outcomes: (level, enabled = true) => gateOutcome(level, 'medium', false, enabled),
+  },
+  {
+    label: 'Feature proposals (always gated)',
+    outcomes: (level, enabled = true) => gateOutcome(level, 'low', true, enabled),
+  },
 ]

@@ -12,17 +12,37 @@ from conftest import make_settings
 
 
 class ProjectConnection:
-    def __init__(self, *, exists: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        exists: bool = False,
+        active: bool = True,
+        project_count: int = 0,
+    ) -> None:
         self.exists = exists
+        self.active = active
+        self.project_count = project_count
         self.statements: list[tuple[str, tuple[object, ...]]] = []
 
     @asynccontextmanager
     async def transaction(self):
         yield
 
+    async def fetchrow(self, query: str, *args):
+        self.statements.append((query, args))
+        assert "FROM admin_users" in query
+        assert "FOR UPDATE" in query
+        return {"active": self.active}
+
     async def fetchval(self, query: str, *args):
         self.statements.append((query, args))
-        return None if self.exists else args[0]
+        if "SELECT count(*)" in query:
+            return self.project_count
+        assert "INSERT INTO admin_projects" in query
+        if self.exists:
+            return None
+        self.project_count += 1
+        return args[0]
 
     async def execute(self, query: str, *args):
         self.statements.append((query, args))
@@ -154,6 +174,44 @@ def test_project_creation_rejects_duplicates_and_cross_site_requests() -> None:
     assert not any(
         "admin_user_projects" in query for query, _ in duplicate_connection.statements
     )
+
+
+def test_project_creation_enforces_a_serialized_per_user_quota() -> None:
+    csrf = "project-csrf-token"
+    connection = ProjectConnection(project_count=5)
+    with make_client(connection, zero_project_session(csrf)) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+        response = client.post(
+            "/api/projects",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"project_id": "sixth"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "project_quota_reached",
+        "message": "This account has reached its project creation limit",
+    }
+    statements = [query for query, _ in connection.statements]
+    assert "FOR UPDATE" in statements[0]
+    assert "SELECT count(*)" in statements[1]
+    assert not any("INSERT INTO admin_projects" in query for query in statements)
+    assert not any("INSERT INTO admin_user_projects" in query for query in statements)
+
+
+def test_project_creation_revalidates_the_active_user_under_lock() -> None:
+    csrf = "project-csrf-token"
+    connection = ProjectConnection(active=False)
+    with make_client(connection, zero_project_session(csrf)) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+        response = client.post(
+            "/api/projects",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"project_id": "blocked"},
+        )
+
+    assert response.status_code == 401
+    assert not any("INSERT INTO admin_projects" in query for query, _ in connection.statements)
 
 
 def test_project_creation_requires_strict_schema_and_csrf() -> None:

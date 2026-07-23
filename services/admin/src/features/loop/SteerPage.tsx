@@ -78,9 +78,10 @@ export function SteerPage() {
             <div className="space-y-1 text-sm">
               <p className="font-medium">Autonomy is set per run</p>
               <p className="text-muted-foreground">
-                L1 suggests only · L2 holds every passing action for approval · L3 auto-applies
-                low-risk actions · L4 is full autonomy. Feature proposals always ask
-                you, at every level. Pick the level when you start a run.
+                L1 suggests only · L2 holds every passing action for approval · L3/L4 become
+                eligible for automatic actions only when the operator enables autonomous
+                mutations. Feature proposals always ask you, at every level. Pick the available
+                level when you start a run.
               </p>
             </div>
           </CardContent>

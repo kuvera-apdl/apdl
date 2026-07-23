@@ -63,6 +63,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
             "data_settlement_seconds": 5,
         },
         "traffic_percentage": 100.0,
+        "minimum_exposure_config_version": 4,
         "start_date": "2026-08-01T00:00:00+00:00",
         "end_date": "2026-08-31T00:00:00+00:00",
         "version": 7,
@@ -98,6 +99,8 @@ async def test_analysis_returns_exact_authoritative_contract(monkeypatch, status
         "variants": ["control", "treatment"],
         "metric_event": "purchase",
         "metric_direction": "increase",
+        "enrollment_mode": "all",
+        "minimum_exposure_config_version": 4,
         "statistical_plan": {
             "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
             "baseline_conversion_rate": 0.5,
@@ -144,6 +147,9 @@ async def test_analysis_emits_shared_three_arm_fixture_contract(monkeypatch):
             "start_date": contract["start_date"],
             "end_date": contract["end_date"],
             "version": contract["version"],
+            "minimum_exposure_config_version": contract[
+                "minimum_exposure_config_version"
+            ],
         }
     )
     monkeypatch.setattr(
@@ -222,6 +228,14 @@ async def test_analysis_returns_404_for_missing_tenant_record(monkeypatch):
         {"default_variant": "missing"},
         {"primary_metric_json": "{}"},
         {"primary_metric_json": '{"event":"purchase","type":"revenue"}'},
+        {"minimum_exposure_config_version": None},
+        {"minimum_exposure_config_version": 0},
+        {
+            "targeting_rules_json": (
+                '[{"id":"paid","name":"","conditions":[],"rollout":'
+                '{"percentage":100,"bucket_by":"user_id"}}]'
+            )
+        },
         {"start_date": "2026-08-01T00:00:00"},
         {"end_date": "2026-07-31T00:00:00+00:00"},
         {

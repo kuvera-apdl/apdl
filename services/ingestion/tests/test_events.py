@@ -12,17 +12,26 @@ import pytest_asyncio
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
-from app.auth import CredentialKind, Principal, authenticate_request
+from app.auth import (
+    CredentialKind,
+    PostgresAuthenticator,
+    Principal,
+    authenticate_request,
+)
+from app.client_ip import parse_trusted_proxy_cidrs
 from app.main import app
 from app.middleware.rate_limit import (
     BROWSER_BYTE_LIMIT,
     BROWSER_EVENT_LIMIT,
+    PREAUTH_GLOBAL_REQUEST_LIMIT,
+    PREAUTH_IP_REQUEST_LIMIT,
     PROJECT_BYTE_LIMIT,
     PROJECT_EVENT_LIMIT,
     BucketDebit,
     BucketLimit,
     _HIERARCHICAL_TOKEN_BUCKET_LUA,
     _admit,
+    _hash_bucket_identifier,
 )
 from app.routers import events as events_router
 from app.streaming.redis_producer import (
@@ -813,12 +822,15 @@ async def test_valid_request_uses_one_atomic_quota_call_per_stage(client):
     resp = await client.post(URL, json=payload, headers=HEADERS)
 
     assert resp.status_code == 202
+    preauth_calls = quota_calls("preauth")
     request_calls = quota_calls("request")
     byte_calls = quota_calls("byte")
     event_calls = quota_calls("event")
+    assert len(preauth_calls) == 1
     assert len(request_calls) == 1
     assert len(byte_calls) == 1
     assert len(event_calls) == 1
+    assert len(quota_keys(preauth_calls[0])) == 2
     assert len(quota_keys(request_calls[0])) == 4
     assert len(quota_keys(byte_calls[0])) == 4
     assert len(quota_keys(event_calls[0])) == 5
@@ -859,6 +871,7 @@ async def test_valid_request_uses_one_atomic_quota_call_per_stage(client):
     )
     serialized_keys = " ".join(
         (
+            *quota_keys(preauth_calls[0]),
             *quota_keys(request_calls[0]),
             *byte_debits,
             *event_debits,
@@ -868,6 +881,112 @@ async def test_valid_request_uses_one_atomic_quota_call_per_stage(client):
     assert "test-ingestion" not in serialized_keys
     assert "127.0.0.1" not in serialized_keys
     assert "anon-test" not in serialized_keys
+
+
+@pytest.mark.asyncio
+async def test_preauth_uses_authoritative_opaque_client_ip_bucket(client):
+    assert PREAUTH_GLOBAL_REQUEST_LIMIT == BucketLimit(2_000, 200)
+    assert PREAUTH_IP_REQUEST_LIMIT == BucketLimit(100, 10)
+    forwarded_ip = "203.0.113.77"
+    app.state.trusted_proxy_networks = parse_trusted_proxy_cidrs(
+        "127.0.0.0/8"
+    )
+
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("preauth-ip-test")]},
+        headers={**HEADERS, "X-Forwarded-For": forwarded_ip},
+    )
+
+    assert resp.status_code == 202
+    preauth_calls = quota_calls("preauth")
+    assert len(preauth_calls) == 1
+    keys = quota_keys(preauth_calls[0])
+    assert keys == (
+        "apdl:rate:preauth:global",
+        "apdl:rate:preauth:ip:"
+        + _hash_bucket_identifier("ip", forwarded_ip),
+    )
+    serialized_keys = " ".join(keys)
+    assert API_KEY not in serialized_keys
+    assert forwarded_ip not in serialized_keys
+    assert "127.0.0.1" not in serialized_keys
+
+
+@pytest.mark.asyncio
+async def test_preauth_rejection_prevents_unknown_key_postgres_lookup(client):
+    pool = MagicMock()
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = PostgresAuthenticator(pool)
+
+    async def reject_preauth(script, numkeys, *args):
+        assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
+        keys = args[:numkeys]
+        assert all(key.startswith("apdl:rate:preauth:") for key in keys)
+        return [0, PREAUTH_IP_REQUEST_LIMIT.capacity, 0, 7]
+
+    app.state.redis.eval = AsyncMock(side_effect=reject_preauth)
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("unknown-key")]},
+        headers=HEADERS,
+    )
+
+    assert resp.status_code == 429
+    assert resp.json() == {
+        "error": "rate_limited",
+        "message": "Pre-authentication request quota exceeded",
+    }
+    assert resp.headers["Retry-After"] == "7"
+    pool.acquire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preauth_redis_outage_rejects_before_postgres_lookup(client):
+    pool = MagicMock()
+    app.dependency_overrides.pop(authenticate_request, None)
+    app.state.authenticator = PostgresAuthenticator(pool)
+    app.state.redis.eval = AsyncMock(side_effect=ConnectionError("Redis down"))
+
+    resp = await client.post(
+        URL,
+        json={"events": [canonical_event("redis-outage")]},
+        headers=HEADERS,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json() == {
+        "error": "service_unavailable",
+        "message": "Rate-limit authority is unavailable",
+    }
+    pool.acquire.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preauth_never_intercepts_options_health_or_other_paths(client):
+    health_connection = MagicMock()
+    health_connection.fetchval = AsyncMock(return_value=1)
+    health_acquire = AsyncMock()
+    health_acquire.__aenter__.return_value = health_connection
+    health_pool = MagicMock()
+    health_pool.acquire.return_value = health_acquire
+    app.state.auth_pool = health_pool
+
+    options_resp = await client.options(
+        URL,
+        headers={
+            "Origin": "https://example.test",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    health_resp = await client.get("/health")
+    other_resp = await client.post("/not-events", json={})
+
+    assert options_resp.status_code == 200
+    assert health_resp.status_code == 200
+    assert other_resp.status_code == 404
+    app.state.redis.ping.assert_awaited_once()
+    app.state.redis.eval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1090,9 +1209,12 @@ async def test_stateful_child_rejection_preserves_parent_balance():
 
 @pytest.mark.asyncio
 async def test_request_quota_rejection_has_retry_headers_and_no_publish(client):
-    async def reject_rate(script, _numkeys, *_args):
+    async def reject_rate(script, numkeys, *args):
         assert script == _HIERARCHICAL_TOKEN_BUCKET_LUA
-        return [0, BROWSER_EVENT_LIMIT.capacity, 0, 3]
+        keys = args[:numkeys]
+        if any(key.startswith("apdl:rate:request:") for key in keys):
+            return [0, BROWSER_EVENT_LIMIT.capacity, 0, 3]
+        return [1, 999, 999, 0]
 
     app.state.redis.eval = AsyncMock(side_effect=reject_rate)
     resp = await client.post(

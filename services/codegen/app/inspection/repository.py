@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterator
 
 from app.inspection.models import EvidenceKind, EvidenceRef, InspectionSnapshot
+from app.safety.secrets import contains_secret
 
 _EXCLUDED_DIRS = frozenset(
     {
@@ -96,15 +97,6 @@ _SECRET_FILE_PATTERNS = (
     "secrets.yml",
     "secrets.yaml",
 )
-
-_SECRET_CONTENT_PATTERNS = (
-    re.compile(rb"AKIA[0-9A-Z]{16}"),
-    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(rb"gh[pousr]_[A-Za-z0-9]{36,}"),
-    re.compile(rb"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(rb"\bsk-[A-Za-z0-9]{20,}\b"),
-)
-
 
 class InspectionPathError(ValueError):
     """Raised when a requested path is outside the safe inspection boundary."""
@@ -224,7 +216,7 @@ def _binary_shaped_path(path: str) -> bool:
 
 
 def _secret_content(data: bytes) -> bool:
-    return any(pattern.search(data) for pattern in _SECRET_CONTENT_PATTERNS)
+    return contains_secret(data)
 
 
 def _evidence_id(

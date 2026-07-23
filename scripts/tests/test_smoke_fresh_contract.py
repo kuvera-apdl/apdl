@@ -2,12 +2,54 @@
 
 from pathlib import Path
 import unittest
+from datetime import datetime, timezone
+
+from scripts import smoke_experiment_analysis
 
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class FreshSmokeContractTests(unittest.TestCase):
+    def test_experiment_projection_requires_frozen_enrollment_authority(self) -> None:
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 2, tzinfo=timezone.utc)
+        contract = {
+            "control_variant": "control",
+            "variants": ["control", "treatment"],
+            "metric_event": "purchase",
+            "metric_direction": "increase",
+            "enrollment_mode": "all",
+            "minimum_exposure_config_version": 3,
+            "statistical_plan": {"protocol": "fixed"},
+        }
+        projection = {
+            "key": "experiment",
+            "flag_key": "flag",
+            "status": "completed",
+            "control_variant": "control",
+            "variants": ["control", "treatment"],
+            "metric_event": "purchase",
+            "metric_direction": "increase",
+            "enrollment_mode": "all",
+            "minimum_exposure_config_version": 3,
+            "statistical_plan": {"protocol": "fixed"},
+            "start_date": "2026-07-01T00:00:00Z",
+            "end_date": "2026-07-02T00:00:00Z",
+            "version": 7,
+        }
+
+        smoke_experiment_analysis._assert_projection(
+            projection,
+            experiment_key="experiment",
+            flag_key="flag",
+            contract=contract,
+            start=start,
+            end=end,
+            version=7,
+            expected_status="completed",
+        )
+
     def test_core_and_experiment_suites_are_separate(self) -> None:
         script = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
         makefile = (ROOT / "Makefile").read_text()

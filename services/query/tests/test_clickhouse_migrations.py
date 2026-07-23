@@ -11,6 +11,10 @@ BACKFILLS_DIR = ROOT / "pipeline" / "clickhouse" / "backfills"
 FEATURE_FLAG_EXPOSURES_SQL = (
     MIGRATIONS_DIR / "006_feature_flag_exposures.sql"
 ).read_text()
+ASSIGNMENT_EXPOSURES_SQL = (MIGRATIONS_DIR / "013_assignment_exposures.sql").read_text()
+EVENT_STREAM_PROVENANCE_SQL = (
+    MIGRATIONS_DIR / "014_event_stream_provenance.sql"
+).read_text()
 EVENTS_SQL = (MIGRATIONS_DIR / "001_events.sql").read_text()
 FRONTEND_HEALTH_EVENTS_SQL = (
     MIGRATIONS_DIR / "007_frontend_health_events.sql"
@@ -21,9 +25,7 @@ IDENTITY_ALIASES_SQL = (MIGRATIONS_DIR / "011_identity_aliases.sql").read_text()
 PROTOTYPE_RETIREMENT_SQL = (
     MIGRATIONS_DIR / "012_retire_prototype_schemas.sql"
 ).read_text()
-IDENTITY_ALIASES_BACKFILL_SQL = (
-    BACKFILLS_DIR / "011_identity_aliases.sql"
-).read_text()
+IDENTITY_ALIASES_BACKFILL_SQL = (BACKFILLS_DIR / "011_identity_aliases.sql").read_text()
 CLICKHOUSE_INIT_SCRIPT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 CLICKHOUSE_MIGRATION_ENGINE = (
     ROOT / "pipeline" / "clickhouse" / "migrate.py"
@@ -85,14 +87,43 @@ def test_retryable_projection_tables_replace_by_project_and_message_id():
         "ORDER BY (project_id, message_id, anonymous_id, user_id)"
         in IDENTITY_ALIASES_SQL
     )
-    assert "DROP TABLE IF EXISTS feature_flag_exposures" in (
-        FEATURE_FLAG_EXPOSURES_SQL
-    )
+    assert "DROP TABLE IF EXISTS feature_flag_exposures" in (FEATURE_FLAG_EXPOSURES_SQL)
     assert "FROM events FINAL" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "DROP TABLE IF EXISTS frontend_health_events" in (
-        FRONTEND_HEALTH_EVENTS_SQL
-    )
+    assert "DROP TABLE IF EXISTS frontend_health_events" in (FRONTEND_HEALTH_EVENTS_SQL)
     assert "FROM events FINAL" in FRONTEND_HEALTH_EVENTS_SQL
+
+
+def test_event_stream_provenance_is_preserved_on_events_and_exposures():
+    assert "ADD COLUMN IF NOT EXISTS source_stream String" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "ADD COLUMN IF NOT EXISTS source_stream_id String" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "ADD COLUMN IF NOT EXISTS source_stream_id_ms UInt64" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "ADD COLUMN IF NOT EXISTS source_stream_id_seq UInt64" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "DROP TABLE IF EXISTS feature_flag_exposures_mv" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "DROP TABLE IF EXISTS identity_alias_assertions_mv" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "source_stream_id_ms," in EVENT_STREAM_PROVENANCE_SQL
+    assert "source_stream_id_seq," in EVENT_STREAM_PROVENANCE_SQL
+    assert "CREATE MATERIALIZED VIEW identity_alias_assertions_mv" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
+    assert "CREATE TABLE experiment_event_deliveries" in (EVENT_STREAM_PROVENANCE_SQL)
+    assert "ENGINE = ReplacingMergeTree(received_at)" in (EVENT_STREAM_PROVENANCE_SQL)
+    assert "source_stream,\n    source_stream_id" in EVENT_STREAM_PROVENANCE_SQL
+    assert "source_stream_id_seq,\n    message_id" not in EVENT_STREAM_PROVENANCE_SQL
+    assert "CREATE MATERIALIZED VIEW experiment_event_deliveries_mv" in (
+        EVENT_STREAM_PROVENANCE_SQL
+    )
 
 
 def test_duplicate_amplifying_aggregate_views_are_retired():
@@ -107,7 +138,9 @@ def test_feature_flag_exposures_table_uses_canonical_variant_columns():
     assert "rollout_bucket       Nullable(Float64)" in FEATURE_FLAG_EXPOSURES_SQL
     assert "variant_bucket       Nullable(Float64)" in FEATURE_FLAG_EXPOSURES_SQL
     assert "    value                Bool," not in FEATURE_FLAG_EXPOSURES_SQL
-    assert "    bucket               Nullable(Float64)," not in FEATURE_FLAG_EXPOSURES_SQL
+    assert (
+        "    bucket               Nullable(Float64)," not in FEATURE_FLAG_EXPOSURES_SQL
+    )
 
 
 def test_feature_flag_exposures_mv_projects_canonical_event_properties():
@@ -117,18 +150,22 @@ def test_feature_flag_exposures_mv_projects_canonical_event_properties():
     )
     assert (
         "JSONExtract(properties, 'rollout_bucket', 'Nullable(Float64)') "
-        "AS rollout_bucket"
-        in FEATURE_FLAG_EXPOSURES_SQL
+        "AS rollout_bucket" in FEATURE_FLAG_EXPOSURES_SQL
     )
     assert (
         "JSONExtract(properties, 'variant_bucket', 'Nullable(Float64)') "
-        "AS variant_bucket"
-        in FEATURE_FLAG_EXPOSURES_SQL
+        "AS variant_bucket" in FEATURE_FLAG_EXPOSURES_SQL
     )
     assert "JSONExtractBool(properties, 'value')" not in FEATURE_FLAG_EXPOSURES_SQL
     assert "JSONExtract(properties, 'bucket', 'Nullable(Float64)')" not in (
         FEATURE_FLAG_EXPOSURES_SQL
     )
+
+
+def test_exposure_projection_keeps_only_assignment_reasons():
+    assert "JSONExtractString(properties, 'reason') IN" in (ASSIGNMENT_EXPOSURES_SQL)
+    assert ASSIGNMENT_EXPOSURES_SQL.count("'rule_match', 'fallthrough'") == 2
+    assert "FROM events FINAL" in ASSIGNMENT_EXPOSURES_SQL
 
 
 def test_legacy_experiment_exposure_storage_is_retired():

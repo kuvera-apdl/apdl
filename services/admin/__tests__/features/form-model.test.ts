@@ -3,7 +3,7 @@
 // -fields-only updates with derived enabled) live here.
 import { describe, expect, test } from 'vitest'
 
-import { flagCreateSchema } from '../../src/api/schemas/flags'
+import { flagCreateSchema, flagUpdateSchema } from '../../src/api/schemas/flags'
 import {
   emptyFormValues,
   flagFormSchema,
@@ -116,12 +116,19 @@ describe('formToUpdatePlan', () => {
     expect(plan.changedFields.sort()).toEqual(['default_variant', 'variants'])
   })
 
-  test('an emptied review_by is left unchanged (API cannot clear it)', () => {
+  test('an emptied review_by is sent as the canonical null clear operation', () => {
     const flag = makeFlag()
     const values = flagToFormValues(flag)
     values.review_by = ''
     const plan = formToUpdatePlan(values, flag, flag.version)
-    expect(plan.changedFields).toEqual([])
+    expect(plan.changedFields).toEqual(['review_by'])
+    expect(plan.payload).toEqual({ version: 3, review_by: null })
+    expect(flagUpdateSchema.safeParse(plan.payload).success).toBe(true)
+  })
+
+  test('review dates reject impossible calendar values', () => {
+    expect(flagUpdateSchema.safeParse({ version: 3, review_by: '2027-02-29' }).success).toBe(false)
+    expect(flagUpdateSchema.safeParse({ version: 3, review_by: '2028-02-29' }).success).toBe(true)
   })
 })
 

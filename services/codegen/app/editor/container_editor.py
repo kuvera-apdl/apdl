@@ -7,9 +7,10 @@ launches an ephemeral container from the hardened sandbox image
 after a separate provider-free inspection container attests the exact source
 tree. The untrusted repo code therefore never executes in
 the API container that holds the GitHub App key, the Postgres DSN, and the
-internal token. The read installation token is consumed from stdin rather than
-placed in either container's environment. Only the second container receives
-the model provider key. It returns a binary patch and Git object identities;
+internal token. The inspection credential and the editor's complete task
+request are consumed from bounded stdin contracts rather than process metadata.
+Only the second container receives the model provider key. It returns a binary
+patch and Git object identities;
 the controller reconstructs and publishes the approved tree with a separate
 just-in-time write credential.
 
@@ -60,8 +61,15 @@ from app.egress import (
     worker_socket_mount,
 )
 from app.editor.base import EditRequest, EditResult
-from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
+from app.editor.environment import (
+    CODEGEN_BEHAVIOR_ENV,
+    resolve_model_provider_environment,
+)
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
+from app.editor.worker_contract import (
+    encode_codegen_worker_request,
+    validate_codegen_worker_request_source,
+)
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
@@ -81,15 +89,15 @@ _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 # our process env), so their VALUES never appear on the docker argv / process
 # list. The GitHub App private key, Postgres DSN, and internal token are
 # deliberately absent — the sandbox must not receive them.
-_SECRET_ENV_FORWARD: tuple[str, ...] = MODEL_PROVIDER_ENV
-
 # Editor knobs (non-secret) forwarded into the sandbox so the AiderEditor
 # inside behaves EXACTLY like the in-process one — an operator's timeouts,
 # fail-closed posture, and auxiliary-pass toggles must not silently revert to
 # defaults just because CODEGEN_SANDBOX=docker. Unset values fall back to the
 # same defaults in both places.
 _CONFIG_ENV_FORWARD: tuple[str, ...] = tuple(
-    key for key in CODEGEN_BEHAVIOR_ENV if key not in {"CODEGEN_MODEL"}
+    key
+    for key in CODEGEN_BEHAVIOR_ENV
+    if key not in {"CODEGEN_MODEL", "CODEGEN_HELPER_MODEL"}
 )
 
 
@@ -110,10 +118,13 @@ def _last_json(text: str) -> dict | None:
 class ContainerAiderEditor:
     """Editor that runs each changeset inside an ephemeral sandbox container."""
 
-    def __init__(self, *, image: str | None = None, docker_bin: str | None = None) -> None:
+    def __init__(
+        self, *, image: str | None = None, docker_bin: str | None = None
+    ) -> None:
         self._image = image or os.getenv("CODEGEN_SANDBOX_IMAGE", _DEFAULT_IMAGE)
         self._docker = docker_bin or os.getenv("CODEGEN_DOCKER_BIN", "docker")
         self._model = os.getenv("CODEGEN_MODEL", "claude-opus-4-8")
+        self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
         self._memory = os.getenv("CODEGEN_SANDBOX_MEMORY", "2g")
         self._cpus = os.getenv("CODEGEN_SANDBOX_CPUS", "2")
         self._pids = os.getenv("CODEGEN_SANDBOX_PIDS", "512")
@@ -250,6 +261,9 @@ class ContainerAiderEditor:
 
     async def implement(self, request: EditRequest) -> EditResult:
         try:
+            # Validate and bound all task-bearing input before even the
+            # provider-free inspection container is allowed to start.
+            validate_codegen_worker_request_source(request)
             run_id = uuid.uuid4().hex
             inspection_name = f"apdl-codegen-inspect-{run_id}"
             if self._proxy_environment:
@@ -263,7 +277,7 @@ class ContainerAiderEditor:
                 self._preflight_argv(request, container_name=inspection_name),
                 self._docker_control_env(),
                 container_name=inspection_name,
-                stdin_data=self._credential_envelope(request.token),
+                stdin_data=self._preflight_credential_envelope(request.token),
             )
             attestation = self._parse_preflight_result(rc, out, err, request)
             editor_request = replace(
@@ -279,20 +293,25 @@ class ContainerAiderEditor:
                     self._attest_egress_policy,
                     launch_id=container_name,
                 )
+            worker_input = encode_codegen_worker_request(editor_request)
             rc, out, err = await self._run_docker(
                 self._docker_argv(editor_request, container_name=container_name),
                 self._docker_env(editor_request),
                 container_name=container_name,
-                stdin_data=self._credential_envelope(request.token),
+                stdin_data=worker_input,
             )
             return self._parse_result(rc, out, err, editor_request)
         except Exception as exc:  # an attempt must never raise to the job runner
             logger.exception("Sandboxed edit failed for %s", request.repo)
             return EditResult(success=False, branch=request.branch, error=str(exc))
 
-    def _present_secret_keys(self) -> list[str]:
-        """Provider keys actually set in our env (only these get forwarded)."""
-        return [k for k in _SECRET_ENV_FORWARD if os.environ.get(k)]
+    def _selected_provider_environment(self) -> dict[str, str]:
+        """Resolve the exact credential/routing union required by both models."""
+        return resolve_model_provider_environment(
+            os.environ,
+            model=self._model,
+            helper_model=self._helper_model,
+        )
 
     def _docker_argv(
         self,
@@ -304,63 +323,27 @@ class ContainerAiderEditor:
         if request.repository_preflight is None:
             raise ValueError("sandbox editor requires repository preflight evidence")
         argv = self._sandbox_argv(container_name=container_name, role="editor")
-        # Non-secret task inputs — safe to pass as values.
+        # Task data is carried exclusively by the bounded stdin contract. This
+        # argv contains only sandbox/runtime configuration and provider-key
+        # names, never task text, repository authority, or tenant policy.
         argv += [
-            "-e", f"CS_REPO={request.repo}",
-            "-e", f"CS_PROJECT_SCOPE={request.project_scope or request.repo}",
-            "-e", f"CS_BASE={request.base_branch}",
-            "-e", f"CS_BRANCH={request.branch}",
-            "-e", f"CS_TITLE={request.title}",
-            "-e", f"CS_SPEC={request.spec}",
-            "-e", f"CS_RISK_LEVEL={request.risk_level}",
-            "-e", f"CS_CONSTRAINTS={json.dumps(request.constraints)}",
-            "-e", f"CODEGEN_MODEL={self._model}",
-            "-e", "HOME=/workspace/home",
-            "-e", "TMPDIR=/workspace/tmp",
             "-e",
-            "CS_REPOSITORY_PREFLIGHT="
-            + request.repository_preflight.model_dump_json(),
+            f"CODEGEN_MODEL={self._model}",
+            "-e",
+            f"CODEGEN_HELPER_MODEL={self._helper_model}",
+            "-e",
+            "HOME=/workspace/home",
+            "-e",
+            "TMPDIR=/workspace/tmp",
         ]
         for name, value in self._proxy_environment.items():
             argv += ["-e", f"{name}={value}"]
-        if request.test_cmd:
-            argv += ["-e", f"CS_TEST_CMD={request.test_cmd}"]
-        argv += [
-            "-e",
-            "CS_SAFETY_POLICY="
-            + json.dumps(request.safety_policy.model_dump(mode="json")),
-            "-e",
-            f"CS_SAFETY_POLICY_SHA256={request.safety_policy.canonical_digest()}",
-        ]
-        if request.revert_sha:
-            argv += ["-e", f"CS_REVERT_SHA={request.revert_sha}"]
-        if request.existing_branch:
-            argv += ["-e", "CS_EXISTING_BRANCH=true"]
-        if request.expected_head_sha:
-            argv += ["-e", f"CS_EXPECTED_HEAD_SHA={request.expected_head_sha}"]
-        if request.requirement_ledger is not None:
-            argv += [
-                "-e",
-                "CS_REQUIREMENT_LEDGER="
-                + json.dumps(request.requirement_ledger.model_dump(mode="json")),
-            ]
-        if request.runtime_acceptance_plan is not None:
-            argv += [
-                "-e",
-                "CS_RUNTIME_ACCEPTANCE_PLAN="
-                + json.dumps(request.runtime_acceptance_plan.model_dump(mode="json")),
-            ]
-        argv += [
-            "-e",
-            "CS_RUNTIME_ACCEPTANCE_POLICY="
-            + json.dumps(request.runtime_acceptance_policy.model_dump(mode="json")),
-        ]
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
         # Provider secrets are forwarded by NAME only. Repository authority is
         # absent from argv and environ and is consumed from stdin instead.
-        for key in self._present_secret_keys():
+        for key in self._selected_provider_environment():
             argv += ["-e", key]
         if self._proxy_environment:
             argv += [
@@ -427,7 +410,9 @@ class ContainerAiderEditor:
         container_name: str | None = None,
     ) -> list[str]:
         """Build the provider-free repository-inspection container command."""
-        source_branch = request.branch if request.existing_branch else request.base_branch
+        source_branch = (
+            request.branch if request.existing_branch else request.base_branch
+        )
         argv = self._sandbox_argv(container_name=container_name, role="inspection")
         argv += [
             "-e",
@@ -451,12 +436,11 @@ class ContainerAiderEditor:
     def _docker_env(self, request: EditRequest) -> dict[str, str]:
         """Docker client environment carrying provider keys, never Git authority."""
         env = self._docker_control_env()
-        for key in self._present_secret_keys():
-            env[key] = os.environ[key]
+        env.update(self._selected_provider_environment())
         return env
 
     @staticmethod
-    def _credential_envelope(token: str) -> bytes:
+    def _preflight_credential_envelope(token: str) -> bytes:
         return (json.dumps({"read_token": token}) + "\n").encode()
 
     @staticmethod
@@ -569,7 +553,9 @@ class ContainerAiderEditor:
         attestation = RepositoryPreflightAttestation.model_validate(
             data.get("attestation")
         )
-        source_branch = request.branch if request.existing_branch else request.base_branch
+        source_branch = (
+            request.branch if request.existing_branch else request.base_branch
+        )
         if (
             attestation.repository != request.repo
             or attestation.source_branch != source_branch
@@ -675,9 +661,7 @@ class ContainerAiderEditor:
                 client_process,
             )
 
-        cleanup_task = asyncio.create_task(
-            asyncio.wait_for(cleanup(), timeout=45)
-        )
+        cleanup_task = asyncio.create_task(asyncio.wait_for(cleanup(), timeout=45))
         cancellation_interrupted_cleanup = False
         while not cleanup_task.done():
             try:
@@ -783,9 +767,7 @@ class ContainerAiderEditor:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _out, error = await asyncio.wait_for(
-                    process.communicate(), timeout=30
-                )
+                _out, error = await asyncio.wait_for(process.communicate(), timeout=30)
             except asyncio.TimeoutError:
                 process.kill()
                 _out, error = await process.communicate()

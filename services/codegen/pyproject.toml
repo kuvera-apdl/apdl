@@ -38,4 +38,5 @@ dev = [
 # image), not for the FakeEditor-backed tests. Pulls in LiteLLM for any model.
 agent = [
     "aider-chat==0.86.2",
+    "uv==0.11.0",
 ]

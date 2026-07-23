@@ -18,11 +18,13 @@ from app.login_security import (
     LoginSource,
     build_login_source,
     clear_login_source_risk,
+    preflight_auth_rate_limit,
     preflight_login,
     record_failed_login,
     set_device_cookie,
 )
 from app.models import (
+    AuthCapabilities,
     LoginRequest,
     ProjectAccess,
     RegistrationRequest,
@@ -44,6 +46,7 @@ from app.security import (
 )
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
+ACCOUNT_REGISTRATION_LOCK_ID = 4_704_656_378_673_808_212
 
 
 @dataclass(frozen=True)
@@ -200,6 +203,30 @@ def _failed_login_response(
         )
     set_device_cookie(response, source, settings)
     return response
+
+
+def _registration_error(
+    *,
+    status_code: int,
+    error: str,
+    message: str,
+    source: LoginSource | None = None,
+    settings: Settings | None = None,
+) -> JSONResponse:
+    response = JSONResponse(
+        status_code=status_code,
+        content={"error": error, "message": message},
+    )
+    if source is not None and settings is not None:
+        set_device_cookie(response, source, settings)
+    return response
+
+
+@router.get("/capabilities", response_model=AuthCapabilities)
+async def auth_capabilities(
+    settings: Settings = Depends(get_settings),
+) -> AuthCapabilities:
+    return AuthCapabilities(registration_enabled=settings.registration_enabled)
 
 
 @router.get(
@@ -372,34 +399,89 @@ async def login(
 )
 async def register(
     body: RegistrationRequest, request: Request, response: Response
-) -> UserIdentity:
+) -> UserIdentity | Response:
     settings: Settings = request.app.state.settings
     require_allowed_origin(request, settings)
+    if not settings.registration_enabled:
+        return _registration_error(
+            status_code=status.HTTP_403_FORBIDDEN,
+            error="registration_disabled",
+            message="Public account registration is disabled",
+        )
+
     email = str(body.email).strip().lower()
     now = datetime.now(timezone.utc)
+    source = build_login_source(request, email, settings)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO admin_users (user_id, email, password_hash)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (email) DO NOTHING
-                RETURNING user_id
-                """,
-                uuid.uuid4(),
-                email,
-                hash_password(body.password),
+            retry_after = await preflight_auth_rate_limit(
+                conn,
+                source,
+                settings,
+                now,
             )
-            if user_id is None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="An account already exists for this email",
-                )
-            session_token, csrf_token = await _start_session(
-                conn, user_id, settings, now
-            )
+            account_count = int(await conn.fetchval("SELECT count(*) FROM admin_users"))
 
+    if retry_after > 0:
+        return _failed_login_response(source, settings, retry_after)
+    if account_count >= settings.max_accounts:
+        return _registration_error(
+            status_code=status.HTTP_409_CONFLICT,
+            error="account_capacity_reached",
+            message="This deployment has reached its account limit",
+            source=source,
+            settings=settings,
+        )
+
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    capacity_reached = False
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                ACCOUNT_REGISTRATION_LOCK_ID,
+            )
+            locked_account_count = int(
+                await conn.fetchval("SELECT count(*) FROM admin_users")
+            )
+            if locked_account_count >= settings.max_accounts:
+                capacity_reached = True
+                user_id = None
+            else:
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO admin_users (user_id, email, password_hash)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (email) DO NOTHING
+                    RETURNING user_id
+                    """,
+                    uuid.uuid4(),
+                    email,
+                    password_hash,
+                )
+                if user_id is None:
+                    return _registration_error(
+                        status_code=status.HTTP_409_CONFLICT,
+                        error="account_exists",
+                        message="An account already exists for this email",
+                        source=source,
+                        settings=settings,
+                    )
+                session_token, csrf_token = await _start_session(
+                    conn, user_id, settings, now
+                )
+
+    if capacity_reached:
+        return _registration_error(
+            status_code=status.HTTP_409_CONFLICT,
+            error="account_capacity_reached",
+            message="This deployment has reached its account limit",
+            source=source,
+            settings=settings,
+        )
+
+    set_device_cookie(response, source, settings)
     set_session_cookies(response, session_token, csrf_token, settings)
     return UserIdentity(
         user_id=str(user_id),

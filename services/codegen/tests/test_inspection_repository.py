@@ -25,6 +25,16 @@ def test_snapshot_is_stable_strict_and_excludes_secrets_and_binary(tmp_path: Pat
     _write(tmp_path, "src/config.py", "TOKEN = 'ghp_" + "a" * 40 + "'\n")
     _write(tmp_path, ".env", "PASSWORD=do-not-read\n")
     _write(tmp_path, "cert.pem", "-----BEGIN PRIVATE KEY-----\nsecret\n")
+    _write(
+        tmp_path,
+        "src/runtime.env.txt",
+        "AWS_SESSION_TOKEN=temporary-cloud-session-token-123456\n",
+    )
+    _write(
+        tmp_path,
+        "src/remote.txt",
+        "https://service-user:service-password@example.test/private\n",
+    )
     _write(tmp_path, "assets/logo.png", b"\x89PNG\x00binary")
 
     inspector = RepositoryInspector(tmp_path)
@@ -39,6 +49,8 @@ def test_snapshot_is_stable_strict_and_excludes_secrets_and_binary(tmp_path: Pat
         "assets/logo.png",
         "cert.pem",
         "src/config.py",
+        "src/remote.txt",
+        "src/runtime.env.txt",
     ]
     assert all("do-not-read" not in (item.excerpt or "") for item in first.evidence)
 

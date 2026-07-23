@@ -34,10 +34,12 @@ def test_agents_lock_is_a_committed_dependency_audit_input() -> None:
 
     for source in (audit_script, workflow):
         assert "services/agents/requirements.lock" in source
+        assert "services/codegen/requirements.lock" in source
+        assert "services/codegen/requirements-agent.lock" in source
         assert "sdk/python services/agents services/codegen" not in source
 
-    assert "for project in sdk/python services/codegen" in audit_script
-    assert "for project in sdk/python services/codegen" in workflow
+    assert "for project in sdk/python services/codegen" not in audit_script
+    assert "for project in sdk/python services/codegen" not in workflow
 
 
 def test_compose_healthcheck_uses_core_readiness_only() -> None:

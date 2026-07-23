@@ -100,6 +100,14 @@ const server = setupServer(
     }),
   ),
   http.get(`${BASE}/v1/agents/definitions`, () => HttpResponse.json(DEFINITIONS)),
+  http.get(`${BASE}/v1/agents/capabilities/execution`, () =>
+    HttpResponse.json({
+      schema_version: 'agents_project_execution_capabilities@1',
+      project_id: 'demo',
+      autonomous_mutations_operator_enabled: false,
+      codegen_changeset_creation: 'disabled',
+    }),
+  ),
   http.get(`${BASE}/v1/agents/custom`, () => HttpResponse.json(customAgents)),
   http.post(`${BASE}/v1/agents/custom`, async ({ request }) => {
     const body = await request.json()

@@ -9,8 +9,8 @@ from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentCreate,
     ExperimentMetric,
+    ExperimentTargetingRule,
     ExperimentUpdate,
-    GateRule,
     VariantConfig,
 )
 
@@ -95,12 +95,12 @@ def test_build_flag_create_terminal_disables_flag(status):
     assert flag.enabled is False
 
 
-def test_build_flag_create_passes_targeting_rules_through():
-    rule = GateRule.model_validate(
+def test_build_flag_create_projects_eligibility_rules_and_excludes_nonmatches():
+    rule = ExperimentTargetingRule.model_validate(
         {
             "id": "rule-1",
+            "name": "Paid plan",
             "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
-            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         }
     )
     flag = experiment_flag.build_flag_create(
@@ -110,11 +110,37 @@ def test_build_flag_create_passes_targeting_rules_through():
         status="running",
         variants=_variants(),
         default_variant="control",
-        traffic_percentage=100.0,
+        traffic_percentage=37.5,
         targeting_rules=[rule],
     )
     assert len(flag.rules) == 1
     assert flag.rules[0].id == "rule-1"
+    assert flag.rules[0].rollout.percentage == 37.5
+    assert flag.rules[0].rollout.bucket_by == "user_id"
+    assert flag.fallthrough.rollout.percentage == 0.0
+    assert flag.fallthrough.rollout.bucket_by == "user_id"
+
+
+def test_experiment_targeting_rule_rejects_competing_rollout_authority():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ExperimentTargetingRule.model_validate(
+            {
+                "id": "rule-1",
+                "name": "",
+                "conditions": [],
+                "rollout": {"percentage": 50.0, "bucket_by": "user_id"},
+            }
+        )
+
+
+def test_experiment_targeting_rule_requires_canonical_name_field():
+    with pytest.raises(ValidationError, match="name"):
+        ExperimentTargetingRule.model_validate(
+            {
+                "id": "rule-1",
+                "conditions": [],
+            }
+        )
 
 
 def test_build_flag_create_respects_custom_bucket_by():

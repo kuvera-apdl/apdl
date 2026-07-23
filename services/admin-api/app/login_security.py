@@ -96,7 +96,7 @@ def set_device_cookie(
         secure=settings.cookie_secure,
         samesite="strict",
         max_age=settings.login_device_ttl_seconds,
-        path="/api/auth/login",
+        path="/api/auth",
     )
 
 
@@ -153,7 +153,7 @@ async def _consume_rate_bucket(
     return max(1, math.ceil((retry_at - now).total_seconds()))
 
 
-async def preflight_login(
+async def preflight_auth_rate_limit(
     conn,
     source: LoginSource,
     settings: Settings,
@@ -167,15 +167,6 @@ async def preflight_login(
         now,
         settings.login_rate_window_seconds * 2,
     )
-    await conn.execute(
-        """
-        DELETE FROM admin_login_source_risk
-        WHERE updated_at < $1 - ($2 * INTERVAL '1 second')
-        """,
-        now,
-        settings.login_account_risk_window_seconds * 2,
-    )
-
     retry_after = 0
     for scope, key_hash, limit in (
         ("global", source.global_hash, settings.login_global_rate_limit),
@@ -193,6 +184,30 @@ async def preflight_login(
                 now=now,
             ),
         )
+
+    return retry_after
+
+
+async def preflight_login(
+    conn,
+    source: LoginSource,
+    settings: Settings,
+    now: datetime,
+) -> int:
+    retry_after = await preflight_auth_rate_limit(
+        conn,
+        source,
+        settings,
+        now,
+    )
+    await conn.execute(
+        """
+        DELETE FROM admin_login_source_risk
+        WHERE updated_at < $1 - ($2 * INTERVAL '1 second')
+        """,
+        now,
+        settings.login_account_risk_window_seconds * 2,
+    )
 
     for scope, source_hash in (
         ("network", source.network_hash),

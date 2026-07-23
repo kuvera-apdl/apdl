@@ -27,7 +27,12 @@ import { HealthCapture } from '../capture/health';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
 import { parseFlagConfigResult } from '../flags/schema';
-import type { EvalContext, FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
+import type {
+  EvalContext,
+  FlagEvaluationOptions,
+  FlagEvaluationReason,
+  FlagEvaluationResult,
+} from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
 import { ComponentRegistry } from '../ui/registry';
@@ -45,6 +50,31 @@ import { Scrubber, type ScrubFunction } from '../privacy/scrubber';
 import { CookielessIdentity } from '../privacy/cookieless';
 
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
+const FEATURE_FLAG_ASSIGNMENT_REASONS: ReadonlySet<FlagEvaluationReason> = new Set([
+  'rule_match',
+  'fallthrough',
+]);
+const MAX_SUCCESSFUL_EXPOSURE_KEYS = 10_000;
+const MAX_MISSING_FLAG_WARNINGS = 1_000;
+
+function rememberBoundedFifoKey(
+  keys: Set<string>,
+  key: string,
+  limit: number
+): boolean {
+  if (keys.has(key)) {
+    return false;
+  }
+
+  keys.add(key);
+  if (keys.size > limit) {
+    const oldest = keys.values().next();
+    if (!oldest.done) {
+      keys.delete(oldest.value);
+    }
+  }
+  return true;
+}
 
 interface ActiveFlagState {
   variant: string;
@@ -563,8 +593,7 @@ export class APDLClient implements APDLApi {
     if (
       this.isShutDown ||
       result.variant === null ||
-      result.reason === 'not_found' ||
-      result.reason === 'invalid_config'
+      !FEATURE_FLAG_ASSIGNMENT_REASONS.has(result.reason)
     ) {
       return;
     }
@@ -595,7 +624,11 @@ export class APDLClient implements APDLApi {
         page,
         component,
       });
-      this.featureFlagExposureKeys.add(dedupeKey);
+      rememberBoundedFifoKey(
+        this.featureFlagExposureKeys,
+        dedupeKey,
+        MAX_SUCCESSFUL_EXPOSURE_KEYS
+      );
     } catch (error) {
       // Assignment is product control flow; optional telemetry must never make
       // it fail. Leave the key eligible for a later retry and surface the
@@ -612,11 +645,17 @@ export class APDLClient implements APDLApi {
   }
 
   private warnMissingFlag(result: FlagEvaluationResult): void {
-    if (result.reason !== 'not_found' || this.missingFlagWarnings.has(result.key)) {
+    if (
+      result.reason !== 'not_found'
+      || !rememberBoundedFifoKey(
+        this.missingFlagWarnings,
+        result.key,
+        MAX_MISSING_FLAG_WARNINGS
+      )
+    ) {
       return;
     }
 
-    this.missingFlagWarnings.add(result.key);
     console.warn(
       `APDL: Feature flag '${result.key}' is missing or archived; returning null variant.`
     );

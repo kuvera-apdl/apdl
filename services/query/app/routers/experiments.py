@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 from datetime import datetime, timedelta, timezone
 from statistics import NormalDist
 from typing import Any
@@ -12,7 +13,15 @@ from scipy.stats import fisher_exact
 
 from app.auth import require_project
 from app.clickhouse.client import ClickHouseClient
-from app.clickhouse.queries import EXPERIMENT_ANALYSIS_QUERY
+from app.clickhouse.queries import (
+    EXPERIMENT_ANALYSIS_QUERY,
+    EXPERIMENT_PROVENANCE_QUERY,
+)
+from app.completeness import (
+    ExperimentBoundaryAuthority,
+    get_or_create_experiment_boundary,
+    persist_experiment_snapshot,
+)
 from app.config_client import (
     ConfigExperimentAnalysis,
     ConfigServiceUnavailable,
@@ -21,15 +30,16 @@ from app.config_client import (
     fetch_experiment_analysis,
 )
 from app.models.schemas import (
-    ExperimentAnalysisDecisionSnapshot,
     ExperimentAnalysisNonFinal,
     ExperimentAnalysisResponse,
+    ExperimentAnalysisDecisionSnapshot,
     ExperimentArmResult,
     ExperimentComparison,
     ProjectId,
 )
 
 router = APIRouter(prefix="/v1/query", tags=["experiments"])
+logger = logging.getLogger(__name__)
 
 _MAX_EXPERIMENT_WINDOW = timedelta(days=90)
 _ALLOWED_QUERY_PARAMETERS = frozenset({"project_id"})
@@ -39,6 +49,10 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 def _get_client(request: Request) -> ClickHouseClient:
     return request.app.state.ch_client
+
+
+def _get_completeness_pool(request: Request):
+    return getattr(request.app.state, "completeness_pool", None)
 
 
 def _reject_unknown_query_parameters(request: Request) -> None:
@@ -359,6 +373,35 @@ async def experiment_results(
             underpowered_variants=list(metadata.variants),
         )
 
+    authority: ExperimentBoundaryAuthority | None = None
+    completeness_pool = _get_completeness_pool(request)
+    if metadata.status == "completed" and completeness_pool is not None:
+        try:
+            authority = await get_or_create_experiment_boundary(
+                completeness_pool,
+                project_id=pid,
+                experiment_key=metadata.key,
+                config_version=metadata.version,
+                window_start=metadata.start_date,
+                window_end=metadata.end_date,
+            )
+        except Exception as exc:
+            logger.error(
+                "Experiment completeness authority is unavailable for %s/%s: %s",
+                pid,
+                metadata.key,
+                exc,
+            )
+        else:
+            if authority.snapshot is not None:
+                return authority.snapshot
+
+    marker_parts = (
+        authority.marker_stream_id_parts
+        if authority is not None and authority.state == "covered"
+        else None
+    )
+
     rows = await _get_client(request).execute(
         EXPERIMENT_ANALYSIS_QUERY,
         {
@@ -366,8 +409,20 @@ async def experiment_results(
             "flag_key": metadata.flag_key,
             "metric_event": metadata.metric_event,
             "declared_variants": tuple(metadata.variants),
+            "minimum_exposure_config_version": (
+                metadata.minimum_exposure_config_version
+            ),
+            "assignment_reason": (
+                "rule_match"
+                if metadata.enrollment_mode == "targeted"
+                else "fallthrough"
+            ),
             "start_ms": _datetime64_boundary_milliseconds(metadata.start_date),
             "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
+            "require_provenance": 1 if marker_parts is not None else 0,
+            "source_stream": f"events:raw:{pid}",
+            "boundary_stream_id_ms": marker_parts[0] if marker_parts else 0,
+            "boundary_stream_id_seq": marker_parts[1] if marker_parts else 0,
         },
     )
     (
@@ -432,29 +487,133 @@ async def experiment_results(
             underpowered_variants=underpowered,
         )
 
-    by_variant = {arm.variant: arm for arm in arms}
-    treatments = [
-        variant
-        for variant in metadata.variants
-        if variant != metadata.control_variant
-    ]
-    comparisons: list[ExperimentComparison] = []
-    for treatment in treatments:
-        result = _comparison(
-            by_variant[metadata.control_variant],
-            by_variant[treatment],
-            len(treatments),
+    if authority is None:
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="pipeline_provenance_unavailable",
+            underpowered_variants=[],
+        )
+    if authority.state == "pending":
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="awaiting_pipeline_boundary",
+            underpowered_variants=[],
+        )
+    if authority.state == "degraded":
+        reason = (
+            "pipeline_provenance_unavailable"
+            if authority.failure_reason
+            in {
+                "pipeline_provenance_unavailable",
+                "legacy_state_unverifiable",
+            }
+            else "pipeline_degraded"
+        )
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason=reason,
+            underpowered_variants=[],
+        )
+    if (
+        authority.marker_stream_id is None
+        or authority.marker_stream_id_parts is None
+        or completeness_pool is None
+    ):
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="pipeline_provenance_unavailable",
+            underpowered_variants=[],
+        )
+
+    provenance_rows = await _get_client(request).execute(
+        EXPERIMENT_PROVENANCE_QUERY,
+        {
+            "project_id": pid,
+            "flag_key": metadata.flag_key,
+            "metric_event": metadata.metric_event,
+            "minimum_exposure_config_version": (
+                metadata.minimum_exposure_config_version
+            ),
+            "assignment_reason": (
+                "rule_match"
+                if metadata.enrollment_mode == "targeted"
+                else "fallthrough"
+            ),
+            "start_ms": _datetime64_boundary_milliseconds(metadata.start_date),
+            "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
+            "source_stream": f"events:raw:{pid}",
+        },
+    )
+    if len(provenance_rows) != 1:
+        raise HTTPException(
+            status_code=503,
+            detail="ClickHouse returned invalid provenance aggregates",
+        )
+    unprovenanced_events = provenance_rows[0].get("unprovenanced_events")
+    if type(unprovenanced_events) is not int or unprovenanced_events < 0:
+        raise HTTPException(
+            status_code=503,
+            detail="ClickHouse returned invalid provenance aggregates",
+        )
+    if unprovenanced_events:
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="pipeline_provenance_unavailable",
+            underpowered_variants=[],
+        )
+
+    comparison_count = len(arms) - 1
+    control = next(
+        (arm for arm in arms if arm.variant == metadata.control_variant),
+        None,
+    )
+    if control is None or comparison_count < 1:
+        raise HTTPException(
+            status_code=503,
+            detail="Authoritative experiment arms are invalid",
+        )
+    comparisons = [
+        _comparison(
+            control,
+            treatment,
+            comparison_count,
             metadata.statistical_plan.significance_level,
         )
-        if result is None:
-            return ExperimentAnalysisNonFinal(
-                **common,
-                reason="non_finite_statistics",
-                underpowered_variants=[],
-            )
-        comparisons.append(result)
+        for treatment in arms
+        if treatment.variant != metadata.control_variant
+    ]
+    if any(comparison is None for comparison in comparisons):
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="non_finite_statistics",
+            underpowered_variants=[],
+        )
 
-    return ExperimentAnalysisDecisionSnapshot(
+    snapshot = ExperimentAnalysisDecisionSnapshot(
         **common,
-        comparisons=comparisons,
+        data_completeness="verified",
+        comparisons=[
+            comparison for comparison in comparisons if comparison is not None
+        ],
     )
+    try:
+        return await persist_experiment_snapshot(
+            completeness_pool,
+            project_id=pid,
+            experiment_key=metadata.key,
+            config_version=metadata.version,
+            boundary_stream_id=authority.marker_stream_id,
+            snapshot=snapshot,
+        )
+    except Exception as exc:
+        logger.error(
+            "Verified experiment snapshot persistence failed for %s/%s: %s",
+            pid,
+            metadata.key,
+            exc,
+        )
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="data_completeness_unverified",
+            underpowered_variants=[],
+        )

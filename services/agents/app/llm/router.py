@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -77,6 +78,19 @@ _anthropic_client: anthropic.AsyncAnthropic | None = None
 _google_client: genai.Client | None = None
 _local_client: openai.AsyncOpenAI | None = None
 
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_PROVIDERS = ("openai", "anthropic", "google", "local")
+
+
+@dataclass(frozen=True)
+class ProviderRuntimeConfiguration:
+    """One provider's exact endpoint and tier models from process environment."""
+
+    provider: str
+    endpoint_url: str
+    fast_model: str
+    reasoning_model: str
+
 
 def _normalized_endpoint_url(value: str) -> str:
     raw = value.strip().rstrip("/")
@@ -88,6 +102,10 @@ def _normalized_endpoint_url(value: str) -> str:
         raise ValueError("LLM provider endpoint must be an absolute HTTP(S) URL")
     if parsed.userinfo:
         raise ValueError("LLM provider endpoint must not contain user information")
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            "LLM provider endpoint must not contain query or fragment data"
+        )
     return str(parsed).rstrip("/")
 
 
@@ -103,6 +121,45 @@ def _provider_endpoint_url(provider: str) -> str:
     else:
         raise ValueError(f"Unknown provider {provider!r}")
     return _normalized_endpoint_url(value)
+
+
+def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguration:
+    """Resolve the exact router configuration without returning credentials."""
+    if provider not in _PROVIDERS:
+        raise ValueError(f"Unknown provider {provider!r}")
+    if not _provider_available(provider):
+        credential = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "google": "GOOGLE_API_KEY",
+            "local": "LOCAL_LLM_URL",
+        }[provider]
+        raise ValueError(f"{credential} is required for provider {provider}")
+
+    if provider == "openai":
+        fast_model = os.getenv("LLM_FAST_PRIMARY", "gpt-5.4-nano")
+        reasoning_model = os.getenv("LLM_REASONING_PRIMARY", "gpt-5.4-mini")
+    elif provider == "anthropic":
+        fast_model = os.getenv("LLM_FAST_FALLBACK", "claude-haiku-4-5-20251001")
+        reasoning_model = os.getenv("LLM_REASONING_FALLBACK", "claude-sonnet-4-6")
+    elif provider == "google":
+        fast_model = os.getenv("LLM_FAST_GOOGLE", "gemini-2.5-flash-lite")
+        reasoning_model = os.getenv("LLM_REASONING_GOOGLE", "gemini-2.5-flash")
+    else:
+        fast_model = reasoning_model = os.getenv("LOCAL_LLM_MODEL", "gemma4")
+
+    fast_model = fast_model.strip()
+    reasoning_model = reasoning_model.strip()
+    if _MODEL_ID.fullmatch(fast_model) is None:
+        raise ValueError("Configured fast model must be a valid model identifier")
+    if _MODEL_ID.fullmatch(reasoning_model) is None:
+        raise ValueError("Configured reasoning model must be a valid model identifier")
+    return ProviderRuntimeConfiguration(
+        provider=provider,
+        endpoint_url=_provider_endpoint_url(provider),
+        fast_model=fast_model,
+        reasoning_model=reasoning_model,
+    )
 
 
 def _get_openai() -> openai.AsyncOpenAI:
@@ -164,34 +221,25 @@ def _tier_models(tier: str) -> list[dict[str, str]]:
     Providers whose API key is not set are skipped (except local, which
     is always available when LOCAL_LLM_URL is configured).
     """
-    if tier == "fast":
-        candidates = [
-            ("openai", os.getenv("LLM_FAST_PRIMARY", "gpt-5.4-nano")),
-            ("anthropic", os.getenv("LLM_FAST_FALLBACK", "claude-haiku-4-5-20251001")),
-            ("google", os.getenv("LLM_FAST_GOOGLE", "gemini-2.5-flash-lite")),
-            ("local", os.getenv("LOCAL_LLM_MODEL", "gemma4")),
-        ]
-    else:
-        candidates = [
-            ("openai", os.getenv("LLM_REASONING_PRIMARY", "gpt-5.4-mini")),
-            ("anthropic", os.getenv("LLM_REASONING_FALLBACK", "claude-sonnet-4-6")),
-            ("google", os.getenv("LLM_REASONING_GOOGLE", "gemini-2.5-flash")),
-            ("local", os.getenv("LOCAL_LLM_MODEL", "gemma4")),
-        ]
-
     result: list[dict[str, str]] = []
-    for provider, model in candidates:
+    for provider in _PROVIDERS:
         if _provider_available(provider):
             try:
-                endpoint_url = _provider_endpoint_url(provider)
+                configuration = provider_runtime_configuration(provider)
             except ValueError:
-                logger.error("Ignoring %s LLM candidate with invalid endpoint", provider)
+                logger.error(
+                    "Ignoring %s LLM candidate with invalid configuration", provider
+                )
                 continue
             result.append(
                 {
                     "provider": provider,
-                    "model": model,
-                    "endpoint_url": endpoint_url,
+                    "model": (
+                        configuration.fast_model
+                        if tier == "fast"
+                        else configuration.reasoning_model
+                    ),
+                    "endpoint_url": configuration.endpoint_url,
                 }
             )
     return result
@@ -199,15 +247,15 @@ def _tier_models(tier: str) -> list[dict[str, str]]:
 
 def _provider_available(provider: str) -> bool:
     if provider == "openai":
-        return bool(os.getenv("OPENAI_API_KEY"))
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
     if provider == "anthropic":
-        return bool(os.getenv("ANTHROPIC_API_KEY"))
+        return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
     if provider == "google":
-        return bool(os.getenv("GOOGLE_API_KEY"))
+        return bool(os.getenv("GOOGLE_API_KEY", "").strip())
     if provider == "local":
         # Candidate only when its endpoint is explicitly configured. Project
         # policy still authorizes the exact local model before any request.
-        return bool(os.getenv("LOCAL_LLM_URL"))
+        return bool(os.getenv("LOCAL_LLM_URL", "").strip())
     return False
 
 

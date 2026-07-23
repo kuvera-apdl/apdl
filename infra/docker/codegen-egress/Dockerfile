@@ -1,9 +1,23 @@
-FROM ubuntu:24.04
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 ARG CODEGEN_EGRESS_POLICY_SHA256
+ARG DEBIAN_SNAPSHOT=20260623T000000Z
+ARG CA_CERTIFICATES_VERSION=20250419
+ARG CURL_VERSION=8.14.1-2+deb13u3
+ARG SOCAT_VERSION=1.8.0.3-1
+ARG SQUID_VERSION=6.13-2+deb13u1
+ARG TINI_VERSION=0.19.0-3+b7
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl socat squid tini \
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie main" \
+        > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+        "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+        "curl=${CURL_VERSION}" \
+        "socat=${SOCAT_VERSION}" \
+        "squid=${SQUID_VERSION}" \
+        "tini=${TINI_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 COPY squid.conf /etc/squid/squid.conf

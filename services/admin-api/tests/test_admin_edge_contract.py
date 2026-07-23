@@ -68,3 +68,21 @@ def test_compose_limits_forwarding_trust_to_the_admin_edge_network() -> None:
     assert "admin-edge:" in compose
     assert "subnet: 172.30.255.0/28" in compose
     assert 'APDL_ADMIN_TRUSTED_PROXY_CIDRS=["172.30.255.0/28"]' in environment
+
+
+def test_compose_fails_closed_and_bounds_public_registration() -> None:
+    compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
+    environment = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert (
+        "APDL_ADMIN_REGISTRATION_ENABLED: "
+        "${APDL_ADMIN_REGISTRATION_ENABLED:-false}"
+    ) in compose
+    assert "APDL_ADMIN_MAX_ACCOUNTS: ${APDL_ADMIN_MAX_ACCOUNTS:-100}" in compose
+    assert (
+        "APDL_ADMIN_MAX_PROJECTS_PER_USER: "
+        "${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}"
+    ) in compose
+    assert "APDL_ADMIN_REGISTRATION_ENABLED=false" in environment
+    assert "APDL_ADMIN_MAX_ACCOUNTS=100" in environment
+    assert "APDL_ADMIN_MAX_PROJECTS_PER_USER=5" in environment

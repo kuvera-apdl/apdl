@@ -15,6 +15,10 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.editor.environment import MODEL_PROVIDER_ENV
+from app.editor.worker_contract import (
+    decode_codegen_worker_request,
+    encode_codegen_worker_request,
+)
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling import RepoProfile
@@ -33,11 +37,25 @@ from app.semantic_review import assemble_review_verdict
 from app.verification import build_verification_plan, evaluate_verification_coverage
 
 
+@pytest.fixture(autouse=True)
+def _default_container_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CODEGEN_MODEL", raising=False)
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-provider-key")
+
+
 def _req(**over) -> EditRequest:
     base = dict(
-        repo="acme/widgets", base_branch="main", branch="apdl/x",
-        token="ghs_secrettoken", title="Add thing", spec="do the thing",
-        constraints=["keep tests green"], test_cmd="python -m pytest -q",
+        repo="acme/widgets",
+        base_branch="main",
+        branch="apdl/x",
+        token="ghs_secrettoken",
+        title="Add thing",
+        spec="do the thing",
+        constraints=["keep tests green"],
+        test_cmd="python -m pytest -q",
         repository_preflight=RepositoryPreflightAttestation(
             repository="acme/widgets",
             source_branch="main",
@@ -72,37 +90,41 @@ def test_docker_argv_names_container_for_forced_cleanup():
     assert argv[name_index + 1] == "apdl-codegen-test"
 
 
-def test_docker_argv_passes_nonsecret_inputs_as_values():
-    argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
-    assert "CS_REPO=acme/widgets" in argv
-    assert "CS_PROJECT_SCOPE=acme/widgets" in argv
-    assert "CS_BRANCH=apdl/x" in argv
-    assert "CS_TEST_CMD=python -m pytest -q" in argv
-    assert 'CS_CONSTRAINTS=["keep tests green"]' in argv
+def test_docker_argv_contains_no_task_request_values():
+    request = _req(
+        title="sentinel-title",
+        spec="sentinel task secret",
+        constraints=["sentinel-constraint"],
+        test_cmd="sentinel-test-command",
+    )
+    editor = ContainerAiderEditor()
+    argv = " ".join(editor._docker_argv(request))
+    environment = "\0".join(editor._docker_env(request).values())
+    for value in (
+        "acme/widgets",
+        "apdl/x",
+        "sentinel-title",
+        "sentinel task secret",
+        "sentinel-constraint",
+        "sentinel-test-command",
+        "ghs_secrettoken",
+    ):
+        assert value not in argv
+        assert value not in environment
+    assert "CS_" not in argv
     assert "HOME=/workspace/home" in argv
 
 
-def test_docker_argv_omits_test_cmd_when_unset():
-    argv = " ".join(ContainerAiderEditor()._docker_argv(_req(test_cmd=None)))
-    assert "CS_TEST_CMD" not in argv
-
-
-def test_docker_argv_passes_effective_safety_policy_and_revert_sha():
+def test_worker_envelope_carries_effective_safety_policy_and_revert_sha():
     safety_policy = resolve_effective_policy(
-        TenantCodegenConnectionPolicy(
-            gates=TenantCodegenGatesPolicy(max_files=5)
-        ),
+        TenantCodegenConnectionPolicy(gates=TenantCodegenGatesPolicy(max_files=5)),
         PlatformCodegenSafetyPolicy(),
     )
     req = _req(safety_policy=safety_policy, revert_sha="cafebabe")
-    argv = " ".join(ContainerAiderEditor()._docker_argv(req))
-    assert (
-        "CS_SAFETY_POLICY="
-        + json.dumps(safety_policy.model_dump(mode="json"))
-    ) in argv
-    assert f"CS_SAFETY_POLICY_SHA256={safety_policy.canonical_digest()}" in argv
-    assert "CS_GATES_POLICY" not in argv
-    assert "CS_REVERT_SHA=cafebabe" in argv
+    envelope = decode_codegen_worker_request(encode_codegen_worker_request(req))
+    assert envelope.safety_policy == safety_policy
+    assert envelope.safety_policy_sha256 == safety_policy.canonical_digest()
+    assert envelope.revert_sha == "cafebabe"
 
 
 def test_docker_argv_forwards_editor_config(monkeypatch):
@@ -125,7 +147,9 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
     assert ContainerAiderEditor()._timeout == 3000
 
 
-def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(monkeypatch):
+def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(
+    monkeypatch,
+):
     revision = "evaluated-revision"
     image = "sha256:" + "a" * 64
     policy = "b" * 64
@@ -153,9 +177,7 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(monk
         lambda **kwargs: attestation.update(kwargs) or object(),
     )
 
-    ContainerAiderEditor(image=image).assert_runtime_ready(
-        expected_revision=revision
-    )
+    ContainerAiderEditor(image=image).assert_runtime_ready(expected_revision=revision)
 
     assert calls == [
         ["docker", "version", "--format", "{{.Server.Version}}"],
@@ -320,6 +342,43 @@ def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
     assert "APDL_INTERNAL_TOKEN" not in env
 
 
+def test_worker_forwards_exact_main_and_helper_provider_union(monkeypatch):
+    monkeypatch.setenv("CODEGEN_MODEL", "openai/gpt-5")
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "gemini/gemini-2.5-flash")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "unrelated-secret")
+    editor = ContainerAiderEditor()
+
+    argv = editor._docker_argv(_req())
+    env = editor._docker_env(_req())
+
+    assert "CODEGEN_MODEL=openai/gpt-5" in argv
+    assert "CODEGEN_HELPER_MODEL=gemini/gemini-2.5-flash" in argv
+    assert env["OPENAI_API_KEY"] == "openai-secret"
+    assert env["OPENAI_BASE_URL"] == "https://openai.example/v1"
+    assert env["GEMINI_API_KEY"] == "gemini-secret"
+    assert "GROQ_API_KEY" not in env
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "GEMINI_API_KEY",
+    ):
+        assert name in argv
+    for value in ("openai-secret", "https://openai.example/v1", "gemini-secret"):
+        assert value not in argv
+
+
+def test_worker_rejects_ambiguous_gemini_credentials(monkeypatch):
+    monkeypatch.setenv("CODEGEN_MODEL", "gemini/gemini-2.5-pro")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
+
+    with pytest.raises(ValueError, match="ambiguous credentials"):
+        ContainerAiderEditor()._docker_argv(_req())
+
+
 def test_preflight_launch_has_private_pid_namespace_and_no_provider_env(
     monkeypatch,
 ):
@@ -401,24 +460,37 @@ def test_parse_result_maps_success_json():
         content_sha256="d" * 64,
         runtime_acceptance_plan_sha256=runtime_plan.evidence_hash(),
     )
-    out = json.dumps({
-        "success": True, "branch": "apdl/x",
-        "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
-        "changed_paths": ["a.py", "b.py"], "diff_text": "diff…", "error": None,
-        "base_sha": "a" * 40,
-        "candidate_tree_sha": "b" * 40,
-        "patch_base64": "cGF0Y2g=",
-        "prompts": [{"stage": "edit", "label": "one", "system": None, "user": "u", "notes": None}],
-        "contract_bundle": ContractBundle().model_dump(mode="json"),
-        "requirement_ledger": ledger.model_dump(mode="json"),
-        "inspection_snapshot": InspectionSnapshot().model_dump(mode="json"),
-        "dependency_slice": DependencySlice().model_dump(mode="json"),
-        "verification_plan": plan.model_dump(mode="json"),
-        "verification_coverage": coverage.model_dump(mode="json"),
-        "runtime_acceptance_plan": runtime_plan.model_dump(mode="json"),
-        "generated_runtime_workflow": workflow.model_dump(mode="json"),
-        "review_verdict": review.model_dump(mode="json"),
-    })
+    out = json.dumps(
+        {
+            "success": True,
+            "branch": "apdl/x",
+            "diff_stat": {"files": 2, "additions": 9, "deletions": 1},
+            "changed_paths": ["a.py", "b.py"],
+            "diff_text": "diff…",
+            "error": None,
+            "base_sha": "a" * 40,
+            "candidate_tree_sha": "b" * 40,
+            "patch_base64": "cGF0Y2g=",
+            "prompts": [
+                {
+                    "stage": "edit",
+                    "label": "one",
+                    "system": None,
+                    "user": "u",
+                    "notes": None,
+                }
+            ],
+            "contract_bundle": ContractBundle().model_dump(mode="json"),
+            "requirement_ledger": ledger.model_dump(mode="json"),
+            "inspection_snapshot": InspectionSnapshot().model_dump(mode="json"),
+            "dependency_slice": DependencySlice().model_dump(mode="json"),
+            "verification_plan": plan.model_dump(mode="json"),
+            "verification_coverage": coverage.model_dump(mode="json"),
+            "runtime_acceptance_plan": runtime_plan.model_dump(mode="json"),
+            "generated_runtime_workflow": workflow.model_dump(mode="json"),
+            "review_verdict": review.model_dump(mode="json"),
+        }
+    )
     res = editor._parse_result(0, out, "", _req())
     assert res.success is True
     assert res.diff_stat["files"] == 2
@@ -480,6 +552,24 @@ async def test_implement_never_raises_on_docker_fault(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_oversized_task_is_rejected_before_any_container_launch(monkeypatch):
+    editor = ContainerAiderEditor()
+    launched = False
+
+    async def run(*_args, **_kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("oversized input must not reach Docker")
+
+    monkeypatch.setattr(editor, "_run_docker", run)
+    result = await editor.implement(_req(spec="x" * (256 * 1024 + 1)))
+
+    assert result.success is False
+    assert "strict schema" in (result.error or "")
+    assert launched is False
+
+
+@pytest.mark.asyncio
 async def test_implement_reattests_egress_immediately_before_worker(monkeypatch):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
@@ -503,8 +593,8 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
 
     async def run(_argv, _env, *, container_name, stdin_data):
         assert container_name.startswith("apdl-codegen-")
-        assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
         if "app.inspection.preflight_cli" in _argv:
+            assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
             events.append("preflight")
             return (
                 0,
@@ -518,6 +608,7 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
                 ),
                 "",
             )
+        assert decode_codegen_worker_request(stdin_data).spec == "do the thing"
         events.append("editor")
         return 0, json.dumps({"success": True, "branch": "apdl/x"}), ""
 
@@ -825,9 +916,7 @@ async def test_container_cleanup_treats_verified_absence_as_success(monkeypatch)
 
     monkeypatch.setattr(editor, "_docker_control_command", control)
 
-    await editor._stop_container_and_client(
-        "apdl-codegen-gone", ExitedClient()
-    )
+    await editor._stop_container_and_client("apdl-codegen-gone", ExitedClient())
 
 
 @pytest.mark.asyncio
@@ -847,9 +936,7 @@ async def test_container_cleanup_raises_if_container_still_exists(monkeypatch, c
     monkeypatch.setattr(editor, "_docker_control_command", control)
 
     with pytest.raises(RuntimeError, match="Could not verify removal"):
-        await editor._stop_container_and_client(
-            "apdl-codegen-stuck", ExitedClient()
-        )
+        await editor._stop_container_and_client("apdl-codegen-stuck", ExitedClient())
 
     assert calls == [
         ("rm", "-f", "apdl-codegen-stuck"),
@@ -894,7 +981,10 @@ async def test_implement_parses_a_successful_run(monkeypatch):
     assert container_names[1].startswith("apdl-codegen-edit-")
     assert container_names[0] != container_names[1]
     assert json.loads(launches[0][2]) == {"read_token": "ghs_secrettoken"}
-    assert json.loads(launches[1][2]) == {"read_token": "ghs_secrettoken"}
+    worker_request = decode_codegen_worker_request(launches[1][2])
+    assert worker_request.schema_version == "codegen_worker_request@1"
+    assert worker_request.read_token == "ghs_secrettoken"
+    assert worker_request.spec == "do the thing"
     assert "GH_TOKEN" not in launches[0][1]
     assert "GH_TOKEN" not in launches[1][1]
 

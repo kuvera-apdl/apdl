@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
+import { useAuthCapabilities } from '@/features/auth/hooks'
 
 const registrationSchema = z
   .object({
@@ -24,12 +25,16 @@ const registrationSchema = z
 
 export function RegisterPage() {
   const { authenticated, initializing, register } = useAuth()
+  const capabilities = useAuthCapabilities()
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [serverBlock, setServerBlock] = useState<
+    'account_capacity_reached' | 'registration_disabled' | null
+  >(null)
 
   if (!initializing && authenticated) return <Navigate to="/" replace />
 
@@ -46,8 +51,12 @@ export function RegisterPage() {
       await register(parsed.data.email, parsed.data.password)
       navigate('/settings/workspace', { replace: true })
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 409) {
+      if (caught instanceof ApiError && caught.code === 'account_exists') {
         setError('An account already exists for this email. Sign in instead.')
+      } else if (caught instanceof ApiError && caught.code === 'account_capacity_reached') {
+        setServerBlock('account_capacity_reached')
+      } else if (caught instanceof ApiError && caught.code === 'registration_disabled') {
+        setServerBlock('registration_disabled')
       } else if (caught instanceof ApiError && caught.status === 429) {
         setError('Too many attempts. Wait a minute and try again.')
       } else {
@@ -56,6 +65,50 @@ export function RegisterPage() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const registrationState = serverBlock ?? (
+    capabilities.isSuccess && !capabilities.data.registration_enabled
+      ? 'registration_disabled'
+      : null
+  )
+
+  if (initializing || capabilities.isPending) {
+    return (
+      <RegistrationUnavailable
+        title="Checking registration availability"
+        description="Verifying whether this APDL deployment is accepting new accounts."
+        status
+      />
+    )
+  }
+
+  if (capabilities.isError) {
+    return (
+      <RegistrationUnavailable
+        title="Unable to verify registration availability"
+        description="Registration is closed until the admin service can confirm that new accounts are enabled."
+        onRetry={() => void capabilities.refetch()}
+      />
+    )
+  }
+
+  if (registrationState === 'registration_disabled') {
+    return (
+      <RegistrationUnavailable
+        title="Registration is disabled"
+        description="This APDL deployment is not accepting new accounts. Ask an operator for access."
+      />
+    )
+  }
+
+  if (registrationState === 'account_capacity_reached') {
+    return (
+      <RegistrationUnavailable
+        title="Account capacity reached"
+        description="This APDL deployment has reached its account limit. Ask an operator for access."
+      />
+    )
   }
 
   return (
@@ -116,6 +169,49 @@ export function RegisterPage() {
             </Button>
           </form>
           <p className="mt-5 text-center text-sm text-muted-foreground">
+            Already registered?{' '}
+            <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/login">
+              Sign in
+            </Link>
+          </p>
+        </CardContent>
+      </Card>
+    </main>
+  )
+}
+
+function RegistrationUnavailable({
+  title,
+  description,
+  onRetry,
+  status = false,
+}: {
+  title: string
+  description: string
+  onRetry?: () => void
+  status?: boolean
+}) {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader className="space-y-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <UserPlus className="h-5 w-5" />
+          </div>
+          <div>
+            <CardTitle>{title}</CardTitle>
+            <CardDescription className="mt-1.5" role={status ? 'status' : undefined}>
+              {description}
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {onRetry ? (
+            <Button type="button" className="w-full" onClick={onRetry}>
+              Retry
+            </Button>
+          ) : null}
+          <p className="text-center text-sm text-muted-foreground">
             Already registered?{' '}
             <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/login">
               Sign in

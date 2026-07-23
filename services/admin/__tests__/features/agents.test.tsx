@@ -23,6 +23,42 @@ const requests: { path: string; body: unknown }[] = []
 let monitorStatus = 'waiting_approval'
 let monitorPhase = 'experiment_design_approval'
 
+const EXECUTABLE_DEFINITIONS = {
+  agents: [
+    {
+      name: 'behavior_analysis',
+      display_name: 'Behavior analysis',
+      description: 'Produces insights.',
+      order: 10,
+      produces: 'insights',
+      requires: [],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+    {
+      name: 'experiment_design',
+      display_name: 'Experiment design',
+      description: 'Produces experiment designs.',
+      order: 20,
+      produces: 'experiment_designs',
+      requires: ['insights'],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+    {
+      name: 'feature_proposal',
+      display_name: 'Feature proposals',
+      description: 'Produces feature proposals.',
+      order: 40,
+      produces: 'feature_proposals',
+      requires: ['insights'],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+  ],
+  tool_catalog: [],
+}
+
 function queuedApproval(runId: string) {
   return {
     command_id: '018f3d4e-c1c2-7000-8000-000000000001',
@@ -55,6 +91,14 @@ function queuedApproval(runId: string) {
 const server = setupServer(
   http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
     HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
+  ),
+  http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+    HttpResponse.json({
+      schema_version: 'agents_project_execution_capabilities@1',
+      project_id: 'demo',
+      autonomous_mutations_operator_enabled: false,
+      codegen_changeset_creation: 'disabled',
+    }),
   ),
   http.post('*/api/projects/demo/agents/v1/agents/trigger', async ({ request }) => {
     requests.push({ path: 'trigger', body: await request.json() })
@@ -175,6 +219,9 @@ describe('gating matrix (must match framework/gating.py)', () => {
     expect(gateOutcome(4, 'high')).toBe('deploy')
     // Feature proposals always gate, regardless of level.
     expect(gateOutcome(4, 'low', true)).toBe('approve')
+    // The operator switch takes precedence over requested L3/L4 autonomy.
+    expect(gateOutcome(3, 'low', false, false)).toBe('approve')
+    expect(gateOutcome(4, 'high', false, false)).toBe('approve')
   })
 })
 
@@ -210,6 +257,11 @@ describe('TriggerPage', () => {
   })
 
   test('posts the manual trigger and navigates to the run', async () => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+    )
     renderWithProviders(
       <Routes>
         <Route path="/agents/trigger" element={<TriggerPage />} />
@@ -217,13 +269,18 @@ describe('TriggerPage', () => {
       </Routes>,
       '/agents/trigger',
     )
+    expect(await screen.findByText('Produces insights.')).toBeInTheDocument()
+    expect(
+      await screen.findByText(/autonomous mutations are not operator-enabled/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /L3/i })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: /L4/i })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 
     // Navigates to the new run — no client-side run tracking (the server
     // owns run history now).
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
-    // Default mode runs the full built-in loop when definition discovery is
-    // unavailable, so the built-in fallback list is selected.
+    // Default mode runs only the built-ins confirmed by live capability discovery.
     expect(requests[0]?.body).toEqual({
       project_id: 'demo',
       trigger_type: 'manual',
@@ -237,7 +294,100 @@ describe('TriggerPage', () => {
     })
   })
 
-  test('filters experiment evaluation from live definitions and trigger payloads', async () => {
+  test('offers L3/L4 only after exact operator enablement and submits the selected level', async () => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+      http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+        HttpResponse.json({
+          schema_version: 'agents_project_execution_capabilities@1',
+          project_id: 'demo',
+          autonomous_mutations_operator_enabled: true,
+          codegen_changeset_creation: 'available',
+        }),
+      ),
+    )
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/trigger" element={<TriggerPage />} />
+        <Route path="/agents/runs/:runId" element={<div>monitor page</div>} />
+      </Routes>,
+      '/agents/trigger',
+    )
+
+    const l4 = await screen.findByRole('radio', { name: /L4/i })
+    await waitFor(() => expect(l4).toBeEnabled())
+    await userEvent.click(l4)
+    await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
+
+    expect(await screen.findByText('monitor page')).toBeInTheDocument()
+    expect(requests.find((entry) => entry.path === 'trigger')?.body).toMatchObject({
+      autonomy_level: 4,
+    })
+  })
+
+  test.each([
+    {
+      name: 'an unavailable capability endpoint',
+      response: HttpResponse.json({ detail: 'Unavailable' }, { status: 503 }),
+    },
+    {
+      name: 'a cross-project capability response',
+      response: HttpResponse.json({
+        schema_version: 'agents_project_execution_capabilities@1',
+        project_id: 'other',
+        autonomous_mutations_operator_enabled: true,
+        codegen_changeset_creation: 'available',
+      }),
+    },
+  ])('keeps L3/L4 unavailable for $name', async ({ response }) => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+      http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+        response.clone(),
+      ),
+    )
+    renderWithProviders(<TriggerPage />, '/agents/trigger')
+
+    expect(
+      await screen.findByText(/autonomous mutation capability is unavailable/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /L3/i })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: /L4/i })).toBeDisabled()
+  })
+
+  test.each([
+    {
+      name: 'an unavailable endpoint',
+      response: HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
+      message: /agent definitions are unavailable/i,
+    },
+    {
+      name: 'an invalid response',
+      response: HttpResponse.json({ agents: [{ name: 'behavior_analysis' }], tool_catalog: [] }),
+      message: /agent definitions are unavailable/i,
+    },
+    {
+      name: 'an empty executable list',
+      response: HttpResponse.json({ agents: [], tool_catalog: [] }),
+      message: /no executable agent definitions/i,
+    },
+  ])('fails closed for $name', async ({ response, message }) => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () => response.clone()),
+    )
+    renderWithProviders(<TriggerPage />, '/agents/trigger')
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /curl/i })).not.toBeInTheDocument()
+    expect(requests.some((entry) => entry.path === 'trigger')).toBe(false)
+  })
+
+  test('offers evidence-only experiment evaluation from live definitions', async () => {
     server.use(
       http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
         HttpResponse.json({
@@ -255,10 +405,10 @@ describe('TriggerPage', () => {
             {
               name: 'experiment_evaluation',
               display_name: 'Experiment evaluation',
-              description: 'Produces experiment verdicts.',
+              description: 'Summarizes verified experiment evidence.',
               order: 30,
-              produces: 'experiment_verdicts',
-              requires: ['experiment_designs'],
+              produces: 'experiment_evidence_summaries',
+              requires: [],
               model_tier: 'reasoning',
               is_custom: false,
             },
@@ -276,11 +426,11 @@ describe('TriggerPage', () => {
     )
 
     expect(await screen.findByText('Produces insights.')).toBeInTheDocument()
-    expect(screen.queryByText('Experiment evaluation')).not.toBeInTheDocument()
+    expect(screen.getByText('Experiment evaluation')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
     expect(requests.find((entry) => entry.path === 'trigger')?.body).toMatchObject({
-      analysis_types: ['behavior_analysis'],
+      analysis_types: ['behavior_analysis', 'experiment_evaluation'],
     })
   })
 })

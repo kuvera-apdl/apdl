@@ -362,6 +362,8 @@ def required_role(service: str, method: str, path: str) -> str | None:
     if service == "agents":
         if not path.startswith("/v1/agents"):
             return ""
+        if method == "GET" and path == "/v1/agents/capabilities/execution":
+            return "agents:run"
         if method == "GET":
             return "agents:read"
         if method == "POST" and path == "/v1/agents/trigger":

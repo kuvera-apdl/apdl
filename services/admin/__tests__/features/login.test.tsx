@@ -19,6 +19,9 @@ const server = setupServer(
   http.get('*/api/auth/me', () =>
     HttpResponse.json({ detail: 'Login required' }, { status: 401 }),
   ),
+  http.get('*/api/auth/capabilities', () =>
+    HttpResponse.json({ registration_enabled: true }),
+  ),
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
@@ -45,6 +48,29 @@ function renderLogin() {
     </QueryClientProvider>,
   )
 }
+
+test('advertises registration only when the strict capability is enabled', async () => {
+  renderLogin()
+
+  expect(await screen.findByRole('link', { name: 'Create your account' })).toHaveAttribute(
+    'href',
+    '/register',
+  )
+})
+
+test('does not advertise registration when the capability is disabled', async () => {
+  let checked = false
+  server.use(
+    http.get('*/api/auth/capabilities', () => {
+      checked = true
+      return HttpResponse.json({ registration_enabled: false })
+    }),
+  )
+  renderLogin()
+
+  await waitFor(() => expect(checked).toBe(true))
+  expect(screen.queryByRole('link', { name: 'Create your account' })).not.toBeInTheDocument()
+})
 
 test('authenticates a human session and returns to the protected page', async () => {
   let submitted: unknown = null

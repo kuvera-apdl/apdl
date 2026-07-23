@@ -9,7 +9,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { FlagListPage } from '../../src/features/flags/FlagListPage'
-import { makeFlag, seedWorkspace } from '../helpers/fixtures'
+import { makeFlag, makeWorkspace, seedWorkspace } from '../helpers/fixtures'
+import type { Workspace } from '../../src/core/workspace'
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/flags', () =>
@@ -38,10 +39,10 @@ beforeEach(() => {
   seedWorkspace()
 })
 
-function renderFlagList() {
+function renderFlagList(workspace: Workspace = seedWorkspace()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+    <WorkspaceProvider initialWorkspaces={[workspace]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={['/flags']}>
@@ -85,5 +86,18 @@ describe('FlagListPage', () => {
     renderFlagList()
     await userEvent.click(await screen.findByText('checkout-cta'))
     expect(await screen.findByText('detail page')).toBeInTheDocument()
+  })
+
+  test('removes every write control for a config:read-only workspace', async () => {
+    const workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    renderFlagList(workspace)
+
+    await screen.findByText('checkout-cta')
+    expect(screen.queryByRole('link', { name: /new flag/i })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Actions for checkout-cta' }))
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Disable…' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Archive…' })).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'View audit trail' })).toBeInTheDocument()
   })
 })

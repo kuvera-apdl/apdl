@@ -111,11 +111,13 @@ async def provision(args: argparse.Namespace) -> None:
             name="--override-reason",
             maximum=2000,
         )
+    dsn = os.getenv("POSTGRES_URL", "").strip()
+    if not dsn:
+        raise SystemExit("POSTGRES_URL is required")
     password = (
         sys.stdin.readline().rstrip("\n") if args.password_stdin else getpass.getpass()
     )
     password_hash = hash_password(password)
-    dsn = os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
     conn = await asyncpg.connect(dsn)
     try:
         await conn.execute(

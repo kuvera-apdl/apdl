@@ -9,8 +9,9 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import github_api_url
-from app.github.artifacts import StaleActionsHeadError, redact_text
+from app.github.artifacts import StaleActionsHeadError
 from app.github.client import gh_client, gh_headers, github_json_pages
+from app.safety.secrets import redact_secrets
 
 _PER_PAGE = 100
 _MAX_PAGES = 5
@@ -25,12 +26,12 @@ class StrictModel(BaseModel):
 class ActionsWorkflowRun(StrictModel):
     schema_version: Literal["actions_workflow_run@1"] = "actions_workflow_run@1"
     run_id: int = Field(ge=1)
-    name: str
+    name: str = Field(max_length=300)
     head_sha: str = Field(min_length=1)
     status: str
     conclusion: str | None = None
     run_attempt: int = Field(default=1, ge=1)
-    html_url: str | None = None
+    html_url: str | None = Field(default=None, max_length=2000)
 
 
 class ActionsJob(StrictModel):
@@ -38,10 +39,10 @@ class ActionsJob(StrictModel):
     job_id: int = Field(ge=1)
     workflow_run_id: int = Field(ge=1)
     head_sha: str = Field(min_length=1)
-    name: str
+    name: str = Field(max_length=300)
     status: str
     conclusion: str | None = None
-    html_url: str | None = None
+    html_url: str | None = Field(default=None, max_length=2000)
 
 
 class ActionsJobLog(StrictModel):
@@ -263,7 +264,7 @@ async def read_job_log(
     # final visible byte is still recognized and redacted as a whole.
     inspected = raw[: max_bytes + 512]
     text = inspected.decode("utf-8", "replace")
-    text, redacted = redact_text(text)
+    text, redacted = redact_secrets(text)
     text = text[:max_bytes]
     return ActionsJobLog(
         job_id=job_id,

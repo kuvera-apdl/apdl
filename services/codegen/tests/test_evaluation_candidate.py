@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.editor.base import EditResult
+from app.editor.environment import MODEL_PROVIDER_ENV
 from app.evaluations.candidate import evaluate_candidate
 from app.evaluations.corpus import DEFAULT_FIXTURE_ROOT, load_corpus
 from app.evaluations.docker_executor import DockerEvaluationExecutor
@@ -43,6 +44,15 @@ from app.requirements import compile_requirement_ledger, map_implementation_evid
 _INVOCATION_ID = "eval_inv_" + "a" * 32
 _PINNED_IMAGE = "apdl-codegen-evaluator@sha256:" + "b" * 64
 _PROVIDER_SECRET = "provider-secret-material"
+
+
+@pytest.fixture(autouse=True)
+def _default_evaluation_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CODEGEN_MODEL", "openai/gpt-5")
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", _PROVIDER_SECRET)
 
 
 def _task():
@@ -96,8 +106,7 @@ class _RepairingEditor:
         self.requests.append(request)
         target = workspace / "app.py"
         target.write_text(
-            "def send_signup(client):\n"
-            "    client.capture(\"signup\")\n",
+            'def send_signup(client):\n    client.capture("signup")\n',
             encoding="utf-8",
         )
         diff = subprocess.run(
@@ -224,7 +233,7 @@ def test_fixture_harness_is_semantic_and_binds_the_final_tree(tmp_path: Path):
 
     target.write_text(
         target.read_text(encoding="utf-8")
-        + "# client.capture(\"signup\") is the intended repair\n",
+        + '# client.capture("signup") is the intended repair\n',
         encoding="utf-8",
     )
     comment_only = run_fixture_harness(materialized, manifest)
@@ -238,13 +247,17 @@ def test_fixture_harness_is_semantic_and_binds_the_final_tree(tmp_path: Path):
         lambda: MetricValue(
             value="1",
             evidence=[
-                EvidenceReference(source=EvidenceSource.executor, reference="evidence://1")
+                EvidenceReference(
+                    source=EvidenceSource.executor, reference="evidence://1"
+                )
             ],
         ),
         lambda: MetricValue(
             value=True,
             evidence=[
-                EvidenceReference(source=EvidenceSource.executor, reference="evidence://1")
+                EvidenceReference(
+                    source=EvidenceSource.executor, reference="evidence://1"
+                )
             ],
         ),
         lambda: RolloutPolicy(minimum_sample_size=True),
@@ -278,7 +291,11 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     )
     source_environment = {
         "PATH": os.environ.get("PATH", os.defpath),
+        "CODEGEN_MODEL": "openai/gpt-5",
+        "CODEGEN_HELPER_MODEL": "anthropic/claude-haiku-4-5",
         "OPENAI_API_KEY": _PROVIDER_SECRET,
+        "ANTHROPIC_API_KEY": "helper-provider-secret",
+        "GROQ_API_KEY": "unselected-provider-secret",
         "GITHUB_TOKEN": "github-write-token",
         "GH_TOKEN": "gh-write-token",
         "GITHUB_APP_PRIVATE_KEY": "private-key",
@@ -324,11 +341,15 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     assert str(workspace.resolve()) in rendered
     assert _PINNED_IMAGE in argv
     assert "OPENAI_API_KEY" in argv
+    assert "ANTHROPIC_API_KEY" in argv
+    assert "GROQ_API_KEY" not in argv
     assert _PROVIDER_SECRET not in rendered
     assert "--privileged" not in argv
     assert "docker.sock" not in rendered
 
     assert environment["OPENAI_API_KEY"] == _PROVIDER_SECRET
+    assert environment["ANTHROPIC_API_KEY"] == "helper-provider-secret"
+    assert "GROQ_API_KEY" not in environment
     assert environment["HTTP_PROXY"] == "http://127.0.0.1:3128"
     assert environment["https_proxy"] == "http://127.0.0.1:3128"
     for forbidden in (
@@ -663,9 +684,7 @@ async def test_installed_candidate_protocol_runs_real_workspace_editor_path(
     """Exercise stdin/stdout + AiderEditor with a deterministic fake Aider binary."""
     corpus = load_corpus()
     case = next(
-        item
-        for item in corpus.cases
-        if item.case_id == "python-flaky-infrastructure"
+        item for item in corpus.cases if item.case_id == "python-flaky-infrastructure"
     )
     materialized, manifest = materialize_fixture(
         case,
@@ -695,7 +714,8 @@ async def test_installed_candidate_protocol_runs_real_workspace_editor_path(
         timeout_seconds=30,
         environment={
             "PATH": os.environ.get("PATH", os.defpath),
-            "CODEGEN_MODEL": "keyless-test-model",
+            "CODEGEN_MODEL": "openai/keyless-test-model",
+            "OPENAI_API_KEY": "test-only-provider-key",
             "CODEGEN_REVISION": "keyless-test-revision",
             "CODEGEN_AIDER_BIN": str(fake_aider),
             "CODEGEN_BRIEF": "false",

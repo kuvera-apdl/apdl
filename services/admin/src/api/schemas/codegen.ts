@@ -12,6 +12,7 @@ import {
   runtimeEvidenceAssessmentSchema,
 } from './codegen-runtime'
 import { publicationAuthorizationSchema } from './codegen-publication'
+import { externalHttpsUrlSchema } from './urls'
 
 // One LLM prompt the run actually sent (brief compilation, an edit instruction
 // handed to the coding agent, or a pre-push diff review). `system` is null for
@@ -745,7 +746,7 @@ export const changesetSchema = z
     status: changesetStatusSchema,
     base_branch: z.string().nullable(),
     branch: z.string().nullable(),
-    pr_url: z.string().nullable(),
+    pr_url: externalHttpsUrlSchema.nullable(),
     pr_number: z.number().int().nullable(),
     head_sha: z.string().nullable(),
     github_pr_status: githubPRStatusSchema.nullable(),

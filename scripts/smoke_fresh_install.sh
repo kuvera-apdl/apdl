@@ -60,12 +60,24 @@ export APDL_GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$((SMOKE_PORT_BASE + 7)
 export APDL_AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$((SMOKE_PORT_BASE + 8))}"
 export APDL_ADMIN_HOST_PORT="${APDL_ADMIN_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
 
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+if [ -n "${APDL_SMOKE_COMPOSE_OVERRIDE:-}" ]; then
+    if [[ "$APDL_SMOKE_COMPOSE_OVERRIDE" != /* ]]; then
+        APDL_SMOKE_COMPOSE_OVERRIDE="$ROOT_DIR/$APDL_SMOKE_COMPOSE_OVERRIDE"
+    fi
+    [ -f "$APDL_SMOKE_COMPOSE_OVERRIDE" ] || {
+        echo "Smoke Compose override not found: $APDL_SMOKE_COMPOSE_OVERRIDE" >&2
+        exit 1
+    }
+    COMPOSE_ARGS+=(-f "$APDL_SMOKE_COMPOSE_OVERRIDE")
+fi
+
 compose() {
-    docker compose -f "$COMPOSE_FILE" "$@"
+    docker compose "${COMPOSE_ARGS[@]}" "$@"
 }
 
 compose_all_profiles() {
-    docker compose -f "$COMPOSE_FILE" --profile agents --profile codegen "$@"
+    docker compose "${COMPOSE_ARGS[@]}" --profile agents --profile codegen "$@"
 }
 
 cleanup() {
@@ -153,15 +165,45 @@ assert_not_created() {
 echo "==> Validating core Compose contract"
 compose config --quiet
 
+case "${APDL_SMOKE_NO_BUILD:-false}" in
+    true)
+        [ -n "${APDL_SMOKE_COMPOSE_OVERRIDE:-}" ] || {
+            echo "APDL_SMOKE_NO_BUILD=true requires APDL_SMOKE_COMPOSE_OVERRIDE" >&2
+            exit 1
+        }
+        echo "==> Pulling immutable release images without registry credentials"
+        compose pull postgres-migrate ingestion config query clickhouse-writer \
+            admin-api admin
+        startup_build_args=(--no-build)
+        smoke_migrator_build=false
+        smoke_packaged_migrations=true
+        ;;
+    false)
+        startup_build_args=(--build)
+        smoke_migrator_build=true
+        smoke_packaged_migrations=false
+        ;;
+    *)
+        echo "APDL_SMOKE_NO_BUILD must be true or false" >&2
+        exit 1
+        ;;
+esac
+
 echo "==> Starting fresh PostgreSQL, ClickHouse, and Redis volumes"
 compose up -d postgres clickhouse redis
 
 CLICKHOUSE_COMPOSE_FILE="$COMPOSE_FILE" "$ROOT_DIR/scripts/init-clickhouse.sh"
-POSTGRES_COMPOSE_FILE="$COMPOSE_FILE" "$ROOT_DIR/scripts/init-postgres.sh"
+
+POSTGRES_MIGRATOR_BUILD="$smoke_migrator_build" \
+POSTGRES_USE_PACKAGED_MIGRATIONS="$smoke_packaged_migrations" \
+POSTGRES_COMPOSE_FILE="$COMPOSE_FILE" \
+POSTGRES_COMPOSE_OVERRIDE_FILE="${APDL_SMOKE_COMPOSE_OVERRIDE:-}" \
+    "$ROOT_DIR/scripts/init-postgres.sh"
 assert_credentials
 
 echo "==> Starting only the supported fresh-smoke service set"
-compose up -d --build --wait --wait-timeout "${APDL_SMOKE_STARTUP_TIMEOUT:-180}" \
+compose up -d "${startup_build_args[@]}" --wait \
+    --wait-timeout "${APDL_SMOKE_STARTUP_TIMEOUT:-180}" \
     ingestion config query clickhouse-writer admin-api admin gateway
 assert_not_created
 

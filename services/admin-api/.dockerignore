@@ -2,5 +2,6 @@
 __pycache__
 .pytest_cache
 tests
-scripts
+scripts/*
+!scripts/create_admin_user.py
 *.pyc

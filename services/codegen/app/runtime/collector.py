@@ -35,6 +35,7 @@ from app.runtime.models import (
     RuntimeEvidenceStatus,
     RuntimeJobLogEvidence,
 )
+from app.safety.secrets import contains_secret, redact_secrets
 
 _HEAD_SHA_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"
 _FAILED_JOB_CONCLUSIONS = frozenset(
@@ -89,9 +90,7 @@ class RuntimeCollectionDiagnostic(StrictModel):
     message: str = Field(min_length=1, max_length=2000)
     workflow_run_id: int | None = Field(default=None, ge=1)
     job_id: int | None = Field(default=None, ge=1)
-    artifact_name: str | None = Field(
-        default=None, pattern=r"^[A-Za-z0-9_.-]{1,128}$"
-    )
+    artifact_name: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 def _diagnostic_key(item: RuntimeCollectionDiagnostic) -> tuple:
@@ -284,6 +283,44 @@ def _utf8_prefix(value: str, max_bytes: int) -> tuple[str, bool]:
     return encoded[:max_bytes].decode("utf-8", "ignore"), True
 
 
+def redact_artifact_observation(
+    observation: RuntimeArtifactObservation,
+) -> RuntimeArtifactObservation:
+    """Reapply canonical redaction at the collector's injected-adapter boundary."""
+    if contains_secret(observation.artifact_name):
+        raise ValueError("runtime artifact name contains secret material")
+    files = []
+    for file in observation.files:
+        if contains_secret(file.path):
+            raise ValueError("runtime artifact path contains secret material")
+        excerpt = file.text_excerpt
+        redacted = file.redacted
+        if excerpt is not None:
+            excerpt, changed = redact_secrets(excerpt)
+            excerpt = excerpt[:8000]
+            redacted = redacted or changed
+        files.append(
+            file.model_copy(
+                update={"text_excerpt": excerpt, "redacted": redacted},
+                deep=True,
+            )
+        )
+    github_url = observation.github_url
+    if github_url is not None:
+        github_url = redact_secrets(github_url)[0][:2000]
+    reason = observation.unverified_reason
+    if reason is not None:
+        reason = redact_secrets(reason)[0][:2000]
+    return RuntimeArtifactObservation.model_validate(
+        {
+            **observation.model_dump(mode="python"),
+            "files": [file.model_dump(mode="python") for file in files],
+            "github_url": github_url,
+            "unverified_reason": reason,
+        }
+    )
+
+
 def _unverified_artifact(
     expectation: RuntimeArtifactExpectation,
     *,
@@ -292,6 +329,9 @@ def _unverified_artifact(
     reason: str,
     artifact: GitHubArtifact | None = None,
 ) -> RuntimeArtifactObservation:
+    github_url = None
+    if artifact is not None:
+        github_url = redact_secrets(artifact.archive_download_url)[0][:2000]
     return RuntimeArtifactObservation(
         artifact_name=expectation.artifact_name,
         artifact_id=artifact.artifact_id if artifact is not None else None,
@@ -300,7 +340,7 @@ def _unverified_artifact(
         status=RuntimeEvidenceStatus.unverified,
         requirement_ids=expectation.requirement_ids,
         files=[],
-        github_url=(artifact.archive_download_url if artifact is not None else None),
+        github_url=github_url,
         unverified_reason=reason,
     )
 
@@ -453,6 +493,11 @@ async def collect_runtime_evidence(
                 token,
                 max_bytes=max_log_bytes,
             )
+            inspected, source_bounded = _utf8_prefix(
+                log.text,
+                max_log_bytes + 512,
+            )
+            inspected, canonical_redacted = redact_secrets(inspected)
         except (httpx.HTTPError, ValueError) as error:
             diagnostics.append(
                 _exception_diagnostic(
@@ -483,25 +528,27 @@ async def collect_runtime_evidence(
                 )
             )
             continue
-        excerpt, bounded = _utf8_prefix(log.text, max_log_bytes)
+        excerpt, bounded = _utf8_prefix(inspected, max_log_bytes)
         excerpt_bytes = len(excerpt.encode("utf-8"))
         github_url = (
             job.html_url
             or f"https://github.com/{repo}/actions/runs/"
             f"{job.workflow_run_id}/job/{job.job_id}"
         )
+        github_url = redact_secrets(github_url)[0][:2000]
+        job_name = redact_secrets(job.name)[0][:300]
         job_logs.append(
             RuntimeJobLogEvidence(
                 workflow_run_id=job.workflow_run_id,
                 job_id=job.job_id,
-                job_name=job.name[:300] or "job",
+                job_name=job_name or "job",
                 head_sha=head_sha,
                 text_excerpt=excerpt,
                 excerpt_byte_count=excerpt_bytes,
                 source_byte_count=log.byte_count,
-                truncated=log.truncated or bounded,
-                redacted=log.redacted,
-                github_url=github_url[:2000],
+                truncated=log.truncated or source_bounded or bounded,
+                redacted=log.redacted or canonical_redacted,
+                github_url=github_url,
             )
         )
 
@@ -610,16 +657,19 @@ async def collect_runtime_evidence(
                 )
             else:
                 observations.append(
-                    missing_artifact_observation(
-                        expectation,
-                        workflow_run_id=completed_fallback.run_id,
-                        head_sha=head_sha,
-                        github_url=completed_fallback.html_url,
+                    redact_artifact_observation(
+                        missing_artifact_observation(
+                            expectation,
+                            workflow_run_id=completed_fallback.run_id,
+                            head_sha=head_sha,
+                            github_url=completed_fallback.html_url,
+                        )
                     )
                 )
             continue
         try:
             observation = await download_artifact_fn(artifact, expectation, token)
+            observation = redact_artifact_observation(observation)
         except (httpx.HTTPError, ValueError) as error:
             diagnostics.append(
                 _exception_diagnostic(

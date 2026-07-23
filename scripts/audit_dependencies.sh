@@ -27,20 +27,18 @@ for lock in \
     services/query/requirements.lock \
     services/agents/requirements.lock \
     services/admin-api/requirements.lock \
+    services/codegen/requirements.lock \
+    services/codegen/requirements-agent.lock \
     pipeline/redis/requirements.lock
 do
     echo "==> Auditing $lock"
     uvx pip-audit --strict --require-hashes -r "$ROOT_DIR/$lock"
 done
 
-for project in sdk/python services/codegen; do
+for project in sdk/python; do
     slug="${project//\//-}"
     requirements="$TMP_DIR/$slug.txt"
-    if [ "$project" = "services/codegen" ]; then
-        echo "==> Resolving and auditing $project (offline API only; agent extra excluded)"
-    else
-        echo "==> Resolving and auditing $project"
-    fi
+    echo "==> Resolving and auditing $project"
     uv pip compile "$ROOT_DIR/$project/pyproject.toml" \
         --python-version 3.12 \
         --output-file "$requirements" \

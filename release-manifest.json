@@ -17,5 +17,87 @@
       "path": "sdk/python"
     }
   },
-  "docker_images": []
+  "docker_images": [
+    {
+      "name": "admin",
+      "repository": "ghcr.io/kuvera-apdl/apdl-admin",
+      "context": "services/admin",
+      "dockerfile": "services/admin/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "admin-api",
+      "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
+      "context": "services/admin-api",
+      "dockerfile": "services/admin-api/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "agents",
+      "repository": "ghcr.io/kuvera-apdl/apdl-agents",
+      "context": "services/agents",
+      "dockerfile": "services/agents/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "clickhouse-writer",
+      "repository": "ghcr.io/kuvera-apdl/apdl-clickhouse-writer",
+      "context": "pipeline/redis",
+      "dockerfile": "pipeline/redis/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "codegen",
+      "repository": "ghcr.io/kuvera-apdl/apdl-codegen",
+      "context": "services/codegen",
+      "dockerfile": "services/codegen/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "codegen-egress",
+      "repository": "ghcr.io/kuvera-apdl/apdl-codegen-egress",
+      "context": "infra/docker/codegen-egress",
+      "dockerfile": "infra/docker/codegen-egress/Dockerfile",
+      "build_args": [
+        "CODEGEN_EGRESS_POLICY_SHA256"
+      ]
+    },
+    {
+      "name": "codegen-worker",
+      "repository": "ghcr.io/kuvera-apdl/apdl-codegen-worker",
+      "context": "services/codegen",
+      "dockerfile": "services/codegen/Dockerfile.worker",
+      "build_args": [
+        "CODEGEN_REVISION"
+      ]
+    },
+    {
+      "name": "config",
+      "repository": "ghcr.io/kuvera-apdl/apdl-config",
+      "context": "services/config",
+      "dockerfile": "services/config/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "ingestion",
+      "repository": "ghcr.io/kuvera-apdl/apdl-ingestion",
+      "context": "services/ingestion",
+      "dockerfile": "services/ingestion/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "postgres-migrate",
+      "repository": "ghcr.io/kuvera-apdl/apdl-postgres-migrate",
+      "context": "pipeline/postgres",
+      "dockerfile": "pipeline/postgres/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "query",
+      "repository": "ghcr.io/kuvera-apdl/apdl-query",
+      "context": "services/query",
+      "dockerfile": "services/query/Dockerfile",
+      "build_args": []
+    }
+  ]
 }

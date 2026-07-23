@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
 import {
   buildCreate,
   buildUpdate,
@@ -38,6 +39,25 @@ import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 
 export function ExperimentDetailPage() {
   const { key = '' } = useParams()
+  const { active } = useWorkspace()
+  const canWrite = hasWorkspaceRole(active, 'config:write')
+
+  return (
+    <ExperimentDetailEditor
+      key={`${active?.id ?? 'no-workspace'}:${key}`}
+      experimentKey={key}
+      canWrite={canWrite}
+    />
+  )
+}
+
+function ExperimentDetailEditor({
+  experimentKey: key,
+  canWrite,
+}: {
+  experimentKey: string
+  canWrite: boolean
+}) {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const experimentsQuery = useExperimentsQuery()
@@ -56,10 +76,12 @@ export function ExperimentDetailPage() {
   } | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
-  if (entry && values === null) {
-    setValues(entryToFormValues(entry))
-    setLoadedVersion(entry.version)
-  }
+  useEffect(() => {
+    if (entry && values === null) {
+      setValues(entryToFormValues(entry))
+      setLoadedVersion(entry.version)
+    }
+  }, [entry, values])
 
   const submitUpdate = async (body: ExperimentUpdate) => {
     try {
@@ -77,7 +99,7 @@ export function ExperimentDetailPage() {
   }
 
   const save = async () => {
-    if (!values) return
+    if (!canWrite || !values) return
     if (!entry) return
     if (loadedVersion === null) return
     const body = buildUpdate(values, entry, loadedVersion)
@@ -143,7 +165,7 @@ export function ExperimentDetailPage() {
           </>
         }
         actions={
-          !archived ? (
+          canWrite && !archived ? (
             <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}>
               {removalVerb}…
             </Button>
@@ -181,13 +203,16 @@ export function ExperimentDetailPage() {
               currentStatus={entry.status}
               onSubmit={() => void save()}
               submitting={updateMutation.isPending}
-              readOnly={archived}
+              readOnly={archived || !canWrite}
             />
           ) : null}
         </TabsContent>
       </Tabs>
 
-      <Dialog open={staleConfirm !== null} onOpenChange={(open) => !open && setStaleConfirm(null)}>
+      <Dialog
+        open={canWrite && staleConfirm !== null}
+        onOpenChange={(open) => !open && setStaleConfirm(null)}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Experiment changed since you loaded it</DialogTitle>
@@ -218,7 +243,7 @@ export function ExperimentDetailPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <Dialog open={canWrite && deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{removalVerb} experiment "{entry.key}"?</DialogTitle>
@@ -258,12 +283,15 @@ export function ExperimentDetailPage() {
 }
 
 export function ExperimentCreatePage() {
+  const { active } = useWorkspace()
+  const canWrite = hasWorkspaceRole(active, 'config:write')
   const navigate = useNavigate()
   const createMutation = useCreateExperimentMutation()
   const [values, setValues] = useState<ExperimentFormValues>(emptyExperimentValues)
   const [keyError, setKeyError] = useState<string | null>(null)
 
   const submit = async () => {
+    if (!canWrite) return
     setKeyError(null)
     try {
       const response = await createMutation.mutateAsync(buildCreate(values))
@@ -273,6 +301,15 @@ export function ExperimentCreatePage() {
       if (error instanceof ApiError && error.code === 'conflict') setKeyError(error.message)
       else toast.error(error instanceof ApiError ? error.message : 'Create failed')
     }
+  }
+
+  if (!canWrite) {
+    return (
+      <EmptyState
+        title="Experiment creation unavailable"
+        description="Creating experiments requires config:write for the active project."
+      />
+    )
   }
 
   return (

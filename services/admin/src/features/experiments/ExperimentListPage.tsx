@@ -12,7 +12,7 @@ import { EmptyState } from '@/components/shared/PanelStates'
 import { RelativeTime } from '@/components/shared/RelativeTime'
 import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
 import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 import { formatPercent } from '@/lib/format'
@@ -21,6 +21,7 @@ const columnHelper = createColumnHelper<ExperimentEntry>()
 
 export function ExperimentListPage() {
   const { active } = useWorkspace()
+  const canWrite = hasWorkspaceRole(active, 'config:write')
   const navigate = useNavigate()
   const experimentsQuery = useExperimentsQuery()
   const conn = active ? serviceConnection(active, 'config') : null
@@ -71,12 +72,14 @@ export function ExperimentListPage() {
         actions={
           <>
             {conn ? <CurlButton spec={listExperimentsCurl(conn)} title="List experiments" /> : null}
-            <Button size="sm" asChild>
-              <Link to="/experiments/new">
-                <Plus />
-                New experiment
-              </Link>
-            </Button>
+            {canWrite ? (
+              <Button size="sm" asChild>
+                <Link to="/experiments/new">
+                  <Plus />
+                  New experiment
+                </Link>
+              </Button>
+            ) : null}
           </>
         }
       />
@@ -91,14 +94,20 @@ export function ExperimentListPage() {
         emptyState={
           <EmptyState
             title="No experiments yet"
-            description="Results use each experiment's configured backing flag, metric, and analysis window."
+            description={
+              canWrite
+                ? "Results use each experiment's configured backing flag, metric, and analysis window."
+                : 'No experiments are available to this read-only workspace.'
+            }
           >
-            <Button size="sm" asChild>
-              <Link to="/experiments/new">
-                <Plus />
-                New experiment
-              </Link>
-            </Button>
+            {canWrite ? (
+              <Button size="sm" asChild>
+                <Link to="/experiments/new">
+                  <Plus />
+                  New experiment
+                </Link>
+              </Button>
+            ) : null}
           </EmptyState>
         }
       />

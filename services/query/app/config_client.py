@@ -54,6 +54,8 @@ class ConfigExperimentAnalysis(BaseModel):
     variants: list[str] = Field(..., min_length=2, max_length=10)
     metric_event: str = Field(..., min_length=1)
     metric_direction: Literal["increase", "decrease"]
+    enrollment_mode: Literal["all", "targeted"]
+    minimum_exposure_config_version: int = Field(..., ge=1, strict=True)
     statistical_plan: ConfigExperimentStatisticalPlan
     start_date: AwareDatetime
     end_date: AwareDatetime

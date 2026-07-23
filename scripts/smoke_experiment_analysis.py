@@ -141,6 +141,20 @@ def _load_fixture(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise SmokeFailure("Fixture control_variant must be a declared variant")
     if runtime["unknown_variant"] in variants:
         raise SmokeFailure("Fixture unknown_variant must not be a declared variant")
+    if contract.get("enrollment_mode") != "all":
+        raise SmokeFailure(
+            "Fixture enrollment_mode must be all for fallthrough exposure events"
+        )
+    minimum_exposure_config_version = contract.get(
+        "minimum_exposure_config_version"
+    )
+    if (
+        type(minimum_exposure_config_version) is not int
+        or minimum_exposure_config_version < 1
+    ):
+        raise SmokeFailure(
+            "Fixture minimum_exposure_config_version must be a positive integer"
+        )
     _assert_equal(
         set(expected["arm_sample_sizes"]),
         set(variants),
@@ -340,6 +354,8 @@ def _assert_projection(
             "variants",
             "metric_event",
             "metric_direction",
+            "enrollment_mode",
+            "minimum_exposure_config_version",
             "statistical_plan",
             "start_date",
             "end_date",
@@ -361,6 +377,16 @@ def _assert_projection(
     )
     _assert_equal(
         projection["metric_direction"], contract["metric_direction"], "metric direction"
+    )
+    _assert_equal(
+        projection["enrollment_mode"],
+        contract["enrollment_mode"],
+        "projected enrollment mode",
+    )
+    _assert_equal(
+        projection["minimum_exposure_config_version"],
+        contract["minimum_exposure_config_version"],
+        "projected minimum exposure config version",
     )
     _assert_equal(
         projection["statistical_plan"], contract["statistical_plan"], "statistical plan"
@@ -570,7 +596,7 @@ def _run(args: argparse.Namespace) -> None:
             runtime=runtime,
             run_id=run_id,
             flag_key=flag_key,
-            config_version=created_version,
+            config_version=int(contract["minimum_exposure_config_version"]),
             start=start,
             end=end,
         )
