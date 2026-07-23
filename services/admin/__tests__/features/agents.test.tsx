@@ -387,7 +387,7 @@ describe('TriggerPage', () => {
     expect(requests.some((entry) => entry.path === 'trigger')).toBe(false)
   })
 
-  test('filters experiment evaluation from live definitions and trigger payloads', async () => {
+  test('offers evidence-only experiment evaluation from live definitions', async () => {
     server.use(
       http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
         HttpResponse.json({
@@ -405,10 +405,10 @@ describe('TriggerPage', () => {
             {
               name: 'experiment_evaluation',
               display_name: 'Experiment evaluation',
-              description: 'Produces experiment verdicts.',
+              description: 'Summarizes verified experiment evidence.',
               order: 30,
-              produces: 'experiment_verdicts',
-              requires: ['experiment_designs'],
+              produces: 'experiment_evidence_summaries',
+              requires: [],
               model_tier: 'reasoning',
               is_custom: false,
             },
@@ -426,11 +426,11 @@ describe('TriggerPage', () => {
     )
 
     expect(await screen.findByText('Produces insights.')).toBeInTheDocument()
-    expect(screen.queryByText('Experiment evaluation')).not.toBeInTheDocument()
+    expect(screen.getByText('Experiment evaluation')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
     expect(requests.find((entry) => entry.path === 'trigger')?.body).toMatchObject({
-      analysis_types: ['behavior_analysis'],
+      analysis_types: ['behavior_analysis', 'experiment_evaluation'],
     })
   })
 })

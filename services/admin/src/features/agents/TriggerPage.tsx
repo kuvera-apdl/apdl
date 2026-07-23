@@ -34,7 +34,7 @@ interface AnalysisOption {
 
 // code_implementation is deliberately absent from the manual trigger list —
 // it runs via the approval flow. Filter it out of the live listing too.
-const HIDDEN_AGENTS = new Set(['code_implementation', 'experiment_evaluation'])
+const HIDDEN_AGENTS = new Set(['code_implementation'])
 
 const OUTCOME_STYLES: Record<GateOutcome, string> = {
   halt: 'text-muted-foreground',

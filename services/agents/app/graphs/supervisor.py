@@ -355,6 +355,7 @@ async def _run_owned_supervisor(
         "insights": [],
         "experiment_designs": [],
         "experiment_verdicts": [],
+        "experiment_evidence_summaries": [],
         "personalizations": [],
         "feature_proposals": [],
         "errors": [],
