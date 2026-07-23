@@ -28,7 +28,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { useFlagsQuery } from '@/features/flags/hooks'
 import { useCreateFlagMutation, useUpdateFlagMutation } from '@/features/flags/mutations'
 import { PopulationSimulator } from '@/features/flags/tester/PopulationSimulator'
@@ -71,6 +71,14 @@ function Section({ title, description, children }: { title: string; description?
 export function FlagEditorPage() {
   const { key } = useParams()
   const { active } = useWorkspace()
+  if (!hasWorkspaceRole(active, 'config:write')) {
+    return (
+      <EmptyState
+        title="Flag editing unavailable"
+        description="Creating or editing flags requires config:write for the active project."
+      />
+    )
+  }
 
   return <FlagEditor key={`${active?.id ?? 'no-workspace'}:${key ?? '__new__'}`} flagKey={key} />
 }

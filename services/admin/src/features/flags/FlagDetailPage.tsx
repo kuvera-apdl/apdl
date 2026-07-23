@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
 import { useFlagAuditQuery, useFlagsQuery } from '@/features/flags/hooks'
 import {
   ACTION_LABELS,
@@ -135,6 +136,8 @@ function OverviewTab({ flag }: { flag: FlagConfig }) {
 
 export function FlagDetailPage() {
   const { key = '' } = useParams()
+  const { active } = useWorkspace()
+  const canWrite = hasWorkspaceRole(active, 'config:write')
   const [searchParams, setSearchParams] = useSearchParams()
   const flagsQuery = useFlagsQuery()
   const [auditLimit, setAuditLimit] = useState(AUDIT_LIMIT_DEFAULT)
@@ -201,7 +204,7 @@ export function FlagDetailPage() {
         }
         description={flag.name}
         actions={
-          flag.state !== 'archived' ? (
+          canWrite && flag.state !== 'archived' ? (
             <>
               <Button variant="outline" size="sm" asChild>
                 <Link to={`/flags/${encodeURIComponent(flag.key)}/edit`}>
@@ -224,7 +227,7 @@ export function FlagDetailPage() {
         }
       />
 
-      {lifecycleAction ? (
+      {canWrite && lifecycleAction ? (
         <LifecycleDialog flag={flag} action={lifecycleAction} onClose={() => setLifecycleAction(null)} />
       ) : null}
 

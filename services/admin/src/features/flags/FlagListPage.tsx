@@ -24,7 +24,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { serviceConnection, useWorkspace } from '@/core/workspace'
+import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { useFlagsQuery } from '@/features/flags/hooks'
 import { LifecycleDialog, type LifecycleAction } from '@/features/flags/LifecycleDialog'
 import { formatPercent, isPastDate, parseServerDate, variantSummary } from '@/lib/format'
@@ -36,12 +36,13 @@ const columnHelper = createColumnHelper<FlagConfig>()
 
 interface RowMenuProps {
   flag: FlagConfig
+  canWrite: boolean
   onViewAudit: () => void
   onEdit: () => void
   onLifecycle: (action: LifecycleAction) => void
 }
 
-function RowMenu({ flag, onViewAudit, onEdit, onLifecycle }: RowMenuProps) {
+function RowMenu({ flag, canWrite, onViewAudit, onEdit, onLifecycle }: RowMenuProps) {
   const copy = async (value: string, what: string) => {
     try {
       await navigator.clipboard.writeText(value)
@@ -65,11 +66,11 @@ function RowMenu({ flag, onViewAudit, onEdit, onLifecycle }: RowMenuProps) {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>
-        {!archived ? <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem> : null}
-        {flag.state === 'active' ? (
+        {canWrite && !archived ? <DropdownMenuItem onSelect={onEdit}>Edit</DropdownMenuItem> : null}
+        {canWrite && flag.state === 'active' ? (
           <DropdownMenuItem onSelect={() => onLifecycle('disable')}>Disable…</DropdownMenuItem>
         ) : null}
-        {!archived ? (
+        {canWrite && !archived ? (
           <DropdownMenuItem onSelect={() => onLifecycle('archive')}>Archive…</DropdownMenuItem>
         ) : null}
         <DropdownMenuItem onSelect={() => void copy(flag.key, 'Key')}>Copy key</DropdownMenuItem>
@@ -84,6 +85,7 @@ function RowMenu({ flag, onViewAudit, onEdit, onLifecycle }: RowMenuProps) {
 
 export function FlagListPage() {
   const { active } = useWorkspace()
+  const canWrite = hasWorkspaceRole(active, 'config:write')
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const flagsQuery = useFlagsQuery()
@@ -214,6 +216,7 @@ export function FlagListPage() {
           cell: ({ row }) => (
             <RowMenu
               flag={row.original}
+              canWrite={canWrite}
               onViewAudit={() => openDetail(row.original, 'audit')}
               onEdit={() => navigate(`/flags/${encodeURIComponent(row.original.key)}/edit`)}
               onLifecycle={(action) => setLifecycle({ flag: row.original, action })}
@@ -222,7 +225,7 @@ export function FlagListPage() {
         }),
       ] as ColumnDef<FlagConfig, unknown>[],
     // openDetail only captures react-router's stable navigate.
-    [],
+    [canWrite],
   )
 
   const conn = active ? serviceConnection(active, 'config') : null
@@ -239,17 +242,19 @@ export function FlagListPage() {
         actions={
           <>
             {conn ? <CurlButton spec={listFlagsCurl(conn, showArchived)} title="List flags" /> : null}
-            <Button size="sm" asChild>
-              <Link to="/flags/new">
-                <Plus />
-                New flag
-              </Link>
-            </Button>
+            {canWrite ? (
+              <Button size="sm" asChild>
+                <Link to="/flags/new">
+                  <Plus />
+                  New flag
+                </Link>
+              </Button>
+            ) : null}
           </>
         }
       />
 
-      {lifecycle ? (
+      {canWrite && lifecycle ? (
         <LifecycleDialog
           flag={lifecycle.flag}
           action={lifecycle.action}
@@ -308,13 +313,22 @@ export function FlagListPage() {
         rowClassName={(flag) => (flag.state === 'archived' ? 'opacity-60' : undefined)}
         emptyState={
           allFlags !== undefined && allFlags.length === 0 ? (
-            <EmptyState title="No flags yet" description="Create your first flag to start the Loop.">
-              <Button size="sm" asChild>
-                <Link to="/flags/new">
-                  <Plus />
-                  New flag
-                </Link>
-              </Button>
+            <EmptyState
+              title="No flags yet"
+              description={
+                canWrite
+                  ? 'Create your first flag to start the Loop.'
+                  : 'No flags are available to this read-only workspace.'
+              }
+            >
+              {canWrite ? (
+                <Button size="sm" asChild>
+                  <Link to="/flags/new">
+                    <Plus />
+                    New flag
+                  </Link>
+                </Button>
+              ) : null}
             </EmptyState>
           ) : (
             'No flags match the current filters.'

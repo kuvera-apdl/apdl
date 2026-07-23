@@ -8,8 +8,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
+import type { Workspace } from '../../src/core/workspace'
 import { FlagDetailPage } from '../../src/features/flags/FlagDetailPage'
-import { makeAuditEntry, makeFlag, seedWorkspace } from '../helpers/fixtures'
+import { makeAuditEntry, makeFlag, makeWorkspace, seedWorkspace } from '../helpers/fixtures'
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/flags', () =>
@@ -44,10 +45,10 @@ beforeEach(() => {
   seedWorkspace()
 })
 
-function renderDetail(path: string) {
+function renderDetail(path: string, workspace: Workspace = seedWorkspace()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+    <WorkspaceProvider initialWorkspaces={[workspace]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
           <MemoryRouter initialEntries={[path]}>
@@ -91,5 +92,15 @@ describe('FlagDetailPage', () => {
   test('unknown keys render the not-found state', async () => {
     renderDetail('/flags/nope')
     expect(await screen.findByText(/not found/i)).toBeInTheDocument()
+  })
+
+  test('keeps details read-only without config:write', async () => {
+    const workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    renderDetail('/flags/checkout-cta', workspace)
+
+    expect(await screen.findByText('checkout-cta')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /disable|archive|activate|deactivate/i }))
+      .not.toBeInTheDocument()
   })
 })

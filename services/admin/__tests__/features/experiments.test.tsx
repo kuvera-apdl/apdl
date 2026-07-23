@@ -19,6 +19,7 @@ import {
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
+import type { Workspace } from '../../src/core/workspace'
 import {
   buildCreate,
   buildUpdate,
@@ -30,7 +31,7 @@ import {
 } from '../../src/features/experiments/ExperimentForm'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
 import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
-import { seedWorkspace } from '../helpers/fixtures'
+import { makeWorkspace, seedWorkspace } from '../helpers/fixtures'
 
 const STATISTICAL_PLAN = {
   protocol: 'fixed_horizon_fisher_newcombe_cc_plan_v1',
@@ -547,6 +548,27 @@ describe('ExperimentListPage', () => {
     expect(await screen.findByText('checkout-test')).toBeInTheDocument()
     expect(screen.getByText('archived')).toBeInTheDocument()
   })
+
+  test('does not offer creation without config:write', async () => {
+    const workspace: Workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[workspace]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments']}>
+              <Routes>
+                <Route path="/experiments" element={<ExperimentListPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    expect(await screen.findByText('checkout-test')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /new experiment/i })).not.toBeInTheDocument()
+  })
 })
 
 describe('ExperimentDetailPage', () => {
@@ -712,5 +734,28 @@ describe('ExperimentDetailPage', () => {
     expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
       .not.toBeInTheDocument()
     expect(screen.getByText(/by credential:operator/i)).toBeInTheDocument()
+  })
+
+  test('keeps a live experiment read-only without config:write', async () => {
+    const workspace: Workspace = seedWorkspace(makeWorkspace({ roles: ['config:read'] }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <WorkspaceProvider initialWorkspaces={[workspace]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+              <Routes>
+                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+              </Routes>
+            </MemoryRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    expect(await screen.findByDisplayValue('CTA experiment')).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
+      .not.toBeInTheDocument()
+    expect(updateBodies).toEqual([])
   })
 })
