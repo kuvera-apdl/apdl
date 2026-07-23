@@ -7,6 +7,7 @@ import type { ExperimentUpdate } from '@/api/types/experiments'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
 import { RelativeTime } from '@/components/shared/RelativeTime'
+import { StatePill } from '@/components/shared/StatePill'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -115,6 +116,10 @@ export function ExperimentDetailPage() {
     )
   }
 
+  const archived = entry.archived_at !== null
+  const deletesPermanently = entry.status === 'draft'
+  const removalVerb = deletesPermanently ? 'Delete' : 'Archive'
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -122,19 +127,27 @@ export function ExperimentDetailPage() {
         title={
           <span className="flex flex-wrap items-center gap-2">
             <code className="font-mono">{entry.key}</code>
-            <ExperimentStatusPill status={entry.status} />
+            {archived ? <StatePill state="archived" /> : <ExperimentStatusPill status={entry.status} />}
           </span>
         }
         description={
           <>
             {entry.description || 'No description'} · updated{' '}
             <RelativeTime value={entry.updated_at} />
+            {archived ? (
+              <>
+                {' '}· archived <RelativeTime value={entry.archived_at} />
+                {entry.archived_by ? ` by ${entry.archived_by}` : ''}
+              </>
+            ) : null}
           </>
         }
         actions={
-          <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}>
-            Delete…
-          </Button>
+          !archived ? (
+            <Button variant="destructive" size="sm" onClick={() => setDeleteOpen(true)}>
+              {removalVerb}…
+            </Button>
+          ) : null
         }
       />
 
@@ -168,6 +181,7 @@ export function ExperimentDetailPage() {
               currentStatus={entry.status}
               onSubmit={() => void save()}
               submitting={updateMutation.isPending}
+              readOnly={archived}
             />
           ) : null}
         </TabsContent>
@@ -207,10 +221,11 @@ export function ExperimentDetailPage() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete experiment "{entry.key}"?</DialogTitle>
+            <DialogTitle>{removalVerb} experiment "{entry.key}"?</DialogTitle>
             <DialogDescription>
-              Removes the experiment record. Exposure events and statistics history in ClickHouse
-              are not touched.
+              {deletesPermanently
+                ? 'Permanently removes this unlaunched draft. Exposure events and statistics history in ClickHouse are not touched.'
+                : 'Stops active traffic and archives the experiment as an immutable record. Exposure events and statistics history are preserved.'}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -222,8 +237,10 @@ export function ExperimentDetailPage() {
               onClick={() => {
                 void deleteMutation
                   .mutateAsync(entry.version)
-                  .then(() => {
-                    toast.success(`Experiment "${entry.key}" deleted`)
+                  .then((result) => {
+                    toast.success(
+                      `Experiment "${entry.key}" ${result.archived ? 'archived' : 'deleted'}`,
+                    )
                     navigate('/experiments')
                   })
                   .catch((error: unknown) =>
@@ -231,7 +248,7 @@ export function ExperimentDetailPage() {
                   )
               }}
             >
-              Delete
+              {removalVerb}
             </Button>
           </DialogFooter>
         </DialogContent>

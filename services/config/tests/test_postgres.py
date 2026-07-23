@@ -145,6 +145,7 @@ async def test_get_experiment_uses_explicit_projection():
 
     assert "SELECT *" not in pool.sql
     assert "flag_key" in pool.sql
+    assert "archived_at IS NULL" not in pool.sql
     assert pool.args == ("apdl", "checkout")
 
 
@@ -157,6 +158,7 @@ async def test_get_due_experiments_uses_database_timestamp_comparison():
 
     assert "status = 'scheduled' AND start_date <= $1" in pool.sql
     assert "status = 'running' AND end_date <= $1" in pool.sql
+    assert "archived_at IS NULL" in pool.sql
     assert pool.args == (now,)
 
 
@@ -182,6 +184,8 @@ def test_row_to_experiment_includes_canonical_columns():
         "version": 3,
         "created_at": created,
         "updated_at": updated,
+        "archived_at": None,
+        "archived_by": None,
     }
 
     exp = postgres._row_to_experiment(row)
@@ -196,6 +200,8 @@ def test_row_to_experiment_includes_canonical_columns():
     assert exp["end_date"] is end
     assert exp["created_at"] is created
     assert exp["updated_at"] is updated
+    assert exp["archived_at"] is None
+    assert exp["archived_by"] is None
 
 
 def test_create_experiments_table_defines_canonical_columns():

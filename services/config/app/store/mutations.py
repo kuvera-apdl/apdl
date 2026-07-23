@@ -69,6 +69,14 @@ class ImmutableExperimentError(MutationError):
         self.fields = ordered_fields
 
 
+class ArchivedExperimentError(MutationError):
+    """A mutation targeted an immutable archived experiment."""
+
+    def __init__(self, key: str):
+        super().__init__(f"Experiment '{key}' is archived and immutable")
+        self.key = key
+
+
 _FROZEN_EXPERIMENT_FIELDS = {
     "default_variant": "default_variant",
     "traffic_percentage": "traffic_percentage",
@@ -242,6 +250,36 @@ async def _audit_flag(
         _json(after) if after else None,
         _json(evidence or {}),
         reason,
+    )
+
+
+async def _audit_experiment(
+    conn,
+    *,
+    action: str,
+    actor: str,
+    before: dict | None,
+    after: dict | None,
+) -> None:
+    experiment = after or before
+    if experiment is None:
+        raise IntegrityError("experiment audit requires a before or after snapshot")
+    await conn.execute(
+        """
+        INSERT INTO experiment_audit_log (
+            project_id, experiment_key, action, actor, previous_version,
+            new_version, before, after
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+        """,
+        experiment["project_id"],
+        experiment["key"],
+        action,
+        actor,
+        before.get("version") if before else None,
+        after.get("version") if after else None,
+        _json(before) if before else None,
+        _json(after) if after else None,
     )
 
 
@@ -538,6 +576,64 @@ async def _update_experiment(
             expected_version,
         )
     return pg_store._row_to_experiment(row)
+
+
+async def _archive_experiment(conn, before: dict, *, actor: str) -> dict:
+    archive_time = datetime.now(timezone.utc)
+    desired = before
+    if before["status"] in {"scheduled", "running"}:
+        desired, _ = finalize_terminal_analysis_window(
+            before,
+            {**before, "status": "stopped"},
+            now=archive_time,
+        )
+    row = await conn.fetchrow(
+        f"""
+        UPDATE experiments SET
+            status = $4,
+            end_date = $5,
+            archived_at = $6,
+            archived_by = $7,
+            version = version + 1,
+            updated_at = now()
+        WHERE project_id = $1 AND key = $2 AND version = $3
+          AND status <> 'draft' AND archived_at IS NULL
+        RETURNING {pg_store.EXPERIMENT_COLUMNS}
+        """,
+        before["project_id"],
+        before["key"],
+        before["version"],
+        desired["status"],
+        desired.get("end_date"),
+        archive_time,
+        actor,
+    )
+    if row is None:
+        raise VersionConflictError(
+            "Experiment",
+            before["key"],
+            before["version"],
+        )
+    return pg_store._row_to_experiment(row)
+
+
+async def _delete_draft_experiment(conn, before: dict) -> None:
+    result = await conn.execute(
+        """
+        DELETE FROM experiments
+        WHERE project_id = $1 AND key = $2 AND version = $3
+          AND status = 'draft' AND archived_at IS NULL
+        """,
+        before["project_id"],
+        before["key"],
+        before["version"],
+    )
+    if not result.endswith("1"):
+        raise VersionConflictError(
+            "Experiment",
+            before["key"],
+            before["version"],
+        )
 
 
 def _load_json(raw: str | None, fallback):
@@ -866,6 +962,13 @@ async def create_experiment_bundle(
         async with conn.transaction():
             created_flag = await _insert_flag(conn, flag)
             created_experiment = await _insert_experiment(conn, experiment)
+            await _audit_experiment(
+                conn,
+                action="experiment_created",
+                actor=actor,
+                before=None,
+                after=created_experiment,
+            )
             await _audit_flag(
                 conn,
                 action="flag_created",
@@ -908,6 +1011,8 @@ async def _update_experiment_bundle(
             desired["key"],
             before_experiment["version"],
         )
+    if before_experiment.get("archived_at") is not None:
+        raise ArchivedExperimentError(before_experiment["key"])
     if desired["flag_key"] != before_experiment["flag_key"]:
         raise IntegrityError("Experiment flag ownership is immutable")
     desired, terminal_fields = finalize_terminal_analysis_window(
@@ -930,6 +1035,18 @@ async def _update_experiment_bundle(
         conn,
         desired,
         expected_version,
+    )
+    audit_action = (
+        "experiment_status_changed"
+        if before_experiment["status"] != updated_experiment["status"]
+        else "experiment_updated"
+    )
+    await _audit_experiment(
+        conn,
+        action=audit_action,
+        actor=actor,
+        before=before_experiment,
+        after=updated_experiment,
     )
     await _audit_flag(
         conn,
@@ -989,23 +1106,37 @@ async def delete_experiment_bundle(
                     key,
                     experiment["version"],
                 )
+            if experiment.get("archived_at") is not None:
+                raise ArchivedExperimentError(key)
             before_flag = await _locked_flag(
                 conn,
                 project_id,
                 experiment["flag_key"],
             )
             archived = await _archive_flag(conn, before_flag)
-            result = await conn.execute(
-                """
-                DELETE FROM experiments
-                WHERE project_id = $1 AND key = $2 AND version = $3
-                """,
-                project_id,
-                key,
-                expected_version,
+            if experiment["status"] == "draft":
+                await _delete_draft_experiment(conn, experiment)
+                removed = {
+                    **experiment,
+                    "version": expected_version + 1,
+                }
+                experiment_action = "experiment_deleted"
+                audit_after = None
+            else:
+                removed = await _archive_experiment(
+                    conn,
+                    experiment,
+                    actor=actor,
+                )
+                experiment_action = "experiment_archived"
+                audit_after = removed
+            await _audit_experiment(
+                conn,
+                action=experiment_action,
+                actor=actor,
+                before=experiment,
+                after=audit_after,
             )
-            if not result.endswith("1"):
-                raise VersionConflictError("Experiment", key, expected_version)
             await _audit_flag(
                 conn,
                 action="flag_archived",
@@ -1013,21 +1144,20 @@ async def delete_experiment_bundle(
                 origin="experiment",
                 before=before_flag,
                 after=archived,
-                reason=f"experiment_deleted:{key}",
+                reason=f"{experiment_action}:{key}",
             )
             project_version = await _enqueue_flag_change(
                 conn,
                 "flag_archived",
                 archived,
             )
-            tombstone = {**experiment, "version": expected_version + 1}
             await _enqueue_experiment_change(
                 conn,
-                "experiment_deleted",
-                tombstone,
+                experiment_action,
+                removed,
                 project_version=project_version,
             )
-            return tombstone, archived
+            return removed, archived
 
 
 def _parse_timestamp(raw: str | datetime | None) -> datetime | None:

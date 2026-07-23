@@ -161,6 +161,32 @@ async def test_analysis_emits_shared_three_arm_fixture_contract(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_analysis_preserves_archived_launched_authority(monkeypatch):
+    get_experiment = AsyncMock(
+        return_value=make_experiment(
+            {
+                "status": "completed",
+                "version": 8,
+                "archived_at": "2026-09-01T00:00:00+00:00",
+                "archived_by": "credential:archiver",
+            }
+        )
+    )
+    monkeypatch.setattr(experiments.pg_store, "get_experiment", get_experiment)
+
+    response = await _get("/v1/experiments/checkout_exp/analysis")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+    assert response.json()["version"] == 8
+    get_experiment.assert_awaited_once_with(
+        app.state.pg_pool,
+        "apdl",
+        "checkout_exp",
+    )
+
+
+@pytest.mark.asyncio
 async def test_analysis_returns_404_for_missing_tenant_record(monkeypatch):
     monkeypatch.setattr(
         experiments.pg_store,

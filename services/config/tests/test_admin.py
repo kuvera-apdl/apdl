@@ -83,6 +83,8 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "creation_idempotency_request_sha256": None,
         "created_at": "2026-06-01T00:00:00+00:00",
         "updated_at": "2026-06-01T00:00:00+00:00",
+        "archived_at": None,
+        "archived_by": None,
     }
     if overrides:
         experiment.update(overrides)
@@ -784,6 +786,36 @@ async def test_update_experiment_rejects_illegal_transition(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_experiment_rejects_archived_authority(monkeypatch):
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(
+            return_value=make_experiment(
+                {
+                    "status": "running",
+                    "archived_at": "2026-07-20T00:00:00+00:00",
+                    "archived_by": "credential:archiver",
+                }
+            )
+        ),
+    )
+    command = AsyncMock()
+    monkeypatch.setattr(admin.mutations, "update_experiment_bundle", command)
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, "description": "rewrite"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "experiment_archived"
+    command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_delete_experiment_requires_and_forwards_version(monkeypatch):
     command = AsyncMock(return_value=(make_experiment({"version": 4}), make_flag()))
     monkeypatch.setattr(admin.mutations, "delete_experiment_bundle", command)
@@ -801,12 +833,85 @@ async def test_delete_experiment_requires_and_forwards_version(monkeypatch):
 
     assert missing.status_code == 422
     assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
+    assert deleted.json()["archived"] is False
     command.assert_awaited_once_with(
         app.state.pg_pool,
         project_id="apdl",
         key="checkout_exp",
         expected_version=3,
         actor="credential:test-config",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_route_reports_launched_experiment_archive(monkeypatch):
+    archived_at = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    command = AsyncMock(
+        return_value=(
+            make_experiment(
+                {
+                    "status": "running",
+                    "version": 4,
+                    "archived_at": archived_at,
+                    "archived_by": "credential:test-config",
+                }
+            ),
+            make_flag({"archived_at": archived_at}),
+        )
+    )
+    monkeypatch.setattr(admin.mutations, "delete_experiment_bundle", command)
+
+    response = await _request(
+        "DELETE",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl", "version": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "deleted": False,
+        "archived": True,
+        "key": "checkout_exp",
+        "flag_key": "checkout_exp",
+        "version": 4,
+    }
+
+
+@pytest.mark.asyncio
+async def test_experiment_audit_is_available_after_removal(monkeypatch):
+    audit = AsyncMock(
+        return_value=[
+            {
+                "id": 9,
+                "project_id": "apdl",
+                "experiment_key": "checkout_exp",
+                "action": "experiment_archived",
+                "actor": "credential:test-config",
+                "previous_version": 3,
+                "new_version": 4,
+                "before": {"status": "running"},
+                "after": {"status": "running", "archived_at": "2026-07-20"},
+                "created_at": "2026-07-20T00:00:00+00:00",
+            }
+        ]
+    )
+    monkeypatch.setattr(admin.pg_store, "get_experiment_audit_entries", audit)
+
+    response = await _request(
+        "GET",
+        "/v1/admin/experiments/checkout_exp/audit",
+        params={"project_id": "apdl"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert response.json()["audit"][0]["action"] == "experiment_archived"
+    audit.assert_awaited_once_with(
+        app.state.pg_pool,
+        "apdl",
+        "checkout_exp",
+        limit=50,
     )
 
 
@@ -825,6 +930,10 @@ async def test_list_experiments_serializes_datetimes_and_version(monkeypatch):
                         "end_date": datetime(
                             2026, 7, 1, tzinfo=timezone.utc
                         ),
+                        "archived_at": datetime(
+                            2026, 7, 20, tzinfo=timezone.utc
+                        ),
+                        "archived_by": "credential:archiver",
                     }
                 )
             ]
@@ -840,4 +949,6 @@ async def test_list_experiments_serializes_datetimes_and_version(monkeypatch):
     entry = response.json()["experiments"][0]
     assert entry["start_date"] == "2026-06-01T00:00:00+00:00"
     assert entry["end_date"] == "2026-07-01T00:00:00+00:00"
+    assert entry["archived_at"] == "2026-07-20T00:00:00+00:00"
+    assert entry["archived_by"] == "credential:archiver"
     assert entry["version"] == 3

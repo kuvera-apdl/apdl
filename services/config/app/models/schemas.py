@@ -315,6 +315,8 @@ class ExperimentConfig(BaseModel):
     version: int = Field(default=1, ge=1)
     created_at: str = ""
     updated_at: str = ""
+    archived_at: str | None = None
+    archived_by: str | None = None
 
 
 def _validate_context_value(
