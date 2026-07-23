@@ -119,6 +119,113 @@ await run(
   }
 );
 
+await run(
+  'RA-03 built bundle renders untrusted modal markup as Trusted Types-compatible text',
+  async () => {
+    const harness = createHarness();
+    const { window } = harness;
+    const client = createUiClient(harness);
+    const target = window.document.createElement('div');
+    window.document.body.appendChild(target);
+    window.__apdlXssExecuted = false;
+    const payload = [
+      '<img src=x onerror="window.__apdlXssExecuted = true">',
+      '<svg onload="window.__apdlXssExecuted = true"></svg>',
+      '<script>window.__apdlXssExecuted = true</script>',
+    ].join('');
+    const descriptor = Object.getOwnPropertyDescriptor(
+      window.Element.prototype,
+      'innerHTML'
+    );
+    assert.ok(descriptor);
+    Object.defineProperty(window.Element.prototype, 'innerHTML', {
+      ...descriptor,
+      set() {
+        throw new window.TypeError('Trusted Types policy rejected innerHTML');
+      },
+    });
+
+    try {
+      const rendered = client.ui.render({
+        component: 'modal',
+        props: { title: 'Untrusted content', body: payload },
+        slotId: 'security-modal',
+      }, target);
+
+      assert.ok(rendered);
+      assert.equal(rendered.querySelector('img, svg, script'), null);
+      assert.equal(rendered.textContent.includes(payload), true);
+      assert.equal(window.__apdlXssExecuted, false);
+    } finally {
+      Object.defineProperty(window.Element.prototype, 'innerHTML', descriptor);
+    }
+
+    await client.shutdown();
+    harness.close();
+  }
+);
+
+await run(
+  'RA-03 built bundle rejects scriptable, data, malformed, and relative UI URLs',
+  async () => {
+    const harness = createHarness();
+    const { window } = harness;
+    const client = createUiClient(harness);
+    const cases = [
+      ['banner', {
+        text: 'Banner',
+        ctaText: 'Open',
+        ctaHref: 'javascript:window.__apdlXssExecuted=true',
+      }],
+      ['card', {
+        title: 'Card',
+        ctaText: 'Open',
+        ctaHref: 'data:text/html,<script>alert(1)</script>',
+      }],
+      ['card', {
+        title: 'Card',
+        imageUrl: 'data:image/svg+xml,<svg onload=alert(1)>',
+      }],
+      ['cta-button', { text: 'Open', href: 'java\nscript:alert(1)' }],
+      ['cta-button', { text: 'Open', href: 'jav\u0000ascript:alert(1)' }],
+      ['cta-button', { text: 'Open', href: 'https:\\evil.example/path' }],
+      ['modal', { title: 'Modal', ctaText: 'Open', ctaHref: '//evil.example' }],
+      ['modal', { title: 'Modal', ctaText: 'Open', ctaHref: '/relative' }],
+      ['modal', { title: 'Modal', ctaText: 'Open', ctaHref: '#fragment' }],
+    ];
+
+    for (const [index, [component, props]] of cases.entries()) {
+      const target = window.document.createElement('div');
+      window.document.body.appendChild(target);
+      const rendered = client.ui.render({
+        component,
+        props,
+        slotId: `unsafe-url-${index}`,
+      }, target);
+      assert.equal(rendered, null, `${component} accepted an unsafe URL`);
+      assert.equal(target.querySelector('a, img, svg, script'), null);
+    }
+
+    const safeTarget = window.document.createElement('div');
+    window.document.body.appendChild(safeTarget);
+    const safeLink = client.ui.render({
+      component: 'cta-button',
+      props: {
+        text: 'Safe link',
+        href: 'https://safe.example/path',
+        target: '_blank',
+      },
+      slotId: 'safe-url',
+    }, safeTarget);
+    assert.ok(safeLink);
+    assert.equal(safeLink.href, 'https://safe.example/path');
+    assert.equal(safeLink.rel, 'noopener noreferrer');
+
+    await client.shutdown();
+    harness.close();
+  }
+);
+
 function createHarness() {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     runScripts: 'dangerously',
@@ -186,6 +293,19 @@ function createHarness() {
     close: () => dom.window.close(),
     window,
   };
+}
+
+function createUiClient(harness) {
+  return new harness.APDLClient({
+    endpoint: FIRST_ENDPOINT,
+    auth: { clientKey: CLIENT_KEY },
+    persistence: 'memory',
+    consent: {
+      analytics: false,
+      personalization: true,
+      experiments: false,
+    },
+  });
 }
 
 function storageKey(kind, endpoint) {

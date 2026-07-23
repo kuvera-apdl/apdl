@@ -1,4 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
+import { requireSafeUiTarget, requireSafeUiUrl } from '../url-policy';
 
 /**
  * Configurable CTA (call-to-action) button component.
@@ -24,26 +25,39 @@ export const CTAButtonComponent: ComponentDefinition = {
         enum: ['small', 'medium', 'large'],
       },
       fullWidth: { type: 'boolean', default: false },
-      target: { type: 'string', default: '_self' },
+      target: {
+        type: 'string',
+        default: '_self',
+        enum: ['_self', '_blank'],
+      },
     },
   },
 
   render(props: Record<string, unknown>, context: RenderContext): HTMLElement {
     const text = (props.text as string) || '';
     const href = props.href as string | undefined;
+    const safeHref = href === undefined
+      ? null
+      : requireSafeUiUrl(href, 'cta-button.href');
     const variant = (props.variant as string) || 'primary';
     const size = (props.size as string) || 'medium';
     const fullWidth = props.fullWidth === true;
-    const target = (props.target as string) || '_self';
+    const target = requireSafeUiTarget(
+      props.target ?? '_self',
+      'cta-button.target'
+    );
 
-    const isLink = !!href;
+    const isLink = safeHref !== null;
     const el = document.createElement(isLink ? 'a' : 'button');
     el.setAttribute('data-apdl-component', 'cta-button');
     el.textContent = text;
 
     if (isLink) {
-      (el as HTMLAnchorElement).href = href;
+      (el as HTMLAnchorElement).href = safeHref;
       (el as HTMLAnchorElement).target = target;
+      (el as HTMLAnchorElement).rel = 'noopener noreferrer';
+    } else {
+      (el as HTMLButtonElement).type = 'button';
     }
 
     // Size-specific padding
@@ -97,7 +111,11 @@ export const CTAButtonComponent: ComponentDefinition = {
       if (!isLink) {
         e.preventDefault();
       }
-      context.track('cta_button_clicked', { text, href, variant });
+      context.track('cta_button_clicked', {
+        text,
+        href: safeHref ?? undefined,
+        variant,
+      });
     });
 
     context.track('cta_button_rendered', { text, variant });
