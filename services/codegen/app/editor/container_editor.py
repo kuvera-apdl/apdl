@@ -19,9 +19,9 @@ trusted local in-process mode requires an explicit opt-in. It shells out to
 ``docker run``, so the codegen process needs a Docker client + socket (run
 codegen on a Docker host, or mount the socket for Docker-out-of-Docker).
 
-INTEGRATION-UNTESTED, like the editor it wraps: needs a built sandbox image, a
-Docker socket, a model key, and a live repo. The pure pieces (argv/env assembly,
-result parsing, the never-raise contract) are unit-tested.
+The worker image's real Docker launch, writable-workspace, hardening, and
+verified-cleanup path has a daemon-backed smoke contract. A live model/repository
+edit still requires deployment credentials and remains an external integration.
 
 Hardening applied here via ``docker run`` flags: ``--rm``, ``--network none``
 for evaluated work, a read-only root,
@@ -368,8 +368,10 @@ class ContainerAiderEditor:
             "run",
             "--rm",
             "-i",
-            "--pid",
-            "private",
+            # Docker's default is an isolated PID namespace. There is no
+            # portable `--pid private` value (Docker 29 rejects it), so leave
+            # the option unset rather than turning every worker launch into an
+            # invalid command.
             "--read-only",
             "--cap-drop",
             "ALL",

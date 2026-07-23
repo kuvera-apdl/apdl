@@ -1,8 +1,8 @@
-"""Tests for the sandboxed (container) editor's pure logic + never-raise contract.
+"""Tests for the sandboxed editor's pure logic and never-raise contract.
 
-The real path (an actual `docker run` of the sandbox image) is integration-
-untested; these cover argv/env assembly, the secrets-off-argv property, result
-parsing, and that an attempt never raises.
+The built-image Docker launch/change/cleanup contract lives in
+``test_worker_noexec_contracts.py``. These tests cover argv/env assembly, the
+secrets-off-argv property, result parsing, and that an attempt never raises.
 """
 
 import asyncio
@@ -75,7 +75,7 @@ def test_docker_argv_has_hardening_and_image_last():
     assert "--cap-drop" in argv and "ALL" in argv
     assert "no-new-privileges" in argv
     assert "--read-only" in argv
-    assert argv[argv.index("--pid") + 1] == "private"
+    assert "--pid" not in argv
     assert argv.count("--tmpfs") == 2
     assert "--user" in argv and "1000:1000" in argv
     assert "--pids-limit" in argv and "--memory" in argv and "--cpus" in argv
@@ -379,7 +379,7 @@ def test_worker_rejects_ambiguous_gemini_credentials(monkeypatch):
         ContainerAiderEditor()._docker_argv(_req())
 
 
-def test_preflight_launch_has_private_pid_namespace_and_no_provider_env(
+def test_preflight_launch_uses_default_pid_isolation_and_no_provider_env(
     monkeypatch,
 ):
     for name in MODEL_PROVIDER_ENV:
@@ -393,7 +393,7 @@ def test_preflight_launch_has_private_pid_namespace_and_no_provider_env(
     env = editor._docker_control_env()
     joined = " ".join(argv)
 
-    assert argv[argv.index("--pid") + 1] == "private"
+    assert "--pid" not in argv
     assert "dev.apdl.codegen.role=inspection" in argv
     assert argv[-3:] == [
         "apdl-sandbox:test",

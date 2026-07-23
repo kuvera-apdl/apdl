@@ -1,4 +1,4 @@
-"""Built-worker regression for contract checks on production noexec mounts."""
+"""Daemon-backed smoke contracts for the production Codegen worker image."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+from app.editor.container_editor import ContainerAiderEditor
 
 
 def _docker_daemon_available(docker: str) -> bool:
@@ -33,7 +35,8 @@ def _assert_completed(completed: subprocess.CompletedProcess[str], label: str) -
     pytest.fail(f"{label} failed with exit {completed.returncode}:\n{output}")
 
 
-def test_built_worker_contract_checks_survive_production_noexec_mounts():
+@pytest.fixture(scope="module")
+def built_worker_image():
     docker = shutil.which("docker")
     if docker is None or not _docker_daemon_available(docker):
         pytest.skip("Docker daemon is unavailable")
@@ -41,26 +44,52 @@ def test_built_worker_contract_checks_survive_production_noexec_mounts():
     repository_root = Path(__file__).resolve().parents[3]
     context = repository_root / "services/codegen"
     dockerfile = context / "Dockerfile.worker"
-    tag = f"apdl-codegen-noexec-test:{uuid.uuid4().hex}"
-    revision = f"noexec-contract-test-{uuid.uuid4().hex}"
-    build = subprocess.run(
-        [
-            docker,
-            "build",
-            "--build-arg",
-            f"CODEGEN_REVISION={revision}",
-            "--file",
-            dockerfile.as_posix(),
-            "--tag",
-            tag,
-            context.as_posix(),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=900,
-    )
-    _assert_completed(build, "worker image build")
+    tag = f"apdl-codegen-worker-smoke:{uuid.uuid4().hex}"
+    revision = f"worker-smoke-{uuid.uuid4().hex}"
+    try:
+        build = subprocess.run(
+            [
+                docker,
+                "build",
+                "--build-arg",
+                f"CODEGEN_REVISION={revision}",
+                "--file",
+                dockerfile.as_posix(),
+                "--tag",
+                tag,
+                context.as_posix(),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        _assert_completed(build, "worker image build")
+        inspect = subprocess.run(
+            [docker, "image", "inspect", "--format", "{{.Id}}", tag],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _assert_completed(inspect, "worker image identity inspection")
+        image_id = inspect.stdout.strip()
+        assert image_id.startswith("sha256:")
+        yield docker, image_id
+    finally:
+        subprocess.run(
+            [docker, "image", "rm", "--force", tag],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+
+def test_built_worker_contract_checks_survive_production_noexec_mounts(
+    built_worker_image,
+):
+    docker, image_id = built_worker_image
 
     probe = textwrap.dedent(
         """
@@ -170,55 +199,124 @@ def test_built_worker_contract_checks_survive_production_noexec_mounts():
         )
         """
     )
-    try:
-        run = subprocess.run(
-            [
-                docker,
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges",
-                "--pids-limit",
-                "512",
-                "--memory",
-                "2g",
-                "--cpus",
-                "2",
-                "--tmpfs",
-                "/workspace:rw,nosuid,nodev,noexec,size=4g,uid=1000,gid=1000",
-                "--tmpfs",
-                "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
-                "--user",
-                "1000:1000",
-                "-e",
-                "HOME=/workspace/home",
-                "-e",
-                "TMPDIR=/workspace/tmp",
-                "--entrypoint",
-                "python",
-                tag,
-                "-c",
-                probe,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=120,
+    run = subprocess.run(
+        [
+            docker,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "512",
+            "--memory",
+            "2g",
+            "--cpus",
+            "2",
+            "--tmpfs",
+            "/workspace:rw,nosuid,nodev,noexec,size=4g,uid=1000,gid=1000",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,noexec,size=512m,uid=1000,gid=1000",
+            "--user",
+            "1000:1000",
+            "-e",
+            "HOME=/workspace/home",
+            "-e",
+            "TMPDIR=/workspace/tmp",
+            "--entrypoint",
+            "python",
+            image_id,
+            "-c",
+            probe,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    _assert_completed(run, "production-mount contract probe")
+    result = json.loads(run.stdout.strip().splitlines()[-1])
+    assert result["node_status"] == "passed"
+    assert result["python_status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_built_worker_launch_change_and_verified_cleanup(
+    built_worker_image,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Exercise the orchestrator's exact Docker argv and cleanup implementation."""
+    docker, image_id = built_worker_image
+    monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "none")
+    editor = ContainerAiderEditor(image=image_id, docker_bin=docker)
+    container_name = f"apdl-codegen-worker-smoke-{uuid.uuid4().hex}"
+    probe = textwrap.dedent(
+        """
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+
+        candidate = Path("/workspace/candidate.py")
+        candidate.write_text('VALUE = "before"\\n', encoding="utf-8")
+        before_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        candidate.write_text(
+            candidate.read_text(encoding="utf-8").replace("before", "after"),
+            encoding="utf-8",
         )
-        _assert_completed(run, "production-mount contract probe")
-        result = json.loads(run.stdout.strip().splitlines()[-1])
-        assert result["node_status"] == "passed"
-        assert result["python_status"] == "passed"
-    finally:
-        subprocess.run(
-            [docker, "image", "rm", "--force", tag],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
+        after_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        assert before_sha256 != after_sha256
+        print(
+            json.dumps(
+                {
+                    "after_sha256": after_sha256,
+                    "changed": candidate.read_text(encoding="utf-8")
+                    == 'VALUE = "after"\\n',
+                    "uid": os.getuid(),
+                },
+                sort_keys=True,
+            )
         )
+        """
+    )
+    argv = editor._sandbox_argv(container_name=container_name, role="editor")
+    assert "--pid" not in argv
+    assert argv[argv.index("--network") + 1] == "none"
+    assert "--read-only" in argv
+    assert "--cap-drop" in argv and argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert "no-new-privileges" in argv
+    assert argv.count("--tmpfs") == 2
+    argv += [
+        "-e",
+        "HOME=/workspace/home",
+        "-e",
+        "TMPDIR=/workspace/tmp",
+        "--entrypoint",
+        "python",
+        image_id,
+        "-c",
+        probe,
+    ]
+
+    rc, stdout, stderr = await editor._run_docker(
+        argv,
+        editor._docker_control_env(),
+        container_name=container_name,
+    )
+
+    assert rc == 0, stderr
+    result = json.loads(stdout.strip().splitlines()[-1])
+    assert result["changed"] is True
+    assert result["uid"] == 1000
+    inspect = subprocess.run(
+        [docker, "container", "inspect", container_name],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert inspect.returncode != 0
