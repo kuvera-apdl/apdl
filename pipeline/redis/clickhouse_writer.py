@@ -21,7 +21,7 @@ import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -49,6 +49,8 @@ SHUTDOWN_TIMEOUT_SECONDS = 10.0
 EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
+MAX_EVENT_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_EVENT_FUTURE_SKEW_SECONDS = 5 * 60
 STREAM_DISCOVERY_INTERVAL_SECONDS = 5.0
 BOUNDARY_MARKER_POLL_INTERVAL_SECONDS = 1.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
@@ -222,6 +224,7 @@ CANONICAL_REQUIRED_EVENT_FIELDS = frozenset(
         "event",
         "type",
         "timestamp",
+        "server_timestamp",
         "context",
         "message_id",
     }
@@ -2343,13 +2346,12 @@ class ClickHouseWriter:
             value = event_json.get(required_string)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{required_string} must be a non-empty string")
-        timestamp = self._parse_timestamp(event_json.get("timestamp"), "timestamp")
-        raw_received_at = event_json.get("server_timestamp")
-        received_at = (
-            self._parse_timestamp(raw_received_at, "server_timestamp")
-            if raw_received_at is not None
-            else datetime.now(timezone.utc)
+        received_at = self._parse_timestamp(
+            event_json.get("server_timestamp"),
+            "server_timestamp",
         )
+        timestamp = self._parse_timestamp(event_json.get("timestamp"), "timestamp")
+        self._validate_event_timestamp_window(timestamp, received_at)
         if source_stream:
             if source_stream != self._stream_key_for_project(project_id):
                 raise ValueError("source stream conflicts with project authority")
@@ -2568,6 +2570,22 @@ class ClickHouseWriter:
         except ValueError as exc:
             raise ValueError(f"{field} must be a valid RFC3339 value") from exc
         return parsed
+
+    @staticmethod
+    def _validate_event_timestamp_window(
+        timestamp: datetime,
+        received_at: datetime,
+    ) -> None:
+        if timestamp < received_at - timedelta(seconds=MAX_EVENT_AGE_SECONDS):
+            raise ValueError(
+                "timestamp is more than 7 days older than server receipt time"
+            )
+        if timestamp > received_at + timedelta(
+            seconds=MAX_EVENT_FUTURE_SKEW_SECONDS
+        ):
+            raise ValueError(
+                "timestamp is more than 5 minutes ahead of server receipt time"
+            )
 
     @staticmethod
     def _event_name(payload: dict[str, Any]) -> str:

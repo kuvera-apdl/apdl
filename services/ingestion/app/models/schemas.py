@@ -1,16 +1,25 @@
 """Strict canonical models for the public event-ingestion contract."""
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
 
 MAX_BATCH_SIZE = 100
 MAX_EVENT_NAME_LENGTH = 256
 MAX_PROPERTY_KEY_LENGTH = 256
 MAX_STRING_PROPERTY_LENGTH = 8192
+MAX_EVENT_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_EVENT_FUTURE_SKEW_SECONDS = 5 * 60
 VALID_EVENT_TYPES = frozenset({"track", "identify", "group", "page"})
 CANONICAL_EVENT_NAMES = {
     "identify": "identify",
@@ -23,6 +32,10 @@ DUPLICATE_MESSAGE_ID_ERROR = (
 RFC3339_UTC_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
 )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class NamedVersionContext(BaseModel):
@@ -154,7 +167,7 @@ class Event(BaseModel):
 
     @field_validator("timestamp")
     @classmethod
-    def validate_timestamp(cls, value: str) -> str:
+    def validate_timestamp(cls, value: str, info: ValidationInfo) -> str:
         match = RFC3339_UTC_PATTERN.fullmatch(value)
         if match is None:
             raise ValueError(
@@ -168,7 +181,7 @@ class Event(BaseModel):
             raise ValueError("Timestamp year must contain four canonical digits")
         microsecond = int((match.group(7) or "").ljust(6, "0"))
         try:
-            datetime(
+            parsed = datetime(
                 year,
                 month,
                 day,
@@ -180,6 +193,26 @@ class Event(BaseModel):
             )
         except ValueError as exc:
             raise ValueError("Timestamp must be a valid RFC3339 value") from exc
+
+        received_at = (
+            info.context.get("received_at")
+            if isinstance(info.context, dict)
+            else None
+        ) or _utc_now()
+        if not isinstance(received_at, datetime) or received_at.tzinfo is None:
+            raise TypeError("received_at validation context must be timezone-aware")
+        if parsed < received_at - timedelta(seconds=MAX_EVENT_AGE_SECONDS):
+            raise ValueError(
+                "Timestamp must not be more than 7 days older than "
+                "server receipt time"
+            )
+        if parsed > received_at + timedelta(
+            seconds=MAX_EVENT_FUTURE_SKEW_SECONDS
+        ):
+            raise ValueError(
+                "Timestamp must not be more than 5 minutes ahead of "
+                "server receipt time"
+            )
         return value
 
     @model_validator(mode="after")

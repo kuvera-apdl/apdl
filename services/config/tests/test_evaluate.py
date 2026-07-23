@@ -91,6 +91,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
     published = kwargs["event"]
     assert published["event"] == "$feature_flag_exposure"
     assert published["type"] == "track"
+    assert published["server_timestamp"] == published["timestamp"]
     assert published["user_id"] == "user_123"
     assert published["session_id"].startswith("server:")
     assert published["context"] == {

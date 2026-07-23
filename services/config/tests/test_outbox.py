@@ -78,6 +78,7 @@ def exposure_row(*, attempts: int) -> dict:
                 "event": "$feature_flag_exposure",
                 "type": "track",
                 "timestamp": "2026-07-22T10:00:00Z",
+                "server_timestamp": "2026-07-22T10:00:00Z",
                 "message_id": "eval-1",
                 "session_id": "server:eval-1",
                 "user_id": "user-1",
@@ -141,6 +142,15 @@ async def test_exposure_uses_atomic_bounded_stream_admission():
     redis.xadd.assert_not_awaited()
     assert "XLEN" in outbox._BOUNDED_XADD_LUA
     assert "MAXLEN" not in outbox._BOUNDED_XADD_LUA
+
+
+@pytest.mark.asyncio
+async def test_exposure_without_server_timestamp_is_permanently_rejected():
+    row = exposure_row(attempts=1)
+    del row["payload"]["event"]["server_timestamp"]
+
+    with pytest.raises(outbox.PermanentDeliveryError, match="noncanonical fields"):
+        await outbox.deliver(row, AsyncMock(), AsyncMock())
 
 
 @pytest.mark.asyncio

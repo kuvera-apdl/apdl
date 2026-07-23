@@ -35,6 +35,10 @@ class _RequestBodyTooLarge(Exception):
     """Raised as soon as an incrementally read body crosses the hard bound."""
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 async def _read_bounded_body(request: Request) -> bytes:
     body = bytearray()
     async for chunk in request.stream():
@@ -49,6 +53,10 @@ async def ingest_events(request: Request):
     principal = require_role(request, "events:write")
     project_id = principal.project_id
     redis = request.app.state.redis
+    received_at = _utc_now()
+    received_at = received_at.replace(
+        microsecond=(received_at.microsecond // 1_000) * 1_000
+    )
 
     # Charge authenticated traffic before Content-Length checks, body reads,
     # privacy processing, or schema work. Invalid requests consume this budget.
@@ -110,7 +118,7 @@ async def ingest_events(request: Request):
         return _error_response(400, "bad_request", "Request body is empty")
 
     # Validate
-    validation = validate_event_batch(body)
+    validation = validate_event_batch(body, received_at=received_at)
     if not validation["valid"]:
         return Response(
             content=json.dumps({
@@ -126,8 +134,9 @@ async def ingest_events(request: Request):
     if rate_result is not None:
         return rate_result
 
-    now = datetime.now(timezone.utc)
-    server_ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+    server_ts = received_at.strftime("%Y-%m-%dT%H:%M:%S.") + (
+        f"{received_at.microsecond // 1000:03d}Z"
+    )
     source_ip = client_ip(request)
     stream_key = f"events:raw:{project_id}"
 

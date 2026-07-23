@@ -9,6 +9,8 @@ import type { TrackEvent } from '../../src/core/types';
 import { MAX_SERIALIZED_REQUEST_BYTES } from '../../src/core/event-validation';
 import { CLIENT_KEY, ENDPOINT } from '../helpers';
 
+const FIXED_NOW = new Date('2026-07-13T12:00:00.000Z');
+
 function createConfig(overrides?: Partial<ResolvedConfig>): ResolvedConfig {
   const base = resolveConfig({
     endpoint: ENDPOINT,
@@ -74,6 +76,7 @@ describe('EventQueue', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
     config = createConfig();
     transport = new Transport(CLIENT_KEY);
     const storageScope = {
@@ -152,6 +155,33 @@ describe('EventQueue', () => {
       expect(() => queue.enqueue(createEvent({ timestamp }))).toThrow(
         'must be a valid RFC3339 UTC timestamp'
       );
+      expect(queue.length).toBe(0);
+    });
+
+    it.each([
+      '2026-07-06T12:00:00.000Z',
+      '2026-07-13T12:05:00.000Z',
+    ])('should accept timestamp window boundary %s', (timestamp) => {
+      queue.enqueue(createEvent({ timestamp }));
+      expect(queue.length).toBe(1);
+    });
+
+    it.each([
+      [
+        '2026-07-06T11:59:59.999999Z',
+        'must be no more than 7 days old',
+      ],
+      [
+        '2026-07-13T12:05:00.000001Z',
+        'must not be more than 5 minutes in the future',
+      ],
+      ['1000-01-01T00:00:00Z', 'must be no more than 7 days old'],
+      [
+        '9999-12-31T23:59:59Z',
+        'must not be more than 5 minutes in the future',
+      ],
+    ])('should reject timestamp %s outside the canonical window', (timestamp, message) => {
+      expect(() => queue.enqueue(createEvent({ timestamp }))).toThrow(message);
       expect(queue.length).toBe(0);
     });
 

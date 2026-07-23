@@ -191,6 +191,7 @@ async def _enqueue_exposure(
         "event": FEATURE_FLAG_EXPOSURE_EVENT,
         "type": "track",
         "timestamp": timestamp,
+        "server_timestamp": timestamp,
         "message_id": message_id,
         "session_id": session_id,
         "context": {

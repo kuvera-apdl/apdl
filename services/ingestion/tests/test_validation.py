@@ -5,17 +5,27 @@ covering all 24+ test cases from the C++ test suite.
 """
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from app.models import schemas as event_schemas
 from app.models.schemas import EventBatch
+from app.validation import schema as validation_schema
 from app.validation.schema import validate_event_batch, validate_single_event
 
 CONTRACT_FIXTURE = (
     Path(__file__).resolve().parents[3] / "fixtures" / "events" / "canonical.json"
 )
+REFERENCE_TIME = datetime(2026, 7, 13, 12, 0, 4, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def fixed_validation_clock(monkeypatch):
+    monkeypatch.setattr(validation_schema, "_utc_now", lambda: REFERENCE_TIME)
+    monkeypatch.setattr(event_schemas, "_utc_now", lambda: REFERENCE_TIME)
 
 
 def canonical_event(
@@ -190,6 +200,16 @@ class TestBatchValidation:
             ),
         ]
 
+    def test_event_batch_model_enforces_timestamp_window_without_context(self):
+        body = {
+            "events": [
+                canonical_event(timestamp="2026-07-06T12:00:03.999999Z")
+            ],
+        }
+
+        with pytest.raises(PydanticValidationError, match="more than 7 days older"):
+            EventBatch.model_validate(body, strict=True)
+
     def test_non_object_body(self):
         """NonObjectBody -- a string is not a dict."""
         result = validate_event_batch("just a string")
@@ -228,7 +248,7 @@ class TestSingleEventValidation:
             "purchase",
             user_id="usr_42",
             properties={"amount": 99.99, "currency": "USD"},
-            timestamp="2025-06-15T10:30:00.000Z",
+            timestamp="2026-07-13T12:00:00.000Z",
         )
         result = validate_single_event(event)
         assert result["valid"] is True
@@ -662,6 +682,46 @@ class TestSingleEventValidation:
         result = validate_single_event(event)
         assert result["valid"] is False
 
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-07-06T12:00:04.000Z",
+            "2026-07-13T12:05:04.000Z",
+        ],
+    )
+    def test_event_timestamp_window_boundaries_are_accepted(self, timestamp):
+        event = canonical_event(timestamp=timestamp)
+
+        assert validate_single_event(
+            event,
+            received_at=REFERENCE_TIME,
+        )["valid"] is True
+
+    @pytest.mark.parametrize(
+        ("timestamp", "message"),
+        [
+            (
+                "2026-07-06T12:00:03.999999Z",
+                "more than 7 days older",
+            ),
+            (
+                "2026-07-13T12:05:04.000001Z",
+                "more than 5 minutes ahead",
+            ),
+        ],
+    )
+    def test_event_timestamp_outside_the_canonical_window_is_rejected(
+        self,
+        timestamp,
+        message,
+    ):
+        event = canonical_event(timestamp=timestamp)
+
+        result = validate_single_event(event, received_at=REFERENCE_TIME)
+
+        assert result["valid"] is False
+        assert any(message in error["message"] for error in result["errors"])
+
     def test_event_not_an_object(self):
         """EventNotAnObject"""
         result = validate_single_event("just a string")
@@ -750,7 +810,7 @@ def feature_flag_exposure_event():
         "anonymous_id": "anon_42",
         "session_id": "sess_42",
         "message_id": "msg_42",
-        "timestamp": "2026-05-26T02:26:53.455Z",
+        "timestamp": "2026-07-13T12:00:00.000Z",
         "context": {},
         "properties": {
             "flag_key": "checkout-gate",
@@ -777,7 +837,7 @@ def frontend_error_event():
         "anonymous_id": "anon_42",
         "session_id": "sess_42",
         "message_id": "msg_42",
-        "timestamp": "2026-05-26T02:26:53.455Z",
+        "timestamp": "2026-07-13T12:00:00.000Z",
         "context": {},
         "properties": {
             "error_type": "javascript_error",
@@ -803,7 +863,7 @@ def web_vital_event():
         "anonymous_id": "anon_42",
         "session_id": "sess_42",
         "message_id": "msg_42",
-        "timestamp": "2026-05-26T02:26:53.455Z",
+        "timestamp": "2026-07-13T12:00:00.000Z",
         "context": {},
         "properties": {
             "metric": "LCP",

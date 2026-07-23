@@ -1301,7 +1301,7 @@ async def enqueue_exposure(
 
 
 def _canonical_exposure_payload(payload: Any) -> dict | None:
-    """Remove only the generated event timestamp from a receipt payload."""
+    """Remove server-generated event times from a receipt payload."""
     if not isinstance(payload, dict):
         return None
     canonical = json.loads(_json(payload))
@@ -1312,6 +1312,7 @@ def _canonical_exposure_payload(payload: Any) -> dict | None:
     if not isinstance(event, dict):
         return None
     event.pop("timestamp", None)
+    event.pop("server_timestamp", None)
     return canonical
 
 

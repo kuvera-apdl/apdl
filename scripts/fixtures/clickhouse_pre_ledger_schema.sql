@@ -238,7 +238,7 @@ SELECT
     'anonymous-1',
     'session-1',
     toDateTime64('2026-07-01 12:00:00', 3),
-    '{"flag_key":"checkout","variant":"on","reason":"rollout","rule_id":"rule-1","rollout_bucket":1.0,"variant_bucket":2.0,"rollout_percentage":50.0,"bucket_by":"user_id","config_version":3,"source":"sdk","page":"/","component":"hero"}',
+    '{"flag_key":"checkout","variant":"on","reason":"fallthrough","rule_id":"rule-1","rollout_bucket":1.0,"variant_bucket":2.0,"rollout_percentage":50.0,"bucket_by":"user_id","config_version":3,"source":"sdk","page":"/","component":"hero"}',
     '',
     '',
     'desktop',

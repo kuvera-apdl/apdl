@@ -54,7 +54,10 @@ Event properties and traits must be canonical JSON: strings, finite numbers,
 booleans, nulls, arrays, and string-keyed objects. Cycles, Python-only values,
 excessive nesting/cardinality, and events over 64 KiB raise `ValueError`
 synchronously and never enter the background queue. Delivery batches stay
-within the ingestion service's 512 KiB request limit. HTTP 408/425/429,
+within the ingestion service's 512 KiB request limit. Event timestamps may be
+at most seven days old and at most five minutes ahead of the SDK clock,
+matching ingestion; out-of-window time is rejected rather than rewritten.
+HTTP 408/425/429,
 5xx, and network failures remain queued with their original `message_id`;
 permanent rejections are discarded so they cannot block later valid events.
 Optional event and context fields use omission as their only absent wire form;

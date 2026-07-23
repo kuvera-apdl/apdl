@@ -100,7 +100,7 @@ assert_equal \
     "$(query "SELECT engine, sorting_key, primary_key FROM system.tables WHERE database = 'apdl' AND name = 'apdl_maintenance_gate'")" \
     "runtime gate engine is not canonical"
 assert_equal \
-    $'12\t12\t1\t12' \
+    $'15\t15\t1\t15' \
     "$(query "SELECT count(), uniqExact(version), min(version), max(version) FROM apdl_schema_migrations FINAL")" \
     "migration ledger is not the exact contiguous release sequence"
 assert_equal \
@@ -120,6 +120,25 @@ assert_equal \
     "$(query "SELECT (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL)")" \
     "derived projection backfill did not converge"
 assert_equal \
+    $'project_id\ttoDate(received_at)\tproject_id\ttoDate(received_at)' \
+    "$(query "SELECT (SELECT partition_key FROM system.tables WHERE database = 'apdl' AND name = 'events'), (SELECT default_expression FROM system.columns WHERE database = 'apdl' AND table = 'events' AND name = 'event_date'), (SELECT partition_key FROM system.tables WHERE database = 'apdl' AND name = 'experiment_event_deliveries'), (SELECT default_expression FROM system.columns WHERE database = 'apdl' AND table = 'experiment_event_deliveries' AND name = 'event_date')")" \
+    "event retention storage is not server-receipt authoritative"
+query "INSERT INTO events (
+    project_id, message_id, event_type, event_name, user_id, anonymous_id,
+    group_id, session_id, timestamp, received_at, properties, traits, context,
+    ip, source_stream, source_stream_id, source_stream_id_ms,
+    source_stream_id_seq
+) VALUES (
+    'demo', 'received-at-retention-probe', 'track', 'retention_probe', '',
+    'retention-anon', '', 'retention-session', '2099-12-31 23:59:59.000',
+    '2026-07-02 03:04:05.000', '{}', '{}', '{}', '',
+    'events:raw:demo', '999-0', 999, 0
+)" >/dev/null
+assert_equal \
+    $'2026-07-02\t2099-12-31\t2026-07-02\t2026-07-02\t2099-12-31\t2026-07-02' \
+    "$(query "SELECT (SELECT toString(event_date) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(timestamp)) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(received_at)) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(event_date) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(timestamp)) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(received_at)) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe')")" \
+    "client event time still controls a retained event date"
+assert_equal \
     '0' \
     "$(query "SELECT count() FROM system.tables WHERE database = 'apdl' AND name IN ('events_v2', 'events_dlq_v2', 'decisions_v2', 'feeds_v2', 'flag_evaluations_v', 'experiment_exposures_v', 'agent_actions_v', 'personalizations_v')")" \
     "disconnected durable prototype objects survived the cutover"
@@ -131,8 +150,8 @@ if [[ "$rerun_output" != *"ClickHouse schema is already current"* ]]; then
     exit 1
 fi
 assert_equal \
-    $'2\t1\t1' \
-    "$(query "SELECT (SELECT count() FROM events FINAL), (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL)")" \
+    $'3\t1\t1\t1' \
+    "$(query "SELECT (SELECT count() FROM events FINAL), (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL), (SELECT count() FROM experiment_event_deliveries FINAL)")" \
     "migration rerun changed canonical row counts"
 
 echo "==> Verifying a remote runtime inhibitor blocks migration"

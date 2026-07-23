@@ -299,6 +299,7 @@ def _exposure_delivery_payload(raw_payload, project_id: str) -> tuple[str, str]:
         "event",
         "type",
         "timestamp",
+        "server_timestamp",
         "message_id",
         "session_id",
         "context",
@@ -317,7 +318,7 @@ def _exposure_delivery_payload(raw_payload, project_id: str) -> tuple[str, str]:
             "invalid_payload",
             "Config exposure event has an invalid type",
         )
-    for field in ("timestamp", "message_id", "session_id"):
+    for field in ("timestamp", "server_timestamp", "message_id", "session_id"):
         if not isinstance(event[field], str) or not event[field]:
             raise PermanentDeliveryError(
                 "invalid_payload",

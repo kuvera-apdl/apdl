@@ -8,6 +8,7 @@ contracts.
 """
 
 import math
+from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
@@ -94,8 +95,17 @@ WEB_VITAL_METRICS = frozenset({"CLS", "INP", "LCP"})
 WEB_VITAL_RATINGS = frozenset({"good", "needs_improvement", "poor"})
 
 
-def validate_event_batch(body: object) -> dict:
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def validate_event_batch(
+    body: object,
+    *,
+    received_at: datetime | None = None,
+) -> dict:
     """Validate a full event batch payload."""
+    reference_time = received_at or _utc_now()
     if not isinstance(body, dict):
         return _error("body", "Request body must be a JSON object")
 
@@ -124,7 +134,13 @@ def validate_event_batch(body: object) -> dict:
 
     all_errors: list[dict] = []
     for i, ev in enumerate(events):
-        all_errors.extend(_validate_event(ev, prefix=f"events[{i}]"))
+        all_errors.extend(
+            _validate_event(
+                ev,
+                prefix=f"events[{i}]",
+                received_at=reference_time,
+            )
+        )
     all_errors.extend(_validate_unique_message_ids(events))
 
     if all_errors:
@@ -132,9 +148,17 @@ def validate_event_batch(body: object) -> dict:
     return {"valid": True, "errors": []}
 
 
-def validate_single_event(event: object) -> dict:
+def validate_single_event(
+    event: object,
+    *,
+    received_at: datetime | None = None,
+) -> dict:
     """Validate one event as if it were standalone (not wrapped in a batch)."""
-    errors = _validate_event(event, prefix="")
+    errors = _validate_event(
+        event,
+        prefix="",
+        received_at=received_at or _utc_now(),
+    )
     if errors:
         return {"valid": False, "errors": errors}
     return {"valid": True, "errors": []}
@@ -166,7 +190,12 @@ def _validate_unique_message_ids(events: list[object]) -> list[dict]:
     return errors
 
 
-def _validate_event(event: object, prefix: str) -> list[dict]:
+def _validate_event(
+    event: object,
+    prefix: str,
+    *,
+    received_at: datetime,
+) -> list[dict]:
     if not isinstance(event, dict):
         return [{"field": prefix or "event", "message": "Event must be an object"}]
 
@@ -177,7 +206,11 @@ def _validate_event(event: object, prefix: str) -> list[dict]:
             "message": "Event requires user_id or anonymous_id",
         })
     try:
-        Event.model_validate(event, strict=True)
+        Event.model_validate(
+            event,
+            strict=True,
+            context={"received_at": received_at},
+        )
     except ValidationError as exc:
         errors.extend(_format_errors(exc, prefix=prefix))
 

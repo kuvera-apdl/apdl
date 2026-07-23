@@ -38,8 +38,7 @@ def test_migration_indexes_every_ordered_cleanup_horizon():
 
 
 def test_schema_gate_requires_receipt_ledger_migration():
-    assert schema.MIGRATION_VERSION == 36
-    assert schema.MIGRATION_NAME == "036_config_outbox_retention.sql"
+    assert schema.MIGRATION_VERSION >= 36
     assert ("config_exposure_receipts", "project_id") in schema.REQUIRED_COLUMNS
     assert ("config_exposure_receipts", "message_id") in schema.REQUIRED_COLUMNS
     assert (

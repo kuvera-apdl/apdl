@@ -210,7 +210,10 @@ strings, booleans, nulls, arrays, and plain string-keyed objects. Cycles,
 `BigInt`, accessors, sparse arrays, unsupported values, malformed timestamps,
 unknown context fields, excessive nesting/cardinality, and events over 64 KiB
 are rejected synchronously before queue ownership. Requests are split below
-512 KiB. Network errors, HTTP 408/425/429, and 5xx retain the same stable
+512 KiB. Event timestamps may be at most seven days old and at most five
+minutes ahead of the browser clock, matching the ingestion and offline-storage
+window; the SDK rejects out-of-window time instead of rewriting it. Network
+errors, HTTP 408/425/429, and 5xx retain the same stable
 message IDs for retry; other non-2xx responses are permanent and cannot poison
 later queue entries. If both a retryable send and offline persistence fail, the
 batch is requeued once in memory and returned in the drain's `pending` report;

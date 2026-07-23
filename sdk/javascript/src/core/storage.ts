@@ -7,6 +7,8 @@ import {
 import {
   assertSerializedEventSize,
   canonicalizeTrackEvent,
+  MAX_EVENT_AGE_MS,
+  MAX_EVENT_FUTURE_SKEW_MS,
   serializedJsonBytes,
 } from './event-validation';
 
@@ -17,8 +19,6 @@ const DB_VERSION = 3;
 // before the mandatory privacy guard. Reject them rather than guessing an
 // owning deployment or replaying potentially sensitive legacy telemetry.
 const RECORD_SCHEMA_VERSION = 3;
-const MAX_RECORD_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 export const MAX_OFFLINE_EVENTS_PER_PROJECT = 1000;
 export const MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT = 5 * 1024 * 1024;
 const OFFLINE_RECORD_FIELDS = new Set([
@@ -406,8 +406,8 @@ export class OfflineStorage {
     if (!isStoredOfflineEvent(value)) return 'stale';
 
     if (
-      value.stored_at > now + MAX_CLOCK_SKEW_MS ||
-      now - value.stored_at > MAX_RECORD_AGE_MS
+      value.stored_at > now + MAX_EVENT_FUTURE_SKEW_MS ||
+      now - value.stored_at > MAX_EVENT_AGE_MS
     ) {
       return 'stale';
     }

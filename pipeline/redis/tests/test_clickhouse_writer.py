@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -405,6 +406,7 @@ def canonical_event(event="signup", **overrides):
         "type": "track",
         "anonymous_id": "anon-test",
         "timestamp": "2026-07-13T12:00:00.000Z",
+        "server_timestamp": "2026-07-13T12:00:00.000Z",
         "context": {},
         "message_id": f"message-{event}",
     }
@@ -1589,7 +1591,8 @@ def test_writer_uses_shared_canonical_contract_fixture(monkeypatch):
 
     rows = []
     for event in fixture["valid"]:
-        row = writer._parse_event({"event_json": json.dumps(event)}, "demo")
+        payload = {**event, "server_timestamp": event["timestamp"]}
+        row = writer._parse_event({"event_json": json.dumps(payload)}, "demo")
         assert row["message_id"] == event["message_id"]
         assert row["event_type"] == event["type"]
         rows.append(row)
@@ -1693,6 +1696,62 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
             "xadd",
             "xack",
             "xdel",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_out_of_window_event_time_is_quarantined_without_rewrite(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch)
+        event = canonical_event(timestamp="2026-07-06T11:59:59.999999Z")
+        results = [
+            (
+                "events:raw:demo",
+                [("1-0", {"event_json": json.dumps(event)})],
+            )
+        ]
+
+        assert await writer._process_messages(results) == 0
+        assert ch_client.inserts == []
+        assert event["timestamp"] == "2026-07-06T11:59:59.999999Z"
+        assert len(redis_client.adds) == 1
+        dlq_stream, fields, _ = redis_client.adds[0]
+        assert dlq_stream == "events:dlq:demo"
+        assert fields["reason_code"] == "invalid_event_schema"
+        assert fields["error_type"] == "ValueError"
+        assert redis_client.acks == []
+
+        assert await writer._flush() is True
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_missing_server_timestamp_is_quarantined_before_source_ack(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch)
+        event = canonical_event()
+        event.pop("server_timestamp")
+
+        assert await writer._process_messages([
+            (
+                "events:raw:demo",
+                [("1-0", {"event_json": json.dumps(event)})],
+            )
+        ]) == 0
+        assert ch_client.inserts == []
+        assert len(redis_client.adds) == 1
+        _, fields, _ = redis_client.adds[0]
+        assert fields["reason_code"] == "invalid_event_schema"
+        assert fields["error_type"] == "ValueError"
+        assert redis_client.acks == []
+
+        assert await writer._flush() is True
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
         ]
 
     asyncio.run(scenario())
@@ -2050,6 +2109,54 @@ def test_noncanonical_timestamps_are_rejected(monkeypatch, timestamp):
 
     with pytest.raises(ValueError, match="canonical RFC3339|canonical digits"):
         writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+def test_server_timestamp_is_required_at_the_writer_boundary(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event()
+    payload.pop("server_timestamp")
+
+    with pytest.raises(
+        ValueError,
+        match="missing required fields: server_timestamp",
+    ):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        ("2026-07-06T11:59:59.999999Z", "more than 7 days older"),
+        ("2026-07-13T12:05:00.000001Z", "more than 5 minutes ahead"),
+    ],
+)
+def test_out_of_window_timestamps_are_rejected_at_the_writer_boundary(
+    monkeypatch,
+    timestamp,
+    message,
+):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(timestamp=timestamp)
+
+    with pytest.raises(ValueError, match=message):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-07-06T12:00:00.000Z",
+        "2026-07-13T12:05:00.000Z",
+    ],
+)
+def test_event_timestamp_window_boundaries_are_accepted(monkeypatch, timestamp):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(timestamp=timestamp)
+
+    assert writer._parse_event(
+        {"event_json": json.dumps(payload)},
+        "demo",
+    )["timestamp"] == datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
 
 @pytest.mark.parametrize(

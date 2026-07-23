@@ -1036,17 +1036,19 @@ async def test_scheduler_refuses_to_start_legacy_experiment_without_plan(monkeyp
     update_bundle.assert_not_awaited()
 
 
-def test_exposure_retry_ignores_only_generated_timestamp():
+def test_exposure_retry_ignores_generated_event_times():
     first = {
         "stream_key": "events:raw:apdl",
         "event": {
             "message_id": "stable",
             "timestamp": "2026-01-01T00:00:00Z",
+            "server_timestamp": "2026-01-01T00:00:00Z",
             "user_id": "user-1",
         },
     }
     retry = deepcopy(first)
     retry["event"]["timestamp"] = "2026-01-01T00:00:01Z"
+    retry["event"]["server_timestamp"] = "2026-01-01T00:00:01Z"
     conflict = deepcopy(retry)
     conflict["event"]["user_id"] = "user-2"
 
@@ -1060,11 +1062,13 @@ async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting
     existing_event = {
         "message_id": "eval_stable_001",
         "timestamp": "2026-07-22T10:00:00Z",
+        "server_timestamp": "2026-07-22T10:00:00Z",
         "user_id": "user-1",
     }
     requested_event = {
         **existing_event,
         "timestamp": "2026-07-22T10:00:01Z",
+        "server_timestamp": "2026-07-22T10:00:01Z",
     }
     if conflicting:
         requested_event["user_id"] = "user-2"
@@ -1108,6 +1112,7 @@ async def test_new_exposure_receipt_and_delivery_intent_are_created_together():
         event={
             "message_id": "eval_new_001",
             "timestamp": "2026-07-22T10:00:00Z",
+            "server_timestamp": "2026-07-22T10:00:00Z",
             "user_id": "user-1",
         },
     )
@@ -1116,7 +1121,12 @@ async def test_new_exposure_receipt_and_delivery_intent_are_created_together():
     receipt_payload = json.loads(conn.calls[0][1][2])
     outbox_payload = json.loads(conn.calls[1][1][3])
     assert "timestamp" not in receipt_payload["event"]
+    assert "server_timestamp" not in receipt_payload["event"]
     assert outbox_payload["event"]["timestamp"] == "2026-07-22T10:00:00Z"
+    assert (
+        outbox_payload["event"]["server_timestamp"]
+        == "2026-07-22T10:00:00Z"
+    )
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1143,7 @@ async def test_exposure_receipt_rejects_a_mismatched_event_message_id():
             event={
                 "message_id": "eval_different_001",
                 "timestamp": "2026-07-22T10:00:00Z",
+                "server_timestamp": "2026-07-22T10:00:00Z",
                 "user_id": "user-1",
             },
         )

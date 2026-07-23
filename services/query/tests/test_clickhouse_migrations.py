@@ -15,6 +15,9 @@ ASSIGNMENT_EXPOSURES_SQL = (MIGRATIONS_DIR / "013_assignment_exposures.sql").rea
 EVENT_STREAM_PROVENANCE_SQL = (
     MIGRATIONS_DIR / "014_event_stream_provenance.sql"
 ).read_text()
+RECEIVED_AT_RETENTION_SQL = (
+    MIGRATIONS_DIR / "015_received_at_event_retention.sql"
+).read_text()
 EVENTS_SQL = (MIGRATIONS_DIR / "001_events.sql").read_text()
 FRONTEND_HEALTH_EVENTS_SQL = (
     MIGRATIONS_DIR / "007_frontend_health_events.sql"
@@ -124,6 +127,48 @@ def test_event_stream_provenance_is_preserved_on_events_and_exposures():
     assert "CREATE MATERIALIZED VIEW experiment_event_deliveries_mv" in (
         EVENT_STREAM_PROVENANCE_SQL
     )
+
+
+def test_event_retention_and_partitions_use_server_receipt_time():
+    events_table = RECEIVED_AT_RETENTION_SQL.split(
+        "CREATE TABLE events__apdl_migration_015 (", 1
+    )[1].split(
+        "INSERT INTO events__apdl_migration_015", 1
+    )[0]
+    delivery_table = RECEIVED_AT_RETENTION_SQL.split(
+        "CREATE TABLE experiment_event_deliveries__apdl_migration_015 (", 1
+    )[1].split(
+        "INSERT INTO experiment_event_deliveries__apdl_migration_015", 1
+    )[0]
+
+    for table_definition in (events_table, delivery_table):
+        assert "event_date" in table_definition
+        assert "Date DEFAULT toDate(received_at)" in table_definition
+        assert "PARTITION BY project_id" in table_definition
+        assert "TTL event_date + INTERVAL 12 MONTH" in table_definition
+        assert "DEFAULT toDate(timestamp)" not in table_definition
+
+    assert "toDate(received_at)\nFROM events;" in RECEIVED_AT_RETENTION_SQL
+    assert (
+        "toDate(received_at)\nFROM experiment_event_deliveries;"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    assert (
+        "EXCHANGE TABLES events AND events__apdl_migration_015"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    assert (
+        "EXCHANGE TABLES experiment_event_deliveries"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    for view in (
+        "feature_flag_exposures_mv",
+        "frontend_health_events_mv",
+        "identity_alias_assertions_mv",
+        "experiment_event_deliveries_mv",
+    ):
+        assert f"DROP TABLE IF EXISTS {view}" in RECEIVED_AT_RETENTION_SQL
+        assert f"CREATE MATERIALIZED VIEW {view}" in RECEIVED_AT_RETENTION_SQL
 
 
 def test_duplicate_amplifying_aggregate_views_are_retired():
