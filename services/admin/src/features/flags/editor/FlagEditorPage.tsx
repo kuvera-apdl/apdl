@@ -70,6 +70,12 @@ function Section({ title, description, children }: { title: string; description?
 
 export function FlagEditorPage() {
   const { key } = useParams()
+  const { active } = useWorkspace()
+
+  return <FlagEditor key={`${active?.id ?? 'no-workspace'}:${key ?? '__new__'}`} flagKey={key} />
+}
+
+function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
   const isEdit = key !== undefined
   const navigate = useNavigate()
   const { active } = useWorkspace()

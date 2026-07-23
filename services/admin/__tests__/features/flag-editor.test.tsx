@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -15,6 +15,7 @@ import { makeFlag, seedWorkspace } from '../helpers/fixtures'
 
 let currentFlags: FlagConfig[] = []
 const putBodies: Record<string, unknown>[] = []
+const putKeys: string[] = []
 const postBodies: Record<string, unknown>[] = []
 
 const server = setupServer(
@@ -35,10 +36,12 @@ const server = setupServer(
       { status: 201 },
     )
   }),
-  http.put('*/api/projects/demo/config/v1/admin/flags/:key', async ({ request }) => {
+  http.put('*/api/projects/demo/config/v1/admin/flags/:key', async ({ request, params }) => {
     const body = (await request.json()) as Record<string, unknown>
     putBodies.push(body)
-    const current = currentFlags[0]!
+    const key = String(params.key)
+    putKeys.push(key)
+    const current = currentFlags.find((flag) => flag.key === key)!
     if (body.version !== current.version) {
       return HttpResponse.json(
         {
@@ -50,7 +53,7 @@ const server = setupServer(
       )
     }
     const updated = { ...current, ...(body.name ? { name: String(body.name) } : {}), version: current.version + 1 }
-    currentFlags = [updated]
+    currentFlags = currentFlags.map((flag) => (flag.key === key ? updated : flag))
     return HttpResponse.json({ updated: true, flag: updated })
   }),
 )
@@ -64,6 +67,7 @@ beforeEach(() => {
   seedWorkspace()
   currentFlags = []
   putBodies.length = 0
+  putKeys.length = 0
   postBodies.length = 0
 })
 
@@ -88,6 +92,7 @@ function renderEditor(initialPath: string) {
       </QueryClientProvider>
     </WorkspaceProvider>,
   )
+  return router
 }
 
 describe('FlagEditorPage — create', () => {
@@ -145,6 +150,30 @@ describe('FlagEditorPage — create', () => {
 })
 
 describe('FlagEditorPage — edit & version conflict', () => {
+  test('remounts form state and mutation identity when navigating between flags', async () => {
+    currentFlags = [
+      makeFlag({ key: 'flag-a', name: 'Flag A', version: 3 }),
+      makeFlag({ key: 'flag-b', name: 'Flag B', version: 7 }),
+    ]
+    const router = renderEditor('/flags/flag-a/edit')
+
+    await screen.findByDisplayValue('Flag A')
+    await act(async () => {
+      await router.navigate('/flags/flag-b/edit')
+    })
+
+    const nameInput = await screen.findByDisplayValue('Flag B')
+    expect(screen.queryByDisplayValue('Flag A')).not.toBeInTheDocument()
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'Updated Flag B')
+    await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(putBodies).toHaveLength(1))
+    expect(putKeys).toEqual(['flag-b'])
+    expect(putBodies[0]).toMatchObject({ version: 7, name: 'Updated Flag B' })
+  })
+
   test('rebases onto the current version after a 409', async () => {
     currentFlags = [makeFlag()] // v3
     renderEditor('/flags/checkout-cta/edit')

@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -75,6 +75,7 @@ const ARCHIVED_EXPERIMENT = {
 
 let deleteRequestUrl = ''
 const updateBodies: Record<string, unknown>[] = []
+const updateKeys: string[] = []
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
@@ -92,6 +93,7 @@ const server = setupServer(
   }),
   http.put('*/api/projects/demo/config/v1/admin/experiments/:key', async ({ request, params }) => {
     updateBodies.push((await request.json()) as Record<string, unknown>)
+    updateKeys.push(String(params.key))
     return HttpResponse.json({
       updated: true,
       key: String(params.key),
@@ -113,6 +115,7 @@ beforeEach(() => {
   seedWorkspace()
   deleteRequestUrl = ''
   updateBodies.length = 0
+  updateKeys.length = 0
 })
 
 describe('experiment schemas', () => {
@@ -547,6 +550,56 @@ describe('ExperimentListPage', () => {
 })
 
 describe('ExperimentDetailPage', () => {
+  test('remounts form state and mutation identity when navigating between experiments', async () => {
+    const secondExperiment = {
+      ...EXPERIMENT,
+      key: 'pricing-test',
+      flag_key: 'pricing-test',
+      description: 'Pricing experiment',
+      version: 7,
+    }
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [EXPERIMENT, secondExperiment], count: 2 }),
+      ),
+    )
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const router = createMemoryRouter(
+      [
+        { path: '/experiments/:key', element: <ExperimentDetailPage /> },
+        { path: '/experiments', element: <div>experiment list</div> },
+      ],
+      { initialEntries: ['/experiments/checkout-test?tab=setup'] },
+    )
+    render(
+      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <RouterProvider router={router} />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>,
+    )
+
+    await screen.findByDisplayValue('CTA experiment')
+    await act(async () => {
+      await router.navigate('/experiments/pricing-test?tab=setup')
+    })
+
+    const description = await screen.findByDisplayValue('Pricing experiment')
+    expect(screen.queryByDisplayValue('CTA experiment')).not.toBeInTheDocument()
+    await userEvent.clear(description)
+    await userEvent.type(description, 'Updated pricing experiment')
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    expect(updateKeys).toEqual(['pricing-test'])
+    expect(updateBodies[0]).toEqual({
+      version: 7,
+      description: 'Updated pricing experiment',
+    })
+  })
+
   test('running to stopped omits every Config-frozen field from the update request', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(

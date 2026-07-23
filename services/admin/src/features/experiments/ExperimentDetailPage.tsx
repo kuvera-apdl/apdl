@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -19,6 +19,7 @@ import {
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useWorkspace } from '@/core/workspace'
 import {
   buildCreate,
   buildUpdate,
@@ -38,6 +39,12 @@ import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 
 export function ExperimentDetailPage() {
   const { key = '' } = useParams()
+  const { active } = useWorkspace()
+
+  return <ExperimentDetailEditor key={`${active?.id ?? 'no-workspace'}:${key}`} experimentKey={key} />
+}
+
+function ExperimentDetailEditor({ experimentKey: key }: { experimentKey: string }) {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const experimentsQuery = useExperimentsQuery()
@@ -56,10 +63,12 @@ export function ExperimentDetailPage() {
   } | null>(null)
   const [deleteOpen, setDeleteOpen] = useState(false)
 
-  if (entry && values === null) {
-    setValues(entryToFormValues(entry))
-    setLoadedVersion(entry.version)
-  }
+  useEffect(() => {
+    if (entry && values === null) {
+      setValues(entryToFormValues(entry))
+      setLoadedVersion(entry.version)
+    }
+  }, [entry, values])
 
   const submitUpdate = async (body: ExperimentUpdate) => {
     try {
