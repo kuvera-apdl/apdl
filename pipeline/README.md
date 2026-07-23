@@ -18,13 +18,20 @@ Streams is the only event bus included in APDL.
 ## ClickHouse writer
 
 `redis/clickhouse_writer.py` is a single-file async consumer
-(deps: `redis`, `clickhouse-driver`). The synchronous ClickHouse driver is
+(deps: `redis`, `clickhouse-driver`, `asyncpg`). The synchronous ClickHouse driver is
 isolated in one dedicated worker thread, so inserts cannot block Redis reads,
 pending claims, monitoring, or signal handling on the asyncio loop. It reads
 from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
 `PROJECT_IDS` — using the `clickhouse-writer` consumer group (consumer name
 `worker-{pid}`) and batch-inserts into the `events` table.
 
+- **Single writer authority:** exactly one process may advance the
+  `clickhouse-writer` group. Before reading Redis, startup takes a dedicated
+  PostgreSQL session advisory lock and exits if another writer owns it. The
+  same checked-out session is heartbeat-verified for the writer lifetime, and
+  supported Compose declares one replica. This keeps the process-local
+  completeness frontier equal to the group-wide frontier; horizontal writer
+  scaling requires a shared frontier redesign.
 - **Batching:** rotates fairly across streams and reads one tenant at a time so
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
   buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
@@ -39,10 +46,10 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   trimming accepted data. A crash between insert and ACK may replay an insert,
   but the stable client
   `message_id` and `(project_id, message_id)` replacement key make supported
-  `FINAL` reads return that event exactly once. Retries must preserve the
-  complete logical event, especially its original timestamp: ClickHouse does
-  not merge replacement keys across monthly partitions, so changing the
-  timestamp while reusing an ID violates the idempotency contract.
+  `FINAL` reads return that event exactly once. The canonical event tables
+  partition by project, while retention dates derive from server-authoritative
+  receipt time. Retries must preserve the complete logical event; reusing an ID
+  for changed content has undefined winner semantics.
 - **Tenant authority:** the project is derived only from a validated
   `events:raw:{project_id}` stream key. Conflicting project assertions inside a
   Redis message or its event JSON are rejected.
@@ -63,9 +70,10 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   and leaves the Redis deliveries pending for replay instead of ACKing an
   unobserved insert result.
 
-The deletion contract permits any number of consumers in the one required
-`clickhouse-writer` group, but no second durable consumer group. Adding another
-group requires all-group acknowledgement tracking before entries can be
+The deletion and completeness contract permits exactly one live consumer in
+the one required `clickhouse-writer` group and no second durable consumer
+group. Adding a consumer requires a shared completeness frontier; adding a
+group also requires all-group acknowledgement tracking before entries can be
 deleted. Redis must use non-evicting memory policy plus durable persistence;
 the supported Compose stack uses AOF (`appendfsync everysec`) and
 an explicit aggregate memory ceiling with `maxmemory-policy noeviction`. Route
@@ -94,6 +102,9 @@ bounded producers. Mixed old/new producers are unsupported because one legacy
 producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
+`POSTGRES_URL` (default
+`postgresql://apdl:apdl_dev@localhost:5432/apdl`, used for singleton writer and
+migration-inhibitor authority),
 `CLICKHOUSE_NATIVE_URL` (default
 `clickhouse://apdl:apdl_dev@localhost:9000/apdl`), `BUFFER_SIZE`,
 `FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),

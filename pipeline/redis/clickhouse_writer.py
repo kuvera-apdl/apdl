@@ -56,6 +56,7 @@ BOUNDARY_MARKER_POLL_INTERVAL_SECONDS = 1.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+WRITER_SINGLETON_LOCK_ID = 4_158_044_085
 MAINTENANCE_INHIBITOR_LOCK_IDS = tuple(
     sorted((MAINTENANCE_INHIBITOR_LOCK_ID, MAINTENANCE_GUARD_LOCK_ID))
 )
@@ -118,6 +119,41 @@ EVENT_INSERT_QUERY = (
 )
 
 
+async def _acquire_writer_singleton(connection) -> None:
+    """Fail closed unless this backend owns the only writer authority."""
+    acquired = await connection.fetchval(
+        "SELECT pg_try_advisory_lock($1)",
+        WRITER_SINGLETON_LOCK_ID,
+    )
+    if acquired is not True:
+        raise RuntimeError(
+            "Another ClickHouse writer owns the singleton consumer-group authority"
+        )
+    logger.info("Acquired singleton ClickHouse writer authority")
+
+
+async def _heartbeat_writer_singleton(connection) -> None:
+    """Prove the checked-out backend still owns singleton writer authority."""
+    held_lock_count = await connection.fetchval(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_locks
+        WHERE pid = pg_backend_pid()
+          AND locktype = 'advisory'
+          AND mode = 'ExclusiveLock'
+          AND granted
+          AND classid = 0
+          AND objsubid = 1
+          AND objid = ($1::bigint)::oid
+        """,
+        WRITER_SINGLETON_LOCK_ID,
+    )
+    if held_lock_count != 1:
+        raise RuntimeError(
+            "PostgreSQL backend no longer holds singleton writer authority"
+        )
+
+
 async def _acquire_maintenance_inhibitor(connection) -> None:
     """Acquire both shared locks in one canonical order on this backend."""
     for lock_id in MAINTENANCE_INHIBITOR_LOCK_IDS:
@@ -155,6 +191,7 @@ async def _monitor_maintenance_inhibitor(
     connection_lost: asyncio.Event,
     *,
     heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+    require_writer_singleton: bool = False,
 ) -> None:
     """Fence writes when one inhibitor connection becomes uncertain."""
     while not connection_lost.is_set():
@@ -169,6 +206,11 @@ async def _monitor_maintenance_inhibitor(
                     _heartbeat_maintenance_inhibitor(connection),
                     timeout=heartbeat_seconds,
                 )
+                if require_writer_singleton:
+                    await asyncio.wait_for(
+                        _heartbeat_writer_singleton(connection),
+                        timeout=heartbeat_seconds,
+                    )
             except asyncio.CancelledError:
                 raise
             except BaseException:
@@ -2713,14 +2755,16 @@ async def main():
     connection_lost_events = []
     try:
         # Keep two dedicated backend sessions checked out for the entire writer
-        # lifetime. Losing either one fences new writes, while the other still
-        # blocks exclusive migration ownership through ClickHouse drain proof.
-        # A total PostgreSQL restart can remove both sessions together; the
-        # supported Compose quiescence path must also observe this writer stopped
-        # before it permits migration execution.
-        for _ in range(2):
+        # lifetime. The first exclusively owns the one supported consumer-group
+        # writer authority; both redundantly block migrations. Losing either
+        # session fences new writes. A total PostgreSQL restart can remove both
+        # sessions together, so Compose quiescence must also observe this writer
+        # stopped before it permits migration execution.
+        for inhibitor_index in range(2):
             maintenance_connection = await maintenance_pool.acquire()
             maintenance_connections.append(maintenance_connection)
+            if inhibitor_index == 0:
+                await _acquire_writer_singleton(maintenance_connection)
             await _acquire_maintenance_inhibitor(maintenance_connection)
 
         writer = ClickHouseWriter(
@@ -2766,7 +2810,11 @@ async def main():
                         timeout=MAINTENANCE_HEARTBEAT_SECONDS,
                     )
                     for maintenance_connection in maintenance_connections
-                )
+                ),
+                asyncio.wait_for(
+                    _heartbeat_writer_singleton(maintenance_connections[0]),
+                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
+                ),
             )
             for inhibitor_index, (
                 maintenance_connection,
@@ -2785,6 +2833,7 @@ async def main():
                             maintenance_connection,
                             writer,
                             connection_lost,
+                            require_writer_singleton=inhibitor_index == 1,
                         ),
                         name=f"maintenance-inhibitor-monitor-{inhibitor_index}",
                     )

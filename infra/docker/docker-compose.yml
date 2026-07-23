@@ -346,6 +346,10 @@ services:
     build:
       context: ../../pipeline/redis
       dockerfile: Dockerfile
+    # The writer's completeness frontier is intentionally single-authority.
+    # A PostgreSQL advisory lock also rejects accidental runtime scaling.
+    deploy:
+      replicas: 1
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl

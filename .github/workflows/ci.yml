@@ -223,6 +223,22 @@ jobs:
   clickhouse-writer:
     name: ClickHouse Writer
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+        env:
+          POSTGRES_DB: apdl
+          POSTGRES_USER: apdl
+          POSTGRES_PASSWORD: apdl_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apdl -d apdl"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      APDL_WRITER_SINGLETON_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
