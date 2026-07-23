@@ -156,7 +156,7 @@ async def approve_action(
         for item in body.decisions
     )
     try:
-        codegen_capability = await codegen_changeset_capability()
+        codegen_capability = await codegen_changeset_capability(principal.project_id)
         command = await enqueue_approval_command(
             pool,
             run_id=run_id,

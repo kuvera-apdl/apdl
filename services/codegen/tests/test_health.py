@@ -40,7 +40,7 @@ async def test_ready_returns_200_when_db_reachable():
 
 
 @pytest.mark.asyncio
-async def test_ready_exposes_changeset_creation_only_for_publication_stages():
+async def test_ready_requires_a_tenant_scoped_check_for_publication_stages():
     from tests.fakes import FakePool
 
     app.state.pg_pool = FakePool()
@@ -50,7 +50,7 @@ async def test_ready_exposes_changeset_creation_only_for_publication_stages():
         resp = await client.get("/ready")
 
     assert resp.status_code == 200
-    assert resp.json()["capabilities"] == {"changeset_creation": "available"}
+    assert resp.json()["capabilities"] == {"changeset_creation": "tenant_scoped"}
 
 
 @pytest.mark.asyncio
@@ -67,4 +67,4 @@ async def test_ready_returns_503_when_db_unreachable():
         resp = await client.get("/ready")
     assert resp.status_code == 503
     assert resp.json()["status"] == "not_ready"
-    assert resp.json()["capabilities"] == {"changeset_creation": "available"}
+    assert resp.json()["capabilities"] == {"changeset_creation": "tenant_scoped"}
