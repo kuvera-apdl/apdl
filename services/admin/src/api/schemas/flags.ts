@@ -33,6 +33,21 @@ export const guardrailThresholdSchema = z.enum(['2x_baseline', 'at_least_one'])
 export const evaluationModeSchema = z.enum(['client', 'server', 'both'])
 export const flagStateSchema = z.enum(['draft', 'active', 'disabled', 'archived'])
 
+const calendarDateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD')
+  .refine((value) => {
+    const year = Number(value.slice(0, 4))
+    const month = Number(value.slice(5, 7))
+    const day = Number(value.slice(8, 10))
+    const parsed = new Date(Date.UTC(year, month - 1, day))
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    )
+  }, 'expected a valid calendar date')
+
 const EXISTENCE_OPERATORS = new Set<string>(['exists', 'not_exists'])
 
 export const gateConditionSchema = z
@@ -171,7 +186,7 @@ const flagConfigShape = z
     name: z.string().max(MAX_STRING_LENGTH),
     state: flagStateSchema,
     owners: z.array(z.string()),
-    review_by: z.string().nullable(),
+    review_by: calendarDateSchema.nullable(),
     description: z.string(),
     enabled: z.boolean(),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
@@ -356,7 +371,7 @@ export const flagCreateSchema = z
     state: writableFlagStateSchema,
     owners: z.array(z.string().min(1)),
     // Omitted entirely when unset — the server create path runs exclude_none.
-    review_by: z.string().optional(),
+    review_by: calendarDateSchema.optional(),
     enabled: z.boolean(),
     description: z.string(),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
@@ -375,7 +390,7 @@ export const flagUpdateSchema = z
   .object({
     version: z.number().int().min(1),
     owners: z.array(z.string().min(1)).optional(),
-    review_by: z.string().optional(),
+    review_by: calendarDateSchema.nullable().optional(),
     name: z.string().min(1).max(MAX_STRING_LENGTH).optional(),
     description: z.string().optional(),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
