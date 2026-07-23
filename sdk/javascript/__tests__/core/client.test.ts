@@ -882,6 +882,34 @@ describe('APDLClient', () => {
       expect(exposures[0].properties?.variant_bucket).toBeTypeOf('number');
     });
 
+    it('should return the fallback without exposing rollout-excluded actors', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('excluded-flag', {
+            fallthrough: {
+              rollout: { percentage: 0, bucket_by: 'user_id' },
+            },
+          })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+
+      const flaggedClient = new APDLClient(createTestConfig());
+      await flushAsync();
+      flaggedClient.identify('user_123');
+
+      expect(flaggedClient.getVariantDetails('excluded-flag')).toMatchObject({
+        variant: 'control',
+        reason: 'fallthrough_rollout',
+      });
+      expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
+      await flaggedClient.shutdown();
+    });
+
     it('should return assignments and retry exposure telemetry after queue pressure', async () => {
       fetchMock.mockResolvedValueOnce({
         ok: true,
@@ -894,17 +922,18 @@ describe('APDLClient', () => {
         headers: new Headers(),
       });
       const flaggedClient = new APDLClient(createTestConfig({
-        batchSize: 2,
-        maxQueueSize: 1,
+        batchSize: 3,
+        maxQueueSize: 2,
       }));
       await flushAsync();
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      flaggedClient.identify('user_123');
 
       flaggedClient.track('fills_queue');
       expect(() => flaggedClient.getVariant('queue-pressure-flag'))
         .not.toThrow();
       expect(flaggedClient.getVariantDetails('queue-pressure-flag').variant)
-        .toBe('control');
+        .toBe('treatment');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
       expect(warn).toHaveBeenCalledWith(
         "APDL: Failed to enqueue exposure for feature flag 'queue-pressure-flag'",
@@ -912,9 +941,10 @@ describe('APDLClient', () => {
       );
 
       await flaggedClient.debug.flush();
-      expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('control');
+      expect(flaggedClient.getVariant('queue-pressure-flag')).toBe('treatment');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
 
+      flaggedClient.track('fills_queue_again');
       warn.mockImplementation(() => {
         throw new Error('diagnostic logger failed');
       });

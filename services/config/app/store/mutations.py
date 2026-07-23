@@ -15,7 +15,7 @@ from app.flags import experiment_flag
 from app.models.schemas import (
     ExperimentMetric,
     ExperimentStatisticalPlan,
-    GateRule,
+    ExperimentTargetingRule,
     VariantConfig,
     validate_flag_variant_config,
     validate_statistical_plan,
@@ -500,12 +500,12 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         INSERT INTO experiments (
             key, project_id, status, description, flag_key, default_variant,
             variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
-            traffic_percentage, start_date, end_date, creation_idempotency_key,
-            creation_idempotency_request_sha256
+            traffic_percentage, minimum_exposure_config_version, start_date, end_date,
+            creation_idempotency_key, creation_idempotency_request_sha256
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
-            $15
+            $15, $16
         )
         RETURNING {pg_store.EXPERIMENT_COLUMNS}
         """,
@@ -522,6 +522,7 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         if experiment.get("statistical_plan") is not None
         else None,
         experiment.get("traffic_percentage", 100.0),
+        experiment.get("minimum_exposure_config_version"),
         experiment.get("start_date"),
         experiment.get("end_date"),
         experiment.get("creation_idempotency_key"),
@@ -546,8 +547,9 @@ async def _update_experiment(
             primary_metric_json = $9,
             statistical_plan = $10::jsonb,
             traffic_percentage = $11,
-            start_date = $12,
-            end_date = $13,
+            minimum_exposure_config_version = $12,
+            start_date = $13,
+            end_date = $14,
             version = version + 1,
             updated_at = now()
         WHERE project_id = $1 AND key = $2 AND version = $3
@@ -566,6 +568,7 @@ async def _update_experiment(
         if experiment.get("statistical_plan") is not None
         else None,
         experiment["traffic_percentage"],
+        experiment.get("minimum_exposure_config_version"),
         experiment.get("start_date"),
         experiment.get("end_date"),
     )
@@ -731,7 +734,7 @@ def _derived_experiment_flag(experiment: dict, backing: dict) -> dict:
         for value in _load_json(experiment.get("variants_json"), [])
     ]
     rules = [
-        GateRule.model_validate(value)
+        ExperimentTargetingRule.model_validate(value)
         for value in _load_json(experiment.get("targeting_rules_json"), [])
     ]
     updates = experiment_flag.build_flag_projection(
@@ -961,7 +964,15 @@ async def create_experiment_bundle(
     async with pool.acquire() as conn:
         async with conn.transaction():
             created_flag = await _insert_flag(conn, flag)
-            created_experiment = await _insert_experiment(conn, experiment)
+            experiment_to_insert = dict(experiment)
+            if experiment_to_insert.get("status", "draft") != "draft":
+                experiment_to_insert["minimum_exposure_config_version"] = (
+                    created_flag["version"]
+                )
+            created_experiment = await _insert_experiment(
+                conn,
+                experiment_to_insert,
+            )
             await _audit_experiment(
                 conn,
                 action="experiment_created",
@@ -1031,6 +1042,11 @@ async def _update_experiment_bundle(
     )
     merged_flag = _derived_experiment_flag(desired, before_flag)
     updated_flag = await _update_flag(conn, merged_flag, before_flag["version"])
+    if before_experiment["status"] == "draft" and desired["status"] != "draft":
+        desired = {
+            **desired,
+            "minimum_exposure_config_version": updated_flag["version"],
+        }
     updated_experiment = await _update_experiment(
         conn,
         desired,

@@ -316,8 +316,8 @@ async def test_create_experiment_delegates_one_bundle_and_omits_presence_value(
             "targeting_rules": [
                 {
                     "id": "has-plan",
+                    "name": "Has plan",
                     "conditions": [{"attribute": "plan", "operator": "exists"}],
-                    "rollout": {"percentage": 100, "bucket_by": "user_id"},
                 }
             ],
         },
@@ -664,6 +664,7 @@ async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
             [
                 {
                     "id": "paid-plan",
+                    "name": "Paid plan",
                     "conditions": [
                         {
                             "attribute": "plan",
@@ -671,10 +672,6 @@ async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
                             "value": "paid",
                         }
                     ],
-                    "rollout": {
-                        "percentage": 100.0,
-                        "bucket_by": "user_id",
-                    },
                 }
             ],
         ),

@@ -96,7 +96,7 @@ class StrictExperimentTimestampConn:
         if "FROM experiments" in sql and "FOR UPDATE" in sql:
             return dict(self.row)
         if "UPDATE experiments SET" in sql:
-            start_date, end_date = args[11], args[12]
+            start_date, end_date = args[12], args[13]
             assert start_date is None or isinstance(start_date, datetime)
             assert end_date is None or isinstance(end_date, datetime)
             self.bound_timestamps.append((start_date, end_date))
@@ -109,6 +109,7 @@ class StrictExperimentTimestampConn:
                 "targeting_rules_json": args[7],
                 "primary_metric_json": args[8],
                 "traffic_percentage": args[10],
+                "minimum_exposure_config_version": args[11],
                 "start_date": start_date,
                 "end_date": end_date,
                 "version": self.row["version"] + 1,
@@ -164,6 +165,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "primary_metric_json": "{}",
         "statistical_plan": None,
         "traffic_percentage": 100.0,
+        "minimum_exposure_config_version": None,
         "start_date": None,
         "end_date": None,
         "version": 1,
@@ -327,6 +329,48 @@ async def test_experiment_outbox_failure_rolls_back_flag_experiment_and_audit(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("status", "expected_minimum_version"),
+    [("draft", None), ("running", 7)],
+)
+async def test_experiment_create_stamps_first_analyzable_flag_version(
+    monkeypatch,
+    status,
+    expected_minimum_version,
+):
+    conn = FakeConn()
+    pool = FakePool(conn)
+    insert_experiment = AsyncMock(
+        side_effect=lambda _conn, experiment: make_experiment(experiment)
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_insert_flag",
+        AsyncMock(return_value=make_flag({"version": 7})),
+    )
+    monkeypatch.setattr(mutations, "_insert_experiment", insert_experiment)
+    monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(mutations, "_audit_experiment", AsyncMock())
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_flag_change",
+        AsyncMock(return_value=12),
+    )
+    monkeypatch.setattr(mutations, "_enqueue_experiment_change", AsyncMock())
+
+    created, _ = await mutations.create_experiment_bundle(
+        pool,
+        experiment=make_experiment({"status": status}),
+        flag=make_flag(),
+        actor="credential:test",
+    )
+
+    persisted = insert_experiment.await_args.args[1]
+    assert persisted["minimum_exposure_config_version"] == expected_minimum_version
+    assert created["minimum_exposure_config_version"] == expected_minimum_version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "command,kwargs",
     [
         (
@@ -423,8 +467,7 @@ async def test_stale_experiment_version_fails_before_touching_backing_flag(
         ("traffic_percentage", 50.0, "traffic_percentage"),
         (
             "targeting_rules_json",
-            '[{"id":"paid-plan","conditions":[],"rollout":'
-            '{"percentage":100.0,"bucket_by":"user_id"}}]',
+            '[{"id":"paid-plan","name":"","conditions":[]}]',
             "targeting_rules",
         ),
     ],
@@ -492,6 +535,7 @@ async def test_experiment_lifecycle_binds_typed_database_timestamps(
     row = make_experiment(
         {
             "status": initial_status,
+            "minimum_exposure_config_version": 1,
             "start_date": now - timedelta(days=30),
             "end_date": now + end_offset,
             "created_at": now - timedelta(days=60),
@@ -537,6 +581,61 @@ async def test_experiment_lifecycle_binds_typed_database_timestamps(
     assert isinstance(end_date, datetime)
     assert updated["start_date"] is start_date
     assert updated["end_date"] is end_date
+
+
+@pytest.mark.asyncio
+async def test_first_draft_launch_stamps_updated_backing_flag_version(monkeypatch):
+    conn = FakeConn()
+    before = make_experiment()
+    desired = make_experiment(
+        {
+            "status": "running",
+            "start_date": datetime(2026, 7, 1, tzinfo=timezone.utc),
+            "end_date": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        }
+    )
+    update_experiment = AsyncMock(
+        side_effect=lambda _conn, experiment, _version: {
+            **experiment,
+            "version": 2,
+        }
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_experiment",
+        AsyncMock(return_value=before),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_locked_flag",
+        AsyncMock(return_value=make_flag({"version": 5})),
+    )
+    monkeypatch.setattr(
+        mutations,
+        "_update_flag",
+        AsyncMock(return_value=make_flag({"version": 6})),
+    )
+    monkeypatch.setattr(mutations, "_update_experiment", update_experiment)
+    monkeypatch.setattr(mutations, "_audit_flag", AsyncMock())
+    monkeypatch.setattr(mutations, "_audit_experiment", AsyncMock())
+    monkeypatch.setattr(
+        mutations,
+        "_enqueue_flag_change",
+        AsyncMock(return_value=12),
+    )
+    monkeypatch.setattr(mutations, "_enqueue_experiment_change", AsyncMock())
+
+    updated, _ = await mutations._update_experiment_bundle(
+        conn,
+        desired=desired,
+        expected_version=1,
+        actor="credential:test",
+        origin="experiment",
+    )
+
+    persisted = update_experiment.await_args.args[1]
+    assert persisted["minimum_exposure_config_version"] == 6
+    assert updated["minimum_exposure_config_version"] == 6
 
 
 @pytest.mark.asyncio

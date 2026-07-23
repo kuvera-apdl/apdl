@@ -162,8 +162,8 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
         "targeting_rules": [
             {
                 "id": "targeting",
+                "name": "",
                 "conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}],
-                "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
             },
         ],
     }
@@ -271,10 +271,10 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
     assert captured["json"]["targeting_rules"] == [
         {
             "id": "targeting",
+            "name": "",
             "conditions": [
                 {"attribute": "user_id", "operator": "exists"},
             ],
-            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         }
     ]
 

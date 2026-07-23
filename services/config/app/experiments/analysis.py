@@ -11,6 +11,7 @@ from app.models.schemas import (
     ExperimentAnalysis,
     ExperimentMetric,
     ExperimentStatisticalPlan,
+    ExperimentTargetingRule,
     ExperimentVariant,
     validate_statistical_plan,
 )
@@ -53,6 +54,15 @@ def build_analysis_contract(experiment: dict) -> ExperimentAnalysis:
             expected_type=dict,
         )
         primary_metric = ExperimentMetric.model_validate(metric_value)
+        targeting_values = _stored_json(
+            experiment.get("targeting_rules_json"),
+            field="targeting_rules_json",
+            expected_type=list,
+        )
+        targeting_rules = [
+            ExperimentTargetingRule.model_validate(value)
+            for value in targeting_values
+        ]
         statistical_plan = ExperimentStatisticalPlan.model_validate(
             experiment.get("statistical_plan")
         )
@@ -70,6 +80,10 @@ def build_analysis_contract(experiment: dict) -> ExperimentAnalysis:
             variants=[variant.key for variant in variants],
             metric_event=primary_metric.event,
             metric_direction=primary_metric.direction,
+            enrollment_mode="targeted" if targeting_rules else "all",
+            minimum_exposure_config_version=experiment.get(
+                "minimum_exposure_config_version"
+            ),
             statistical_plan=statistical_plan,
             start_date=experiment.get("start_date"),
             end_date=experiment.get("end_date"),

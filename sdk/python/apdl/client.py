@@ -30,6 +30,7 @@ from .types import (
 )
 
 logger = logging.getLogger("apdl")
+FEATURE_FLAG_ASSIGNMENT_REASONS = frozenset({"rule_match", "fallthrough"})
 
 # Server-side evaluation is per-request, so a config change can't carry a single
 # "new variant" — it signals "configs updated; re-evaluate against your context".
@@ -407,8 +408,13 @@ class APDLClient:
         page: str,
         component: str,
     ) -> None:
-        # No assigned variant (not_found / invalid_config) -> nothing to expose.
-        if result.variant is None:
+        # A fallback variant is still returned for product control flow when a
+        # rollout excludes the actor, but exclusion is not an assignment and
+        # must never become exposure telemetry.
+        if (
+            result.variant is None
+            or result.reason not in FEATURE_FLAG_ASSIGNMENT_REASONS
+        ):
             return
         # An exposure must be attributable to an identity.
         if not context.user_id and not context.anonymous_id:

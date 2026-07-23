@@ -27,7 +27,12 @@ import { HealthCapture } from '../capture/health';
 import { FlagCache } from '../flags/cache';
 import { FlagEvaluator } from '../flags/evaluator';
 import { parseFlagConfigResult } from '../flags/schema';
-import type { EvalContext, FlagEvaluationOptions, FlagEvaluationResult } from '../flags/types';
+import type {
+  EvalContext,
+  FlagEvaluationOptions,
+  FlagEvaluationReason,
+  FlagEvaluationResult,
+} from '../flags/types';
 import { SSEConnection } from '../sse/connection';
 import { SSEHandlers } from '../sse/handlers';
 import { ComponentRegistry } from '../ui/registry';
@@ -45,6 +50,10 @@ import { Scrubber, type ScrubFunction } from '../privacy/scrubber';
 import { CookielessIdentity } from '../privacy/cookieless';
 
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
+const FEATURE_FLAG_ASSIGNMENT_REASONS: ReadonlySet<FlagEvaluationReason> = new Set([
+  'rule_match',
+  'fallthrough',
+]);
 
 interface ActiveFlagState {
   variant: string;
@@ -563,8 +572,7 @@ export class APDLClient implements APDLApi {
     if (
       this.isShutDown ||
       result.variant === null ||
-      result.reason === 'not_found' ||
-      result.reason === 'invalid_config'
+      !FEATURE_FLAG_ASSIGNMENT_REASONS.has(result.reason)
     ) {
       return;
     }

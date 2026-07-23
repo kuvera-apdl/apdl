@@ -308,18 +308,21 @@ describe('experiment schemas', () => {
 })
 
 describe('experiment form model', () => {
-  test('parseTargetingRules validates against the canonical GateRule schema', () => {
+  test('parseTargetingRules validates eligibility without a competing rollout', () => {
     expect(parseTargetingRules('')).toEqual({ value: [], error: null })
     const rule = {
       id: 'r1',
       name: '',
       conditions: [],
-      rollout: { percentage: 100, bucket_by: 'user_id' },
     }
     expect(parseTargetingRules(JSON.stringify([rule]))).toEqual({ value: [rule], error: null })
+    expect(parseTargetingRules(JSON.stringify([{
+      ...rule,
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    }])).error).toBe('Each rule needs exactly id, name, and conditions')
     expect(parseTargetingRules('{"a": 1}').error).toBe('Must be a JSON array of rules')
     expect(parseTargetingRules('[{"id":"r1"}]').error).toBe(
-      'Each rule needs id, name, conditions, and a rollout',
+      'Each rule needs exactly id, name, and conditions',
     )
     expect(parseTargetingRules('{nope').error).toBe('Invalid JSON')
   })
@@ -386,7 +389,6 @@ describe('experiment form model', () => {
         id: 'rule-pro',
         name: 'Pro users',
         conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-        rollout: { percentage: 100, bucket_by: 'user_id' },
       },
     ])
     expect(buildUpdate(draftValues, draft, 7)).toEqual({
@@ -398,7 +400,6 @@ describe('experiment form model', () => {
           id: 'rule-pro',
           name: 'Pro users',
           conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-          rollout: { percentage: 100, bucket_by: 'user_id' },
         },
       ],
       start_date: '2026-06-01T00:00:00Z',
@@ -422,7 +423,6 @@ describe('experiment form model', () => {
         id: 'rule-pro',
         name: 'Pro users',
         conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
-        rollout: { percentage: 100, bucket_by: 'user_id' },
       },
     ])
 

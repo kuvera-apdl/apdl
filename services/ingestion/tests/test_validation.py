@@ -337,7 +337,48 @@ class TestSingleEventValidation:
         result = validate_single_event(event)
 
         assert result["valid"] is False
-        assert any(error["field"] == "properties.reason" for error in result["errors"])
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["disabled", "error", "rule_rollout", "fallthrough_rollout"],
+    )
+    def test_feature_flag_exposure_rejects_non_assignment_reasons(self, reason):
+        event = feature_flag_exposure_event()
+        event["properties"]["reason"] = reason
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(
+            error["field"] == "properties.reason"
+            for error in result["errors"]
+        )
+
+    def test_feature_flag_rule_assignment_requires_rule_id(self):
+        event = feature_flag_exposure_event()
+        event["properties"]["reason"] = "rule_match"
+        event["properties"]["rule_id"] = None
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(error["field"] == "properties.rule_id" for error in result["errors"])
+
+    @pytest.mark.parametrize(
+        "property_name",
+        ["rollout_bucket", "variant_bucket", "rollout_percentage"],
+    )
+    def test_feature_flag_assignment_rejects_null_bucket_data(self, property_name):
+        event = feature_flag_exposure_event()
+        event["properties"][property_name] = None
+
+        result = validate_single_event(event)
+
+        assert result["valid"] is False
+        assert any(
+            error["field"] == f"properties.{property_name}"
+            for error in result["errors"]
+        )
 
     def test_feature_flag_exposure_rejects_boolean_value_property(self):
         event = feature_flag_exposure_event()

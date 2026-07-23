@@ -18,6 +18,7 @@ from app.store import postgres as pg_store
 logger = logging.getLogger(__name__)
 
 FEATURE_FLAG_EXPOSURE_EVENT = "$feature_flag_exposure"
+FEATURE_FLAG_ASSIGNMENT_REASONS = frozenset({"rule_match", "fallthrough"})
 SERVER_EXPOSURE_SOURCE = "server"
 MAX_EVALUATE_REQUEST_BYTES = 65_536
 
@@ -139,7 +140,11 @@ async def evaluate(body: GateEvaluateRequest, request: Request):
             },
         )
 
-    if body.log_exposure and response.variant is not None:
+    if (
+        body.log_exposure
+        and response.variant is not None
+        and response.reason in FEATURE_FLAG_ASSIGNMENT_REASONS
+    ):
         try:
             await _enqueue_exposure(request, body, response)
         except mutations.IntegrityError as exc:

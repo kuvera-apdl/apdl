@@ -51,12 +51,8 @@ FEATURE_FLAG_EXPOSURE_KEYS = frozenset({
     "component",
 })
 FEATURE_FLAG_EXPOSURE_REASONS = frozenset({
-    "disabled",
-    "error",
     "rule_match",
-    "rule_rollout",
     "fallthrough",
-    "fallthrough_rollout",
 })
 FEATURE_FLAG_EXPOSURE_SOURCES = frozenset({
     "memory",
@@ -421,7 +417,7 @@ def _validate_feature_flag_exposure_types(
     ):
         errors.append({
             "field": _join(prefix, "properties.reason"),
-            "message": "Property 'reason' is not a canonical gate evaluation reason",
+            "message": "Property 'reason' is not a canonical assignment reason",
         })
 
     _validate_nullable_string_property(properties, "rule_id", prefix, errors)
@@ -437,12 +433,41 @@ def _validate_feature_flag_exposure_types(
     )
     _validate_nullable_string_property(properties, "bucket_by", prefix, errors)
 
-    if "config_version" in properties and not _is_non_negative_int(
-        properties["config_version"]
+    for key in ("rollout_bucket", "variant_bucket", "rollout_percentage"):
+        if key in properties and properties[key] is None:
+            errors.append({
+                "field": _join(prefix, f"properties.{key}"),
+                "message": f"Assignment property '{key}' must not be null",
+            })
+
+    if "bucket_by" in properties and not _is_non_empty_string(
+        properties["bucket_by"]
+    ):
+        errors.append({
+            "field": _join(prefix, "properties.bucket_by"),
+            "message": "Assignment property 'bucket_by' must be a non-empty string",
+        })
+
+    reason = properties.get("reason")
+    rule_id = properties.get("rule_id")
+    if reason == "rule_match" and not _is_non_empty_string(rule_id):
+        errors.append({
+            "field": _join(prefix, "properties.rule_id"),
+            "message": "Rule assignments require a non-empty rule_id",
+        })
+    if reason == "fallthrough" and rule_id is not None:
+        errors.append({
+            "field": _join(prefix, "properties.rule_id"),
+            "message": "Fallthrough assignments require a null rule_id",
+        })
+
+    if "config_version" in properties and (
+        not _is_non_negative_int(properties["config_version"])
+        or properties["config_version"] < 1
     ):
         errors.append({
             "field": _join(prefix, "properties.config_version"),
-            "message": "Property 'config_version' must be a non-negative integer",
+            "message": "Property 'config_version' must be a positive integer",
         })
 
     if "source" in properties and properties["source"] not in FEATURE_FLAG_EXPOSURE_SOURCES:

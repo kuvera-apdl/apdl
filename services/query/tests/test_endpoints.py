@@ -799,6 +799,8 @@ def _experiment_metadata(
     start_date: str | datetime | None = None,
     end_date: str | datetime | None = None,
     required_sample_size_per_arm: int = 20,
+    enrollment_mode: str = "all",
+    minimum_exposure_config_version: int = 3,
 ) -> ConfigExperimentAnalysis:
     start = start_date or datetime(2025, 1, 1, tzinfo=UTC)
     end = end_date or start + timedelta(days=duration_days)
@@ -811,6 +813,8 @@ def _experiment_metadata(
             "variants": variants or ["control", "treatment"],
             "metric_event": "purchase",
             "metric_direction": "increase",
+            "enrollment_mode": enrollment_mode,
+            "minimum_exposure_config_version": minimum_exposure_config_version,
             "statistical_plan": {
                 "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
                 "baseline_conversion_rate": 0.5,
@@ -1288,9 +1292,38 @@ async def test_experiment_uses_authoritative_metric_and_window(client, monkeypat
             "flag_key": metadata.flag_key,
             "metric_event": metadata.metric_event,
             "declared_variants": ("control", "treatment"),
+            "minimum_exposure_config_version": 3,
+            "assignment_reason": "fallthrough",
             "start_ms": 1_735_689_600_124,
         "end_ms": 1_738_281_600_655,
     }
+
+
+@pytest.mark.asyncio
+async def test_targeted_experiment_requires_rule_assignment_and_minimum_version(
+    client,
+    monkeypatch,
+):
+    metadata = _experiment_metadata(
+        enrollment_mode="targeted",
+        minimum_exposure_config_version=9,
+    )
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=metadata),
+    )
+    app.state.ch_client.execute = AsyncMock(return_value=[])
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    query_parameters = app.state.ch_client.execute.await_args.args[1]
+    assert query_parameters["assignment_reason"] == "rule_match"
+    assert query_parameters["minimum_exposure_config_version"] == 9
 
 
 @pytest.mark.asyncio

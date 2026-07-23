@@ -132,7 +132,7 @@ async def test_evaluate_server_gate_derives_metadata_from_stable_message_id(
             json={
                 "project_id": "apdl",
                 "key": "checkout",
-                "context": {"anonymous_id": "anon_123", "attributes": {}},
+                "context": {"user_id": "user_123", "attributes": {}},
                 "message_id": "eval_checkout_002",
             },
         )
@@ -140,7 +140,7 @@ async def test_evaluate_server_gate_derives_metadata_from_stable_message_id(
     assert response.status_code == 200
     enqueue.assert_awaited_once()
     published = enqueue.await_args.kwargs["event"]
-    assert published["anonymous_id"] == "anon_123"
+    assert published["user_id"] == "user_123"
     assert published["message_id"] == "eval_checkout_002"
     assert published["session_id"] == f"server:{published['message_id']}"
     assert published["properties"]["source"] == "server"
@@ -210,6 +210,47 @@ async def test_evaluate_reports_corrupt_rollout_without_exposure(
     assert record.project_id == "apdl"
     assert record.flag_key == "checkout"
     assert record.config_version == 4
+
+
+@pytest.mark.asyncio
+async def test_evaluate_does_not_persist_rollout_exclusion(monkeypatch):
+    monkeypatch.setattr(
+        evaluate.pg_store,
+        "get_flag",
+        AsyncMock(
+            return_value=make_flag(
+                {
+                    "evaluation_mode": "server",
+                    "fallthrough": {
+                        "rollout": {
+                            "percentage": 0.0,
+                            "bucket_by": "user_id",
+                        }
+                    },
+                }
+            )
+        ),
+    )
+    enqueue = AsyncMock()
+    monkeypatch.setattr(evaluate.mutations, "enqueue_exposure", enqueue)
+    app.state.pg_pool = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/evaluate",
+            json={
+                "project_id": "apdl",
+                "key": "checkout",
+                "context": {"user_id": "user_123", "attributes": {}},
+                "message_id": "eval_excluded_001",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["variant"] == "control"
+    assert response.json()["reason"] == "fallthrough_rollout"
+    enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio

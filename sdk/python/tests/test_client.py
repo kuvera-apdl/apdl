@@ -233,6 +233,32 @@ def test_not_found_flag_does_not_log_exposure():
     assert transport.all_events() == []
 
 
+def test_rollout_exclusion_returns_fallback_without_logging_exposure():
+    from apdl.flags.models import FallthroughConfig, RolloutConfig
+
+    transport = RecordingTransport()
+    client = make_client(transport, log_exposures=True)
+    client.set_flags([
+        make_flag(
+            "g",
+            default_variant="control",
+            fallthrough=FallthroughConfig(
+                rollout=RolloutConfig(
+                    percentage=0.0,
+                    bucket_by="user_id",
+                )
+            ),
+        )
+    ])
+
+    result = client.get_variant_details("g", user_id="u1")
+    assert result.variant == "control"
+    assert result.reason == "fallthrough_rollout"
+    client.flush()
+    client.shutdown()
+    assert transport.all_events() == []
+
+
 def test_exposure_skipped_without_identity():
     # bucket_by a custom attribute so a variant is assigned without user identity,
     # but an exposure can't be attributed -> not logged.

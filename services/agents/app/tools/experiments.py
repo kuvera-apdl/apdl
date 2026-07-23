@@ -120,8 +120,8 @@ def _targeting_to_rules(targeting: dict[str, Any] | list | None) -> list[dict[st
     return [
         {
             "id": "targeting",
+            "name": "",
             "conditions": conditions,
-            "rollout": {"percentage": 100.0, "bucket_by": "user_id"},
         }
     ]
 

@@ -11,6 +11,9 @@ BACKFILLS_DIR = ROOT / "pipeline" / "clickhouse" / "backfills"
 FEATURE_FLAG_EXPOSURES_SQL = (
     MIGRATIONS_DIR / "006_feature_flag_exposures.sql"
 ).read_text()
+ASSIGNMENT_EXPOSURES_SQL = (
+    MIGRATIONS_DIR / "013_assignment_exposures.sql"
+).read_text()
 EVENTS_SQL = (MIGRATIONS_DIR / "001_events.sql").read_text()
 FRONTEND_HEALTH_EVENTS_SQL = (
     MIGRATIONS_DIR / "007_frontend_health_events.sql"
@@ -129,6 +132,14 @@ def test_feature_flag_exposures_mv_projects_canonical_event_properties():
     assert "JSONExtract(properties, 'bucket', 'Nullable(Float64)')" not in (
         FEATURE_FLAG_EXPOSURES_SQL
     )
+
+
+def test_exposure_projection_keeps_only_assignment_reasons():
+    assert "JSONExtractString(properties, 'reason') IN" in (
+        ASSIGNMENT_EXPOSURES_SQL
+    )
+    assert ASSIGNMENT_EXPOSURES_SQL.count("'rule_match', 'fallthrough'") == 2
+    assert "FROM events FINAL" in ASSIGNMENT_EXPOSURES_SQL
 
 
 def test_legacy_experiment_exposure_storage_is_retired():

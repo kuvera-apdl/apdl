@@ -341,13 +341,15 @@ class TestQueryBuilders:
 
         assert "FROM feature_flag_exposures AS exposure FINAL" in sql
         assert "exposure.flag_key = %(flag_key)s" in sql
+        assert "exposure.config_version >= %(minimum_exposure_config_version)s" in sql
+        assert "exposure.reason = %(assignment_reason)s" in sql
         assert "argMin(variant, tuple(first_exposure, message_id))" in sql
         assert "uniqExact(variant) > 1 AS crossed_over" in sql
         assert "variant NOT IN %(declared_variants)s" in sql
         assert "countIf(has_unknown_variant) AS unknown_variant_actors" in sql
         assert "LEFT JOIN metric_events" in sql
         assert "countIf(converted) AS conversions" in sql
-        assert "INNER JOIN" not in sql
+        assert "LEFT JOIN metric_events" in sql
 
     def test_experiment_query_stitches_exposures_and_metrics_through_same_aliases(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
@@ -360,6 +362,9 @@ class TestQueryBuilders:
         assert "ifNull(exposure_identity.has_conflict, 0)" in sql
         assert "ifNull(metric_identity.has_conflict, 0)" in sql
         assert "uniqExact(actor_id) AS identity_conflict_actors" in sql
+        assert "INNER JOIN assignments AS assignment" in sql
+        assert "assignment.actor_id = metric.actor_id" in sql
+        assert "metric.timestamp >= assignment.assigned_at" in sql
         assert "CROSS JOIN identity_quality" in sql
         assert "exposure.user_id = metric.user_id" not in sql
         assert "exposure.anonymous_id = metric.anonymous_id" not in sql

@@ -179,6 +179,7 @@ def test_row_to_experiment_includes_canonical_columns():
         "primary_metric_json": "{}",
         "statistical_plan": None,
         "traffic_percentage": 100.0,
+        "minimum_exposure_config_version": 2,
         "start_date": start,
         "end_date": end,
         "version": 3,
@@ -195,6 +196,7 @@ def test_row_to_experiment_includes_canonical_columns():
     assert exp["primary_metric_json"] == "{}"
     assert exp["statistical_plan"] is None
     assert exp["traffic_percentage"] == 100.0
+    assert exp["minimum_exposure_config_version"] == 2
     assert exp["version"] == 3
     assert exp["start_date"] is start
     assert exp["end_date"] is end

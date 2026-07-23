@@ -366,6 +366,14 @@ async def experiment_results(
             "flag_key": metadata.flag_key,
             "metric_event": metadata.metric_event,
             "declared_variants": tuple(metadata.variants),
+            "minimum_exposure_config_version": (
+                metadata.minimum_exposure_config_version
+            ),
+            "assignment_reason": (
+                "rule_match"
+                if metadata.enrollment_mode == "targeted"
+                else "fallthrough"
+            ),
             "start_ms": _datetime64_boundary_milliseconds(metadata.start_date),
             "end_ms": _datetime64_boundary_milliseconds(metadata.end_date),
         },

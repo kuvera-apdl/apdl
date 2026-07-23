@@ -504,6 +504,8 @@ WITH
         {_EXPERIMENT_EXPOSURE_IDENTITY_JOIN}
         WHERE exposure.project_id = %(project_id)s
           AND exposure.flag_key = %(flag_key)s
+          AND exposure.config_version >= %(minimum_exposure_config_version)s
+          AND exposure.reason = %(assignment_reason)s
           AND exposure.first_exposure >= analysis_start
           AND exposure.first_exposure < analysis_end
           AND exposure.event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
@@ -540,9 +542,12 @@ WITH
             FROM raw_exposures
             WHERE identity_conflict = 1
             UNION ALL
-            SELECT actor_id
-            FROM metric_events
-            WHERE identity_conflict = 1
+            SELECT metric.actor_id
+            FROM metric_events AS metric
+            INNER JOIN assignments AS assignment
+                ON assignment.actor_id = metric.actor_id
+            WHERE metric.identity_conflict = 1
+              AND metric.timestamp >= assignment.assigned_at
         ) AS conflicted_actors
     ),
     actor_outcomes AS (
