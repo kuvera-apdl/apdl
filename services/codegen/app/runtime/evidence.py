@@ -5,9 +5,41 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.models.observations import CIVerificationObservation
-from app.runtime.collector import RuntimeEvidenceCollection
-from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceObservation
+from app.runtime.collector import (
+    RuntimeEvidenceCollection,
+    redact_artifact_observation,
+)
+from app.runtime.models import (
+    RuntimeAcceptancePlan,
+    RuntimeEvidenceObservation,
+    RuntimeJobLogEvidence,
+)
 from app.runtime.planner import assess_runtime_evidence
+from app.safety.secrets import redact_secrets
+
+
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    data = value.encode("utf-8")
+    if len(data) <= max_bytes:
+        return value
+    return data[:max_bytes].decode("utf-8", "ignore")
+
+
+def _redact_job_log(log: RuntimeJobLogEvidence) -> RuntimeJobLogEvidence:
+    excerpt, changed = redact_secrets(log.text_excerpt)
+    excerpt = _utf8_prefix(excerpt, 8000)
+    job_name = redact_secrets(log.job_name)[0][:300] or "job"
+    github_url = redact_secrets(log.github_url)[0][:2000]
+    return RuntimeJobLogEvidence.model_validate(
+        {
+            **log.model_dump(mode="python"),
+            "job_name": job_name,
+            "text_excerpt": excerpt,
+            "excerpt_byte_count": len(excerpt.encode("utf-8")),
+            "redacted": log.redacted or changed,
+            "github_url": github_url,
+        }
+    )
 
 
 def _diagnostic_text(collection: RuntimeEvidenceCollection) -> list[str]:
@@ -24,7 +56,7 @@ def _diagnostic_text(collection: RuntimeEvidenceCollection) -> list[str]:
             )
             if value
         )
-        values.append(f"{identity}: {item.message}")
+        values.append(redact_secrets(f"{identity}: {item.message}")[0])
     return sorted(set(values))
 
 
@@ -50,7 +82,7 @@ def build_runtime_evidence_observation(
     if collection.head_sha != head_sha:
         raise ValueError("runtime collection does not match the requested exact head")
     artifacts = sorted(
-        collection.artifacts,
+        (redact_artifact_observation(item) for item in collection.artifacts),
         key=lambda item: (
             item.workflow_run_id,
             item.artifact_id or 0,
@@ -58,7 +90,7 @@ def build_runtime_evidence_observation(
         ),
     )
     job_logs = sorted(
-        collection.job_logs,
+        (_redact_job_log(item) for item in collection.job_logs),
         key=lambda item: (item.workflow_run_id, item.job_id),
     )
     assessment = assess_runtime_evidence(

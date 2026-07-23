@@ -30,6 +30,7 @@ from app.safety.policy import (
     VerifiedProtectedPathExemption,
     resolve_effective_policy,
 )
+from app.safety.secrets import redact_secrets
 from app.store import changesets as changeset_store
 from app.store import connections as connections_store
 from app.store.observations import (
@@ -54,6 +55,7 @@ _RUNTIME_DIAGNOSTIC_BYTES = 800
 
 def _bounded_utf8(value: str, limit: int) -> str:
     """Retain at most ``limit`` UTF-8 bytes without splitting a character."""
+    value = redact_secrets(value)[0]
     encoded = value.encode("utf-8")
     if len(encoded) <= limit:
         return value
@@ -147,7 +149,10 @@ def _render_runtime_evidence(
             f"\n- {len(observation.collection_errors) - len(diagnostics)} additional "
             "diagnostic(s) omitted by the repair prompt bound."
         )
-    return "".join(values)
+    # Reapply the canonical policy to the complete rendering as a final boundary.
+    # Metadata fields (job names, artifact paths, and URLs) are untrusted too,
+    # even when their excerpts were already redacted at collection time.
+    return redact_secrets("".join(values))[0]
 
 
 def _classify_failure(

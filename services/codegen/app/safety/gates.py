@@ -10,7 +10,6 @@ patterns. Never trust the LLM to self-police; these gates are the backstop.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from typing import Any, Sequence
@@ -26,14 +25,7 @@ from app.safety.paths import (
     malformed_changed_paths_violation,
     require_changed_path_list,
 )
-
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),  # GitHub tokens
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),  # Slack tokens
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),  # generic secret keys
-)
+from app.safety.secrets import SecretScanLimitError, secret_kinds
 
 
 @dataclass
@@ -44,13 +36,16 @@ class GateResult:
 
 def scan_secrets(diff_text: str) -> list[str]:
     """Return findings for any secret-shaped string in the diff text."""
-    findings: list[str] = []
-    for pattern in _SECRET_PATTERNS:
-        if pattern.search(diff_text):
-            findings.append(
-                f"Possible secret matching /{pattern.pattern}/ in the diff."
-            )
-    return findings
+    if not isinstance(diff_text, str):
+        raise TypeError("diff_text must be a string")
+    try:
+        kinds = secret_kinds(diff_text)
+    except SecretScanLimitError as exc:
+        return [f"Secret scan failed closed: {exc}."]
+    return [
+        f"Possible {kind.replace('_', ' ')} secret material in the diff."
+        for kind in kinds
+    ]
 
 
 def protected_path_violations(

@@ -37,6 +37,26 @@ def test_scan_secrets_flags_known_shapes():
     assert scan_secrets("a clean diff with no secrets") == []
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Authorization: Bearer opaque-bearer-value",
+        "DATABASE_URL=postgresql://user:password@db.internal/app",
+        "https://example.test/?access_token=top-secret-value",
+        'client_secret = "quoted secret value"',
+    ],
+)
+def test_scan_secrets_uses_canonical_contextual_detection(secret):
+    assert scan_secrets(secret)
+
+
+def test_scan_secrets_fails_closed_when_input_exceeds_budget():
+    findings = scan_secrets("x" * (4 * 1024 * 1024 + 1))
+
+    assert len(findings) == 1
+    assert "failed closed" in findings[0].lower()
+
+
 def test_protected_paths_flag_ci_and_env_only():
     violations = protected_path_violations(
         [".github/workflows/ci.yml", "src/app.py", "config/.env"]

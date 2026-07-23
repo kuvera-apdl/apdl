@@ -282,6 +282,31 @@ def _runtime_observation(
     )
 
 
+def test_runtime_repair_rendering_redacts_untrusted_metadata_fields():
+    observation = _runtime_observation(
+        head_sha="head-current",
+        observed_at=datetime.now(timezone.utc),
+        identity="f",
+        marker="SAFE_RUNTIME_EVIDENCE",
+        ci_observation=_failed_observation(head_sha="head-current"),
+    )
+    secret = "opaque-bearer-value"
+    job = observation.job_logs[0].model_copy(
+        update={
+            "job_name": f"Authorization: Bearer {secret}",
+            "github_url": (
+                "https://github.test/actions/jobs/32?access_token=" + secret
+            ),
+        }
+    )
+    observation = observation.model_copy(update={"job_logs": [job]})
+
+    rendered = repair_module._render_runtime_evidence(observation)
+
+    assert secret not in rendered
+    assert "[REDACTED]" in rendered
+
+
 @pytest.mark.asyncio
 async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
     monkeypatch,

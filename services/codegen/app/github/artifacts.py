@@ -21,47 +21,12 @@ from app.runtime.models import (
     RuntimeArtifactObservation,
     RuntimeEvidenceStatus,
 )
+from app.safety.secrets import contains_secret, redact_secrets
 
 _PER_PAGE = 100
 _MAX_PAGES = 5
 _MAX_REDIRECTS = 3
 _HEAD_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-
-_TEXT_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(
-        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
-        r"(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\Z)",
-        re.DOTALL,
-    ),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
-    re.compile(
-        r"(?im)\b(?:authorization|proxy-authorization)\s*[:=]\s*"
-        r"(?:bearer|basic)\s+[^\s,;\"']+"
-    ),
-    re.compile(r"(?im)\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"),
-    re.compile(
-        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\."
-        r"[A-Za-z0-9_-]{8,}\b"
-    ),
-    re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s/]+@[^\s]+"),
-    re.compile(
-        r"(?i)\b(?:aws_session_token|session_token|database_url|redis_url|"
-        r"postgres_url)\b\s*[:=]\s*[^\s,;]+"
-    ),
-    re.compile(
-        r"(?i)(?:[?&]|\b)(?:access_token|api_key|token|password|secret)="
-        r"[^&\s]+"
-    ),
-    re.compile(
-        r"(?i)\b(token|password|secret|api[_-]?key)\b(\s*[:=]\s*)"
-        r"([^\s,;]+)"
-    ),
-)
-
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -71,9 +36,9 @@ class GitHubArtifact(StrictModel):
     artifact_id: int = Field(ge=1)
     workflow_run_id: int = Field(ge=1)
     head_sha: str = Field(min_length=1)
-    name: str
+    name: str = Field(max_length=128)
     size_in_bytes: int = Field(ge=0)
-    archive_download_url: str = Field(min_length=1)
+    archive_download_url: str = Field(min_length=1, max_length=2000)
     expired: bool = False
 
 
@@ -88,18 +53,6 @@ class StaleActionsHeadError(ValueError):
 def _validate_head_sha(head_sha: str) -> None:
     if not _HEAD_PATTERN.fullmatch(head_sha):
         raise ValueError("head_sha contains invalid characters")
-
-
-def redact_text(value: str) -> tuple[str, bool]:
-    """Redact secret-shaped values from logs and text artifact excerpts."""
-    redacted = False
-    for pattern in _TEXT_SECRET_PATTERNS:
-        if pattern.pattern.startswith("(?i)\\b(token"):
-            value, count = pattern.subn(r"\1\2[REDACTED]", value)
-        else:
-            value, count = pattern.subn("[REDACTED]", value)
-        redacted = redacted or count > 0
-    return value, redacted
 
 
 async def _download_bounded_archive(
@@ -292,6 +245,8 @@ def inspect_artifact_zip(
             normalized_paths = [_safe_member_path(info.filename) for info in infos]
             if len(normalized_paths) != len(set(normalized_paths)):
                 raise ArtifactSafetyError("artifact contains duplicate member paths")
+            if any(contains_secret(path) for path in normalized_paths):
+                raise ArtifactSafetyError("artifact member path contains secret material")
 
             evidence: list[ArtifactFileEvidence] = []
             for info, path in zip(infos, normalized_paths, strict=True):
@@ -322,7 +277,7 @@ def inspect_artifact_zip(
                     except UnicodeDecodeError:
                         binary = True
                     else:
-                        text, redacted = redact_text(text)
+                        text, redacted = redact_secrets(text)
                         excerpt = text[:excerpt_chars]
                 evidence.append(
                     ArtifactFileEvidence(
