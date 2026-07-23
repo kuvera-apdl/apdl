@@ -688,6 +688,9 @@ class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
         "identity_alias_conflicts",
         "unknown_variant_exposures",
         "data_completeness_unverified",
+        "awaiting_pipeline_boundary",
+        "pipeline_degraded",
+        "pipeline_provenance_unavailable",
     ]
     underpowered_variants: list[str]
 

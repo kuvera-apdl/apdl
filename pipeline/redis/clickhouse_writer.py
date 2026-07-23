@@ -50,6 +50,7 @@ EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
 STREAM_DISCOVERY_INTERVAL_SECONDS = 5.0
+BOUNDARY_MARKER_POLL_INTERVAL_SECONDS = 1.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
@@ -75,6 +76,10 @@ EVENT_INSERT_COLUMNS = (
     "country",
     "device_type",
     "browser",
+    "source_stream",
+    "source_stream_id",
+    "source_stream_id_ms",
+    "source_stream_id_seq",
 )
 EVENT_EXTERNAL_TABLE_NAME = "apdl_runtime_input"
 EVENT_INPUT_STRUCTURE = (
@@ -95,6 +100,10 @@ EVENT_INPUT_STRUCTURE = (
     ("country", "LowCardinality(String)"),
     ("device_type", "LowCardinality(String)"),
     ("browser", "LowCardinality(String)"),
+    ("source_stream", "String"),
+    ("source_stream_id", "String"),
+    ("source_stream_id_ms", "UInt64"),
+    ("source_stream_id_seq", "UInt64"),
 )
 EVENT_INSERT_QUERY = (
     f"INSERT INTO events ({', '.join(EVENT_INSERT_COLUMNS)}) "
@@ -167,6 +176,7 @@ async def _monitor_maintenance_inhibitor(
     )
     await writer.stop(flush_buffer=False)
 
+
 if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
     raise RuntimeError("Event stream alert threshold must be below capacity")
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
@@ -174,42 +184,73 @@ RFC3339_UTC_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
 )
 CANONICAL_EVENT_TYPES = frozenset({"track", "identify", "group", "page"})
-CANONICAL_CONTEXT_FIELDS = frozenset({
-    "library",
-    "browser",
-    "os",
-    "device",
-    "screen",
-    "viewport",
-    "page",
-    "locale",
-    "timezone",
-    "referrer",
-})
-CANONICAL_EVENT_FIELDS = frozenset({
-    "event",
-    "type",
-    "user_id",
-    "anonymous_id",
-    "group_id",
-    "timestamp",
-    "properties",
-    "traits",
-    "context",
-    "message_id",
-    "session_id",
-    # Ingestion-owned authority/metadata added only after public validation.
-    "project_id",
-    "server_timestamp",
-    "ip",
-})
-CANONICAL_REQUIRED_EVENT_FIELDS = frozenset({
-    "event",
-    "type",
-    "timestamp",
-    "context",
-    "message_id",
-})
+CANONICAL_CONTEXT_FIELDS = frozenset(
+    {
+        "library",
+        "browser",
+        "os",
+        "device",
+        "screen",
+        "viewport",
+        "page",
+        "locale",
+        "timezone",
+        "referrer",
+    }
+)
+CANONICAL_EVENT_FIELDS = frozenset(
+    {
+        "event",
+        "type",
+        "user_id",
+        "anonymous_id",
+        "group_id",
+        "timestamp",
+        "properties",
+        "traits",
+        "context",
+        "message_id",
+        "session_id",
+        # Ingestion-owned authority/metadata added only after public validation.
+        "project_id",
+        "server_timestamp",
+        "ip",
+    }
+)
+CANONICAL_REQUIRED_EVENT_FIELDS = frozenset(
+    {
+        "event",
+        "type",
+        "timestamp",
+        "context",
+        "message_id",
+    }
+)
+BOUNDARY_MARKER_KIND = "experiment_analysis_boundary"
+BOUNDARY_MARKER_FIELDS = frozenset({"message_kind", "boundary_token"})
+BOUNDARY_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+BOUNDARY_MARKER_DEDUP_PREFIX = "analysis:boundary:"
+BOUNDARY_MARKER_LUA = """
+local existing = redis.call('GET', KEYS[2])
+if existing then
+    return existing
+end
+local current_entries = redis.call('XLEN', KEYS[1])
+if current_entries >= tonumber(ARGV[1]) then
+    return redis.error_reply('EVENT_STREAM_CAPACITY_REACHED')
+end
+local marker_id = redis.call(
+    'XADD',
+    KEYS[1],
+    '*',
+    'message_kind',
+    ARGV[2],
+    'boundary_token',
+    ARGV[3]
+)
+redis.call('SET', KEYS[2], marker_id)
+return marker_id
+"""
 
 
 @dataclass(frozen=True)
@@ -218,7 +259,8 @@ class BufferedEvent:
 
     stream_key: str
     message_id: str
-    row: dict
+    row: dict | None
+    boundary_token: str | None = None
 
 
 @dataclass
@@ -260,6 +302,8 @@ class ClickHouseWriter:
             CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS
         ),
         shutdown_timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+        authority_pool=None,
+        boundary_marker_poll_interval: float = (BOUNDARY_MARKER_POLL_INTERVAL_SECONDS),
     ):
         if buffer_size <= 0:
             raise ValueError("buffer_size must be positive")
@@ -267,6 +311,8 @@ class ClickHouseWriter:
             raise ValueError("dlq_maxlen must be positive")
         if stream_discovery_interval <= 0:
             raise ValueError("stream_discovery_interval must be positive")
+        if boundary_marker_poll_interval <= 0:
+            raise ValueError("boundary_marker_poll_interval must be positive")
         for name, value in (
             ("clickhouse_connect_timeout", clickhouse_connect_timeout),
             ("clickhouse_send_receive_timeout", clickhouse_send_receive_timeout),
@@ -299,6 +345,9 @@ class ClickHouseWriter:
         self._stop_task: asyncio.Task[None] | None = None
         self.buffer: list[BufferedEvent] = []
         self._durable_pending_ack: dict[str, list[str]] = {}
+        self._boundary_tokens_by_delivery: dict[tuple[str, str], str] = {}
+        self._uncertain_redis_finalizations: set[str] = set()
+        self._finalized_since_frontier: dict[str, set[str]] = {}
         self.buffer_size = buffer_size
         self.flush_interval = flush_interval
         self.dlq_maxlen = dlq_maxlen
@@ -306,6 +355,8 @@ class ClickHouseWriter:
         self.pending_claim_interval = pending_claim_interval
         self.stream_discovery_interval = stream_discovery_interval
         self.shutdown_timeout = shutdown_timeout
+        self.authority_pool = authority_pool
+        self.boundary_marker_poll_interval = boundary_marker_poll_interval
         self.running = False
         self._closed = False
         self.last_flush = time.monotonic()
@@ -372,6 +423,8 @@ class ClickHouseWriter:
                 self._flush_loop(),
                 self._monitor_loop(project_ids),
             ]
+            if self.authority_pool is not None:
+                tasks.append(self._boundary_marker_loop(project_ids))
             if project_ids is None:
                 tasks.append(self._stream_discovery_loop())
             await asyncio.gather(*tasks)
@@ -481,11 +534,13 @@ class ClickHouseWriter:
             for name, value in parse_qsl(parsed.query, keep_blank_values=True)
             if name not in timeout_names
         ]
-        query.extend([
-            ("connect_timeout", str(connect_timeout)),
-            ("send_receive_timeout", str(send_receive_timeout)),
-            ("sync_request_timeout", str(sync_request_timeout)),
-        ])
+        query.extend(
+            [
+                ("connect_timeout", str(connect_timeout)),
+                ("send_receive_timeout", str(send_receive_timeout)),
+                ("sync_request_timeout", str(sync_request_timeout)),
+            ]
+        )
         return urlunsplit(parsed._replace(query=urlencode(query)))
 
     def _disconnect_clickhouse(self) -> None:
@@ -542,9 +597,7 @@ class ClickHouseWriter:
 
         await self._ensure_consumer_groups_for_streams(stream_keys)
 
-    async def _ensure_consumer_groups_for_streams(
-        self, stream_keys: list[str]
-    ) -> None:
+    async def _ensure_consumer_groups_for_streams(self, stream_keys: list[str]) -> None:
         """Ensure groups for one already-resolved registry snapshot."""
         for stream_key in stream_keys:
             await self._ensure_consumer_group(stream_key)
@@ -558,17 +611,38 @@ class ClickHouseWriter:
                 raise
             groups = []
 
-        if any(
-            self._redis_info_value(group, "name") == CONSUMER_GROUP
-            for group in groups
-        ):
+        existing_group = next(
+            (
+                group
+                for group in groups
+                if self._redis_info_value(group, "name") == CONSUMER_GROUP
+            ),
+            None,
+        )
+        if existing_group is not None:
+            existing_group_frontier = self._redis_info_value(
+                existing_group,
+                "last-delivered-id",
+            )
+            existing_group_entries_read = self._redis_info_value(
+                existing_group,
+                "entries-read",
+            )
             logger.debug(
                 "Consumer group '%s' already exists on '%s'",
                 CONSUMER_GROUP,
                 stream_key,
             )
+            await self._initialize_pipeline_authority(
+                stream_key,
+                group_was_created=False,
+                observed_group_frontier=existing_group_frontier,
+                observed_group_entries_read=existing_group_entries_read,
+                safe_genesis=(existing_group_frontier == "0-0"),
+            )
             return
 
+        created = False
         try:
             await self.redis_client.xgroup_create(
                 name=stream_key,
@@ -581,10 +655,145 @@ class ClickHouseWriter:
                 CONSUMER_GROUP,
                 stream_key,
             )
+            created = True
         except redis.ResponseError as exc:
             # Another writer may create the group after the read above.
             if "BUSYGROUP" not in str(exc):
                 raise
+        await self._initialize_pipeline_authority(
+            stream_key,
+            group_was_created=created,
+            observed_group_frontier="0-0" if created else None,
+            observed_group_entries_read=0 if created else None,
+            safe_genesis=created,
+        )
+
+    async def _initialize_pipeline_authority(
+        self,
+        stream_key: str,
+        *,
+        group_was_created: bool,
+        observed_group_frontier: str | None,
+        observed_group_entries_read: int | str | None,
+        safe_genesis: bool,
+    ) -> None:
+        """Create completeness authority without blessing legacy ACK history."""
+        if self.authority_pool is None:
+            return
+        project_id = self._project_id_from_stream(stream_key)
+        async with self.authority_pool.acquire() as connection:
+            existing = await connection.fetchrow(
+                """
+                SELECT
+                    stream_key,
+                    contiguous_stream_id,
+                    consumer_group_entries_read,
+                    status
+                FROM event_pipeline_watermarks
+                WHERE project_id = $1
+                """,
+                project_id,
+            )
+        if existing is not None:
+            if self._postgres_value(existing, "stream_key") != stream_key:
+                raise RuntimeError("pipeline watermark stream authority is invalid")
+            if group_was_created:
+                await self._degrade_pipeline_authority(
+                    stream_key,
+                    "stream_state_unverifiable",
+                )
+                return
+            try:
+                observed_parts = self._stream_id_parts(observed_group_frontier)
+                persisted_parts = self._stream_id_parts(
+                    self._postgres_value(existing, "contiguous_stream_id")
+                )
+                if isinstance(observed_group_entries_read, bool):
+                    raise ValueError
+                observed_entries_read = int(observed_group_entries_read)
+                if observed_entries_read < 0:
+                    raise ValueError
+                persisted_entries_read = self._postgres_value(
+                    existing,
+                    "consumer_group_entries_read",
+                )
+                if type(persisted_entries_read) is not int:
+                    raise ValueError
+            except (RuntimeError, TypeError, ValueError):
+                await self._degrade_pipeline_authority(
+                    stream_key,
+                    "stream_state_unverifiable",
+                )
+                return
+            # A healthy authority must restart at exactly the frontier it last
+            # committed. A lower group head proves rollback; a higher head is
+            # also ambiguous (for example XGROUP SETID, or a crash after Redis
+            # finalization but before the PostgreSQL commit). Never bless that
+            # cross-store gap implicitly.
+            if self._postgres_value(existing, "status") == "healthy" and (
+                observed_parts != persisted_parts
+                or observed_entries_read != persisted_entries_read
+            ):
+                await self._degrade_pipeline_authority(
+                    stream_key,
+                    "stream_state_unverifiable",
+                )
+            return
+
+        try:
+            if isinstance(observed_group_entries_read, bool):
+                raise ValueError
+            initial_entries_read = int(observed_group_entries_read)
+            if initial_entries_read < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            initial_entries_read = 0
+            safe_genesis = False
+        if safe_genesis:
+            stream_info = await self.redis_client.xinfo_stream(stream_key)
+            max_deleted_entry_id = self._redis_info_value(
+                stream_info,
+                "max-deleted-entry-id",
+            )
+            if max_deleted_entry_id is None:
+                raise RuntimeError(
+                    "Redis stream does not expose deleted-history authority"
+                )
+            safe_genesis = self._stream_id_parts(max_deleted_entry_id) == (0, 0)
+            safe_genesis = safe_genesis and initial_entries_read == 0
+        status = "healthy" if safe_genesis else "degraded"
+        failure_reason = None if safe_genesis else "legacy_state_unverifiable"
+        async with self.authority_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO event_pipeline_watermarks (
+                    project_id,
+                    stream_key,
+                    provenance_start_stream_id,
+                    contiguous_stream_id,
+                    consumer_group_entries_read,
+                    status,
+                    failure_reason
+                )
+                VALUES ($1, $2, '0-0', '0-0', $3, $4, $5)
+                ON CONFLICT (project_id) DO NOTHING
+                """,
+                project_id,
+                stream_key,
+                initial_entries_read,
+                status,
+                failure_reason,
+            )
+            row = await connection.fetchrow(
+                """
+                SELECT stream_key
+                FROM event_pipeline_watermarks
+                WHERE project_id = $1
+                """,
+                project_id,
+            )
+        if row is None or self._postgres_value(row, "stream_key") != stream_key:
+            raise RuntimeError("pipeline watermark stream authority is invalid")
 
     async def _consume_loop(self, project_ids: list[str] | None):
         """Main consume loop reading from Redis Streams.
@@ -683,6 +892,10 @@ class ClickHouseWriter:
                     )
                     if deleted_ids:
                         self.stats["lost_or_deleted_pending"] += len(deleted_ids)
+                        await self._degrade_pipeline_authority(
+                            stream_key,
+                            "lost_pending_entry",
+                        )
                         logger.critical(
                             "Redis XAUTOCLAIM reported %d lost or deleted pending "
                             "messages from '%s': %s",
@@ -770,6 +983,101 @@ class ClickHouseWriter:
                     exc,
                 )
 
+    async def _boundary_marker_loop(
+        self,
+        project_ids: list[str] | None,
+    ) -> None:
+        """Materialize deterministic experiment barriers in project streams."""
+        while self.running:
+            try:
+                await self._publish_pending_boundary_markers(project_ids)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.stats["errors"] += 1
+                logger.error("Experiment boundary marker publication failed: %s", exc)
+
+            remaining = self.boundary_marker_poll_interval
+            while self.running and remaining > 0:
+                interval = min(remaining, 1.0)
+                await asyncio.sleep(interval)
+                remaining -= interval
+
+    async def _publish_pending_boundary_markers(
+        self,
+        project_ids: list[str] | None,
+    ) -> None:
+        if self.authority_pool is None:
+            return
+        async with self.authority_pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT project_id, stream_key, marker_token
+                FROM experiment_analysis_boundaries
+                WHERE marker_stream_id IS NULL
+                  AND ($1::text[] IS NULL OR project_id = ANY($1::text[]))
+                ORDER BY requested_at, project_id, experiment_key, config_version
+                LIMIT 100
+                """,
+                project_ids,
+            )
+
+        for row in rows:
+            project_id = self._postgres_value(row, "project_id")
+            stream_key = self._postgres_value(row, "stream_key")
+            marker_token = self._postgres_value(row, "marker_token")
+            if stream_key != self._stream_key_for_project(project_id):
+                raise RuntimeError("experiment boundary stream authority is invalid")
+            if (
+                not isinstance(marker_token, str)
+                or BOUNDARY_TOKEN_PATTERN.fullmatch(marker_token) is None
+            ):
+                raise RuntimeError("experiment boundary marker token is invalid")
+
+            marker_stream_id = await self.redis_client.eval(
+                BOUNDARY_MARKER_LUA,
+                2,
+                stream_key,
+                f"{BOUNDARY_MARKER_DEDUP_PREFIX}{marker_token}",
+                EVENT_STREAM_MAX_ENTRIES,
+                BOUNDARY_MARKER_KIND,
+                marker_token,
+            )
+            if isinstance(marker_stream_id, bytes):
+                marker_stream_id = marker_stream_id.decode()
+            self._stream_id_parts(marker_stream_id)
+
+            async with self.authority_pool.acquire() as connection:
+                result = await connection.execute(
+                    """
+                    UPDATE experiment_analysis_boundaries
+                    SET marker_stream_id = $4,
+                        marked_at = now()
+                    WHERE project_id = $1
+                      AND marker_token = $2
+                      AND stream_key = $3
+                      AND marker_stream_id IS NULL
+                    """,
+                    project_id,
+                    marker_token,
+                    stream_key,
+                    marker_stream_id,
+                )
+                if result not in {"UPDATE 0", "UPDATE 1"}:
+                    raise RuntimeError("boundary marker update returned invalid result")
+                stored = await connection.fetchval(
+                    """
+                    SELECT marker_stream_id
+                    FROM experiment_analysis_boundaries
+                    WHERE project_id = $1
+                      AND marker_token = $2
+                    """,
+                    project_id,
+                    marker_token,
+                )
+            if stored != marker_stream_id:
+                raise RuntimeError("boundary marker identity changed concurrently")
+
     async def _refresh_discovered_stream_registry(self) -> list[str]:
         """Atomically replace the registry after a complete valid refresh.
 
@@ -778,9 +1086,7 @@ class ClickHouseWriter:
         failure therefore leaves the last usable snapshot intact.
         """
         async with self._stream_registry_lock:
-            stream_keys = self._normalized_stream_keys(
-                await self._discover_streams()
-            )
+            stream_keys = self._normalized_stream_keys(await self._discover_streams())
             await self._reconcile_acknowledged_history(
                 stream_keys,
                 require_group=False,
@@ -858,8 +1164,7 @@ class ClickHouseWriter:
             last_logged = self._last_stream_pressure_log.get(stream_key)
             if (
                 last_logged is not None
-                and now - last_logged
-                < EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS
+                and now - last_logged < EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS
             ):
                 continue
 
@@ -1044,12 +1349,43 @@ class ClickHouseWriter:
         return f"{milliseconds}-{sequence + 1}"
 
     @staticmethod
+    def _stream_id_parts(stream_id: str) -> tuple[int, int]:
+        if not isinstance(stream_id, str):
+            raise ValueError(f"Invalid Redis stream ID: {stream_id!r}")
+        try:
+            milliseconds_text, sequence_text = stream_id.split("-", 1)
+            if (
+                str(int(milliseconds_text)) != milliseconds_text
+                or str(int(sequence_text)) != sequence_text
+            ):
+                raise ValueError
+            milliseconds = int(milliseconds_text)
+            sequence = int(sequence_text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid Redis stream ID: {stream_id!r}") from exc
+        if (
+            milliseconds < 0
+            or sequence < 0
+            or milliseconds >= 2**64
+            or sequence >= 2**64
+        ):
+            raise ValueError(f"Invalid Redis stream ID: {stream_id!r}")
+        return milliseconds, sequence
+
+    @staticmethod
     def _redis_info_value(info: dict, field: str):
         """Read redis-py XINFO mappings with decoded or byte keys/values."""
         value = info.get(field, info.get(field.encode()))
         if isinstance(value, bytes):
             return value.decode()
         return value
+
+    @staticmethod
+    def _postgres_value(row, field: str):
+        try:
+            return row[field]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(f"PostgreSQL authority omitted {field}") from exc
 
     async def _process_messages(
         self, results: list[tuple[str, list[tuple[str, dict]]]]
@@ -1070,7 +1406,17 @@ class ClickHouseWriter:
                 continue
             for message_id, data in messages:
                 try:
-                    parsed = self._parse_event(data, project_id)
+                    boundary_token = self._parse_boundary_marker(data)
+                    parsed = (
+                        None
+                        if boundary_token is not None
+                        else self._parse_event(
+                            data,
+                            project_id,
+                            source_stream=stream_key,
+                            source_stream_id=message_id,
+                        )
+                    )
                 except (
                     json.JSONDecodeError,
                     KeyError,
@@ -1112,6 +1458,7 @@ class ClickHouseWriter:
                         stream_key=stream_key,
                         message_id=message_id,
                         row=parsed,
+                        boundary_token=boundary_token,
                     )
                 )
                 self.stats["consumed"] += 1
@@ -1121,6 +1468,25 @@ class ClickHouseWriter:
         if len(self.buffer) >= self.buffer_size and self._flush_retry_is_due():
             await self._flush()
         return buffered_count
+
+    @staticmethod
+    def _parse_boundary_marker(data: dict) -> str | None:
+        """Recognize only the writer-owned strict settlement-marker contract."""
+        if not isinstance(data, dict):
+            raise TypeError("Redis event fields must be an object")
+        if "message_kind" not in data:
+            return None
+        if set(data) != BOUNDARY_MARKER_FIELDS:
+            raise ValueError("analysis boundary marker fields are not canonical")
+        if data.get("message_kind") != BOUNDARY_MARKER_KIND:
+            raise ValueError("unknown Redis stream message kind")
+        boundary_token = data.get("boundary_token")
+        if (
+            not isinstance(boundary_token, str)
+            or BOUNDARY_TOKEN_PATTERN.fullmatch(boundary_token) is None
+        ):
+            raise ValueError("analysis boundary token is invalid")
+        return boundary_token
 
     @staticmethod
     def _project_id_from_stream(stream_key: str) -> str:
@@ -1176,6 +1542,23 @@ class ClickHouseWriter:
             self.stats["errors"] += 1
             logger.error(
                 "Could not persist reject metadata for %s on %s: %s",
+                message_id,
+                stream_key,
+                exc,
+            )
+            return False
+
+        try:
+            await self._degrade_pipeline_authority(
+                stream_key,
+                "dead_lettered_event",
+            )
+        except Exception as exc:
+            # The DLQ copy is durable but the source must remain pending until
+            # PostgreSQL records that completeness can no longer be proven.
+            self.stats["errors"] += 1
+            logger.error(
+                "Could not degrade pipeline authority for rejected %s on %s: %s",
                 message_id,
                 stream_key,
                 exc,
@@ -1239,19 +1622,303 @@ class ClickHouseWriter:
             message_ids = self._durable_pending_ack.setdefault(event.stream_key, [])
             if event.message_id not in message_ids:
                 message_ids.append(event.message_id)
+            if event.boundary_token is not None:
+                self._boundary_tokens_by_delivery[
+                    (event.stream_key, event.message_id)
+                ] = event.boundary_token
+
+    async def _verify_boundary_deliveries(
+        self,
+        stream_key: str,
+        message_ids: list[str],
+    ) -> None:
+        expected = {
+            message_id: self._boundary_tokens_by_delivery[(stream_key, message_id)]
+            for message_id in message_ids
+            if (stream_key, message_id) in self._boundary_tokens_by_delivery
+        }
+        if not expected:
+            return
+        if self.authority_pool is None:
+            raise RuntimeError("boundary delivery has no PostgreSQL authority")
+        project_id = self._project_id_from_stream(stream_key)
+        async with self.authority_pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT marker_token, marker_stream_id
+                FROM experiment_analysis_boundaries
+                WHERE project_id = $1
+                  AND stream_key = $2
+                  AND marker_stream_id = ANY($3::text[])
+                """,
+                project_id,
+                stream_key,
+                list(expected),
+            )
+        observed = {
+            self._postgres_value(row, "marker_stream_id"): self._postgres_value(
+                row,
+                "marker_token",
+            )
+            for row in rows
+        }
+        if observed != expected:
+            raise RuntimeError("boundary delivery lacks matching PostgreSQL authority")
+
+    async def _degrade_pipeline_authority(
+        self,
+        stream_key: str,
+        failure_reason: str,
+    ) -> None:
+        """Permanently prevent completeness claims after a proven stream gap."""
+        if self.authority_pool is None:
+            return
+        if failure_reason not in {
+            "legacy_state_unverifiable",
+            "dead_lettered_event",
+            "lost_pending_entry",
+            "stream_state_unverifiable",
+        }:
+            raise ValueError("invalid pipeline degradation reason")
+        project_id = self._project_id_from_stream(stream_key)
+        async with self.authority_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO event_pipeline_watermarks (
+                    project_id,
+                    stream_key,
+                    provenance_start_stream_id,
+                    contiguous_stream_id,
+                    consumer_group_entries_read,
+                    status,
+                    failure_reason
+                )
+                VALUES ($1, $2, '0-0', '0-0', 0, 'degraded', $3)
+                ON CONFLICT (project_id) DO UPDATE
+                SET status = 'degraded',
+                    failure_reason = CASE
+                        WHEN event_pipeline_watermarks.status = 'degraded'
+                        THEN event_pipeline_watermarks.failure_reason
+                        ELSE EXCLUDED.failure_reason
+                    END,
+                    updated_at = now()
+                WHERE event_pipeline_watermarks.stream_key = EXCLUDED.stream_key
+                """,
+                project_id,
+                stream_key,
+                failure_reason,
+            )
+            row = await connection.fetchrow(
+                """
+                SELECT stream_key, status
+                FROM event_pipeline_watermarks
+                WHERE project_id = $1
+                """,
+                project_id,
+            )
+        if (
+            row is None
+            or self._postgres_value(row, "stream_key") != stream_key
+            or self._postgres_value(row, "status") != "degraded"
+        ):
+            raise RuntimeError("pipeline authority could not be degraded")
+
+    async def _advance_pipeline_frontier(
+        self,
+        stream_key: str,
+        finalized_message_ids: list[str],
+    ) -> None:
+        """Advance only when every Redis delivery through the group head is ACKed."""
+        if self.authority_pool is None:
+            return
+        if not finalized_message_ids:
+            raise RuntimeError("pipeline frontier requires finalized deliveries")
+        finalized = self._finalized_since_frontier.setdefault(stream_key, set())
+        for message_id in finalized_message_ids:
+            self._stream_id_parts(message_id)
+            finalized.add(message_id)
+        try:
+            groups = await self.redis_client.xinfo_groups(stream_key)
+            group = next(
+                item
+                for item in groups
+                if self._redis_info_value(item, "name") == CONSUMER_GROUP
+            )
+            pending = int(self._redis_info_value(group, "pending") or 0)
+            raw_lag = self._redis_info_value(group, "lag")
+            if raw_lag is None:
+                raise RuntimeError("Redis consumer-group lag is not provable")
+            lag = int(raw_lag)
+            if lag < 0:
+                raise RuntimeError("Redis consumer-group lag is invalid")
+            candidate = self._redis_info_value(group, "last-delivered-id")
+            candidate_parts = self._stream_id_parts(candidate)
+            raw_entries_read = self._redis_info_value(group, "entries-read")
+            if isinstance(raw_entries_read, bool):
+                raise RuntimeError("Redis consumer-group entries-read is invalid")
+            entries_read = int(raw_entries_read)
+            if entries_read < 0:
+                raise RuntimeError("Redis consumer-group entries-read is invalid")
+        except Exception:
+            await self._degrade_pipeline_authority(
+                stream_key,
+                "stream_state_unverifiable",
+            )
+            raise
+        if pending < 0:
+            await self._degrade_pipeline_authority(
+                stream_key,
+                "stream_state_unverifiable",
+            )
+            raise RuntimeError("Redis consumer group returned negative pending count")
+        if pending > 0:
+            return
+
+        project_id = self._project_id_from_stream(stream_key)
+        clear_finalized = False
+        async with self.authority_pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT
+                        stream_key,
+                        provenance_start_stream_id,
+                        contiguous_stream_id,
+                        consumer_group_entries_read,
+                        status
+                    FROM event_pipeline_watermarks
+                    WHERE project_id = $1
+                    FOR UPDATE
+                    """,
+                    project_id,
+                )
+                if row is None:
+                    raise RuntimeError("pipeline watermark is missing")
+                if self._postgres_value(row, "stream_key") != stream_key:
+                    raise RuntimeError("pipeline watermark stream authority is invalid")
+                if self._postgres_value(row, "status") == "degraded":
+                    clear_finalized = True
+                elif self._postgres_value(row, "status") != "healthy":
+                    raise RuntimeError("pipeline watermark status is invalid")
+                else:
+                    provenance_start = self._stream_id_parts(
+                        self._postgres_value(row, "provenance_start_stream_id")
+                    )
+                    current = self._stream_id_parts(
+                        self._postgres_value(row, "contiguous_stream_id")
+                    )
+                    persisted_entries_read = self._postgres_value(
+                        row,
+                        "consumer_group_entries_read",
+                    )
+                    if type(persisted_entries_read) is not int:
+                        raise RuntimeError(
+                            "pipeline delivery-count authority is invalid"
+                        )
+                    new_finalized = {
+                        message_id
+                        for message_id in finalized
+                        if self._stream_id_parts(message_id) > current
+                    }
+                    idempotent_commit = (
+                        candidate_parts == current
+                        and entries_read == persisted_entries_read
+                        and not new_finalized
+                    )
+                    exact_advance = (
+                        bool(new_finalized)
+                        and candidate_parts > current
+                        and candidate_parts
+                        == max(
+                            self._stream_id_parts(message_id)
+                            for message_id in new_finalized
+                        )
+                        and entries_read - persisted_entries_read == len(new_finalized)
+                    )
+                    invalid_authority = (
+                        candidate_parts < provenance_start
+                        or candidate_parts < current
+                        or entries_read < persisted_entries_read
+                        or not (idempotent_commit or exact_advance)
+                    )
+                    if invalid_authority:
+                        # entries-read is the group-wide delivery sequence. Its
+                        # delta must exactly equal this process's finalized IDs;
+                        # XGROUP SETID and concurrent consumers therefore fail
+                        # closed even when the head happens to equal our batch.
+                        await connection.execute(
+                            """
+                            UPDATE event_pipeline_watermarks
+                            SET status = 'degraded',
+                                failure_reason = 'stream_state_unverifiable',
+                                updated_at = now()
+                            WHERE project_id = $1
+                              AND status = 'healthy'
+                            """,
+                            project_id,
+                        )
+                    elif exact_advance:
+                        await connection.execute(
+                            """
+                            UPDATE event_pipeline_watermarks
+                            SET contiguous_stream_id = $2,
+                                consumer_group_entries_read = $3,
+                                updated_at = now()
+                            WHERE project_id = $1
+                              AND status = 'healthy'
+                            """,
+                            project_id,
+                            candidate,
+                            entries_read,
+                        )
+                    clear_finalized = True
+        if clear_finalized:
+            self._finalized_since_frontier.pop(stream_key, None)
 
     async def _ack_durable_messages(self) -> bool:
         """Atomically ACK and delete durable rows, grouped by Redis stream."""
         for stream_key, message_ids in list(self._durable_pending_ack.items()):
             try:
-                async with self.redis_client.pipeline(transaction=True) as transaction:
-                    transaction.xack(
+                await self._verify_boundary_deliveries(stream_key, message_ids)
+                try:
+                    async with self.redis_client.pipeline(
+                        transaction=True
+                    ) as transaction:
+                        transaction.xack(
+                            stream_key,
+                            CONSUMER_GROUP,
+                            *message_ids,
+                        )
+                        transaction.xdel(stream_key, *message_ids)
+                        results = await transaction.execute()
+                except Exception:
+                    # EXEC may have committed even when its reply is lost. A
+                    # retry may therefore legitimately observe (0, 0).
+                    self._uncertain_redis_finalizations.add(stream_key)
+                    raise
+                if (
+                    not isinstance(results, list)
+                    or len(results) != 2
+                    or any(type(value) is not int or value < 0 for value in results)
+                ):
+                    raise RuntimeError("Redis ACK/delete returned an invalid result")
+                expected = len(message_ids)
+                result_pair = tuple(results)
+                allowed_results = {(expected, expected)}
+                if stream_key in self._uncertain_redis_finalizations:
+                    allowed_results.add((0, 0))
+                if result_pair not in allowed_results:
+                    await self._degrade_pipeline_authority(
                         stream_key,
-                        CONSUMER_GROUP,
-                        *message_ids,
+                        "stream_state_unverifiable",
                     )
-                    transaction.xdel(stream_key, *message_ids)
-                    await transaction.execute()
+                    raise RuntimeError(
+                        "Redis ACK/delete did not finalize the exact durable batch"
+                    )
+                # Redis has committed, but PostgreSQL may still fail. Keep the
+                # ambiguity marker until its frontier transaction succeeds.
+                self._uncertain_redis_finalizations.add(stream_key)
+                await self._advance_pipeline_frontier(stream_key, message_ids)
             except Exception as exc:
                 delay = self._record_flush_failure()
                 self.stats["errors"] += 1
@@ -1264,10 +1931,16 @@ class ClickHouseWriter:
                     exc,
                 )
                 return False
+            self._uncertain_redis_finalizations.discard(stream_key)
             # EXEC is the commit boundary. If the connection fails before its
             # result is known, retain these IDs and safely retry the idempotent
             # XACK/XDEL pair rather than risking an unfinalized delivery.
             del self._durable_pending_ack[stream_key]
+            for message_id in message_ids:
+                self._boundary_tokens_by_delivery.pop(
+                    (stream_key, message_id),
+                    None,
+                )
 
         return True
 
@@ -1291,13 +1964,16 @@ class ClickHouseWriter:
             raise RuntimeError(
                 "ClickHouse INSERTs are fenced while the writer is stopping"
             )
+        rows = [event.row for event in batch if event.row is not None]
+        if not rows:
+            return
         self.ch_client.execute(
             EVENT_INSERT_QUERY,
             external_tables=[
                 {
                     "name": EVENT_EXTERNAL_TABLE_NAME,
                     "structure": list(EVENT_INPUT_STRUCTURE),
-                    "data": [event.row for event in batch],
+                    "data": rows,
                 }
             ],
             query_id=query_id,
@@ -1493,6 +2169,8 @@ class ClickHouseWriter:
 
     async def _insert_or_isolate(self, batch: list[BufferedEvent]) -> InsertOutcome:
         """Insert valid subsets and DLQ only proven singleton row failures."""
+        if all(event.row is None for event in batch):
+            return InsertOutcome(durable=batch, retry=[])
         try:
             await self._execute_insert_async(batch)
             return InsertOutcome(durable=batch, retry=[])
@@ -1577,7 +2255,14 @@ class ClickHouseWriter:
                 return True
             return False
 
-    def _parse_event(self, data: dict, project_id: str) -> dict:
+    def _parse_event(
+        self,
+        data: dict,
+        project_id: str,
+        *,
+        source_stream: str = "",
+        source_stream_id: str = "",
+    ) -> dict:
         """Parse a Redis stream message into a ClickHouse row dict.
 
         Expected Redis message fields:
@@ -1647,9 +2332,7 @@ class ClickHouseWriter:
             "page": "page",
         }.get(event_type)
         if expected_event is not None and event_name != expected_event:
-            raise ValueError(
-                f"type {event_type!r} requires event {expected_event!r}"
-            )
+            raise ValueError(f"type {event_type!r} requires event {expected_event!r}")
         if not event_json.get("user_id") and not event_json.get("anonymous_id"):
             raise ValueError("event requires user_id or anonymous_id")
         if event_type == "identify" and not event_json.get("user_id"):
@@ -1667,6 +2350,16 @@ class ClickHouseWriter:
             if raw_received_at is not None
             else datetime.now(timezone.utc)
         )
+        if source_stream:
+            if source_stream != self._stream_key_for_project(project_id):
+                raise ValueError("source stream conflicts with project authority")
+            source_stream_id_ms, source_stream_id_seq = self._stream_id_parts(
+                source_stream_id
+            )
+        elif source_stream_id:
+            raise ValueError("source stream ID requires a source stream")
+        else:
+            source_stream_id_ms, source_stream_id_seq = 0, 0
 
         context = event_json.get("context")
         if not isinstance(context, dict):
@@ -1712,6 +2405,10 @@ class ClickHouseWriter:
             "country": "",
             "device_type": self._optional_string(device, "type"),
             "browser": self._optional_string(browser, "name"),
+            "source_stream": source_stream,
+            "source_stream_id": source_stream_id,
+            "source_stream_id_ms": source_stream_id_ms,
+            "source_stream_id_seq": source_stream_id_seq,
         }
         self._validate_clickhouse_row(row)
         return row
@@ -1756,9 +2453,7 @@ class ClickHouseWriter:
                     non_empty=True,
                 )
         if "device" in context:
-            cls._validate_nested_object(
-                context["device"], {"type"}, "context.device"
-            )
+            cls._validate_nested_object(context["device"], {"type"}, "context.device")
             cls._require_string(
                 context["device"]["type"],
                 "context.device.type",
@@ -1917,6 +2612,8 @@ class ClickHouseWriter:
             "country",
             "device_type",
             "browser",
+            "source_stream",
+            "source_stream_id",
         ):
             if not isinstance(row[field], str):
                 raise TypeError(f"ClickHouse row field {field} must be a string")
@@ -1924,6 +2621,11 @@ class ClickHouseWriter:
             raise TypeError("ClickHouse row field timestamp must be a datetime")
         if not isinstance(row["received_at"], datetime):
             raise TypeError("ClickHouse row field received_at must be a datetime")
+        for field in ("source_stream_id_ms", "source_stream_id_seq"):
+            if type(row[field]) is not int or row[field] < 0 or row[field] >= 2**64:
+                raise TypeError(
+                    f"ClickHouse row field {field} must be an unsigned 64-bit integer"
+                )
 
 
 async def main():
@@ -1984,7 +2686,7 @@ async def main():
     maintenance_pool = await asyncpg.create_pool(
         postgres_url,
         min_size=2,
-        max_size=2,
+        max_size=3,
     )
     maintenance_connections = []
     writer = None
@@ -2015,6 +2717,7 @@ async def main():
             clickhouse_send_receive_timeout=clickhouse_send_receive_timeout,
             clickhouse_sync_request_timeout=clickhouse_sync_request_timeout,
             shutdown_timeout=shutdown_timeout,
+            authority_pool=maintenance_pool,
         )
 
         loop = asyncio.get_event_loop()
@@ -2038,13 +2741,15 @@ async def main():
         try:
             # Close the acquire-to-monitor gap: no Redis consumption begins until
             # both backends positively prove both lock IDs are still held.
-            await asyncio.gather(*(
-                asyncio.wait_for(
-                    _heartbeat_maintenance_inhibitor(maintenance_connection),
-                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
+            await asyncio.gather(
+                *(
+                    asyncio.wait_for(
+                        _heartbeat_maintenance_inhibitor(maintenance_connection),
+                        timeout=MAINTENANCE_HEARTBEAT_SECONDS,
+                    )
+                    for maintenance_connection in maintenance_connections
                 )
-                for maintenance_connection in maintenance_connections
-            ))
+            )
             for inhibitor_index, (
                 maintenance_connection,
                 connection_lost,

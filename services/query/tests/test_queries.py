@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.clickhouse.client import normalize_query_params
 from app.clickhouse.queries import (
     EXPERIMENT_ANALYSIS_QUERY,
+    EXPERIMENT_PROVENANCE_QUERY,
     build_cohort_query,
     build_event_breakdown_query,
     build_event_catalog_query,
@@ -176,7 +177,13 @@ class TestSelectorValidation:
         with pytest.raises(ValidationError):
             _selector(
                 "$click",
-                [{"property": "href); DROP TABLE events", "operator": "eq", "value": "/"}],
+                [
+                    {
+                        "property": "href); DROP TABLE events",
+                        "operator": "eq",
+                        "value": "/",
+                    }
+                ],
             )
 
     def test_rejects_unsupported_scalar_value_type(self):
@@ -224,12 +231,23 @@ class TestQueryBuilders:
                 reads.append(line.strip())
 
         assert reads
-        assert all(read.endswith(" FINAL") for read in reads)
+        physical_provenance_scans = {
+            "FROM feature_flag_exposures AS provenance_exposure",
+            "FROM events AS provenance_metric",
+        }
+        assert all(
+            read.endswith(" FINAL") or read in physical_provenance_scans
+            for read in reads
+        )
 
     def test_count_query_returns_one_row_per_selector(self):
         selectors = [
-            _selector("$click", [{"property": "href", "operator": "eq", "value": "/a"}]),
-            _selector("$click", [{"property": "href", "operator": "eq", "value": "/b"}]),
+            _selector(
+                "$click", [{"property": "href", "operator": "eq", "value": "/a"}]
+            ),
+            _selector(
+                "$click", [{"property": "href", "operator": "eq", "value": "/b"}]
+            ),
         ]
         params = {
             "project_id": "demo",
@@ -311,7 +329,11 @@ class TestQueryBuilders:
             "concat('u:', actor_identity.resolved_user_id)"
         )
         anonymous = "concat('a:', event.anonymous_id)"
-        assert actor.index(direct_user) < actor.index(resolved_user) < actor.index(anonymous)
+        assert (
+            actor.index(direct_user)
+            < actor.index(resolved_user)
+            < actor.index(anonymous)
+        )
 
     def test_alias_join_is_tenant_bound_fail_closed_and_retroactive(self):
         join = identity_alias_join_sql("event", "actor_identity")
@@ -339,10 +361,14 @@ class TestQueryBuilders:
     def test_experiment_query_is_exposure_led_and_first_assignment_wins(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
-        assert "FROM feature_flag_exposures AS exposure FINAL" in sql
-        assert "exposure.flag_key = %(flag_key)s" in sql
-        assert "exposure.config_version >= %(minimum_exposure_config_version)s" in sql
-        assert "exposure.reason = %(assignment_reason)s" in sql
+        assert "FROM boundary_events AS exposure" in sql
+        assert "FROM feature_flag_exposures AS exposure" not in sql
+        assert "FROM experiment_event_deliveries FINAL" in sql
+        assert "FROM boundary_events AS metric" in sql
+        assert "LIMIT 1 BY project_id, message_id" in sql
+        assert "JSONExtractString(exposure.properties, 'flag_key')" in sql
+        assert "JSONExtractUInt(exposure.properties, 'config_version')" in sql
+        assert "JSONExtractString(exposure.properties, 'reason')" in sql
         assert "argMin(variant, tuple(first_exposure, message_id))" in sql
         assert "uniqExact(variant) > 1 AS crossed_over" in sql
         assert "variant NOT IN %(declared_variants)s" in sql
@@ -354,7 +380,11 @@ class TestQueryBuilders:
     def test_experiment_query_stitches_exposures_and_metrics_through_same_aliases(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
-        assert sql.count("FROM resolved_identity_aliases") == 2
+        assert sql.count("FROM experiment_event_deliveries FINAL") == 1
+        assert sql.count("FROM boundary_events") == 4
+        assert "FROM boundary_events AS metric" in sql
+        assert sql.count("%(boundary_stream_id_ms)s") >= 2
+        assert sql.count("%(boundary_stream_id_seq)s") == 1
         assert "concat('u:', exposure_identity.resolved_user_id)" in sql
         assert "concat('u:', metric_identity.resolved_user_id)" in sql
         assert "exposure_identity.anonymous_id = exposure.anonymous_id" in sql
@@ -369,14 +399,29 @@ class TestQueryBuilders:
         assert "exposure.user_id = metric.user_id" not in sql
         assert "exposure.anonymous_id = metric.anonymous_id" not in sql
 
+    def test_experiment_provenance_keeps_superseded_unprovenanced_rows_visible(self):
+        sql = EXPERIMENT_PROVENANCE_QUERY
+
+        # FINAL could hide a pre-boundary, pre-provenance row after a later
+        # replacement of the same client message ID. Completeness must retain
+        # that uncertainty and fail closed rather than bless the replacement.
+        assert "FROM feature_flag_exposures FINAL" not in sql
+        assert "FROM events FINAL" not in sql
+        assert "FROM identity_alias_assertions FINAL" not in sql
+        assert "FROM experiment_event_deliveries FINAL" not in sql
+        assert "FROM feature_flag_exposures AS provenance_exposure" in sql
+        assert "FROM events AS provenance_metric" in sql
+        assert "FROM identity_alias_assertions AS provenance_identity" in sql
+        assert "FROM experiment_event_deliveries AS provenance_delivery" in sql
+
     def test_experiment_query_uses_authoritative_metric_and_half_open_window(self):
         sql = EXPERIMENT_ANALYSIS_QUERY
 
         assert "metric.event_name = %(metric_event)s" in sql
         assert "fromUnixTimestamp64Milli(%(start_ms)s, 'UTC')" in sql
         assert "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')" in sql
-        assert "exposure.first_exposure >= analysis_start" in sql
-        assert "exposure.first_exposure < analysis_end" in sql
+        assert "exposure.timestamp >= analysis_start" in sql
+        assert "exposure.timestamp < analysis_end" in sql
         assert "metric.timestamp >= analysis_start" in sql
         assert "metric.timestamp < analysis_end" in sql
         assert sql.count("event_date BETWEEN toDate(analysis_start)") == 2
@@ -421,9 +466,7 @@ class TestQueryBuilders:
         assert "f.timestamp >= window_start" in sql
         assert "f.timestamp < window_end" in sql
         assert (
-            sql.count(
-                "event_date BETWEEN toDate(window_start) AND toDate(window_end)"
-            )
+            sql.count("event_date BETWEEN toDate(window_start) AND toDate(window_end)")
             == 2
         )
         assert "exposure.page = %(page_scope)s" in sql

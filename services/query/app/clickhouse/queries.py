@@ -38,7 +38,9 @@ LEFT ANY JOIN (
 """
 
 
-def build_event_count_query(selectors: list[EventSelector], params: dict[str, Any]) -> str:
+def build_event_count_query(
+    selectors: list[EventSelector], params: dict[str, Any]
+) -> str:
     """Build selector rows plus one exact range-wide total row."""
     actor = canonical_actor_sql("e", "actor_identity")
     identity_join = identity_alias_join_sql("e", "actor_identity")
@@ -96,7 +98,7 @@ WHERE e.project_id = %(project_id)s
     return f"""
 SELECT *
 FROM (
-{'\nUNION ALL\n'.join(subqueries)}
+{"\nUNION ALL\n".join(subqueries)}
 )
 ORDER BY is_total, event_count DESC
 """
@@ -206,6 +208,7 @@ LIMIT %(limit)s
 # Funnel query builder
 # ---------------------------------------------------------------------------
 
+
 def build_funnel_query(
     steps: list[EventSelector],
     params: dict[str, Any],
@@ -236,7 +239,9 @@ def build_funnel_query(
         for index, step in enumerate(steps)
     ]
     conditions = ",\n            ".join(step_conditions)
-    prefilter = "\n          OR ".join(f"({condition})" for condition in step_conditions)
+    prefilter = "\n          OR ".join(
+        f"({condition})" for condition in step_conditions
+    )
     window_milliseconds = window_seconds * 1000
     actor = canonical_actor_sql("e", "actor_identity")
     identity_join = identity_alias_join_sql("e", "actor_identity")
@@ -275,6 +280,7 @@ ORDER BY step_number
 # ---------------------------------------------------------------------------
 # Retention query
 # ---------------------------------------------------------------------------
+
 
 def build_retention_query(
     cohort_selector: EventSelector,
@@ -402,6 +408,7 @@ ORDER BY c.cohort_week, period_offset
 # Cohort comparison query
 # ---------------------------------------------------------------------------
 
+
 def build_cohort_query(metric_selector: EventSelector, params: dict[str, Any]) -> str:
     """Build a cohort comparison query using a selector for the metric event."""
     condition = build_selector_condition(
@@ -457,6 +464,7 @@ ORDER BY daily.cohort_value, daily.day
 # Event discovery
 # ---------------------------------------------------------------------------
 
+
 def build_event_catalog_query(params: dict[str, Any]) -> str:
     """List distinct event names with volume, most frequent first."""
     actor = canonical_actor_sql("e", "actor_identity")
@@ -480,12 +488,37 @@ LIMIT %(limit)s
 # Experiment queries
 # ---------------------------------------------------------------------------
 
+
+def experiment_identity_alias_join_sql(
+    table_alias: str,
+    identity_alias: str,
+) -> str:
+    """Resolve identities from assertions frozen at the analysis boundary."""
+    return f"""
+LEFT ANY JOIN (
+    SELECT
+        project_id,
+        anonymous_id,
+        if(min(user_id) = max(user_id), min(user_id), '') AS resolved_user_id,
+        min(user_id) != max(user_id) AS has_conflict
+    FROM boundary_events
+    WHERE project_id = %(project_id)s
+      AND event_type = 'identify'
+      AND user_id != ''
+      AND anonymous_id != ''
+    GROUP BY project_id, anonymous_id
+) AS {identity_alias}
+    ON {identity_alias}.project_id = {table_alias}.project_id
+   AND {identity_alias}.anonymous_id = {table_alias}.anonymous_id
+"""
+
+
 _EXPERIMENT_EXPOSURE_ACTOR = canonical_actor_sql("exposure", "exposure_identity")
-_EXPERIMENT_EXPOSURE_IDENTITY_JOIN = identity_alias_join_sql(
+_EXPERIMENT_EXPOSURE_IDENTITY_JOIN = experiment_identity_alias_join_sql(
     "exposure", "exposure_identity"
 )
 _EXPERIMENT_METRIC_ACTOR = canonical_actor_sql("metric", "metric_identity")
-_EXPERIMENT_METRIC_IDENTITY_JOIN = identity_alias_join_sql(
+_EXPERIMENT_METRIC_IDENTITY_JOIN = experiment_identity_alias_join_sql(
     "metric", "metric_identity"
 )
 
@@ -493,21 +526,65 @@ EXPERIMENT_ANALYSIS_QUERY = f"""
 WITH
     fromUnixTimestamp64Milli(%(start_ms)s, 'UTC') AS analysis_start,
     fromUnixTimestamp64Milli(%(end_ms)s, 'UTC') AS analysis_end,
+    boundary_events AS (
+        SELECT
+            project_id,
+            message_id,
+            event_type,
+            event_name,
+            user_id,
+            anonymous_id,
+            session_id,
+            timestamp,
+            received_at,
+            properties,
+            source_stream,
+            source_stream_id,
+            source_stream_id_ms,
+            source_stream_id_seq,
+            event_date
+        FROM experiment_event_deliveries FINAL
+        WHERE project_id = %(project_id)s
+          AND (
+              %(require_provenance)s = 0
+              OR (
+                  source_stream = %(source_stream)s
+                  AND source_stream_id != ''
+                  AND (
+                      source_stream_id_ms < %(boundary_stream_id_ms)s
+                      OR (
+                          source_stream_id_ms = %(boundary_stream_id_ms)s
+                          AND source_stream_id_seq <= %(boundary_stream_id_seq)s
+                      )
+                  )
+              )
+          )
+        ORDER BY
+            project_id,
+            message_id,
+            received_at DESC,
+            source_stream_id_ms DESC,
+            source_stream_id_seq DESC
+        LIMIT 1 BY project_id, message_id
+    ),
     raw_exposures AS (
         SELECT
             {_EXPERIMENT_EXPOSURE_ACTOR} AS actor_id,
-            exposure.variant,
-            exposure.first_exposure,
+            JSONExtractString(exposure.properties, 'variant') AS variant,
+            exposure.timestamp AS first_exposure,
             exposure.message_id,
             ifNull(exposure_identity.has_conflict, 0) AS identity_conflict
-        FROM feature_flag_exposures AS exposure FINAL
+        FROM boundary_events AS exposure
         {_EXPERIMENT_EXPOSURE_IDENTITY_JOIN}
         WHERE exposure.project_id = %(project_id)s
-          AND exposure.flag_key = %(flag_key)s
-          AND exposure.config_version >= %(minimum_exposure_config_version)s
-          AND exposure.reason = %(assignment_reason)s
-          AND exposure.first_exposure >= analysis_start
-          AND exposure.first_exposure < analysis_end
+          AND exposure.event_name = '$feature_flag_exposure'
+          AND JSONExtractString(exposure.properties, 'flag_key') = %(flag_key)s
+          AND JSONExtractUInt(exposure.properties, 'config_version')
+              >= %(minimum_exposure_config_version)s
+          AND JSONExtractString(exposure.properties, 'reason')
+              = %(assignment_reason)s
+          AND exposure.timestamp >= analysis_start
+          AND exposure.timestamp < analysis_end
           AND exposure.event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
           AND {_EXPERIMENT_EXPOSURE_ACTOR} != ''
     ),
@@ -526,7 +603,7 @@ WITH
             {_EXPERIMENT_METRIC_ACTOR} AS actor_id,
             metric.timestamp,
             ifNull(metric_identity.has_conflict, 0) AS identity_conflict
-        FROM events AS metric FINAL
+        FROM boundary_events AS metric
         {_EXPERIMENT_METRIC_IDENTITY_JOIN}
         WHERE metric.project_id = %(project_id)s
           AND metric.event_name = %(metric_event)s
@@ -580,6 +657,83 @@ FROM actor_outcomes
 CROSS JOIN identity_quality
 GROUP BY assigned_variant, identity_quality.identity_conflict_actors
 ORDER BY assigned_variant
+"""
+
+
+EXPERIMENT_PROVENANCE_QUERY = """
+WITH
+    fromUnixTimestamp64Milli(%(start_ms)s, 'UTC') AS analysis_start,
+    fromUnixTimestamp64Milli(%(end_ms)s, 'UTC') AS analysis_end
+SELECT sum(unprovenanced_events) AS unprovenanced_events
+FROM (
+    SELECT count() AS unprovenanced_events
+    FROM feature_flag_exposures AS provenance_exposure
+    WHERE project_id = %(project_id)s
+      AND flag_key = %(flag_key)s
+      AND config_version >= %(minimum_exposure_config_version)s
+      AND reason = %(assignment_reason)s
+      AND first_exposure >= analysis_start
+      AND first_exposure < analysis_end
+      AND event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
+      AND (
+          source_stream != %(source_stream)s
+          OR source_stream_id = ''
+          OR source_stream_id != concat(
+              toString(source_stream_id_ms),
+              '-',
+              toString(source_stream_id_seq)
+          )
+      )
+
+    UNION ALL
+
+    SELECT count() AS unprovenanced_events
+    FROM events AS provenance_metric
+    WHERE project_id = %(project_id)s
+      AND event_name = %(metric_event)s
+      AND timestamp >= analysis_start
+      AND timestamp < analysis_end
+      AND event_date BETWEEN toDate(analysis_start) AND toDate(analysis_end)
+      AND (
+          source_stream != %(source_stream)s
+          OR source_stream_id = ''
+          OR source_stream_id != concat(
+              toString(source_stream_id_ms),
+              '-',
+              toString(source_stream_id_seq)
+          )
+      )
+
+    UNION ALL
+
+    SELECT count() AS unprovenanced_events
+    FROM identity_alias_assertions AS provenance_identity
+    WHERE project_id = %(project_id)s
+      AND (
+          source_stream != %(source_stream)s
+          OR source_stream_id = ''
+          OR source_stream_id != concat(
+              toString(source_stream_id_ms),
+              '-',
+              toString(source_stream_id_seq)
+          )
+      )
+
+    UNION ALL
+
+    SELECT count() AS unprovenanced_events
+    FROM experiment_event_deliveries AS provenance_delivery
+    WHERE project_id = %(project_id)s
+      AND (
+          source_stream != %(source_stream)s
+          OR source_stream_id = ''
+          OR source_stream_id != concat(
+              toString(source_stream_id_ms),
+              '-',
+              toString(source_stream_id_seq)
+          )
+      )
+)
 """
 
 
@@ -691,8 +845,6 @@ def build_feature_flag_frontend_error_guardrail_query(
         health_scope_filter=health_scope_filter,
         exposure_actor=canonical_actor_sql("exposure", "exposure_identity"),
         health_actor=canonical_actor_sql("f", "health_identity"),
-        exposure_identity_join=identity_alias_join_sql(
-            "exposure", "exposure_identity"
-        ),
+        exposure_identity_join=identity_alias_join_sql("exposure", "exposure_identity"),
         health_identity_join=identity_alias_join_sql("f", "health_identity"),
     )
