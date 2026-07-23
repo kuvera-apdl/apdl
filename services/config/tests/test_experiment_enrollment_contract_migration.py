@@ -15,8 +15,7 @@ MIGRATION_SQL = (
 
 
 def test_schema_gate_requires_enrollment_contract_migration():
-    assert schema.MIGRATION_VERSION == 35
-    assert schema.MIGRATION_NAME == "035_experiment_enrollment_contract.sql"
+    assert schema.MIGRATION_VERSION >= 35
     assert (
         "experiments",
         "minimum_exposure_config_version",

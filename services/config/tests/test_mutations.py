@@ -1,5 +1,6 @@
 """Failure-injection tests for the sole Config write authority."""
 
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -66,23 +67,36 @@ class FakePool:
         return _Context(self.conn)
 
 
-class ExposureConflictConn:
-    def __init__(self, existing_payload: dict):
+class ExposureReceiptConn:
+    def __init__(self, existing_payload: dict | None):
         self.existing_payload = existing_payload
         self.insert_sql = ""
         self.select_sql = ""
+        self.outbox_sql = ""
+        self.calls: list[tuple[str, tuple]] = []
 
     def transaction(self):
         return _Context(None)
 
     async def fetchrow(self, sql: str, *args):
-        if "INSERT INTO config_outbox" in sql:
+        if "INSERT INTO config_exposure_receipts" in sql:
             self.insert_sql = sql
+            self.calls.append(("receipt", args))
+            if self.existing_payload is None:
+                self.existing_payload = json.loads(args[2])
+                return {"project_id": args[0]}
             return None
-        if "SELECT payload" in sql:
+        if "SELECT canonical_payload" in sql:
             self.select_sql = sql
-            return {"payload": self.existing_payload}
+            return {"canonical_payload": self.existing_payload}
         raise AssertionError(sql)
+
+    async def execute(self, sql: str, *args):
+        if "INSERT INTO config_outbox" not in sql:
+            raise AssertionError(sql)
+        self.outbox_sql = sql
+        self.calls.append(("outbox", args))
+        return "INSERT 0 1"
 
 
 class StrictExperimentTimestampConn:
@@ -1054,11 +1068,11 @@ async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting
     }
     if conflicting:
         requested_event["user_id"] = "user-2"
-    existing_payload = {
+    existing_payload = mutations._canonical_exposure_payload({
         "stream_key": "events:raw:apdl",
         "event": existing_event,
-    }
-    conn = ExposureConflictConn(existing_payload)
+    })
+    conn = ExposureReceiptConn(existing_payload)
     pool = FakePool(conn)
 
     command = mutations.enqueue_exposure(
@@ -1074,10 +1088,56 @@ async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting
     else:
         await command
 
-    assert "ON CONFLICT (project_id, kind, dedup_key) DO NOTHING" in conn.insert_sql
-    assert "project_id = $1 AND kind = 'exposure' AND dedup_key = $2" in (
-        conn.select_sql
+    assert "ON CONFLICT (project_id, message_id) DO NOTHING" in conn.insert_sql
+    assert "project_id = $1 AND message_id = $2" in conn.select_sql
+    assert "FOR UPDATE" in conn.select_sql
+    assert "last_seen_at" not in conn.select_sql
+    assert conn.outbox_sql == ""
+
+
+@pytest.mark.asyncio
+async def test_new_exposure_receipt_and_delivery_intent_are_created_together():
+    conn = ExposureReceiptConn(None)
+    pool = FakePool(conn)
+
+    await mutations.enqueue_exposure(
+        pool,
+        project_id="apdl",
+        message_id="eval_new_001",
+        stream_key="events:raw:apdl",
+        event={
+            "message_id": "eval_new_001",
+            "timestamp": "2026-07-22T10:00:00Z",
+            "user_id": "user-1",
+        },
     )
+
+    assert [kind for kind, _ in conn.calls] == ["receipt", "outbox"]
+    receipt_payload = json.loads(conn.calls[0][1][2])
+    outbox_payload = json.loads(conn.calls[1][1][3])
+    assert "timestamp" not in receipt_payload["event"]
+    assert outbox_payload["event"]["timestamp"] == "2026-07-22T10:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_exposure_receipt_rejects_a_mismatched_event_message_id():
+    conn = ExposureReceiptConn(None)
+    pool = FakePool(conn)
+
+    with pytest.raises(mutations.IntegrityError, match="receipt key"):
+        await mutations.enqueue_exposure(
+            pool,
+            project_id="apdl",
+            message_id="eval_expected_001",
+            stream_key="events:raw:apdl",
+            event={
+                "message_id": "eval_different_001",
+                "timestamp": "2026-07-22T10:00:00Z",
+                "user_id": "user-1",
+            },
+        )
+
+    assert conn.calls == []
 
 
 def test_delivery_payloads_carry_authoritative_versions():

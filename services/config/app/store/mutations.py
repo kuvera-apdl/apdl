@@ -1250,51 +1250,76 @@ async def enqueue_exposure(
     event: dict,
 ) -> None:
     payload = {"stream_key": stream_key, "event": event}
+    canonical_payload = _canonical_exposure_payload(payload)
+    if canonical_payload is None:
+        raise IntegrityError("Exposure payload is not canonical")
+    if canonical_payload["event"].get("message_id") != message_id:
+        raise IntegrityError("Exposure event message_id does not match its receipt key")
     async with pool.acquire() as conn:
         async with conn.transaction():
             inserted = await conn.fetchrow(
                 """
-                INSERT INTO config_outbox (
-                    project_id, kind, dedup_key, payload
+                INSERT INTO config_exposure_receipts (
+                    project_id, message_id, canonical_payload
                 )
-                VALUES ($1, 'exposure', $2, $3::jsonb)
-                ON CONFLICT (project_id, kind, dedup_key) DO NOTHING
-                RETURNING id
+                VALUES ($1, $2, $3::jsonb)
+                ON CONFLICT (project_id, message_id) DO NOTHING
+                RETURNING project_id
                 """,
                 project_id,
                 message_id,
-                _json(payload),
+                _json(canonical_payload),
             )
             if inserted is not None:
+                await _insert_outbox(
+                    conn,
+                    project_id=project_id,
+                    kind="exposure",
+                    dedup_key=message_id,
+                    payload=payload,
+                )
                 return
             existing = await conn.fetchrow(
                 """
-                SELECT payload
-                FROM config_outbox
-                WHERE project_id = $1 AND kind = 'exposure' AND dedup_key = $2
+                SELECT canonical_payload
+                FROM config_exposure_receipts
+                WHERE project_id = $1 AND message_id = $2
+                FOR UPDATE
                 """,
                 project_id,
                 message_id,
             )
-            existing_payload = existing["payload"] if existing else None
+            existing_payload = (
+                existing["canonical_payload"] if existing else None
+            )
             if isinstance(existing_payload, str):
                 existing_payload = json.loads(existing_payload)
-            if not _same_exposure_payload(existing_payload, payload):
+            if existing_payload != canonical_payload:
                 raise IntegrityError(
                     f"Exposure message_id '{message_id}' was reused"
                 )
 
 
+def _canonical_exposure_payload(payload: Any) -> dict | None:
+    """Remove only the generated event timestamp from a receipt payload."""
+    if not isinstance(payload, dict):
+        return None
+    canonical = json.loads(_json(payload))
+    stream_key = canonical.get("stream_key")
+    if not isinstance(stream_key, str) or not stream_key:
+        return None
+    event = canonical.get("event")
+    if not isinstance(event, dict):
+        return None
+    event.pop("timestamp", None)
+    return canonical
+
+
 def _same_exposure_payload(existing: Any, requested: dict) -> bool:
     """Compare idempotent exposure retries while ignoring generated time."""
-    if not isinstance(existing, dict):
-        return False
-    existing_copy = json.loads(_json(existing))
-    requested_copy = json.loads(_json(requested))
-    existing_event = existing_copy.get("event")
-    requested_event = requested_copy.get("event")
-    if not isinstance(existing_event, dict) or not isinstance(requested_event, dict):
-        return False
-    existing_event.pop("timestamp", None)
-    requested_event.pop("timestamp", None)
-    return existing_copy == requested_copy
+    existing_canonical = _canonical_exposure_payload(existing)
+    requested_canonical = _canonical_exposure_payload(requested)
+    return (
+        existing_canonical is not None
+        and existing_canonical == requested_canonical
+    )

@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 35
-MIGRATION_NAME = "035_experiment_enrollment_contract.sql"
+MIGRATION_VERSION = 36
+MIGRATION_NAME = "036_config_outbox_retention.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -67,6 +67,11 @@ REQUIRED_COLUMNS = frozenset(
         ("config_outbox", "quarantined_at"),
         ("config_outbox", "failure_class"),
         ("config_outbox", "failure_code"),
+        ("config_exposure_receipts", "project_id"),
+        ("config_exposure_receipts", "message_id"),
+        ("config_exposure_receipts", "canonical_payload"),
+        ("config_exposure_receipts", "first_seen_at"),
+        ("config_exposure_receipts", "last_seen_at"),
         ("config_project_versions", "project_id"),
         ("config_project_versions", "project_version"),
         ("config_project_versions", "updated_at"),

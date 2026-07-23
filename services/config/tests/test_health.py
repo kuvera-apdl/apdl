@@ -97,6 +97,10 @@ async def test_readiness_returns_200_when_dependencies_are_ready(health_state):
         "outbox": "ready",
     }
     assert payload["outbox"]["pending_count"] == 0
+    assert payload["outbox"]["estimated_receipt_count"] == 0
+    assert payload["outbox"]["thresholds"][
+        "exposure_receipt_retention_seconds"
+    ] == outbox.EXPOSURE_RECEIPT_RETENTION_SECONDS
     assert payload["outbox"]["status"] == "ready"
     assert payload["sse"]["active_connections"] == 0
 

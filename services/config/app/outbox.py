@@ -26,11 +26,20 @@ MAX_DELIVERY_ATTEMPTS = 8
 READINESS_MAX_PENDING_AGE_SECONDS = 300.0
 READINESS_MAX_QUARANTINED_ROWS = 0
 FAILURE_EVIDENCE_MAX_CHARS = 2000
+CLEANUP_BATCH_SIZE = 500
+CLEANUP_INTERVAL_SECONDS = 300.0
+PROCESSED_RETENTION_SECONDS = 7 * 24 * 60 * 60
+QUARANTINED_RETENTION_SECONDS = 90 * 24 * 60 * 60
+CLICKHOUSE_EVENT_RETENTION_MAX_SECONDS = 366 * 24 * 60 * 60
+EXPOSURE_RECEIPT_RETENTION_SECONDS = 400 * 24 * 60 * 60
+CLEANUP_READINESS_GRACE_SECONDS = 60 * 60
 
 if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
     raise RuntimeError("Event stream alert threshold must be below capacity")
 if MAX_DELIVERY_ATTEMPTS < 1:
     raise RuntimeError("Config outbox delivery attempts must be positive")
+if EXPOSURE_RECEIPT_RETENTION_SECONDS <= CLICKHOUSE_EVENT_RETENTION_MAX_SECONDS:
+    raise RuntimeError("Exposure receipts must outlive ClickHouse events")
 
 _BOUNDED_XADD_LUA = """
 local count = tonumber(ARGV[1])
@@ -467,10 +476,14 @@ def _should_log_alert(event: str, stream_key: str) -> bool:
 def empty_metrics() -> dict:
     return {
         "pending_count": 0,
+        "processed_count": 0,
         "quarantined_count": 0,
+        "estimated_receipt_count": 0,
         "max_pending_attempts": 0,
         "oldest_pending_age_seconds": 0.0,
+        "oldest_processed_age_seconds": 0.0,
         "oldest_quarantined_age_seconds": 0.0,
+        "oldest_receipt_age_seconds": 0.0,
     }
 
 
@@ -478,43 +491,75 @@ async def metrics_snapshot(conn) -> dict:
     """Return bounded, low-cardinality delivery lag and quarantine metrics."""
     row = await conn.fetchrow(
         """
+        WITH outbox_metrics AS (
+            SELECT
+                count(*) FILTER (
+                    WHERE processed_at IS NULL AND quarantined_at IS NULL
+                ) AS pending_count,
+                count(*) FILTER (
+                    WHERE processed_at IS NOT NULL
+                ) AS processed_count,
+                count(*) FILTER (
+                    WHERE quarantined_at IS NOT NULL
+                ) AS quarantined_count,
+                COALESCE(max(attempts) FILTER (
+                    WHERE processed_at IS NULL AND quarantined_at IS NULL
+                ), 0) AS max_pending_attempts,
+                COALESCE(EXTRACT(EPOCH FROM (
+                    now() - (
+                        min(created_at) FILTER (
+                            WHERE processed_at IS NULL
+                              AND quarantined_at IS NULL
+                        )
+                    )
+                )), 0) AS oldest_pending_age_seconds,
+                COALESCE(EXTRACT(EPOCH FROM (
+                    now() - min(processed_at)
+                )), 0) AS oldest_processed_age_seconds,
+                COALESCE(EXTRACT(EPOCH FROM (
+                    now() - min(quarantined_at)
+                )), 0) AS oldest_quarantined_age_seconds
+            FROM config_outbox
+        ),
+        receipt_metrics AS (
+            SELECT COALESCE(EXTRACT(EPOCH FROM (
+                now() - min(last_seen_at)
+            )), 0) AS oldest_receipt_age_seconds
+            FROM config_exposure_receipts
+        )
         SELECT
-            count(*) FILTER (
-                WHERE processed_at IS NULL AND quarantined_at IS NULL
-            ) AS pending_count,
-            count(*) FILTER (
-                WHERE quarantined_at IS NOT NULL
-            ) AS quarantined_count,
-            COALESCE(max(attempts) FILTER (
-                WHERE processed_at IS NULL AND quarantined_at IS NULL
-            ), 0) AS max_pending_attempts,
-            COALESCE(EXTRACT(EPOCH FROM (
-                now() - (
-                    min(created_at) FILTER (
-                        WHERE processed_at IS NULL AND quarantined_at IS NULL
-                    )
-                )
-            )), 0) AS oldest_pending_age_seconds,
-            COALESCE(EXTRACT(EPOCH FROM (
-                now() - (
-                    min(quarantined_at) FILTER (
-                        WHERE quarantined_at IS NOT NULL
-                    )
-                )
-            )), 0) AS oldest_quarantined_age_seconds
-        FROM config_outbox
+            outbox_metrics.*,
+            receipt_metrics.oldest_receipt_age_seconds,
+            COALESCE((
+                SELECT greatest(n_live_tup, 0)::bigint
+                FROM pg_stat_user_tables
+                WHERE schemaname = 'public'
+                  AND relname = 'config_exposure_receipts'
+            ), 0) AS estimated_receipt_count
+        FROM outbox_metrics
+        CROSS JOIN receipt_metrics
         """
     )
     return {
         "pending_count": int(row["pending_count"]),
+        "processed_count": int(row["processed_count"]),
         "quarantined_count": int(row["quarantined_count"]),
+        "estimated_receipt_count": int(row["estimated_receipt_count"]),
         "max_pending_attempts": int(row["max_pending_attempts"]),
         "oldest_pending_age_seconds": max(
             float(row["oldest_pending_age_seconds"]),
             0.0,
         ),
+        "oldest_processed_age_seconds": max(
+            float(row["oldest_processed_age_seconds"]),
+            0.0,
+        ),
         "oldest_quarantined_age_seconds": max(
             float(row["oldest_quarantined_age_seconds"]),
+            0.0,
+        ),
+        "oldest_receipt_age_seconds": max(
+            float(row["oldest_receipt_age_seconds"]),
             0.0,
         ),
     }
@@ -529,6 +574,22 @@ def readiness_snapshot(metrics: dict) -> dict:
         reasons.append("oldest_pending_age_exceeded")
     if metrics["quarantined_count"] > READINESS_MAX_QUARANTINED_ROWS:
         reasons.append("quarantined_rows_exceeded")
+    if (
+        metrics["oldest_processed_age_seconds"]
+        > PROCESSED_RETENTION_SECONDS + CLEANUP_READINESS_GRACE_SECONDS
+    ):
+        reasons.append("processed_cleanup_overdue")
+    if (
+        metrics["oldest_quarantined_age_seconds"]
+        > QUARANTINED_RETENTION_SECONDS + CLEANUP_READINESS_GRACE_SECONDS
+    ):
+        reasons.append("quarantined_cleanup_overdue")
+    if (
+        metrics["oldest_receipt_age_seconds"]
+        > EXPOSURE_RECEIPT_RETENTION_SECONDS
+        + CLEANUP_READINESS_GRACE_SECONDS
+    ):
+        reasons.append("receipt_cleanup_overdue")
     return {
         **metrics,
         "status": "degraded" if reasons else "ready",
@@ -536,7 +597,90 @@ def readiness_snapshot(metrics: dict) -> dict:
         "thresholds": {
             "max_pending_age_seconds": READINESS_MAX_PENDING_AGE_SECONDS,
             "max_quarantined_rows": READINESS_MAX_QUARANTINED_ROWS,
+            "processed_retention_seconds": PROCESSED_RETENTION_SECONDS,
+            "quarantined_retention_seconds": QUARANTINED_RETENTION_SECONDS,
+            "exposure_receipt_retention_seconds": (
+                EXPOSURE_RECEIPT_RETENTION_SECONDS
+            ),
+            "cleanup_readiness_grace_seconds": CLEANUP_READINESS_GRACE_SECONDS,
+            "cleanup_batch_size": CLEANUP_BATCH_SIZE,
         },
+    }
+
+
+async def cleanup_once(pool) -> dict[str, int]:
+    """Prune bounded terminal/receipt batches without blocking live workers."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            processed = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT id
+                    FROM config_outbox
+                    WHERE processed_at < now() - ($2 * interval '1 second')
+                    ORDER BY processed_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT $1
+                )
+                DELETE FROM config_outbox AS outbox
+                USING candidates
+                WHERE outbox.id = candidates.id
+                RETURNING outbox.id
+                """,
+                CLEANUP_BATCH_SIZE,
+                PROCESSED_RETENTION_SECONDS,
+            )
+            quarantined = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT id
+                    FROM config_outbox
+                    WHERE quarantined_at < now() - ($2 * interval '1 second')
+                    ORDER BY quarantined_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT $1
+                )
+                DELETE FROM config_outbox AS outbox
+                USING candidates
+                WHERE outbox.id = candidates.id
+                RETURNING outbox.id
+                """,
+                CLEANUP_BATCH_SIZE,
+                QUARANTINED_RETENTION_SECONDS,
+            )
+            receipts = await conn.fetch(
+                """
+                WITH candidates AS (
+                    SELECT receipt.project_id, receipt.message_id
+                    FROM config_exposure_receipts AS receipt
+                    WHERE receipt.last_seen_at
+                          < now() - ($2 * interval '1 second')
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM config_outbox AS outbox
+                          WHERE outbox.project_id = receipt.project_id
+                            AND outbox.kind = 'exposure'
+                            AND outbox.dedup_key = receipt.message_id
+                      )
+                    ORDER BY receipt.last_seen_at,
+                             receipt.project_id,
+                             receipt.message_id
+                    FOR UPDATE OF receipt SKIP LOCKED
+                    LIMIT $1
+                )
+                DELETE FROM config_exposure_receipts AS receipt
+                USING candidates
+                WHERE receipt.project_id = candidates.project_id
+                  AND receipt.message_id = candidates.message_id
+                RETURNING receipt.project_id
+                """,
+                CLEANUP_BATCH_SIZE,
+                EXPOSURE_RECEIPT_RETENTION_SECONDS,
+            )
+    return {
+        "processed": len(processed),
+        "quarantined": len(quarantined),
+        "receipts": len(receipts),
     }
 
 
@@ -623,8 +767,34 @@ async def run_worker(
     broadcaster,
     *,
     idle_seconds: float = 0.25,
+    cleanup_interval_seconds: float = CLEANUP_INTERVAL_SECONDS,
 ) -> None:
+    next_cleanup_at = 0.0
     while True:
+        now = time.monotonic()
+        if now >= next_cleanup_at:
+            cleanup_backlog = False
+            try:
+                cleaned = await cleanup_once(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Config outbox cleanup failed")
+            else:
+                cleanup_backlog = any(
+                    count >= CLEANUP_BATCH_SIZE for count in cleaned.values()
+                )
+                if any(cleaned.values()):
+                    logger.info(
+                        "Config outbox cleanup pruned terminal rows",
+                        extra={
+                            "event": "config_outbox_cleanup",
+                            **cleaned,
+                        },
+                    )
+            next_cleanup_at = (
+                now if cleanup_backlog else now + cleanup_interval_seconds
+            )
         try:
             claimed = await drain_once(pool, redis, broadcaster)
         except asyncio.CancelledError:
