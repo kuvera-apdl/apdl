@@ -3,5 +3,6 @@ WORKDIR /app
 COPY requirements.lock .
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY app/ app/
+COPY scripts/create_admin_user.py scripts/create_admin_user.py
 EXPOSE 8085
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8085", "--no-proxy-headers"]

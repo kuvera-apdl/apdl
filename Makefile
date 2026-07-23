@@ -168,7 +168,7 @@ lint-admin-api:
 	cd services/admin-api && .venv/bin/ruff check app/ scripts/ tests/
 
 create-admin-user:
-	cd services/admin-api && .venv/bin/python scripts/create_admin_user.py $(ARGS)
+	$(COMPOSE) run --rm --build --no-deps admin-api python scripts/create_admin_user.py $(ARGS)
 
 # ─── SDK (Python) ────────────────────────────────────────────
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -87,6 +88,7 @@ def _patch_runtime(monkeypatch, connection: FakeConnection) -> None:
         return connection
 
     monkeypatch.setattr(create_admin_user.asyncpg, "connect", connect)
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://operator-test")
     monkeypatch.setattr(create_admin_user.getpass, "getpass", lambda: "password")
     monkeypatch.setattr(
         create_admin_user,
@@ -232,10 +234,46 @@ async def test_override_flags_are_strict_and_validated_before_connect(
         raise AssertionError("invalid CLI arguments must not open PostgreSQL")
 
     monkeypatch.setattr(create_admin_user.asyncpg, "connect", unexpected_connect)
+    monkeypatch.setenv("POSTGRES_URL", "postgresql://operator-test")
     monkeypatch.setattr(create_admin_user.getpass, "getpass", lambda: "password")
 
     with pytest.raises(SystemExit, match=message):
         await create_admin_user.provision(args)
+
+
+@pytest.mark.asyncio
+async def test_missing_postgres_url_fails_before_prompt_hash_or_connect(monkeypatch):
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+
+    def unexpected_prompt():
+        raise AssertionError("missing DSN must fail before prompting")
+
+    def unexpected_hash(_password: str):
+        raise AssertionError("missing DSN must fail before hashing")
+
+    async def unexpected_connect(_dsn: str):
+        raise AssertionError("missing DSN must fail before connecting")
+
+    monkeypatch.setattr(create_admin_user.getpass, "getpass", unexpected_prompt)
+    monkeypatch.setattr(create_admin_user, "hash_password", unexpected_hash)
+    monkeypatch.setattr(create_admin_user.asyncpg, "connect", unexpected_connect)
+
+    with pytest.raises(SystemExit, match="POSTGRES_URL is required"):
+        await create_admin_user.provision(_args())
+
+
+def test_container_and_make_target_ship_the_operator_cli() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    dockerfile = (repository / "services/admin-api/Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    makefile = (repository / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("create-admin-user:", 1)[1].split("\n\n", 1)[0]
+
+    assert "COPY scripts/create_admin_user.py scripts/create_admin_user.py" in dockerfile
+    assert "$(COMPOSE) run --rm --build --no-deps admin-api" in target
+    assert "python scripts/create_admin_user.py $(ARGS)" in target
+    assert ".venv/bin/python" not in target
 
 
 @pytest.mark.asyncio
