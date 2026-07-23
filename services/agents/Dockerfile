@@ -29,5 +29,6 @@ ENV HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1
 
 COPY app/ app/
+COPY scripts/provision_llm_policy.py scripts/provision_llm_policy.py
 EXPOSE 8083
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8083"]
