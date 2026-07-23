@@ -20,6 +20,8 @@ from typing import Any, Callable, Sequence
 
 AIDER_DISTRIBUTION = "aider-chat"
 AIDER_VERSION = "0.86.2"
+LITELLM_DISTRIBUTION = "litellm"
+LITELLM_VERSION = "1.85.0"
 AIDER_LAUNCHER_ERROR = 78
 
 TRUSTED_AIDER_MESSAGE_PREFIX = (
@@ -91,7 +93,38 @@ _EXPECTED_SIGNATURES = {
     ),
     "load_dotenv_files": ("git_root", "dotenv_fname", "encoding"),
     "Coder.run": ("self", "with_message", "preproc"),
+    "LiteLLMExceptions._load": ("self", "strict"),
 }
+_AIDER_LITELLM_EXCEPTION_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APIError",
+        "APIResponseValidationError",
+        "AuthenticationError",
+        "AzureOpenAIError",
+        "BadGatewayError",
+        "BadRequestError",
+        "BudgetExceededError",
+        "ContentPolicyViolationError",
+        "ContextWindowExceededError",
+        "ImageFetchError",
+        "InternalServerError",
+        "InvalidRequestError",
+        "JSONSchemaValidationError",
+        "NotFoundError",
+        "OpenAIError",
+        "RateLimitError",
+        "RouterRateLimitError",
+        "ServiceUnavailableError",
+        "Timeout",
+        "UnprocessableEntityError",
+        "UnsupportedParamsError",
+    }
+)
+_UNMAPPED_LITELLM_EXCEPTION = "PermissionDeniedError"
+_EXPECTED_EXPORTED_LITELLM_ERRORS = frozenset(
+    name for name in _AIDER_LITELLM_EXCEPTION_NAMES if name.endswith("Error")
+) | {_UNMAPPED_LITELLM_EXCEPTION}
 
 
 class AiderLauncherError(RuntimeError):
@@ -122,6 +155,82 @@ def _validate_aider_identity(
         callable_value = callables.get(name)
         if callable_value is None or _parameter_names(callable_value) != expected:
             raise AiderLauncherError(f"Pinned Aider API mismatch: {name}")
+
+
+def _validate_litellm_compatibility(
+    *,
+    distribution_version: str,
+    aider_exception_names: frozenset[str],
+    exported_exception_names: frozenset[str],
+) -> None:
+    if distribution_version != LITELLM_VERSION:
+        raise AiderLauncherError("Pinned LiteLLM identity mismatch")
+    if aider_exception_names != _AIDER_LITELLM_EXCEPTION_NAMES:
+        raise AiderLauncherError("Pinned Aider exception inventory mismatch")
+    if exported_exception_names != _EXPECTED_EXPORTED_LITELLM_ERRORS:
+        raise AiderLauncherError("Pinned LiteLLM exception inventory mismatch")
+    if _UNMAPPED_LITELLM_EXCEPTION in aider_exception_names:
+        raise AiderLauncherError("LiteLLM permission denial was unexpectedly mapped")
+
+
+def _exported_litellm_exception_names(litellm: ModuleType) -> frozenset[str]:
+    # Materialize Aider's reviewed lazy exports before comparing the complete
+    # Error-suffixed inventory. LiteLLM 1.85.0 adds exactly one class that
+    # Aider 0.86.2 does not know: PermissionDeniedError.
+    for name in _AIDER_LITELLM_EXCEPTION_NAMES:
+        value = getattr(litellm, name, None)
+        if not isinstance(value, type) or not issubclass(value, BaseException):
+            raise AiderLauncherError(
+                f"Pinned LiteLLM exception is unavailable: {name}"
+            )
+    exported: set[str] = set()
+    for name in dir(litellm):
+        if not name.endswith("Error"):
+            continue
+        value = getattr(litellm, name)
+        if not isinstance(value, type):
+            raise AiderLauncherError(
+                f"LiteLLM Error export is not a class: {name}"
+            )
+        if issubclass(value, BaseException):
+            exported.add(name)
+    return frozenset(exported)
+
+
+def _install_litellm_exception_compatibility(
+    aider_exceptions: ModuleType,
+    litellm: ModuleType,
+    *,
+    distribution_version: str,
+) -> None:
+    """Permit one new export without catching or remapping its real errors."""
+    exception_type = aider_exceptions.LiteLLMExceptions
+
+    def hardened_load(self: Any, strict: bool = False) -> None:
+        del strict
+        aider_names = frozenset(self.exception_info)
+        exported_names = _exported_litellm_exception_names(litellm)
+        _validate_litellm_compatibility(
+            distribution_version=distribution_version,
+            aider_exception_names=aider_names,
+            exported_exception_names=exported_names,
+        )
+        expected_types = {
+            getattr(litellm, name)
+            for name in _AIDER_LITELLM_EXCEPTION_NAMES
+        }
+        existing_types = set(self.exceptions)
+        if existing_types and existing_types != expected_types:
+            raise AiderLauncherError("Aider exception mapping changed at runtime")
+        for name in _AIDER_LITELLM_EXCEPTION_NAMES:
+            self.exceptions[getattr(litellm, name)] = self.exception_info[name]
+        permission_denied = getattr(litellm, _UNMAPPED_LITELLM_EXCEPTION)
+        if permission_denied in self.exceptions:
+            raise AiderLauncherError(
+                "LiteLLM permission denial must remain an uncaught provider error"
+            )
+
+    exception_type._load = hardened_load
 
 
 def _single_value(argv: Sequence[str], flag: str) -> str:
@@ -234,7 +343,13 @@ def validate_invocation(
     )
 
 
-def _load_aider_runtime() -> tuple[ModuleType, ModuleType, type[Any]]:
+def _load_aider_runtime() -> tuple[
+    ModuleType,
+    ModuleType,
+    ModuleType,
+    ModuleType,
+    str,
+]:
     repository = Path.cwd().resolve()
     sys.path[:] = [
         entry
@@ -245,19 +360,24 @@ def _load_aider_runtime() -> tuple[ModuleType, ModuleType, type[Any]]:
     try:
         import aider
         import aider.coders.base_coder as base_coder
+        import aider.exceptions as aider_exceptions
         import aider.main as aider_main
+        import litellm
 
         installed_distribution = distribution(AIDER_DISTRIBUTION)
         package_root = installed_distribution.locate_file("aider").resolve(strict=True)
+        litellm_distribution = distribution(LITELLM_DISTRIBUTION)
+        litellm_root = litellm_distribution.locate_file("litellm").resolve(strict=True)
     except (ImportError, OSError, PackageNotFoundError) as exc:
-        raise AiderLauncherError("Pinned Aider runtime is unavailable") from exc
-    if not package_root.is_dir():
-        raise AiderLauncherError("Pinned Aider package root is unavailable")
+        raise AiderLauncherError("Pinned Aider runtime graph is unavailable") from exc
+    if not package_root.is_dir() or not litellm_root.is_dir():
+        raise AiderLauncherError("Pinned Aider package graph is unavailable")
     try:
-        for module in (aider, aider_main, base_coder):
+        for module in (aider, aider_main, base_coder, aider_exceptions):
             Path(module.__file__).resolve(strict=True).relative_to(package_root)
+        Path(litellm.__file__).resolve(strict=True).relative_to(litellm_root)
     except (AttributeError, OSError, ValueError) as exc:
-        raise AiderLauncherError("Aider module is not image-owned") from exc
+        raise AiderLauncherError("Aider runtime graph is not image-owned") from exc
     _validate_aider_identity(
         distribution_version=installed_distribution.version,
         module_version=str(getattr(aider, "__version__", "")),
@@ -267,14 +387,31 @@ def _load_aider_runtime() -> tuple[ModuleType, ModuleType, type[Any]]:
             "generate_search_path_list": aider_main.generate_search_path_list,
             "load_dotenv_files": aider_main.load_dotenv_files,
             "Coder.run": base_coder.Coder.run,
+            "LiteLLMExceptions._load": aider_exceptions.LiteLLMExceptions._load,
         },
     )
-    return aider_main, base_coder, base_coder.Coder
+    _validate_litellm_compatibility(
+        distribution_version=litellm_distribution.version,
+        aider_exception_names=frozenset(
+            aider_exceptions.LiteLLMExceptions.exception_info
+        ),
+        exported_exception_names=_exported_litellm_exception_names(litellm),
+    )
+    return (
+        aider_main,
+        base_coder,
+        aider_exceptions,
+        litellm,
+        litellm_distribution.version,
+    )
 
 
 def _install_hardening(
     aider_main: ModuleType,
     base_coder: ModuleType,
+    aider_exceptions: ModuleType,
+    litellm: ModuleType,
+    litellm_version: str,
     invocation: HardenedAiderInvocation,
 ) -> None:
     original_get_parser = aider_main.get_parser
@@ -325,6 +462,11 @@ def _install_hardening(
     aider_main.load_dotenv_files = controlled_dotenv
     aider_main.check_config_files_for_yes = lambda _files: False
     base_coder.Coder.run = hardened_coder_run
+    _install_litellm_exception_compatibility(
+        aider_exceptions,
+        litellm,
+        distribution_version=litellm_version,
+    )
 
 
 def launch(
@@ -335,11 +477,24 @@ def launch(
 ) -> Any:
     """Launch only the pinned Aider API with implicit configuration disabled."""
     invocation = validate_invocation(argv, control_root=control_root)
-    aider_main, base_coder, _coder_type = _load_aider_runtime()
+    (
+        aider_main,
+        base_coder,
+        aider_exceptions,
+        litellm,
+        litellm_version,
+    ) = _load_aider_runtime()
     for name in tuple(os.environ):
         if name.startswith("AIDER_"):
             del os.environ[name]
-    _install_hardening(aider_main, base_coder, invocation)
+    _install_hardening(
+        aider_main,
+        base_coder,
+        aider_exceptions,
+        litellm,
+        litellm_version,
+        invocation,
+    )
     return aider_main.main(
         list(invocation.argv),
         force_git_root=Path.cwd().resolve().as_posix(),

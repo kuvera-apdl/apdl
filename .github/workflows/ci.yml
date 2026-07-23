@@ -273,11 +273,12 @@ jobs:
             services/agents/requirements.lock \
             services/admin-api/requirements.lock \
             services/codegen/requirements.lock \
-            services/codegen/requirements-agent.lock \
             pipeline/redis/requirements.lock
           do
-            uvx pip-audit --strict --require-hashes -r "$lock"
+            uvx --python 3.12 pip-audit --strict --require-hashes -r "$lock"
           done
+      - name: Audit published Codegen worker lock
+        run: services/codegen/scripts/audit_worker_dependencies.sh
       - name: Audit resolved published and preview Python runtimes
         shell: bash
         run: |
@@ -290,7 +291,7 @@ jobs:
               --python-version 3.12 \
               --output-file "$requirements" \
               --quiet
-            uvx pip-audit --strict -r "$requirements"
+            uvx --python 3.12 pip-audit --strict -r "$requirements"
           done
 
   package-contracts:

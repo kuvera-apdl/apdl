@@ -79,8 +79,11 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # source directly. Both production and evaluation invoke explicit Python
 # modules, avoiding a build-isolation dependency download for the local package.
 COPY requirements-agent.lock /tmp/requirements-agent.lock
-RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-agent.lock \
-    && rm /tmp/requirements-agent.lock
+COPY scripts/verify_aider_distribution.py /tmp/verify-aider-distribution.py
+RUN pip install --no-cache-dir --no-deps --require-hashes \
+        -r /tmp/requirements-agent.lock \
+    && python /tmp/verify-aider-distribution.py \
+    && rm /tmp/requirements-agent.lock /tmp/verify-aider-distribution.py
 COPY --from=candidate-source /candidate/app /app/app
 COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \

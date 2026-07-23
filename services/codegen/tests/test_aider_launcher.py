@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 from app.editor.aider_launcher import (
     AiderLauncherError,
+    LITELLM_VERSION,
     TRUSTED_AIDER_MESSAGE_PREFIX,
+    _AIDER_LITELLM_EXCEPTION_NAMES,
+    _EXPECTED_EXPORTED_LITELLM_ERRORS,
+    _UNMAPPED_LITELLM_EXCEPTION,
+    _install_litellm_exception_compatibility,
     _validate_aider_identity,
+    _validate_litellm_compatibility,
     validate_invocation,
 )
 
@@ -157,12 +164,16 @@ def _aider_callables() -> dict[str, object]:
     def coder_run(self, with_message=None, preproc=True):
         return None
 
+    def exception_load(self, strict=False):
+        return None
+
     return {
         "main": main,
         "get_parser": get_parser,
         "generate_search_path_list": generate_search_path_list,
         "load_dotenv_files": load_dotenv_files,
         "Coder.run": coder_run,
+        "LiteLLMExceptions._load": exception_load,
     }
 
 
@@ -189,4 +200,83 @@ def test_launcher_fails_closed_on_aider_identity_or_api_drift():
             distribution_version="0.86.2",
             module_version="0.86.2",
             callables={**callables, "main": drifted_main},
+        )
+
+
+def _fake_litellm() -> ModuleType:
+    module = ModuleType("litellm")
+    names = _AIDER_LITELLM_EXCEPTION_NAMES | {
+        _UNMAPPED_LITELLM_EXCEPTION
+    }
+    for name in names:
+        setattr(module, name, type(name, (Exception,), {}))
+    module.ErrorEventError = type("ErrorEventError", (object,), {})
+    return module
+
+
+def _fake_aider_exceptions() -> ModuleType:
+    module = ModuleType("aider.exceptions")
+
+    class LiteLLMExceptions:
+        exceptions: dict[type[BaseException], object] = {}
+        exception_info = {
+            name: object() for name in _AIDER_LITELLM_EXCEPTION_NAMES
+        }
+
+        def __init__(self):
+            self._load()
+
+        def _load(self, strict=False):
+            raise AssertionError("unpatched Aider exception discovery ran")
+
+        def exceptions_tuple(self):
+            return tuple(self.exceptions)
+
+    module.LiteLLMExceptions = LiteLLMExceptions
+    return module
+
+
+def test_litellm_185_exception_compatibility_is_exact_and_unmapped():
+    litellm = _fake_litellm()
+    aider_exceptions = _fake_aider_exceptions()
+    _validate_litellm_compatibility(
+        distribution_version=LITELLM_VERSION,
+        aider_exception_names=_AIDER_LITELLM_EXCEPTION_NAMES,
+        exported_exception_names=_EXPECTED_EXPORTED_LITELLM_ERRORS,
+    )
+
+    _install_litellm_exception_compatibility(
+        aider_exceptions,
+        litellm,
+        distribution_version=LITELLM_VERSION,
+    )
+    mapped = aider_exceptions.LiteLLMExceptions().exceptions_tuple()
+
+    assert getattr(litellm, _UNMAPPED_LITELLM_EXCEPTION) not in mapped
+    assert {
+        getattr(litellm, name)
+        for name in _AIDER_LITELLM_EXCEPTION_NAMES
+    } == set(mapped)
+
+    litellm.UnexpectedProviderError = type(
+        "UnexpectedProviderError",
+        (Exception,),
+        {},
+    )
+    with pytest.raises(AiderLauncherError, match="exception inventory"):
+        aider_exceptions.LiteLLMExceptions()
+
+    with pytest.raises(AiderLauncherError, match="identity mismatch"):
+        _validate_litellm_compatibility(
+            distribution_version="1.85.1",
+            aider_exception_names=_AIDER_LITELLM_EXCEPTION_NAMES,
+            exported_exception_names=_EXPECTED_EXPORTED_LITELLM_ERRORS,
+        )
+
+    with pytest.raises(AiderLauncherError, match="Aider exception inventory"):
+        _validate_litellm_compatibility(
+            distribution_version=LITELLM_VERSION,
+            aider_exception_names=_AIDER_LITELLM_EXCEPTION_NAMES
+            - {"APIError"},
+            exported_exception_names=_EXPECTED_EXPORTED_LITELLM_ERRORS,
         )

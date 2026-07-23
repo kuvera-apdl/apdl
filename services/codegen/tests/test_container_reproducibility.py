@@ -17,7 +17,9 @@ def test_worker_uses_immutable_images_snapshot_packages_and_hash_lock() -> None:
     assert "FROM node:20-bookworm-slim@sha256:" in source
     assert "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" in source
     assert "COPY requirements-agent.lock /tmp/requirements-agent.lock" in source
-    assert "--require-hashes -r /tmp/requirements-agent.lock" in source
+    assert "--no-deps --require-hashes" in source
+    assert "-r /tmp/requirements-agent.lock" in source
+    assert "python /tmp/verify-aider-distribution.py" in source
     assert "pip install --no-cache-dir uv" not in source
     assert "deb.nodesource.com" not in source
 
@@ -31,7 +33,7 @@ def test_codegen_locks_cover_runtime_and_worker_tools() -> None:
     assert "--hash=sha256:" in runtime_lock
     assert "--hash=sha256:" in worker_lock
     assert "aider-chat==0.86.2" in worker_lock
-    assert "uv==0.11.0" in worker_lock
+    assert "uv==0.11.29" in worker_lock
 
 
 def test_egress_proxy_uses_immutable_base_and_package_snapshot() -> None:

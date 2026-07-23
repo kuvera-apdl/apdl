@@ -24,7 +24,7 @@ def test_runtime_image_uses_immutable_dependencies_and_model() -> None:
     assert "ENV HF_HUB_OFFLINE=1" in dockerfile
 
 
-def test_agents_lock_is_a_committed_dependency_audit_input() -> None:
+def test_published_locks_are_committed_dependency_audit_inputs() -> None:
     audit_script = (REPO_ROOT / "scripts" / "audit_dependencies.sh").read_text(
         encoding="utf-8"
     )
@@ -35,9 +35,10 @@ def test_agents_lock_is_a_committed_dependency_audit_input() -> None:
     for source in (audit_script, workflow):
         assert "services/agents/requirements.lock" in source
         assert "services/codegen/requirements.lock" in source
-        assert "services/codegen/requirements-agent.lock" in source
+        assert "services/codegen/scripts/audit_worker_dependencies.sh" in source
         assert "sdk/python services/agents services/codegen" not in source
 
+    assert "services/codegen/requirements-agent.lock" in audit_script
     assert "for project in sdk/python services/codegen" not in audit_script
     assert "for project in sdk/python services/codegen" not in workflow
 

@@ -28,12 +28,14 @@ for lock in \
     services/agents/requirements.lock \
     services/admin-api/requirements.lock \
     services/codegen/requirements.lock \
-    services/codegen/requirements-agent.lock \
     pipeline/redis/requirements.lock
 do
     echo "==> Auditing $lock"
-    uvx pip-audit --strict --require-hashes -r "$ROOT_DIR/$lock"
+    uvx --python 3.12 pip-audit --strict --require-hashes -r "$ROOT_DIR/$lock"
 done
+
+echo "==> Auditing services/codegen/requirements-agent.lock"
+"$ROOT_DIR/services/codegen/scripts/audit_worker_dependencies.sh"
 
 for project in sdk/python; do
     slug="${project//\//-}"
@@ -43,7 +45,7 @@ for project in sdk/python; do
         --python-version 3.12 \
         --output-file "$requirements" \
         --quiet
-    uvx pip-audit --strict -r "$requirements"
+    uvx --python 3.12 pip-audit --strict -r "$requirements"
 done
 
 echo "==> Dependency audits passed"
