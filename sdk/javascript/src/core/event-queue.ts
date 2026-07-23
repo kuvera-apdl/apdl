@@ -35,6 +35,17 @@ interface DeliveryAccumulator {
   discardedForConsent: number;
 }
 
+interface PreparedBatch {
+  events: TrackEvent[];
+  payload: { events: IngestionEvent[] };
+}
+
+interface BatchDelivery {
+  delivered: number;
+  permanentRejections: TrackEvent[];
+  retryableEvents: TrackEvent[];
+}
+
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
 
 /**
@@ -420,24 +431,22 @@ export class EventQueue {
 
       const controller = new AbortController();
       this.activeDeliveryController = controller;
-      let outcome: TransportOutcome;
+      let delivery: BatchDelivery;
       try {
-        outcome = useKeepalive
-          ? await this.transport.sendKeepalive(
-              this.ingestionUrl,
-              prepared.payload,
-              controller.signal
-            )
-          : await this.transport.send(
-              this.ingestionUrl,
-              prepared.payload,
-              controller.signal
-            );
+        delivery = await this.deliverPreparedBatch(
+          prepared,
+          useKeepalive,
+          controller.signal
+        );
       } catch (err) {
         if (this.config.debug) {
           console.error('APDL: Unexpected error during flush:', err);
         }
-        outcome = 'retryable';
+        delivery = {
+          delivered: 0,
+          permanentRejections: [],
+          retryableEvents: prepared.events,
+        };
       } finally {
         if (this.activeDeliveryController === controller) {
           this.activeDeliveryController = null;
@@ -453,14 +462,23 @@ export class EventQueue {
         continue;
       }
 
-      if (outcome === 'retryable') {
+      report.delivered += delivery.delivered;
+      report.permanentRejections.push(...delivery.permanentRejections);
+
+      if (delivery.permanentRejections.length > 0 && this.config.debug) {
+        console.warn(
+          `APDL: Server permanently rejected ${delivery.permanentRejections.length} event(s); dropping rejected event(s)`
+        );
+      }
+
+      if (delivery.retryableEvents.length > 0) {
         if (this.config.persistence === 'memory') {
           // Memory mode has no durable retry store. Keep ownership in the
           // public pending queue so callers can retry or inspect every event.
           if (this.config.debug) {
             console.warn('APDL: Retryable event send failure remains pending');
           }
-          this.queue.unshift(...prepared.events);
+          this.queue.unshift(...delivery.retryableEvents);
           this.inFlightEventCount = 0;
           break;
         }
@@ -470,15 +488,15 @@ export class EventQueue {
           );
         }
         try {
-          await this.storage.store(prepared.events);
+          await this.storage.store(delivery.retryableEvents);
           if (
             epoch !== this.consentEpoch ||
             !this.consentManager.isGranted('analytics')
           ) {
             await this.storage.clear();
-            report.discardedForConsent += prepared.events.length;
+            report.discardedForConsent += delivery.retryableEvents.length;
           } else {
-            report.persisted += prepared.events.length;
+            report.persisted += delivery.retryableEvents.length;
           }
           this.inFlightEventCount = 0;
         } catch (err) {
@@ -489,26 +507,17 @@ export class EventQueue {
             epoch !== this.consentEpoch ||
             !this.consentManager.isGranted('analytics')
           ) {
-            report.discardedForConsent += prepared.events.length;
+            report.discardedForConsent += delivery.retryableEvents.length;
             this.inFlightEventCount = 0;
           } else {
             // Keep ownership in memory and stop this drain. Continuing would
             // immediately retry the same failed batch forever.
-            this.queue.unshift(...prepared.events);
+            this.queue.unshift(...delivery.retryableEvents);
             this.inFlightEventCount = 0;
             break;
           }
         }
-      } else if (outcome === 'permanent_rejection') {
-        report.permanentRejections.push(...prepared.events);
-        if (this.config.debug) {
-          console.warn(
-            `APDL: Server permanently rejected ${prepared.events.length} event(s); dropping batch`
-          );
-        }
-        this.inFlightEventCount = 0;
       } else {
-        report.delivered += prepared.events.length;
         this.inFlightEventCount = 0;
       }
     }
@@ -516,6 +525,109 @@ export class EventQueue {
     report.discardedForConsent += this.consentDiscardedSinceReport;
     this.consentDiscardedSinceReport = 0;
     return this.immutableReport(report);
+  }
+
+  /**
+   * Delivers a bounded batch, isolating validation/size failures by bisection.
+   *
+   * Only the transport's explicit payload rejection can recurse. Authentication,
+   * routing, and other permanent failures apply to the whole request. If a
+   * recursive request becomes retryable, its unattempted right-hand neighbors
+   * remain retryable too, preserving their original queue order.
+   */
+  private async deliverPreparedBatch(
+    prepared: PreparedBatch,
+    useKeepalive: boolean,
+    signal: AbortSignal
+  ): Promise<BatchDelivery> {
+    const outcome = await this.sendPreparedBatch(prepared, useKeepalive, signal);
+    if (outcome === 'accepted') {
+      return {
+        delivered: prepared.events.length,
+        permanentRejections: [],
+        retryableEvents: [],
+      };
+    }
+    if (outcome === 'retryable') {
+      return {
+        delivered: 0,
+        permanentRejections: [],
+        retryableEvents: prepared.events,
+      };
+    }
+    if (outcome === 'permanent_rejection' || prepared.events.length === 1) {
+      return {
+        delivered: 0,
+        permanentRejections: prepared.events,
+        retryableEvents: [],
+      };
+    }
+
+    const midpoint = Math.floor(prepared.events.length / 2);
+    const left = this.slicePreparedBatch(prepared, 0, midpoint);
+    const right = this.slicePreparedBatch(prepared, midpoint);
+    const leftDelivery = await this.deliverPreparedBatch(
+      left,
+      useKeepalive,
+      signal
+    );
+    if (leftDelivery.retryableEvents.length > 0) {
+      return {
+        delivered: leftDelivery.delivered,
+        permanentRejections: leftDelivery.permanentRejections,
+        retryableEvents: [...leftDelivery.retryableEvents, ...right.events],
+      };
+    }
+
+    const rightDelivery = await this.deliverPreparedBatch(
+      right,
+      useKeepalive,
+      signal
+    );
+    return {
+      delivered: leftDelivery.delivered + rightDelivery.delivered,
+      permanentRejections: [
+        ...leftDelivery.permanentRejections,
+        ...rightDelivery.permanentRejections,
+      ],
+      retryableEvents: rightDelivery.retryableEvents,
+    };
+  }
+
+  private async sendPreparedBatch(
+    prepared: PreparedBatch,
+    useKeepalive: boolean,
+    signal: AbortSignal
+  ): Promise<TransportOutcome> {
+    try {
+      return useKeepalive
+        ? await this.transport.sendKeepalive(
+            this.ingestionUrl,
+            prepared.payload,
+            signal
+          )
+        : await this.transport.send(
+            this.ingestionUrl,
+            prepared.payload,
+            signal
+          );
+    } catch (err) {
+      if (this.config.debug) {
+        console.error('APDL: Unexpected error during batch delivery:', err);
+      }
+      return 'retryable';
+    }
+  }
+
+  private slicePreparedBatch(
+    prepared: PreparedBatch,
+    start: number,
+    end?: number
+  ): PreparedBatch {
+    return {
+      events: prepared.events.slice(start, end),
+      payload: { events: prepared.payload.events.slice(start, end) },
+    };
   }
 
   private immutableReport(report: DeliveryAccumulator): DeliveryReport {
@@ -575,10 +687,7 @@ export class EventQueue {
    * Every record is validated again so a debug reference or custom integration
    * cannot mutate an already-queued event into a permanent poison record.
    */
-  private dequeueBatch(): {
-    events: TrackEvent[];
-    payload: { events: IngestionEvent[] };
-  } | null {
+  private dequeueBatch(): PreparedBatch | null {
     const events: TrackEvent[] = [];
     const ingestionEvents: IngestionEvent[] = [];
     const maxEvents = Math.min(this.config.batchSize, MAX_EVENTS_PER_BATCH);

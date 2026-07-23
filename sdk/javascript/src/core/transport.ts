@@ -10,6 +10,7 @@ const RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
 export type TransportOutcome =
   | 'accepted'
   | 'retryable'
+  | 'payload_rejected'
   | 'permanent_rejection';
 
 /**
@@ -57,16 +58,18 @@ export class Transport {
           return 'accepted';
         }
 
-        // Only the explicit transient statuses below are retryable. Any other
-        // received non-2xx response is a permanent rejection; network errors
-        // and timeouts take the exception path instead.
-        if (!this.isRetryableStatus(response.status)) {
+        // Validation and size rejections are kept distinct so the queue can
+        // isolate one bad event without dropping its valid batch neighbors.
+        // Other non-transient statuses apply to the request as a whole and
+        // must never trigger payload bisection.
+        const outcome = this.classifyErrorStatus(response.status);
+        if (outcome !== 'retryable') {
           if (this.debug) {
             console.warn(
               `APDL: Non-retryable error ${response.status} from ${url}`
             );
           }
-          return 'permanent_rejection';
+          return outcome;
         }
 
         // 408/425/429 or 5xx — retry.
@@ -126,9 +129,7 @@ export class Transport {
         signal,
       });
       if (response.ok) return 'accepted';
-      return this.isRetryableStatus(response.status)
-        ? 'retryable'
-        : 'permanent_rejection';
+      return this.classifyErrorStatus(response.status);
     } catch {
       return 'retryable';
     }
@@ -153,6 +154,17 @@ export class Transport {
       status === 429 ||
       (status >= 500 && status <= 599)
     );
+  }
+
+  private classifyErrorStatus(
+    status: number
+  ): Exclude<TransportOutcome, 'accepted'> {
+    if (status === 400 || status === 413 || status === 422) {
+      return 'payload_rejected';
+    }
+    return this.isRetryableStatus(status)
+      ? 'retryable'
+      : 'permanent_rejection';
   }
 
   private async fetchWithTimeout(

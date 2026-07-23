@@ -88,6 +88,68 @@ def test_permanent_rejection_does_not_block_next_batch():
     assert transport.posts[1][1]["events"][0]["message_id"] == second_message_id
 
 
+def test_payload_rejection_isolates_invalid_event_and_delivers_neighbors_in_order():
+    transport = ScriptedTransport([
+        TransportOutcome.PAYLOAD_REJECTED,
+        TransportOutcome.ACCEPTED,
+        TransportOutcome.PAYLOAD_REJECTED,
+        TransportOutcome.PAYLOAD_REJECTED,
+        TransportOutcome.ACCEPTED,
+    ])
+    queue = EventQueue(config(batch_size=3, max_queue_size=3), transport)
+    for index in range(3):
+        queue.enqueue(event(index))
+
+    report = queue.flush()
+
+    assert report.accepted == 2
+    assert report.permanently_rejected == 1
+    assert report.undelivered == 0
+    assert [
+        [item["event"] for item in payload["events"]]
+        for _url, payload in transport.posts
+    ] == [
+        ["e0", "e1", "e2"],
+        ["e0"],
+        ["e1", "e2"],
+        ["e1"],
+        ["e2"],
+    ]
+
+
+def test_permanent_request_rejection_does_not_bisect_batch():
+    transport = ScriptedTransport([TransportOutcome.PERMANENT_REJECTION])
+    queue = EventQueue(config(batch_size=2), transport)
+    queue.enqueue(event(0))
+    queue.enqueue(event(1))
+
+    report = queue.flush()
+
+    assert len(transport.posts) == 1
+    assert report.accepted == 0
+    assert report.permanently_rejected == 2
+    assert report.undelivered == 0
+
+
+def test_retryable_bisection_retains_subset_and_unattempted_neighbors():
+    transport = ScriptedTransport([
+        TransportOutcome.PAYLOAD_REJECTED,
+        TransportOutcome.RETRYABLE,
+    ])
+    queue = EventQueue(config(batch_size=3, max_queue_size=3), transport)
+    for index in range(3):
+        queue.enqueue(event(index))
+    message_ids = [item["message_id"] for item in queue.snapshot()]
+
+    report = queue.flush()
+
+    assert len(transport.posts) == 2
+    assert report.accepted == 0
+    assert report.permanently_rejected == 0
+    assert [item["message_id"] for item in report.undelivered_events] == message_ids
+    assert [item["message_id"] for item in queue.snapshot()] == message_ids
+
+
 def test_retryable_batch_keeps_stable_id_until_accepted():
     transport = ScriptedTransport([
         TransportOutcome.RETRYABLE,
