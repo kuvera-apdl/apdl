@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import signal
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -25,22 +24,17 @@ from app.evaluations.models import (
     StrictModel,
 )
 from app.evaluations.runner import EvaluationInvocation
-from app.editor.environment import EVALUATION_ENV, MODEL_PROVIDER_ENV
+from app.editor.environment import (
+    EVALUATION_ENV,
+    MODEL_PROVIDER_CREDENTIAL_ENV,
+    resolve_model_provider_environment,
+)
+from app.safety.secrets import structured_value_contains_secret
 
 
 _ENV_PASSTHROUGH = frozenset(EVALUATION_ENV)
 
-_MODEL_SECRET_ENV = frozenset(MODEL_PROVIDER_ENV)
-_GENERIC_SECRET_PATTERNS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
-        r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
-        r"\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}\b",
-        r"\bAIza[A-Za-z0-9_-]{20,}\b",
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-    )
-)
+_MODEL_SECRET_ENV = frozenset(MODEL_PROVIDER_CREDENTIAL_ENV)
 
 
 class PublicEvaluationInvocation(StrictModel):
@@ -70,6 +64,7 @@ def sanitized_evaluation_environment(
     """Allow only process basics and model-provider settings into the worker."""
     source = os.environ if source is None else source
     environment = {key: source[key] for key in _ENV_PASSTHROUGH if key in source}
+    environment.update(resolve_model_provider_environment(source))
     environment.setdefault("PATH", os.defpath)
     environment["AIDER_ANALYTICS"] = "false"
     environment["AIDER_CHECK_UPDATE"] = "false"
@@ -115,7 +110,9 @@ class SubprocessEvaluationExecutor:
         if timeout_seconds <= 0:
             raise ValueError("evaluation executor timeout must be positive")
         if max_output_bytes < 1024:
-            raise ValueError("evaluation executor output limit must be at least 1024 bytes")
+            raise ValueError(
+                "evaluation executor output limit must be at least 1024 bytes"
+            )
         self._command = tuple(command)
         self._timeout_seconds = timeout_seconds
         self._max_output_bytes = max_output_bytes
@@ -155,7 +152,9 @@ class SubprocessEvaluationExecutor:
                 start_new_session=os.name == "posix",
             )
         except OSError as exc:
-            raise EvaluationExecutorError("evaluation executor could not start") from exc
+            raise EvaluationExecutorError(
+                "evaluation executor could not start"
+            ) from exc
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
@@ -165,6 +164,7 @@ class SubprocessEvaluationExecutor:
         stderr_task = asyncio.create_task(
             _read_bounded(process.stderr, retain_bytes=self._max_output_bytes)
         )
+
         async def exchange() -> tuple[_BoundedBytes, _BoundedBytes]:
             process.stdin.write(payload)
             await process.stdin.drain()
@@ -183,7 +183,9 @@ class SubprocessEvaluationExecutor:
         except (BrokenPipeError, ConnectionResetError) as exc:
             await _terminate_process_tree(process)
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-            raise EvaluationExecutorError("evaluation executor closed its input") from exc
+            raise EvaluationExecutorError(
+                "evaluation executor closed its input"
+            ) from exc
         except asyncio.CancelledError:
             await _terminate_process_tree(process)
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
@@ -194,7 +196,9 @@ class SubprocessEvaluationExecutor:
         # accepting its result.
         await _terminate_process_tree(process)
         if stdout.total_bytes + stderr.total_bytes > self._max_output_bytes:
-            raise EvaluationExecutorError("evaluation executor exceeded its output limit")
+            raise EvaluationExecutorError(
+                "evaluation executor exceeded its output limit"
+            )
         if process.returncode != 0:
             raise EvaluationExecutorError(
                 f"evaluation executor exited with status {process.returncode}"
@@ -221,19 +225,10 @@ class SubprocessEvaluationExecutor:
 
 
 def _contains_protected_output(value, protected_values: tuple[str, ...]) -> bool:
-    if isinstance(value, str):
-        if any(secret in value for secret in protected_values):
-            return True
-        return any(pattern.search(value) for pattern in _GENERIC_SECRET_PATTERNS)
-    if isinstance(value, dict):
-        return any(
-            _contains_protected_output(key, protected_values)
-            or _contains_protected_output(item, protected_values)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_contains_protected_output(item, protected_values) for item in value)
-    return False
+    return structured_value_contains_secret(
+        value,
+        protected_values=protected_values,
+    )
 
 
 async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:

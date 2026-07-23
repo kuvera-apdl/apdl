@@ -78,6 +78,7 @@ from app.evaluations.segments import (
 from app.evaluations.subprocess_executor import (
     EvaluationExecutorError,
     SubprocessEvaluationExecutor,
+    _contains_protected_output,
     public_invocation,
     sanitized_evaluation_environment,
 )
@@ -895,9 +896,7 @@ def test_publication_bundle_accepts_nonpublishing_stages_and_rejects_fabrication
         update={
             "candidate_identity": None,
             "outcomes": [
-                outcome.model_copy(
-                    update={"egress_attestation_sha256": None}
-                )
+                outcome.model_copy(update={"egress_attestation_sha256": None})
                 for outcome in trusted_run.outcomes
             ],
         }
@@ -1131,8 +1130,11 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
         "PATH": os.environ.get("PATH", os.defpath),
         "HOME": "/host/home-with-gh-and-ssh-config",
         "TMPDIR": "/host/tmp-with-credentials",
+        "CODEGEN_MODEL": "openai/gpt-5",
+        "CODEGEN_HELPER_MODEL": "anthropic/claude-haiku-4-5",
         "OPENAI_API_KEY": "provider-key",
         "ANTHROPIC_API_KEY": "second-provider-key",
+        "GROQ_API_KEY": "unselected-provider-key",
         "GITHUB_TOKEN": "github-write-token",
         "GH_TOKEN": "gh-write-token",
         "GITHUB_APP_PRIVATE_KEY": "private-key",
@@ -1148,6 +1150,7 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
     sanitized = sanitized_evaluation_environment(source_environment)
     assert sanitized["OPENAI_API_KEY"] == "provider-key"
     assert sanitized["ANTHROPIC_API_KEY"] == "second-provider-key"
+    assert "GROQ_API_KEY" not in sanitized
     assert "HOME" not in sanitized
     assert "TMPDIR" not in sanitized
     assert all(
@@ -1211,6 +1214,8 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
             "TMPDIR",
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
+            "CODEGEN_MODEL",
+            "CODEGEN_HELPER_MODEL",
         }
     )
 
@@ -1237,6 +1242,7 @@ async def test_subprocess_executor_rejects_candidate_output_containing_secrets(
         [sys.executable, str(worker)],
         environment={
             "PATH": os.environ.get("PATH", os.defpath),
+            "CODEGEN_MODEL": "openai/gpt-5",
             "OPENAI_API_KEY": "provider-secret-material",
         },
         timeout_seconds=5,
@@ -1245,6 +1251,19 @@ async def test_subprocess_executor_rejects_candidate_output_containing_secrets(
 
     with pytest.raises(EvaluationExecutorError, match="protected secret material"):
         await executor.execute(_invocation(workspace))
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "Authorization: Bearer opaque-bearer-value",
+        "https://service-user:service-password@example.test/private",
+        "AWS_SESSION_TOKEN=temporary-cloud-session-token-123456",
+        "-----BEGIN PRIVATE KEY-----\nprivate-material",
+    ],
+)
+def test_evaluation_output_detection_uses_canonical_secret_policy(secret):
+    assert _contains_protected_output({"notes": [secret]}, ()) is True
 
 
 @pytest.mark.asyncio
@@ -1275,7 +1294,11 @@ async def test_subprocess_executor_rejects_strict_schema_identity_and_output_ove
         worker.write_text(source, encoding="utf-8")
         executor = SubprocessEvaluationExecutor(
             [sys.executable, str(worker)],
-            environment={"PATH": os.environ.get("PATH", os.defpath)},
+            environment={
+                "PATH": os.environ.get("PATH", os.defpath),
+                "CODEGEN_MODEL": "openai/gpt-5",
+                "OPENAI_API_KEY": "test-openai-provider-key",
+            },
             timeout_seconds=5,
             max_output_bytes=1024 if name == "overflow" else 100_000,
         )
@@ -1309,7 +1332,11 @@ async def test_subprocess_executor_timeout_kills_descendant_process_group(
     )
     executor = SubprocessEvaluationExecutor(
         [sys.executable, str(worker)],
-        environment={"PATH": os.environ.get("PATH", os.defpath)},
+        environment={
+            "PATH": os.environ.get("PATH", os.defpath),
+            "CODEGEN_MODEL": "openai/gpt-5",
+            "OPENAI_API_KEY": "test-openai-provider-key",
+        },
         timeout_seconds=0.1,
         max_output_bytes=4096,
     )
@@ -1378,7 +1405,7 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
             "--stage",
             "offline",
             "--model",
-            "test-model@1",
+            "openai/test-model@1",
             "--codegen-revision",
             "deadbeef",
             "--run-id",
@@ -1412,7 +1439,7 @@ def test_cli_executes_corpus_and_emits_content_addressed_reports_and_bundle(
     )
     bundle = load_publication_bundle(
         bundle_path,
-        expected_model="test-model@1",
+        expected_model="openai/test-model@1",
         expected_codegen_revision="deadbeef",
         expected_candidate_identity_sha256=run.candidate_identity.identity_sha256,
         expected_egress_policy_sha256=run.candidate_identity.egress_policy_sha256,

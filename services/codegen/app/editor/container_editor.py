@@ -61,7 +61,10 @@ from app.egress import (
     worker_socket_mount,
 )
 from app.editor.base import EditRequest, EditResult
-from app.editor.environment import CODEGEN_BEHAVIOR_ENV, MODEL_PROVIDER_ENV
+from app.editor.environment import (
+    CODEGEN_BEHAVIOR_ENV,
+    resolve_model_provider_environment,
+)
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.worker_contract import (
     encode_codegen_worker_request,
@@ -86,15 +89,15 @@ _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 # our process env), so their VALUES never appear on the docker argv / process
 # list. The GitHub App private key, Postgres DSN, and internal token are
 # deliberately absent — the sandbox must not receive them.
-_SECRET_ENV_FORWARD: tuple[str, ...] = MODEL_PROVIDER_ENV
-
 # Editor knobs (non-secret) forwarded into the sandbox so the AiderEditor
 # inside behaves EXACTLY like the in-process one — an operator's timeouts,
 # fail-closed posture, and auxiliary-pass toggles must not silently revert to
 # defaults just because CODEGEN_SANDBOX=docker. Unset values fall back to the
 # same defaults in both places.
 _CONFIG_ENV_FORWARD: tuple[str, ...] = tuple(
-    key for key in CODEGEN_BEHAVIOR_ENV if key not in {"CODEGEN_MODEL"}
+    key
+    for key in CODEGEN_BEHAVIOR_ENV
+    if key not in {"CODEGEN_MODEL", "CODEGEN_HELPER_MODEL"}
 )
 
 
@@ -115,10 +118,13 @@ def _last_json(text: str) -> dict | None:
 class ContainerAiderEditor:
     """Editor that runs each changeset inside an ephemeral sandbox container."""
 
-    def __init__(self, *, image: str | None = None, docker_bin: str | None = None) -> None:
+    def __init__(
+        self, *, image: str | None = None, docker_bin: str | None = None
+    ) -> None:
         self._image = image or os.getenv("CODEGEN_SANDBOX_IMAGE", _DEFAULT_IMAGE)
         self._docker = docker_bin or os.getenv("CODEGEN_DOCKER_BIN", "docker")
         self._model = os.getenv("CODEGEN_MODEL", "claude-opus-4-8")
+        self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
         self._memory = os.getenv("CODEGEN_SANDBOX_MEMORY", "2g")
         self._cpus = os.getenv("CODEGEN_SANDBOX_CPUS", "2")
         self._pids = os.getenv("CODEGEN_SANDBOX_PIDS", "512")
@@ -299,9 +305,13 @@ class ContainerAiderEditor:
             logger.exception("Sandboxed edit failed for %s", request.repo)
             return EditResult(success=False, branch=request.branch, error=str(exc))
 
-    def _present_secret_keys(self) -> list[str]:
-        """Provider keys actually set in our env (only these get forwarded)."""
-        return [k for k in _SECRET_ENV_FORWARD if os.environ.get(k)]
+    def _selected_provider_environment(self) -> dict[str, str]:
+        """Resolve the exact credential/routing union required by both models."""
+        return resolve_model_provider_environment(
+            os.environ,
+            model=self._model,
+            helper_model=self._helper_model,
+        )
 
     def _docker_argv(
         self,
@@ -317,9 +327,14 @@ class ContainerAiderEditor:
         # argv contains only sandbox/runtime configuration and provider-key
         # names, never task text, repository authority, or tenant policy.
         argv += [
-            "-e", f"CODEGEN_MODEL={self._model}",
-            "-e", "HOME=/workspace/home",
-            "-e", "TMPDIR=/workspace/tmp",
+            "-e",
+            f"CODEGEN_MODEL={self._model}",
+            "-e",
+            f"CODEGEN_HELPER_MODEL={self._helper_model}",
+            "-e",
+            "HOME=/workspace/home",
+            "-e",
+            "TMPDIR=/workspace/tmp",
         ]
         for name, value in self._proxy_environment.items():
             argv += ["-e", f"{name}={value}"]
@@ -328,7 +343,7 @@ class ContainerAiderEditor:
                 argv += ["-e", f"{key}={os.environ[key]}"]
         # Provider secrets are forwarded by NAME only. Repository authority is
         # absent from argv and environ and is consumed from stdin instead.
-        for key in self._present_secret_keys():
+        for key in self._selected_provider_environment():
             argv += ["-e", key]
         if self._proxy_environment:
             argv += [
@@ -395,7 +410,9 @@ class ContainerAiderEditor:
         container_name: str | None = None,
     ) -> list[str]:
         """Build the provider-free repository-inspection container command."""
-        source_branch = request.branch if request.existing_branch else request.base_branch
+        source_branch = (
+            request.branch if request.existing_branch else request.base_branch
+        )
         argv = self._sandbox_argv(container_name=container_name, role="inspection")
         argv += [
             "-e",
@@ -419,8 +436,7 @@ class ContainerAiderEditor:
     def _docker_env(self, request: EditRequest) -> dict[str, str]:
         """Docker client environment carrying provider keys, never Git authority."""
         env = self._docker_control_env()
-        for key in self._present_secret_keys():
-            env[key] = os.environ[key]
+        env.update(self._selected_provider_environment())
         return env
 
     @staticmethod
@@ -537,7 +553,9 @@ class ContainerAiderEditor:
         attestation = RepositoryPreflightAttestation.model_validate(
             data.get("attestation")
         )
-        source_branch = request.branch if request.existing_branch else request.base_branch
+        source_branch = (
+            request.branch if request.existing_branch else request.base_branch
+        )
         if (
             attestation.repository != request.repo
             or attestation.source_branch != source_branch
@@ -643,9 +661,7 @@ class ContainerAiderEditor:
                 client_process,
             )
 
-        cleanup_task = asyncio.create_task(
-            asyncio.wait_for(cleanup(), timeout=45)
-        )
+        cleanup_task = asyncio.create_task(asyncio.wait_for(cleanup(), timeout=45))
         cancellation_interrupted_cleanup = False
         while not cleanup_task.done():
             try:
@@ -751,9 +767,7 @@ class ContainerAiderEditor:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _out, error = await asyncio.wait_for(
-                    process.communicate(), timeout=30
-                )
+                _out, error = await asyncio.wait_for(process.communicate(), timeout=30)
             except asyncio.TimeoutError:
                 process.kill()
                 _out, error = await process.communicate()

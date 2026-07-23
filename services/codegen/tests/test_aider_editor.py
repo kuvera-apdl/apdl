@@ -27,6 +27,7 @@ from app.editor.aider_editor import (
 )
 from app.editor.base import EditRequest
 from app.editor.conventions import CONVENTIONS_MD
+from app.editor.environment import MODEL_PROVIDER_ENV
 from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling.models import (
     CIWorkflow,
@@ -49,6 +50,15 @@ from app.safety.policy import (
     resolve_effective_policy,
 )
 from app.verification import CoverageDisposition, PlanDisposition
+
+
+@pytest.fixture(autouse=True)
+def _default_editor_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CODEGEN_MODEL", raising=False)
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-provider-key")
 
 
 def test_tail_returns_full_text_when_under_limit():
@@ -175,16 +185,29 @@ def test_agent_env_forwards_llm_keys_but_not_github_or_apdl_secrets(
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     monkeypatch.setenv("POSTGRES_URL", "postgresql://nope")
 
-    env = _agent_env(tmp_path / "agent-home")
+    env = _agent_env(tmp_path / "agent-home", model="claude-opus-4-8")
 
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-xyz"
-    assert env["OPENAI_API_KEY"] == "sk-openai-xyz"
+    assert "OPENAI_API_KEY" not in env
     assert "GITHUB_APP_PRIVATE_KEY" not in env
     assert "APDL_INTERNAL_TOKEN" not in env
     assert "POSTGRES_URL" not in env
     assert env["HOME"] == str(tmp_path / "agent-home")
     assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert env["AIDER_CONFIG_FILE"] == "/dev/null"
+
+
+def test_agent_env_forwards_only_explicit_main_model_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "anthropic/claude-haiku-4-5")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xyz")
+    monkeypatch.setenv("OPENAI_API_BASE", "https://gateway.example/v1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-helper-only")
+
+    env = _agent_env(tmp_path / "agent-home", model="openai/gpt-5")
+
+    assert env["OPENAI_API_KEY"] == "sk-openai-xyz"
+    assert env["OPENAI_API_BASE"] == "https://gateway.example/v1"
+    assert "ANTHROPIC_API_KEY" not in env
 
 
 @pytest.mark.asyncio
@@ -239,6 +262,30 @@ async def test_implement_never_raises_on_unexpected_fault(monkeypatch, tmp_path)
     assert result.branch == "apdl/x"
     assert "kaboom" in (result.error or "")
     # The throwaway workdir is cleaned up even on the failure path.
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_in_process_editor_fails_before_checkout_without_selected_provider(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+
+    result = await editor.implement(
+        EditRequest(
+            repo="acme/widgets",
+            base_branch="main",
+            branch="apdl/x",
+            token="ghs_tok",
+            title="x",
+            spec="do a thing",
+        )
+    )
+
+    assert result.success is False
+    assert "requires ANTHROPIC_API_KEY" in (result.error or "")
     assert not list(tmp_path.iterdir())
 
 
@@ -907,7 +954,7 @@ async def test_runtime_workflow_refuses_non_apdl_owned_path_collision(
             profile=profile,
         ),
     )
-    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    editor = AiderEditor(model="anthropic/test", workdir_base=str(tmp_path))
     pipeline = _Pipeline(
         editor,
         monkeypatch,
@@ -973,7 +1020,7 @@ async def test_runtime_workflow_refuses_symlink_to_outside_secret(
         "OPENAI_API_KEY=provider-secret-that-must-not-be-read\n",
         encoding="utf-8",
     )
-    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    editor = AiderEditor(model="anthropic/test", workdir_base=str(tmp_path))
     pipeline = _Pipeline(
         editor,
         monkeypatch,
@@ -1031,7 +1078,7 @@ async def test_generated_workflow_cannot_mask_an_agent_no_op(monkeypatch, tmp_pa
             profile=profile,
         ),
     )
-    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    editor = AiderEditor(model="anthropic/test", workdir_base=str(tmp_path))
     workflow = ".github/workflows/apdl-runtime-acceptance.yml"
     pipeline = _Pipeline(
         editor,
@@ -1222,8 +1269,8 @@ async def test_review_rejection_without_retries_fails_the_changeset(
 
 @pytest.mark.asyncio
 async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
-    """No LiteLLM / no key ⇒ both auxiliary passes skip and the edit still ships."""
-    monkeypatch.setattr(aider_editor, "resolve_completer", lambda: None)
+    """No LiteLLM completer means both auxiliary passes skip and editing continues."""
+    monkeypatch.setattr(aider_editor, "resolve_completer", lambda _model: None)
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(editor, monkeypatch)
 
@@ -1575,7 +1622,7 @@ async def test_named_dependency_blocks_when_install_is_not_isolated(
             profile=profile,
         ),
     )
-    editor = AiderEditor(model="test", workdir_base=str(tmp_path))
+    editor = AiderEditor(model="anthropic/test", workdir_base=str(tmp_path))
 
     async def fake_git(_cwd, args, **_kwargs):
         if args and args[0] == "clone":

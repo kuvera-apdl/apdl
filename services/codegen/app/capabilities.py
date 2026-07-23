@@ -11,12 +11,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from app.config import (
-    codegen_model,
     codegen_revision,
     github_app_id,
     github_app_private_key,
 )
-from app.editor.environment import MODEL_PROVIDER_ENV
+from app.editor.environment import (
+    ModelProviderConfigurationError,
+    resolve_model_provider_environment,
+)
 from app.evaluations.models import RolloutStage
 from app.github.app_auth import build_app_jwt
 from app.safety.killswitch import automation_enabled
@@ -41,22 +43,6 @@ _PUBLICATION_STAGES = frozenset(
         RolloutStage.low_risk_canary,
     }
 )
-_PROVIDER_ENV_BY_PREFIX: dict[str, tuple[tuple[str, ...], ...]] = {
-    "anthropic": (("ANTHROPIC_API_KEY",),),
-    "azure": (("AZURE_API_KEY", "AZURE_API_BASE", "AZURE_API_VERSION"),),
-    "cohere": (("COHERE_API_KEY",),),
-    "deepseek": (("DEEPSEEK_API_KEY",),),
-    "fireworks": (("FIREWORKS_API_KEY",),),
-    "gemini": (("GOOGLE_API_KEY",), ("GEMINI_API_KEY",)),
-    "google": (("GOOGLE_API_KEY",), ("GEMINI_API_KEY",)),
-    "groq": (("GROQ_API_KEY",),),
-    "mistral": (("MISTRAL_API_KEY",),),
-    "ollama": (("OLLAMA_API_BASE",),),
-    "openai": (("OPENAI_API_KEY",),),
-    "openrouter": (("OPENROUTER_API_KEY",),),
-    "together_ai": (("TOGETHERAI_API_KEY",),),
-    "xai": (("XAI_API_KEY",),),
-}
 
 
 class CapabilityChecks(BaseModel):
@@ -90,29 +76,12 @@ class CapabilityEvaluation:
     connection: Any | None
 
 
-def _provider_requirements(model: str) -> tuple[tuple[str, ...], ...]:
-    normalized = model.strip().lower()
-    prefix = normalized.partition("/")[0]
-    if prefix in _PROVIDER_ENV_BY_PREFIX:
-        return _PROVIDER_ENV_BY_PREFIX[prefix]
-    if normalized.startswith("claude"):
-        return _PROVIDER_ENV_BY_PREFIX["anthropic"]
-    if normalized.startswith(("gpt-", "o1", "o3", "o4")):
-        return _PROVIDER_ENV_BY_PREFIX["openai"]
-    if normalized.startswith("gemini"):
-        return _PROVIDER_ENV_BY_PREFIX["gemini"]
-    return ()
-
-
 def _provider_configured() -> bool:
-    requirements = _provider_requirements(codegen_model())
-    if not requirements:
+    try:
+        resolve_model_provider_environment(os.environ)
+    except ModelProviderConfigurationError:
         return False
-    allowed_names = frozenset(MODEL_PROVIDER_ENV)
-    return any(
-        all(name in allowed_names and os.environ.get(name, "").strip() for name in option)
-        for option in requirements
-    )
+    return True
 
 
 def _github_app_configured() -> bool:

@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app import capabilities
 from app.auth import Principal, authenticate_request
+from app.editor.environment import MODEL_PROVIDER_ENV
 from app.evaluations.models import RolloutStage
 from app.main import app
 from tests.fakes import FakePool
@@ -212,9 +213,10 @@ def test_provider_check_is_bound_to_the_selected_model(
     environment: dict[str, str],
     monkeypatch,
 ) -> None:
-    for name in capabilities.MODEL_PROVIDER_ENV:
+    for name in MODEL_PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CODEGEN_MODEL", model)
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
 
@@ -228,11 +230,40 @@ def test_provider_check_is_bound_to_the_selected_model(
 def test_vertex_project_metadata_is_not_an_executable_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in capabilities.MODEL_PROVIDER_ENV:
+    for name in MODEL_PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CODEGEN_MODEL", "vertex_ai/gemini-2.5-pro")
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
     monkeypatch.setenv("VERTEXAI_PROJECT", "project")
     monkeypatch.setenv("VERTEXAI_LOCATION", "region")
+
+    assert capabilities._provider_configured() is False
+
+
+def test_provider_check_requires_main_and_helper_provider_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CODEGEN_MODEL", "anthropic/claude-opus-4-8")
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "openai/gpt-5-mini")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+
+    assert capabilities._provider_configured() is False
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    assert capabilities._provider_configured() is True
+
+
+def test_provider_check_rejects_ambiguous_gemini_key_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in MODEL_PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CODEGEN_MODEL", "gemini/gemini-2.5-pro")
+    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
 
     assert capabilities._provider_configured() is False
 
