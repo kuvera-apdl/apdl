@@ -49,6 +49,7 @@ SHUTDOWN_TIMEOUT_SECONDS = 10.0
 EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
+STREAM_DISCOVERY_INTERVAL_SECONDS = 5.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
@@ -250,6 +251,7 @@ class ClickHouseWriter:
         dlq_maxlen: int = DEFAULT_DLQ_MAXLEN,
         pending_claim_idle_ms: int = PENDING_CLAIM_IDLE_MS,
         pending_claim_interval: float = PENDING_CLAIM_INTERVAL_SECONDS,
+        stream_discovery_interval: float = STREAM_DISCOVERY_INTERVAL_SECONDS,
         clickhouse_connect_timeout: float = CLICKHOUSE_CONNECT_TIMEOUT_SECONDS,
         clickhouse_send_receive_timeout: float = (
             CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS
@@ -263,6 +265,8 @@ class ClickHouseWriter:
             raise ValueError("buffer_size must be positive")
         if dlq_maxlen <= 0:
             raise ValueError("dlq_maxlen must be positive")
+        if stream_discovery_interval <= 0:
+            raise ValueError("stream_discovery_interval must be positive")
         for name, value in (
             ("clickhouse_connect_timeout", clickhouse_connect_timeout),
             ("clickhouse_send_receive_timeout", clickhouse_send_receive_timeout),
@@ -300,6 +304,7 @@ class ClickHouseWriter:
         self.dlq_maxlen = dlq_maxlen
         self.pending_claim_idle_ms = pending_claim_idle_ms
         self.pending_claim_interval = pending_claim_interval
+        self.stream_discovery_interval = stream_discovery_interval
         self.shutdown_timeout = shutdown_timeout
         self.running = False
         self._closed = False
@@ -322,6 +327,7 @@ class ClickHouseWriter:
         self._new_stream_cursor = 0
         self._pending_stream_cursor = 0
         self._known_stream_keys: set[str] = set()
+        self._stream_registry_lock = asyncio.Lock()
         self._last_stream_pressure_log: dict[str, float] = {}
 
     async def start(self, project_ids: list[str] | None = None):
@@ -334,24 +340,23 @@ class ClickHouseWriter:
         self.running = True
         logger.info("ClickHouseWriter starting, consumer=%s", self.consumer_name)
 
+        # Force one bounded discovery before the consume loop starts. Explicit
+        # project configuration is already authoritative and must never trigger
+        # a global Redis SCAN.
+        initial_stream_keys = self._normalized_stream_keys(
+            [self._stream_key_for_project(project_id) for project_id in project_ids]
+            if project_ids is not None
+            else await self._discover_streams()
+        )
+
         # Reclaim legacy acknowledged history before any group-creation write.
         # Redis rejects XGROUP CREATE while memory is already above maxmemory,
         # but permits XTRIM. Existing groups can therefore recover first.
-        existing_stream_keys = await self._discover_streams()
-        if project_ids is not None:
-            configured_stream_keys = {
-                self._stream_key_for_project(project_id)
-                for project_id in project_ids
-            }
-            existing_stream_keys = [
-                stream_key
-                for stream_key in existing_stream_keys
-                if stream_key in configured_stream_keys
-            ]
         await self._reconcile_acknowledged_history(
-            existing_stream_keys,
+            initial_stream_keys,
             require_group=False,
         )
+        self._replace_stream_registry(initial_stream_keys)
 
         # Ensure consumer groups exist for known streams.
         await self._ensure_consumer_groups(project_ids)
@@ -362,11 +367,14 @@ class ClickHouseWriter:
 
         # Run consumption, flushing, and bounded observability concurrently.
         try:
-            await asyncio.gather(
+            tasks = [
                 self._consume_loop(project_ids),
                 self._flush_loop(),
                 self._monitor_loop(project_ids),
-            )
+            ]
+            if project_ids is None:
+                tasks.append(self._stream_discovery_loop())
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Writer task cancelled, starting bounded shutdown")
             await self.stop()
@@ -527,11 +535,17 @@ class ClickHouseWriter:
         New groups start at the beginning of the stream so events published
         before writer discovery remain available to the group.
         """
-        if project_ids:
+        if project_ids is not None:
             stream_keys = [self._stream_key_for_project(pid) for pid in project_ids]
         else:
-            stream_keys = await self._discover_streams()
+            stream_keys = sorted(self._known_stream_keys)
 
+        await self._ensure_consumer_groups_for_streams(stream_keys)
+
+    async def _ensure_consumer_groups_for_streams(
+        self, stream_keys: list[str]
+    ) -> None:
+        """Ensure groups for one already-resolved registry snapshot."""
         for stream_key in stream_keys:
             await self._ensure_consumer_group(stream_key)
 
@@ -733,6 +747,48 @@ class ClickHouseWriter:
                 self.stats["errors"] += 1
                 logger.warning("Event stream monitor failed: %s", exc)
 
+    async def _stream_discovery_loop(self) -> None:
+        """Refresh the dynamic stream registry away from the consume path."""
+        while self.running:
+            remaining = self.stream_discovery_interval
+            while self.running and remaining > 0:
+                interval = min(remaining, 1.0)
+                await asyncio.sleep(interval)
+                remaining -= interval
+            if not self.running:
+                return
+            try:
+                await self._refresh_discovered_stream_registry()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.stats["errors"] += 1
+                logger.warning(
+                    "Redis event stream discovery failed; retaining %d cached "
+                    "streams: %s",
+                    len(self._known_stream_keys),
+                    exc,
+                )
+
+    async def _refresh_discovered_stream_registry(self) -> list[str]:
+        """Atomically replace the registry after a complete valid refresh.
+
+        Discovery, legacy-history reconciliation, and consumer-group creation
+        must all succeed before readers can observe the new snapshot. Any
+        failure therefore leaves the last usable snapshot intact.
+        """
+        async with self._stream_registry_lock:
+            stream_keys = self._normalized_stream_keys(
+                await self._discover_streams()
+            )
+            await self._reconcile_acknowledged_history(
+                stream_keys,
+                require_group=False,
+            )
+            await self._ensure_consumer_groups_for_streams(stream_keys)
+            self._replace_stream_registry(stream_keys)
+            return sorted(self._known_stream_keys)
+
     @staticmethod
     def _claimed_messages(
         claimed,
@@ -771,26 +827,29 @@ class ClickHouseWriter:
     async def _get_stream_keys(self, project_ids: list[str] | None) -> list[str]:
         """Resolve the list of stream keys to read from.
 
-        If project_ids are specified, use them directly. Otherwise, discover
-        streams dynamically. Also ensures consumer groups exist for any
-        newly discovered streams.
+        Explicit project IDs are authoritative. Dynamic consumers read the
+        last complete background-discovery snapshot, so hot consumption and
+        pending sweeps never issue a global Redis SCAN.
         """
-        if project_ids:
-            stream_keys = [self._stream_key_for_project(pid) for pid in project_ids]
-        else:
-            stream_keys = await self._discover_streams()
+        if project_ids is not None:
+            return self._normalized_stream_keys(
+                [self._stream_key_for_project(pid) for pid in project_ids]
+            )
+        return sorted(self._known_stream_keys)
 
-        # Ensure consumer groups exist for any new streams.
-        for stream_key in stream_keys:
-            await self._ensure_consumer_group(stream_key)
+    @staticmethod
+    def _normalized_stream_keys(stream_keys: list[str]) -> list[str]:
+        """Return one stable entry per stream for fair, duplicate-free reads."""
+        return sorted(set(stream_keys))
 
+    def _replace_stream_registry(self, stream_keys: list[str]) -> None:
+        """Publish one validated registry snapshot and trim per-stream state."""
         self._known_stream_keys = set(stream_keys)
         self._last_stream_pressure_log = {
             stream_key: logged_at
             for stream_key, logged_at in self._last_stream_pressure_log.items()
             if stream_key in self._known_stream_keys
         }
-        return stream_keys
 
     async def _log_due_stream_pressure(self, stream_keys) -> None:
         """Rate-limit exact outstanding-entry and consumer pressure logs."""
@@ -903,7 +962,12 @@ class ClickHouseWriter:
         Unread and pending entries are never crossed by the exact MINID trim.
         """
         for stream_key in stream_keys:
-            groups = await self.redis_client.xinfo_groups(stream_key)
+            try:
+                groups = await self.redis_client.xinfo_groups(stream_key)
+            except redis.ResponseError as exc:
+                if not require_group and "no such key" in str(exc).lower():
+                    continue
+                raise
             group = next(
                 (
                     item

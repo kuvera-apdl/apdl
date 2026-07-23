@@ -224,6 +224,8 @@ class FakeRedis:
         self.fail_transaction_after_commit = False
         self.pipeline_transactions: list[bool] = []
         self.transaction_attempts: list[tuple] = []
+        self.scan_calls: list[dict] = []
+        self.scan_responses: list[tuple[int, list[str]]] = []
         self.closed = False
 
     def pipeline(self, *, transaction):
@@ -234,6 +236,12 @@ class FakeRedis:
         self.read_calls += 1
         self.read_args.append(kwargs)
         return []
+
+    async def scan(self, **kwargs):
+        self.scan_calls.append(kwargs)
+        if self.scan_responses:
+            return self.scan_responses.pop(0)
+        return 0, []
 
     async def xlen(self, stream_key):
         self.xlen_calls.append(stream_key)
@@ -1321,7 +1329,7 @@ def test_new_consumer_groups_start_before_existing_backlog(monkeypatch):
         redis_client.group_creates.clear()
         redis_client.stream_groups["events:raw:demo"] = []
         assert await writer._get_stream_keys(["demo"]) == ["events:raw:demo"]
-        assert redis_client.group_creates[-1]["id"] == "0-0"
+        assert redis_client.group_creates == []
 
     asyncio.run(scenario())
 
@@ -1338,7 +1346,7 @@ def test_existing_consumer_group_avoids_group_creation_write(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_start_reconciles_existing_groups_before_group_creation(monkeypatch):
+def test_dynamic_start_forces_discovery_before_group_creation(monkeypatch):
     async def scenario():
         writer, _, _ = make_writer(monkeypatch)
         calls = []
@@ -1369,16 +1377,121 @@ def test_start_reconciles_existing_groups_before_group_creation(monkeypatch):
         monkeypatch.setattr(writer, "_consume_loop", no_op)
         monkeypatch.setattr(writer, "_flush_loop", no_op)
         monkeypatch.setattr(writer, "_monitor_loop", no_op)
+        monkeypatch.setattr(writer, "_stream_discovery_loop", no_op)
 
-        await writer.start(["demo"])
+        await writer.start()
 
         assert calls[:5] == [
             ("discover",),
             ("reconcile", ("events:raw:demo",), False),
-            ("ensure", ("demo",)),
-            ("get", ("demo",)),
+            ("ensure", ()),
+            ("get", ()),
             ("reconcile", ("events:raw:demo",), True),
         ]
+
+    asyncio.run(scenario())
+
+
+def test_fixed_project_start_never_scans_global_keyspace(monkeypatch):
+    async def scenario():
+        writer, redis_client, _ = make_writer(monkeypatch)
+
+        async def no_op(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(writer, "_consume_loop", no_op)
+        monkeypatch.setattr(writer, "_flush_loop", no_op)
+        monkeypatch.setattr(writer, "_monitor_loop", no_op)
+
+        await writer.start(["demo"])
+
+        assert redis_client.scan_calls == []
+        assert writer._known_stream_keys == {"events:raw:demo"}
+
+    asyncio.run(scenario())
+
+
+def test_discovery_loop_refreshes_registry_on_the_configured_interval(monkeypatch):
+    async def scenario():
+        writer, _, _ = make_writer(
+            monkeypatch,
+            stream_discovery_interval=0.001,
+        )
+        refresh_calls = 0
+
+        async def refresh():
+            nonlocal refresh_calls
+            refresh_calls += 1
+            writer.running = False
+            return ["events:raw:new"]
+
+        monkeypatch.setattr(writer, "_refresh_discovered_stream_registry", refresh)
+        writer.running = True
+
+        await asyncio.wait_for(writer._stream_discovery_loop(), timeout=0.1)
+
+        assert refresh_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
+    monkeypatch,
+):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:old"])
+        calls = []
+
+        async def discover():
+            calls.append(("discover",))
+            return ["events:raw:new", "events:raw:old"]
+
+        async def reconcile(stream_keys, *, require_group=True):
+            calls.append(("reconcile", tuple(stream_keys), require_group))
+
+        async def ensure(stream_keys):
+            calls.append(("ensure", tuple(stream_keys)))
+
+        monkeypatch.setattr(writer, "_discover_streams", discover)
+        monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
+        monkeypatch.setattr(writer, "_ensure_consumer_groups_for_streams", ensure)
+
+        snapshot = await writer._refresh_discovered_stream_registry()
+
+        assert snapshot == ["events:raw:new", "events:raw:old"]
+        assert await writer._get_stream_keys(None) == snapshot
+        assert calls == [
+            ("discover",),
+            (
+                "reconcile",
+                ("events:raw:new", "events:raw:old"),
+                False,
+            ),
+            ("ensure", ("events:raw:new", "events:raw:old")),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_failed_discovery_retains_last_valid_registry_snapshot(monkeypatch):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:stable"])
+        writer._last_stream_pressure_log["events:raw:stable"] = 123.0
+
+        async def unavailable():
+            raise ConnectionError("redis scan unavailable")
+
+        monkeypatch.setattr(writer, "_discover_streams", unavailable)
+
+        with pytest.raises(ConnectionError, match="scan unavailable"):
+            await writer._refresh_discovered_stream_registry()
+
+        assert await writer._get_stream_keys(None) == ["events:raw:stable"]
+        assert writer._last_stream_pressure_log == {
+            "events:raw:stable": 123.0,
+        }
 
     asyncio.run(scenario())
 
