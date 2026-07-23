@@ -115,6 +115,9 @@ export class APDLClient implements APDLApi {
   private experimentsEnabled = false;
   private flagDistributionEpoch = 0;
   private flagFetchController: AbortController | null = null;
+  private anonymousId: string | undefined;
+  private identityEpoch = 0;
+  private cookielessIdentityPromise: Promise<void> | null = null;
   private isShutDown = false;
   private shutdownPromise: Promise<DeliveryReport> | null = null;
 
@@ -194,19 +197,22 @@ export class APDLClient implements APDLApi {
     // Session and context
     this.sessionManager = new SessionManager(
       this.config.persistence,
-      storageScope
+      storageScope,
+      this.analyticsCaptureEnabled
     );
     this.contextCollector = new ContextCollector();
 
-    // Anonymous ID
-    const anonymousId = this.resolveAnonymousId();
+    // Identity is purpose-gated. A denied client removes stale state without
+    // reading or deriving an identifier.
+    this.refreshAnonymousIdentity();
 
     // Manual capture
     this.manualCapture = new ManualCapture(
       this.eventQueue,
       this.sessionManager,
       this.contextCollector,
-      anonymousId
+      () => this.requireAnonymousId(),
+      () => this.consentManager.isGranted('analytics')
     );
 
     // Auto-capture
@@ -373,10 +379,8 @@ export class APDLClient implements APDLApi {
   reset(): void {
     this.assertActive();
     this.manualCapture.reset();
-    // Generate a new anonymous ID
-    const newId = generateId();
-    this.manualCapture.setAnonymousId(newId);
-    this.persistAnonymousId(newId);
+    this.clearAnonymousIdentity();
+    this.refreshAnonymousIdentity();
   }
 
   // ── Feature flags ─────────────────────────────────────────────
@@ -461,10 +465,6 @@ export class APDLClient implements APDLApi {
       this.startFlagDistribution();
     }
 
-    // Handle cookieless mode
-    if (this.config.privacyMode === 'cookieless') {
-      void this.setupCookielessId();
-    }
   }
 
   private startFlagDistribution(): void {
@@ -529,10 +529,17 @@ export class APDLClient implements APDLApi {
   }
 
   private async setupCookielessId(): Promise<void> {
+    const epoch = this.identityEpoch;
     try {
       const cookieless = new CookielessIdentity(this.config.auth.clientKey);
       const anonId = await cookieless.generateAnonymousId();
-      this.manualCapture.setAnonymousId(anonId);
+      if (
+        epoch === this.identityEpoch &&
+        this.hasIdentityConsent() &&
+        !this.isShutDown
+      ) {
+        this.anonymousId = anonId;
+      }
     } catch {
       if (this.config.debug) {
         console.warn('APDL: Failed to generate cookieless ID');
@@ -542,7 +549,8 @@ export class APDLClient implements APDLApi {
 
   private resolveAnonymousId(): string {
     if (this.config.privacyMode === 'cookieless') {
-      // Will be replaced async during initialization
+      // Replaced asynchronously with the daily cookieless identifier. The
+      // temporary ID is process-local and is created only after consent.
       return generateId();
     }
 
@@ -564,7 +572,13 @@ export class APDLClient implements APDLApi {
   }
 
   private persistAnonymousId(id: string): void {
-    if (this.config.persistence === 'memory') return;
+    if (
+      this.config.persistence === 'memory' ||
+      this.config.privacyMode !== 'standard' ||
+      !this.hasIdentityConsent()
+    ) {
+      return;
+    }
 
     try {
       if (typeof localStorage !== 'undefined') {
@@ -573,6 +587,63 @@ export class APDLClient implements APDLApi {
     } catch {
       // Storage unavailable
     }
+  }
+
+  private hasIdentityConsent(): boolean {
+    return this.consentManager.isGranted('analytics')
+      || this.consentManager.isGranted('experiments');
+  }
+
+  private refreshAnonymousIdentity(): void {
+    if (!this.hasIdentityConsent()) {
+      this.clearAnonymousIdentity();
+      return;
+    }
+
+    if (this.anonymousId === undefined) {
+      this.anonymousId = this.resolveAnonymousId();
+    }
+
+    if (
+      this.config.privacyMode === 'cookieless' &&
+      this.cookielessIdentityPromise === null
+    ) {
+      const setup = this.setupCookielessId();
+      this.cookielessIdentityPromise = setup;
+      void setup.finally(() => {
+        if (this.cookielessIdentityPromise === setup) {
+          this.cookielessIdentityPromise = null;
+        }
+      });
+    }
+  }
+
+  private clearAnonymousIdentity(): void {
+    this.identityEpoch += 1;
+    this.anonymousId = undefined;
+    this.cookielessIdentityPromise = null;
+
+    if (this.config.persistence === 'memory') return;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(this.anonymousIdStorageKey());
+      }
+    } catch {
+      // Storage unavailable; the in-memory identifier is still cleared.
+    }
+  }
+
+  private requireAnonymousId(): string {
+    if (!this.hasIdentityConsent()) {
+      throw new Error('APDL: anonymous identity is unavailable without consent');
+    }
+    if (this.anonymousId === undefined) {
+      this.refreshAnonymousIdentity();
+    }
+    if (this.anonymousId === undefined) {
+      throw new Error('APDL: anonymous identity is not initialized');
+    }
+    return this.anonymousId;
   }
 
   private getEvalContext(): EvalContext {
@@ -812,9 +883,12 @@ export class APDLClient implements APDLApi {
     if (this.isShutDown || granted === this.analyticsCaptureEnabled) return;
 
     this.analyticsCaptureEnabled = granted;
+    this.sessionManager.setEnabled(granted);
+    this.refreshAnonymousIdentity();
     if (!granted) {
       this.autoCapture.stop();
       this.healthCapture.stop();
+      this.manualCapture.reset();
       void this.eventQueue.revokeAnalyticsConsent();
       return;
     }
@@ -840,6 +914,7 @@ export class APDLClient implements APDLApi {
     if (this.isShutDown || granted === this.experimentsEnabled) return;
 
     this.experimentsEnabled = granted;
+    this.refreshAnonymousIdentity();
     if (!granted) {
       this.flagDistributionEpoch++;
       this.flagFetchController?.abort();
