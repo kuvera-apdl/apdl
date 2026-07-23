@@ -267,10 +267,14 @@ def test_container_and_make_target_ship_the_operator_cli() -> None:
     dockerfile = (repository / "services/admin-api/Dockerfile").read_text(
         encoding="utf-8"
     )
+    dockerignore = (
+        repository / "services/admin-api/.dockerignore"
+    ).read_text(encoding="utf-8")
     makefile = (repository / "Makefile").read_text(encoding="utf-8")
     target = makefile.split("create-admin-user:", 1)[1].split("\n\n", 1)[0]
 
     assert "COPY scripts/create_admin_user.py scripts/create_admin_user.py" in dockerfile
+    assert "scripts/*\n!scripts/create_admin_user.py\n" in dockerignore
     assert "$(COMPOSE) run --rm --build --no-deps admin-api" in target
     assert "python scripts/create_admin_user.py $(ARGS)" in target
     assert ".venv/bin/python" not in target
