@@ -124,8 +124,12 @@ class MigrationQuiescenceTests(unittest.TestCase):
         self.assertIn("add_termination_listener", WRITER_ENTRYPOINT)
         self.assertIn("_monitor_maintenance_inhibitor", WRITER_ENTRYPOINT)
         self.assertIn("min_size=2", WRITER_ENTRYPOINT)
-        self.assertIn("max_size=2", WRITER_ENTRYPOINT)
+        # Two checked-out sessions hold the redundant maintenance locks; one
+        # additional pooled session is reserved for completeness authority
+        # transactions and must not weaken either inhibitor.
+        self.assertIn("max_size=3", WRITER_ENTRYPOINT)
         self.assertIn("for _ in range(2)", WRITER_ENTRYPOINT)
+        self.assertIn("authority_pool=maintenance_pool", WRITER_ENTRYPOINT)
         self.assertIn("objsubid = 1", WRITER_ENTRYPOINT)
         self.assertIn("objid::bigint = ANY($1::bigint[])", WRITER_ENTRYPOINT)
         self.assertIn("await writer.stop(flush_buffer=False)", WRITER_ENTRYPOINT)
