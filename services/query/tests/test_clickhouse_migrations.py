@@ -177,14 +177,13 @@ def test_identity_alias_backfill_is_historical_checksummed_and_one_time():
     ) < IDENTITY_ALIASES_SQL.index(
         "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_assertions_mv"
     )
-    assert "apdl_schema_backfills FINAL" in CLICKHOUSE_INIT_SCRIPT
-    assert "ClickHouse backfill checksum drift" in CLICKHOUSE_INIT_SCRIPT
-    assert "ORDER BY (name, checksum)" in CLICKHOUSE_INIT_SCRIPT
-    assert "mkdir \"$backfill_lock_dir\"" in CLICKHOUSE_INIT_SCRIPT
-    assert "cp \"$backfill\" \"$backfill_snapshot\"" in CLICKHOUSE_INIT_SCRIPT
-    assert "ClickHouse backfills directory not found" in CLICKHOUSE_INIT_SCRIPT
-    assert CLICKHOUSE_INIT_SCRIPT.index("recorded_checksum=") < (
-        CLICKHOUSE_INIT_SCRIPT.index("--multiquery < \"$backfill_snapshot\"")
+    assert "apdl_schema_backfills" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "ClickHouse backfill checksum drift" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "ORDER BY (name, checksum)" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "hashlib.sha256(payload).hexdigest()" in CLICKHOUSE_MIGRATION_ENGINE
+    assert "ClickHouse backfills directory not found" in CLICKHOUSE_MIGRATION_ENGINE
+    assert CLICKHOUSE_MIGRATION_ENGINE.index("recorded_checksum =") < (
+        CLICKHOUSE_MIGRATION_ENGINE.index("client.execute(backfill.sql")
     )
 
 

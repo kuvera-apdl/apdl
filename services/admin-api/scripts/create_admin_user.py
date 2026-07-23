@@ -31,6 +31,8 @@ ROLES = frozenset(
     }
 )
 EXECUTION_ROLES = frozenset({"agents:run", "agents:manage", "agents:approve"})
+MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
+MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
 
 
 def parse_args() -> argparse.Namespace:
@@ -116,6 +118,14 @@ async def provision(args: argparse.Namespace) -> None:
     dsn = os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
     conn = await asyncpg.connect(dsn)
     try:
+        await conn.execute(
+            "SELECT pg_advisory_lock_shared($1)",
+            MAINTENANCE_INHIBITOR_LOCK_ID,
+        )
+        await conn.execute(
+            "SELECT pg_advisory_lock_shared($1)",
+            MAINTENANCE_GUARD_LOCK_ID,
+        )
         async with conn.transaction():
             await conn.execute(
                 """

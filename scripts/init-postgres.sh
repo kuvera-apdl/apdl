@@ -26,6 +26,14 @@ POSTGRES_DB="${POSTGRES_DB:-apdl}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_file_value POSTGRES_PASSWORD)}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-apdl_dev}"
 MIGRATIONS_DIR="${POSTGRES_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/postgres/migrations}"
+DEV_CREDENTIAL_SQL="$ROOT_DIR/scripts/provision-dev-credential.sql"
+MAINTENANCE_INHIBITOR_LOCK_ID=4158044083
+MAINTENANCE_GUARD_LOCK_ID=4158044084
+
+[ -f "$DEV_CREDENTIAL_SQL" ] || {
+    echo "Development credential SQL not found: $DEV_CREDENTIAL_SQL" >&2
+    exit 1
+}
 
 echo "==> Initializing PostgreSQL"
 docker compose "${COMPOSE_ARGS[@]}" up -d "$POSTGRES_SERVICE" >/dev/null
@@ -37,13 +45,33 @@ fi
 
 ready=0
 for _ in $(seq 1 30); do
-    if docker exec "$container_id" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
+    # The official image runs initdb against a temporary child server before
+    # PID 1 execs the durable PostgreSQL server. Do not let a transient
+    # pg_isready success start a fence owner or migration that the handoff will
+    # immediately destroy.
+    if docker exec "$container_id" sh -c '
+        command="$(tr "\000" "\n" </proc/1/cmdline | head -n 1)" || exit 1
+        case "$command" in
+            postgres|*/postgres) exit 0 ;;
+            *) exit 1 ;;
+        esac
+    ' >/dev/null 2>&1 \
+        && docker exec "$container_id" pg_isready \
+        -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; then
         ready=1
         break
     fi
     sleep 2
 done
-[ "$ready" -eq 1 ] || { echo "PostgreSQL did not become ready in time." >&2; exit 1; }
+[ "$ready" -eq 1 ] || {
+    echo "PostgreSQL final server process did not become ready in time." >&2
+    exit 1
+}
+
+# Resolve all image/build work before the final local drain check. The migrator
+# then takes the database-authoritative exclusive inhibitor, which closes the
+# remaining check/apply race and detects participants outside this Compose project.
+docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
 
 quiescence_args=(
     --anchor-container "$container_id"
@@ -60,7 +88,6 @@ quiescence_args=(
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
     "${quiescence_args[@]}"
 
-docker compose "${COMPOSE_ARGS[@]}" build "$POSTGRES_MIGRATOR_SERVICE" >/dev/null
 docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGHOST="$POSTGRES_SERVICE" \
     -e PGPORT=5432 \
@@ -68,7 +95,6 @@ docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGPASSWORD="$POSTGRES_PASSWORD" \
     -e PGDATABASE="$POSTGRES_DB" \
     -e POSTGRES_MIGRATIONS_DIR=/migrations \
-    -e APDL_POSTGRES_SERVICES_QUIESCED=1 \
     -v "$MIGRATIONS_DIR:/migrations:ro" \
     "$POSTGRES_MIGRATOR_SERVICE"
 
@@ -115,29 +141,10 @@ provision_dev_credential() {
         -v key_prefix="$key_prefix" \
         -v key_hash="$key_hash" \
         -v roles="$roles" \
+        -v maintenance_inhibitor_lock_id="$MAINTENANCE_INHIBITOR_LOCK_ID" \
+        -v maintenance_guard_lock_id="$MAINTENANCE_GUARD_LOCK_ID" \
         -U "$POSTGRES_USER" \
-        -d "$POSTGRES_DB" >/dev/null <<'SQL'
-INSERT INTO auth_credentials (
-    credential_id, project_id, credential_kind, key_prefix, key_hash, roles
-)
-VALUES (
-    :'credential_id',
-    :'project_id',
-    :'credential_kind',
-    :'key_prefix',
-    :'key_hash',
-    :'roles'::TEXT[]
-)
-ON CONFLICT (credential_id) DO UPDATE SET
-    project_id = EXCLUDED.project_id,
-    credential_kind = EXCLUDED.credential_kind,
-    key_prefix = EXCLUDED.key_prefix,
-    key_hash = EXCLUDED.key_hash,
-    roles = EXCLUDED.roles,
-    active = TRUE,
-    expires_at = NULL,
-    revoked_at = NULL;
-SQL
+        -d "$POSTGRES_DB" >/dev/null < "$DEV_CREDENTIAL_SQL"
     echo "  Provisioned $credential_kind local-development credential for $project_id"
 }
 

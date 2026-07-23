@@ -50,11 +50,23 @@ class _Conn:
         self.runs = runs
         self.proposals = proposals
         self.renewals = 0
+        self.termination_listeners: list[Any] = []
+
+    def add_termination_listener(self, listener: Any) -> None:
+        self.termination_listeners.append(listener)
+
+    def remove_termination_listener(self, listener: Any) -> None:
+        self.termination_listeners.remove(listener)
+
+    async def close(self) -> None:
+        return None
 
     def transaction(self) -> _Transaction:
         return _Transaction()
 
-    async def fetchval(self, query: str, *args: Any) -> str | None:
+    async def fetchval(self, query: str, *args: Any) -> str | bool | None:
+        if "pg_catalog.pg_locks" in query:
+            return True
         if "INSERT INTO agent_audit_log" in query:
             return "1"
 
@@ -257,6 +269,12 @@ class _Acquire:
 
     async def __aenter__(self) -> _Conn:
         return self.conn
+
+    def __await__(self):
+        async def acquire() -> _Conn:
+            return self.conn
+
+        return acquire().__await__()
 
     async def __aexit__(self, *exc: Any) -> bool:
         return False

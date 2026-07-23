@@ -17,6 +17,33 @@ CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 POSTGRES_INIT = (ROOT / "scripts" / "init-postgres.sh").read_text()
 MAKEFILE = (ROOT / "Makefile").read_text()
 COMPOSE = (ROOT / "infra" / "docker" / "docker-compose.yml").read_text()
+DEPS_COMPOSE = (
+    ROOT / "infra" / "docker" / "docker-compose.deps.yml"
+).read_text()
+CLICKHOUSE_UPGRADE_COMPOSE = (
+    ROOT / "scripts" / "fixtures" / "docker-compose.clickhouse-upgrade.yml"
+).read_text()
+POSTGRES_MIGRATOR = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
+CLICKHOUSE_MIGRATOR = (ROOT / "pipeline" / "clickhouse" / "migrate.py").read_text()
+SERVICE_POOL_ENTRYPOINTS = tuple(
+    (ROOT / path).read_text()
+    for path in (
+        "services/ingestion/app/main.py",
+        "services/config/app/main.py",
+        "services/query/app/main.py",
+        "services/agents/app/main.py",
+        "services/codegen/app/main.py",
+        "services/admin-api/app/main.py",
+    )
+)
+WRITER_ENTRYPOINT = (ROOT / "pipeline/redis/clickhouse_writer.py").read_text()
+GRANT_ENTRYPOINT = (
+    ROOT / "services/codegen/app/github/grant_cli.py"
+).read_text()
+ADMIN_PROVISION_ENTRYPOINT = (
+    ROOT / "services/admin-api/scripts/create_admin_user.py"
+).read_text()
+DEV_CREDENTIAL_SQL = (ROOT / "scripts/provision-dev-credential.sql").read_text()
 SPEC = importlib.util.spec_from_file_location("apdl_migration_quiescence", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 quiescence = importlib.util.module_from_spec(SPEC)
@@ -26,14 +53,33 @@ SPEC.loader.exec_module(quiescence)
 
 class MigrationQuiescenceTests(unittest.TestCase):
     def test_supported_entrypoints_bind_checks_to_engine_confirmations(self) -> None:
+        clickhouse_final_server = CLICKHOUSE_INIT.index("/proc/1/cmdline")
         clickhouse_check = CLICKHOUSE_INIT.index("scripts/migration_quiescence.py")
         clickhouse_apply = CLICKHOUSE_INIT.index("pipeline/clickhouse/migrate.py")
+        self.assertLess(clickhouse_final_server, clickhouse_check)
         self.assertLess(clickhouse_check, clickhouse_apply)
+        self.assertIn("clickhouse-server|*/clickhouse-server", CLICKHOUSE_INIT)
+        self.assertIn("postgres|*/postgres", CLICKHOUSE_INIT)
+        self.assertIn("/proc/1/cmdline", POSTGRES_INIT)
+        self.assertIn("postgres|*/postgres", POSTGRES_INIT)
+        for compose_source in (
+            COMPOSE,
+            DEPS_COMPOSE,
+            CLICKHOUSE_UPGRADE_COMPOSE,
+        ):
+            self.assertIn("/proc/1/cmdline", compose_source)
+            self.assertIn(
+                "clickhouse-server|*/clickhouse-server",
+                compose_source,
+            )
+            self.assertIn("postgres|*/postgres", compose_source)
         self.assertIn("--service clickhouse-writer", CLICKHOUSE_INIT)
-        self.assertIn("APDL_CLICKHOUSE_WRITERS_QUIESCED=1", CLICKHOUSE_INIT)
+        self.assertIn('POSTGRES_CONTAINER_ID="$postgres_container_id"', CLICKHOUSE_INIT)
 
+        postgres_build = POSTGRES_INIT.index('build "$POSTGRES_MIGRATOR_SERVICE"')
         postgres_check = POSTGRES_INIT.index("scripts/migration_quiescence.py")
-        postgres_apply = POSTGRES_INIT.index('build "$POSTGRES_MIGRATOR_SERVICE"')
+        postgres_apply = POSTGRES_INIT.index('run --rm --no-deps')
+        self.assertLess(postgres_build, postgres_check)
         self.assertLess(postgres_check, postgres_apply)
         for service in (
             "ingestion",
@@ -47,7 +93,120 @@ class MigrationQuiescenceTests(unittest.TestCase):
             "gateway",
         ):
             self.assertIn(f"--service {service}", POSTGRES_INIT)
-        self.assertIn("APDL_POSTGRES_SERVICES_QUIESCED=1", POSTGRES_INIT)
+        self.assertNotIn("SERVICES_QUIESCED", POSTGRES_INIT)
+        self.assertNotIn("WRITERS_QUIESCED", CLICKHOUSE_INIT)
+
+    def test_every_supported_database_runtime_holds_the_shared_inhibitor(self) -> None:
+        for source in SERVICE_POOL_ENTRYPOINTS:
+            self.assertIn("pg_advisory_lock_shared($1)", source)
+            self.assertIn("MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084", source)
+            self.assertIn("init=_acquire_maintenance_inhibitor", source)
+            self.assertIn("reset=_reset_maintenance_inhibitor", source)
+            self.assertIn("max_inactive_connection_lifetime=0", source)
+            self.assertIn("maintenance_connection = await", source)
+            self.assertIn("add_termination_listener", source)
+            self.assertIn("_monitor_maintenance_inhibitor", source)
+            self.assertIn("asyncio.wait_for", source)
+            self.assertIn(
+                "objid IN ($1::bigint::oid, $2::bigint::oid)", source
+            )
+            self.assertIn("os._exit(1)", source)
+            acquire = source.index("async def _acquire_maintenance_inhibitor")
+            primary = source.index("MAINTENANCE_INHIBITOR_LOCK_ID,", acquire)
+            guard = source.index("MAINTENANCE_GUARD_LOCK_ID,", acquire)
+            self.assertLess(primary, guard)
+        self.assertIn("pg_advisory_lock_shared($1)", WRITER_ENTRYPOINT)
+        self.assertIn("MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084", WRITER_ENTRYPOINT)
+        self.assertIn(
+            "maintenance_connection = await maintenance_pool.acquire()",
+            WRITER_ENTRYPOINT,
+        )
+        self.assertIn("add_termination_listener", WRITER_ENTRYPOINT)
+        self.assertIn("_monitor_maintenance_inhibitor", WRITER_ENTRYPOINT)
+        self.assertIn("min_size=2", WRITER_ENTRYPOINT)
+        self.assertIn("max_size=2", WRITER_ENTRYPOINT)
+        self.assertIn("for _ in range(2)", WRITER_ENTRYPOINT)
+        self.assertIn("objsubid = 1", WRITER_ENTRYPOINT)
+        self.assertIn("objid::bigint = ANY($1::bigint[])", WRITER_ENTRYPOINT)
+        self.assertIn("await writer.stop(flush_buffer=False)", WRITER_ENTRYPOINT)
+        self.assertIn("_accepting_inserts", WRITER_ENTRYPOINT)
+        self.assertIn("_drain_inflight_insert", WRITER_ENTRYPOINT)
+        self.assertIn("KILL QUERY WHERE query_id", WRITER_ENTRYPOINT)
+        self.assertIn("system.processes", WRITER_ENTRYPOINT)
+        self.assertIn("apdl-runtime-writer-", WRITER_ENTRYPOINT)
+        self.assertIn("FROM apdl_maintenance_gate", WRITER_ENTRYPOINT)
+        self.assertIn("authority = 'runtime-writes'", WRITER_ENTRYPOINT)
+        self.assertIn("external_tables=", WRITER_ENTRYPOINT)
+        self.assertIn("POSTGRES_URL:", COMPOSE[COMPOSE.index("clickhouse-writer:") :])
+        self.assertIn("postgres-migrate:", COMPOSE[COMPOSE.index("clickhouse-writer:") :])
+
+        for source in (GRANT_ENTRYPOINT, ADMIN_PROVISION_ENTRYPOINT):
+            acquire = source.index("pg_advisory_lock_shared($1)")
+            primary = source.index("MAINTENANCE_INHIBITOR_LOCK_ID", acquire)
+            guard = source.index("MAINTENANCE_GUARD_LOCK_ID", primary)
+            self.assertLess(primary, guard)
+
+        primary_sql = DEV_CREDENTIAL_SQL.index(
+            "pg_advisory_lock_shared(:maintenance_inhibitor_lock_id)"
+        )
+        guard_sql = DEV_CREDENTIAL_SQL.index(
+            "pg_advisory_lock_shared(:maintenance_guard_lock_id)"
+        )
+        mutation = DEV_CREDENTIAL_SQL.index("INSERT INTO auth_credentials")
+        self.assertLess(primary_sql, guard_sql)
+        self.assertLess(guard_sql, mutation)
+        self.assertIn(
+            'DEV_CREDENTIAL_SQL="$ROOT_DIR/scripts/provision-dev-credential.sql"',
+            POSTGRES_INIT,
+        )
+
+    def test_both_migrators_hold_the_same_exclusive_database_fence(self) -> None:
+        for source in (POSTGRES_MIGRATOR, CLICKHOUSE_MIGRATOR):
+            self.assertIn("MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083", source)
+            self.assertIn("MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084", source)
+            primary = source.index("acquire_owner(MAINTENANCE_INHIBITOR_LOCK_ID)")
+            guard = source.index("acquire_owner(MAINTENANCE_GUARD_LOCK_ID)")
+            self.assertLess(primary, guard)
+            self.assertIn("with _maintenance_fence() as fence:", source)
+            self.assertIn("fence.assert_held()", source)
+            self.assertIn("_run_fenced_command", source)
+            self.assertIn("_stop_operation", source)
+            self.assertIn("objid = ({lock_id}::bigint)::oid", source)
+        self.assertIn("pg_terminate_backend", POSTGRES_MIGRATOR)
+        self.assertIn("pg_stat_activity", POSTGRES_MIGRATOR)
+        self.assertIn("PGAPPNAME", POSTGRES_MIGRATOR)
+        self.assertIn("system.processes", CLICKHOUSE_MIGRATOR)
+        self.assertIn("on_started=await_client_handshake", CLICKHOUSE_MIGRATOR)
+        self.assertIn("/proc/$1/cmdline", CLICKHOUSE_MIGRATOR)
+        self.assertIn("ClickHouse container-side migration client", CLICKHOUSE_MIGRATOR)
+        self.assertIn("MAINTENANCE_OWNER_TABLE = \"apdl_active_maintenance\"", CLICKHOUSE_MIGRATOR)
+        self.assertIn("with _migration_lock(client.container_id, client.database):", CLICKHOUSE_MIGRATOR)
+        owner = CLICKHOUSE_MIGRATOR.index("with _maintenance_owner(client, fence):")
+        runtime_gate = CLICKHOUSE_MIGRATOR.index(
+            "with _maintenance_writer_gate(client, fence):",
+            owner,
+        )
+        migration = CLICKHOUSE_MIGRATOR.index("migrate(directory, client, fence)", runtime_gate)
+        backfill = CLICKHOUSE_MIGRATOR.index(
+            "apply_backfills(backfills, client, fence)",
+            migration,
+        )
+        convergence = CLICKHOUSE_MIGRATOR.index(
+            "_verify_schema_convergence(",
+            backfill,
+        )
+        self.assertLess(owner, runtime_gate)
+        self.assertLess(runtime_gate, migration)
+        self.assertLess(migration, backfill)
+        self.assertLess(backfill, convergence)
+        self.assertIn('RUNTIME_QUERY_ID_PREFIX = "apdl-runtime-"', CLICKHOUSE_MIGRATOR)
+        self.assertIn("startsWith(query_id", CLICKHOUSE_MIGRATOR)
+        for source in (POSTGRES_MIGRATOR, CLICKHOUSE_MIGRATOR):
+            self.assertIn("the maintenance guard and retrying", source)
+            self.assertIn("signal.SIGTERM", source)
+        self.assertIn(
+            "apply_backfills(backfills, client, fence)", CLICKHOUSE_MIGRATOR
+        )
 
     def test_full_stack_restart_drains_services_before_migrations(self) -> None:
         dev_core = MAKEFILE[MAKEFILE.index("dev-core:") : MAKEFILE.index("dev-all:")]

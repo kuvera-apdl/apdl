@@ -12,10 +12,45 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            clickhouse-server|*/clickhouse-server)
+              clickhouse-client --user apdl --password apdl_dev --query "SELECT 1"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  postgres:
+    image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+    environment:
+      POSTGRES_DB: apdl
+      POSTGRES_USER: apdl
+      POSTGRES_PASSWORD: apdl_dev
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            postgres|*/postgres)
+              pg_isready -U apdl -d apdl
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       interval: 2s
       timeout: 2s
       retries: 30
 
 volumes:
   clickhouse-data:
+  postgres-data:

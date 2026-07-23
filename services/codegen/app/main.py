@@ -11,8 +11,8 @@ service, which calls this one over the internal API.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -78,6 +78,110 @@ _ORPHAN_ERROR = (
 )
 
 logger = logging.getLogger(__name__)
+
+MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
+MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+MAINTENANCE_HEARTBEAT_SECONDS = 1.0
+MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS = 2.0
+
+
+async def _acquire_maintenance_inhibitor(connection) -> None:
+    """Block startup during maintenance and inhibit it while this connection lives."""
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        MAINTENANCE_INHIBITOR_LOCK_ID,
+    )
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        MAINTENANCE_GUARD_LOCK_ID,
+    )
+
+
+async def _reset_maintenance_inhibitor(connection) -> None:
+    """Apply asyncpg's default reset, then restore the session inhibitor."""
+    reset_query = connection.get_reset_query()
+    if reset_query:
+        await connection.execute(reset_query)
+    await _acquire_maintenance_inhibitor(connection)
+
+
+async def _assert_maintenance_inhibitor_held(
+    connection,
+    *,
+    heartbeat_timeout_seconds: float = MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS,
+) -> None:
+    held = await asyncio.wait_for(
+        connection.fetchval(
+            "SELECT count(*) = 2 FROM pg_catalog.pg_locks "
+            "WHERE pid = pg_backend_pid() AND locktype = 'advisory' "
+            "AND mode = 'ShareLock' AND granted "
+            "AND classid = 0 AND objsubid = 1 "
+            "AND objid IN ($1::bigint::oid, $2::bigint::oid)",
+            MAINTENANCE_INHIBITOR_LOCK_ID,
+            MAINTENANCE_GUARD_LOCK_ID,
+        ),
+        timeout=heartbeat_timeout_seconds,
+    )
+    if held is not True:
+        raise RuntimeError("maintenance inhibitor locks were lost")
+
+
+async def _monitor_maintenance_inhibitor(
+    connection,
+    connection_lost: asyncio.Event,
+    *,
+    heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+    heartbeat_timeout_seconds: float = MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS,
+) -> None:
+    """Terminate the process when its dedicated inhibitor session is uncertain."""
+    while not connection_lost.is_set():
+        try:
+            await asyncio.wait_for(connection_lost.wait(), timeout=heartbeat_seconds)
+        except TimeoutError:
+            try:
+                await _assert_maintenance_inhibitor_held(
+                    connection,
+                    heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                connection_lost.set()
+    logger.critical("PostgreSQL maintenance inhibitor was lost; terminating service")
+    _abort_process_on_maintenance_loss()
+
+
+def _abort_process_on_maintenance_loss() -> None:
+    """Immediately stop in-flight work after the database barrier is lost."""
+    os._exit(1)
+
+
+async def _start_maintenance_monitor(connection):
+    loop = asyncio.get_running_loop()
+    connection_lost = asyncio.Event()
+
+    def mark_connection_lost(_connection) -> None:
+        loop.call_soon_threadsafe(connection_lost.set)
+
+    connection.add_termination_listener(mark_connection_lost)
+    try:
+        await _assert_maintenance_inhibitor_held(connection)
+    except BaseException:
+        connection.remove_termination_listener(mark_connection_lost)
+        raise
+    task = asyncio.create_task(
+        _monitor_maintenance_inhibitor(connection, connection_lost),
+        name="maintenance-inhibitor-monitor",
+    )
+    return task, mark_connection_lost
+
+
+async def _close_maintenance_monitor(connection, task, listener) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    connection.remove_termination_listener(listener)
+    await connection.close()
+
 
 ChangesetCreationCapability = Literal["available", "disabled"]
 
@@ -240,183 +344,213 @@ async def lifespan(application: FastAPI):
         postgres_url(),
         min_size=2,
         max_size=pool_max_size,
+        init=_acquire_maintenance_inhibitor,
+        reset=_reset_maintenance_inhibitor,
+        max_inactive_connection_lifetime=0,
     )
-    application.state.pg_pool = pool
-    application.state.authenticator = PostgresAuthenticator(pool)
-    token_broker = GitHubTokenBroker(pool)
-    application.state.github_token_broker = token_broker
-
-    async with pool.acquire() as conn:
-        await assert_schema_ready(conn)
-    await token_broker.start()
-    branch_publisher = GitBranchPublisher()
-    publication_recovery_deps = {
-        "mint_read_token": token_broker.read_changeset,
-        "mint_write_token": token_broker.write_changeset,
-        "mint_pr_write_token": token_broker.pr_write_changeset,
-        "branch_publisher": branch_publisher,
-        "open_pr": open_pull_request,
-        "find_pr": find_pull_request_by_branch,
-        "close_pr": close_pull_request,
-    }
-
-    # Recover orphans: in-process background jobs can't survive a restart, so any
-    # changeset left in an active (post-claim, pre-PR) state from before this
-    # boot is dead. Sweep it to error rather than let it hang in a non-terminal
-    # status forever. The deadline (2× the full per-job pipeline budget) keeps a
-    # concurrent replica's in-flight work safe on the shared database; rows
-    # younger than that are caught by the periodic sweeper once they age out.
-    orphan_deadline = 2 * codegen_job_budget()
-    recoverable_publications = await publication_store.list_recoverable_ids(
-        pool,
-        # Every intent predates this fresh process. Recovery is idempotent and
-        # branch-scoped, so resume immediately instead of waiting a job budget.
-        older_than_seconds=0,
-    )
-    for changeset_id in recoverable_publications:
-        await resume_pull_request_publication(
-            pool,
-            changeset_id,
-            **publication_recovery_deps,
-        )
-    swept = await changeset_store.fail_stale_changesets(
-        pool,
-        older_than_seconds=orphan_deadline,
-        error=_ORPHAN_ERROR,
-    )
-    if swept:
-        logger.warning(
-            "Swept %d orphaned changeset(s) to error: %s", len(swept), ", ".join(swept)
-        )
-
-    # Dependencies for the changeset job runner (editing engine + PR opener).
+    token_broker = None
+    maintenance_connection = None
+    maintenance_task = None
+    maintenance_listener = None
     repair_jobs: set[asyncio.Task] = set()
-
-    def _repair_finished(task: asyncio.Task) -> None:
-        repair_jobs.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if error is not None:
-            logger.error(
-                "CI remediation background task failed",
-                exc_info=(type(error), error, error.__traceback__),
-            )
-
-    async def _schedule_ci_repair(observation: CIVerificationObservation) -> None:
-        """Start a deduplicated repair without blocking CI observation sweeps."""
-        task = asyncio.create_task(
-            repair_failed_ci(
-                pool,
-                observation,
-                editor=editor,
-                mint_read_token=token_broker.read_changeset,
-                mint_write_token=token_broker.write_changeset,
-                branch_publisher=branch_publisher,
-                publication_gate=publication_gate,
-                platform_safety_policy=platform_safety_policy,
-            )
-        )
-        repair_jobs.add(task)
-        task.add_done_callback(_repair_finished)
-
-    application.state.repair_jobs = repair_jobs
-    application.state.job_deps = {
-        "editor": editor,
-        "mint_read_token": token_broker.read_changeset,
-        "mint_write_token": token_broker.write_changeset,
-        "mint_pr_write_token": token_broker.pr_write_changeset,
-        "branch_publisher": branch_publisher,
-        "open_pr": open_pull_request,
-        "find_pr": find_pull_request_by_branch,
-        "close_pr": close_pull_request,
-        "publication_gate": publication_gate,
-        "platform_safety_policy": platform_safety_policy,
-    }
-
-    # Re-enqueue work a restart orphaned before it began: a queued row produced
-    # nothing yet, so re-running it is safe, and the job's queued → cloning
-    # claim transition guarantees a single winner even with a concurrent
-    # replica doing the same. (References are held so the tasks aren't GC'd.)
-    queued_ids = await changeset_store.list_queued_changeset_ids(pool)
-    requeued_jobs = [
-        asyncio.create_task(
-            run_changeset_job(pool, changeset_id, **application.state.job_deps)
-        )
-        for changeset_id in queued_ids
-    ]
-    application.state.requeued_jobs = requeued_jobs
-    if queued_ids:
-        logger.info(
-            "Re-enqueued %d queued changeset(s) from before this boot: %s",
-            len(queued_ids),
-            ", ".join(queued_ids),
-        )
-    # Live GitHub recovery dependencies shared by polling and webhooks.
-    application.state.github_sync_deps = {
-        "get_pull_request": get_pull_request,
-        "get_ci_evidence": get_ci_evidence,
-        "mint_token": token_broker.read_changeset,
-        "repair_failure": _schedule_ci_repair,
-        "collect_runtime": collect_runtime_evidence,
-    }
-
-    # CI poller: the zero-config trigger that keeps open changesets advancing
-    # without an inbound webhook (the common self-hosted case). Disabled when the
-    # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
+    requeued_jobs: list[asyncio.Task] = []
     poller_task: asyncio.Task | None = None
-    poll_interval = codegen_ci_poll_interval()
-    if poll_interval > 0:
-        poller_task = asyncio.create_task(
-            run_github_poller(
-                pool,
-                interval_seconds=poll_interval,
-                **application.state.github_sync_deps,
-            )
-        )
-    else:
-        logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
-
-    # Periodic orphan sweep: catches active-state rows that were too young for
-    # the startup sweep (e.g. orphaned minutes before a restart) once they age
-    # past the deadline, without waiting for some future restart.
     sweeper_task: asyncio.Task | None = None
-    sweep_interval = codegen_stale_sweep_interval()
-    if sweep_interval > 0:
-        sweeper_task = asyncio.create_task(
-            run_stale_sweeper(
+    try:
+        application.state.pg_pool = pool
+        application.state.authenticator = PostgresAuthenticator(pool)
+        token_broker = GitHubTokenBroker(pool)
+        application.state.github_token_broker = token_broker
+        maintenance_connection = await pool.acquire()
+        maintenance_task, maintenance_listener = await _start_maintenance_monitor(
+            maintenance_connection
+        )
+
+        async with pool.acquire() as conn:
+            await assert_schema_ready(conn)
+        await token_broker.start()
+        branch_publisher = GitBranchPublisher()
+        publication_recovery_deps = {
+            "mint_read_token": token_broker.read_changeset,
+            "mint_write_token": token_broker.write_changeset,
+            "mint_pr_write_token": token_broker.pr_write_changeset,
+            "branch_publisher": branch_publisher,
+            "open_pr": open_pull_request,
+            "find_pr": find_pull_request_by_branch,
+            "close_pr": close_pull_request,
+        }
+
+        # Recover orphans: in-process background jobs can't survive a restart, so any
+        # changeset left in an active (post-claim, pre-PR) state from before this
+        # boot is dead. Sweep it to error rather than let it hang in a non-terminal
+        # status forever. The deadline (2× the full per-job pipeline budget) keeps a
+        # concurrent replica's in-flight work safe on the shared database; rows
+        # younger than that are caught by the periodic sweeper once they age out.
+        orphan_deadline = 2 * codegen_job_budget()
+        recoverable_publications = await publication_store.list_recoverable_ids(
+            pool,
+            # Every intent predates this fresh process. Recovery is idempotent and
+            # branch-scoped, so resume immediately instead of waiting a job budget.
+            older_than_seconds=0,
+        )
+        for changeset_id in recoverable_publications:
+            await resume_pull_request_publication(
                 pool,
-                interval_seconds=sweep_interval,
-                older_than_seconds=orphan_deadline,
-                error=_ORPHAN_ERROR,
+                changeset_id,
                 **publication_recovery_deps,
             )
+        swept = await changeset_store.fail_stale_changesets(
+            pool,
+            older_than_seconds=orphan_deadline,
+            error=_ORPHAN_ERROR,
         )
-    else:
-        logger.info("Stale sweeper disabled (CODEGEN_STALE_SWEEP_INTERVAL=0)")
+        if swept:
+            logger.warning(
+                "Swept %d orphaned changeset(s) to error: %s",
+                len(swept),
+                ", ".join(swept),
+            )
 
-    logger.info("Codegen service started: PostgreSQL schema migration verified")
-    yield
+        # Dependencies for the changeset job runner (editing engine + PR opener).
 
-    for task in (poller_task, sweeper_task):
-        if task is not None:
+        def _repair_finished(task: asyncio.Task) -> None:
+            repair_jobs.discard(task)
+            if task.cancelled():
+                return
+            error = task.exception()
+            if error is not None:
+                logger.error(
+                    "CI remediation background task failed",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+        async def _schedule_ci_repair(observation: CIVerificationObservation) -> None:
+            """Start a deduplicated repair without blocking CI observation sweeps."""
+            task = asyncio.create_task(
+                repair_failed_ci(
+                    pool,
+                    observation,
+                    editor=editor,
+                    mint_read_token=token_broker.read_changeset,
+                    mint_write_token=token_broker.write_changeset,
+                    branch_publisher=branch_publisher,
+                    publication_gate=publication_gate,
+                    platform_safety_policy=platform_safety_policy,
+                )
+            )
+            repair_jobs.add(task)
+            task.add_done_callback(_repair_finished)
+
+        application.state.repair_jobs = repair_jobs
+        application.state.job_deps = {
+            "editor": editor,
+            "mint_read_token": token_broker.read_changeset,
+            "mint_write_token": token_broker.write_changeset,
+            "mint_pr_write_token": token_broker.pr_write_changeset,
+            "branch_publisher": branch_publisher,
+            "open_pr": open_pull_request,
+            "find_pr": find_pull_request_by_branch,
+            "close_pr": close_pull_request,
+            "publication_gate": publication_gate,
+            "platform_safety_policy": platform_safety_policy,
+        }
+
+        # Re-enqueue work a restart orphaned before it began: a queued row produced
+        # nothing yet, so re-running it is safe, and the job's queued → cloning
+        # claim transition guarantees a single winner even with a concurrent
+        # replica doing the same. (References are held so the tasks aren't GC'd.)
+        queued_ids = await changeset_store.list_queued_changeset_ids(pool)
+        for changeset_id in queued_ids:
+            requeued_jobs.append(
+                asyncio.create_task(
+                    run_changeset_job(
+                        pool,
+                        changeset_id,
+                        **application.state.job_deps,
+                    )
+                )
+            )
+        application.state.requeued_jobs = requeued_jobs
+        if queued_ids:
+            logger.info(
+                "Re-enqueued %d queued changeset(s) from before this boot: %s",
+                len(queued_ids),
+                ", ".join(queued_ids),
+            )
+        # Live GitHub recovery dependencies shared by polling and webhooks.
+        application.state.github_sync_deps = {
+            "get_pull_request": get_pull_request,
+            "get_ci_evidence": get_ci_evidence,
+            "mint_token": token_broker.read_changeset,
+            "repair_failure": _schedule_ci_repair,
+            "collect_runtime": collect_runtime_evidence,
+        }
+
+        # CI poller: the zero-config trigger that keeps open changesets advancing
+        # without an inbound webhook (the common self-hosted case). Disabled when the
+        # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
+        poll_interval = codegen_ci_poll_interval()
+        if poll_interval > 0:
+            poller_task = asyncio.create_task(
+                run_github_poller(
+                    pool,
+                    interval_seconds=poll_interval,
+                    **application.state.github_sync_deps,
+                )
+            )
+        else:
+            logger.info("CI poller disabled (CODEGEN_CI_POLL_INTERVAL=0)")
+
+        # Periodic orphan sweep: catches active-state rows that were too young for
+        # the startup sweep (e.g. orphaned minutes before a restart) once they age
+        # past the deadline, without waiting for some future restart.
+        sweep_interval = codegen_stale_sweep_interval()
+        if sweep_interval > 0:
+            sweeper_task = asyncio.create_task(
+                run_stale_sweeper(
+                    pool,
+                    interval_seconds=sweep_interval,
+                    older_than_seconds=orphan_deadline,
+                    error=_ORPHAN_ERROR,
+                    **publication_recovery_deps,
+                )
+            )
+        else:
+            logger.info("Stale sweeper disabled (CODEGEN_STALE_SWEEP_INTERVAL=0)")
+
+        logger.info("Codegen service started: PostgreSQL schema migration verified")
+        yield
+    finally:
+        periodic_tasks = [
+            task for task in (poller_task, sweeper_task) if task is not None
+        ]
+        for task in periodic_tasks:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-    for task in tuple(repair_jobs):
-        task.cancel()
-    if repair_jobs:
-        await asyncio.gather(*repair_jobs, return_exceptions=True)
-    for task in requeued_jobs:
-        task.cancel()
-    if requeued_jobs:
-        # A requeued editor may still own a GitHub token lease and an isolated
-        # worker. Await cancellation while PostgreSQL and broker dependencies
-        # are alive so its context manager can revoke the credential cleanly.
-        await asyncio.gather(*requeued_jobs, return_exceptions=True)
-    await token_broker.close()
-    await pool.close()
-    logger.info("Codegen service shut down: PostgreSQL pool closed")
+        if periodic_tasks:
+            await asyncio.gather(*periodic_tasks, return_exceptions=True)
+        for task in tuple(repair_jobs):
+            task.cancel()
+        if repair_jobs:
+            await asyncio.gather(*repair_jobs, return_exceptions=True)
+        for task in requeued_jobs:
+            task.cancel()
+        if requeued_jobs:
+            # A requeued editor may still own a GitHub token lease and an isolated
+            # worker. Await cancellation while PostgreSQL and broker dependencies
+            # are alive so its context manager can revoke the credential cleanly.
+            await asyncio.gather(*requeued_jobs, return_exceptions=True)
+        if token_broker is not None:
+            await token_broker.close()
+        if maintenance_task is not None:
+            await _close_maintenance_monitor(
+                maintenance_connection,
+                maintenance_task,
+                maintenance_listener,
+            )
+        elif maintenance_connection is not None:
+            await maintenance_connection.close()
+        await pool.close()
+        logger.info("Codegen service shut down: PostgreSQL pool closed")
 
 
 app = FastAPI(

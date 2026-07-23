@@ -154,7 +154,15 @@ async def test_explicit_override_is_audited_before_role_grant_in_one_transaction
         "operator@example.com",
         "Approved for production experiment automation",
     )
-    assert all(in_transaction for _, _, in_transaction in connection.calls)
+    maintenance_calls = connection.calls[:2]
+    transaction_calls = connection.calls[2:]
+    assert all("pg_advisory_lock_shared" in call[0] for call in maintenance_calls)
+    assert [call[1] for call in maintenance_calls] == [
+        (create_admin_user.MAINTENANCE_INHIBITOR_LOCK_ID,),
+        (create_admin_user.MAINTENANCE_GUARD_LOCK_ID,),
+    ]
+    assert all(call[2] is False for call in maintenance_calls)
+    assert all(in_transaction for _, _, in_transaction in transaction_calls)
     assert connection.transaction_entries == 1
     assert connection.transaction_exit_type is None
     assert connection.closed is True

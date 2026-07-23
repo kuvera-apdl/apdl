@@ -26,6 +26,27 @@ from app.store.connections import (
 
 _PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 _GRANT_ID_PATTERN = re.compile(r"^ghg_[A-Za-z0-9_-]{1,128}$")
+_MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
+_MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+
+
+async def _acquire_maintenance_inhibitor(connection) -> None:
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        _MAINTENANCE_INHIBITOR_LOCK_ID,
+    )
+    await connection.execute(
+        "SELECT pg_advisory_lock_shared($1)",
+        _MAINTENANCE_GUARD_LOCK_ID,
+    )
+
+
+async def _reset_maintenance_inhibitor(connection) -> None:
+    """Apply asyncpg's default reset, then restore the session inhibitor."""
+    reset_query = connection.get_reset_query()
+    if reset_query:
+        await connection.execute(reset_query)
+    await _acquire_maintenance_inhibitor(connection)
 
 
 def _project_id(value: str) -> str:
@@ -106,6 +127,9 @@ async def activate_repository_grant(
         dsn=postgres_url(),
         min_size=1,
         max_size=2,
+        init=_acquire_maintenance_inhibitor,
+        reset=_reset_maintenance_inhibitor,
+        max_inactive_connection_lifetime=0,
     )
     try:
         async with pool.acquire() as conn:
@@ -131,6 +155,9 @@ async def revoke_repository_grant(*, project_id: str, grant_id: str) -> None:
         dsn=postgres_url(),
         min_size=1,
         max_size=2,
+        init=_acquire_maintenance_inhibitor,
+        reset=_reset_maintenance_inhibitor,
+        max_inactive_connection_lifetime=0,
     )
     try:
         async with pool.acquire() as conn:

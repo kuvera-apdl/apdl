@@ -34,6 +34,22 @@ class FakePool:
 
 
 @pytest.mark.asyncio
+async def test_operator_cli_acquires_both_maintenance_locks_in_order() -> None:
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class Connection:
+        async def execute(self, query: str, *args: object) -> None:
+            calls.append((query, args))
+
+    await grant_cli._acquire_maintenance_inhibitor(Connection())
+
+    assert [args for _, args in calls] == [
+        (grant_cli._MAINTENANCE_INHIBITOR_LOCK_ID,),
+        (grant_cli._MAINTENANCE_GUARD_LOCK_ID,),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_operator_grant_validates_schema_then_activates_discovered_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -90,6 +106,9 @@ async def test_operator_grant_validates_schema_then_activates_discovered_target(
                 "dsn": "postgresql://test",
                 "min_size": 1,
                 "max_size": 2,
+                "init": grant_cli._acquire_maintenance_inhibitor,
+                "reset": grant_cli._reset_maintenance_inhibitor,
+                "max_inactive_connection_lifetime": 0,
             },
         ),
         "schema",
@@ -173,7 +192,14 @@ async def test_operator_revocation_validates_schema_and_exact_project_grant(
     assert events == [
         (
             "pool",
-            {"dsn": "postgresql://test", "min_size": 1, "max_size": 2},
+            {
+                "dsn": "postgresql://test",
+                "min_size": 1,
+                "max_size": 2,
+                "init": grant_cli._acquire_maintenance_inhibitor,
+                "reset": grant_cli._reset_maintenance_inhibitor,
+                "max_inactive_connection_lifetime": 0,
+            },
         ),
         "schema",
         (

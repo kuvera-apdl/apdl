@@ -28,7 +28,17 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            clickhouse-server|*/clickhouse-server)
+              clickhouse-client --user apdl --password apdl_dev --query "SELECT 1"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       interval: 5s
       timeout: 3s
       retries: 5
@@ -44,7 +54,17 @@ services:
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U apdl"]
+      test:
+        - CMD-SHELL
+        - >-
+          case "$$(tr '\000' '\n' </proc/1/cmdline | head -n 1)" in
+            postgres|*/postgres)
+              pg_isready -U apdl -d apdl
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
       interval: 5s
       timeout: 3s
       retries: 5

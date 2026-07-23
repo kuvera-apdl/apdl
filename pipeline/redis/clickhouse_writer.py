@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from uuid import uuid4
 
+import asyncpg
 import redis.asyncio as redis
 from clickhouse_driver import Client as ClickHouseClient
 from clickhouse_driver.errors import TypeMismatchError
@@ -48,6 +50,121 @@ EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
+MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
+MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+MAINTENANCE_INHIBITOR_LOCK_IDS = tuple(
+    sorted((MAINTENANCE_INHIBITOR_LOCK_ID, MAINTENANCE_GUARD_LOCK_ID))
+)
+MAINTENANCE_HEARTBEAT_SECONDS = 1.0
+EVENT_INSERT_COLUMNS = (
+    "project_id",
+    "message_id",
+    "event_type",
+    "event_name",
+    "user_id",
+    "anonymous_id",
+    "group_id",
+    "session_id",
+    "timestamp",
+    "received_at",
+    "properties",
+    "traits",
+    "context",
+    "ip",
+    "country",
+    "device_type",
+    "browser",
+)
+EVENT_EXTERNAL_TABLE_NAME = "apdl_runtime_input"
+EVENT_INPUT_STRUCTURE = (
+    ("project_id", "String"),
+    ("message_id", "String"),
+    ("event_type", "LowCardinality(String)"),
+    ("event_name", "LowCardinality(String)"),
+    ("user_id", "String"),
+    ("anonymous_id", "String"),
+    ("group_id", "String"),
+    ("session_id", "String"),
+    ("timestamp", "DateTime64(3)"),
+    ("received_at", "DateTime64(3)"),
+    ("properties", "String"),
+    ("traits", "String"),
+    ("context", "String"),
+    ("ip", "String"),
+    ("country", "LowCardinality(String)"),
+    ("device_type", "LowCardinality(String)"),
+    ("browser", "LowCardinality(String)"),
+)
+EVENT_INSERT_QUERY = (
+    f"INSERT INTO events ({', '.join(EVENT_INSERT_COLUMNS)}) "
+    f"SELECT {', '.join(EVENT_INSERT_COLUMNS)} "
+    f"FROM {EVENT_EXTERNAL_TABLE_NAME} "
+    "WHERE throwIf((SELECT (count() = 0) OR "
+    "(argMax(writes_blocked, generation) != 0) "
+    "FROM apdl_maintenance_gate "
+    "WHERE authority = 'runtime-writes'), 'maintenance') = 0"
+)
+
+
+async def _acquire_maintenance_inhibitor(connection) -> None:
+    """Acquire both shared locks in one canonical order on this backend."""
+    for lock_id in MAINTENANCE_INHIBITOR_LOCK_IDS:
+        await connection.execute(
+            "SELECT pg_advisory_lock_shared($1)",
+            lock_id,
+        )
+
+
+async def _heartbeat_maintenance_inhibitor(connection) -> None:
+    """Require this backend to still own both distinct shared advisory locks."""
+    held_lock_count = await connection.fetchval(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_locks
+        WHERE pid = pg_backend_pid()
+          AND locktype = 'advisory'
+          AND mode = 'ShareLock'
+          AND granted
+          AND classid = 0
+          AND objsubid = 1
+          AND objid::bigint = ANY($1::bigint[])
+        """,
+        list(MAINTENANCE_INHIBITOR_LOCK_IDS),
+    )
+    if held_lock_count != len(MAINTENANCE_INHIBITOR_LOCK_IDS):
+        raise RuntimeError(
+            "PostgreSQL backend no longer holds both maintenance inhibitor locks"
+        )
+
+
+async def _monitor_maintenance_inhibitor(
+    connection,
+    writer,
+    connection_lost: asyncio.Event,
+    *,
+    heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+) -> None:
+    """Fence writes when one inhibitor connection becomes uncertain."""
+    while not connection_lost.is_set():
+        try:
+            await asyncio.wait_for(
+                connection_lost.wait(),
+                timeout=heartbeat_seconds,
+            )
+        except TimeoutError:
+            try:
+                await asyncio.wait_for(
+                    _heartbeat_maintenance_inhibitor(connection),
+                    timeout=heartbeat_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                connection_lost.set()
+    logger.critical(
+        "PostgreSQL maintenance inhibitor was lost; stopping ClickHouse writes"
+    )
+    await writer.stop(flush_buffer=False)
 
 if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
     raise RuntimeError("Event stream alert threshold must be below capacity")
@@ -118,6 +235,7 @@ class InFlightInsert:
 
     batch: tuple[BufferedEvent, ...]
     future: asyncio.Future[None]
+    query_id: str
 
 
 class ClickHouseWriter:
@@ -154,19 +272,27 @@ class ClickHouseWriter:
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
         self.redis_client = redis.from_url(redis_url, decode_responses=True)
-        self.ch_client = ClickHouseClient.from_url(
-            self._clickhouse_url_with_timeouts(
-                clickhouse_url,
-                connect_timeout=clickhouse_connect_timeout,
-                send_receive_timeout=clickhouse_send_receive_timeout,
-                sync_request_timeout=clickhouse_sync_request_timeout,
-            )
+        configured_clickhouse_url = self._clickhouse_url_with_timeouts(
+            clickhouse_url,
+            connect_timeout=clickhouse_connect_timeout,
+            send_receive_timeout=clickhouse_send_receive_timeout,
+            sync_request_timeout=clickhouse_sync_request_timeout,
         )
+        self.ch_client = ClickHouseClient.from_url(configured_clickhouse_url)
+        # Cancellation and process inspection must never share the native
+        # connection that can be blocked inside an INSERT.
+        self.ch_control_client = ClickHouseClient.from_url(configured_clickhouse_url)
         self._db_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="clickhouse-writer-db",
         )
+        self._control_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="clickhouse-writer-control",
+        )
         self._inflight_insert: InFlightInsert | None = None
+        self._accepting_inserts = True
+        self._stop_task: asyncio.Task[None] | None = None
         self.buffer: list[BufferedEvent] = []
         self._durable_pending_ack: dict[str, list[str]] = {}
         self.buffer_size = buffer_size
@@ -191,6 +317,7 @@ class ClickHouseWriter:
         self._flush_retry_count = 0
         self._next_flush_retry_at = 0.0
         self._flush_lock = asyncio.Lock()
+        self._drain_lock = asyncio.Lock()
         self._stop_lock = asyncio.Lock()
         self._new_stream_cursor = 0
         self._pending_stream_cursor = 0
@@ -245,43 +372,85 @@ class ClickHouseWriter:
             await self.stop()
             raise
 
-    async def stop(self):
-        """Stop consumption and give the final insert a bounded grace period.
+    async def stop(self, *, flush_buffer: bool = True):
+        """Stop writes and prove the native INSERT is gone before returning.
 
-        A synchronous driver call cannot be cancelled safely once its worker
-        thread has entered the socket operation. The coroutine cancellation is
-        therefore detached from the insert itself: unobserved inserts remain
-        buffered and unacknowledged. If the shutdown deadline expires, closing
-        the ClickHouse socket interrupts the driver within its configured I/O
-        timeout while Redis deliveries stay pending for replay.
+        Normal shutdown gets one bounded final-flush grace period. Maintenance
+        inhibitor loss fences new INSERTs immediately. Once the grace period
+        expires, the stable query ID is killed synchronously and checked
+        against ``system.processes``. A control-plane failure is fail-closed:
+        this method keeps retrying, so its caller retains the surviving
+        PostgreSQL inhibitor and Redis deliveries remain pending.
         """
+        self.running = False
+        if not flush_buffer:
+            self._accepting_inserts = False
+        if self._closed:
+            return
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(
+                self._stop_fail_closed(flush_buffer=flush_buffer),
+                name="clickhouse-writer-stop",
+            )
+
+        deferred_exception: BaseException | None = None
+        while not self._stop_task.done():
+            try:
+                await asyncio.shield(self._stop_task)
+            except BaseException as exc:
+                # Do not let a second cancellation, KeyboardInterrupt, or
+                # SystemExit release PostgreSQL guards before drain proof.
+                deferred_exception = deferred_exception or exc
+
+        self._stop_task.result()
+        if deferred_exception is not None:
+            raise deferred_exception
+
+    async def _stop_fail_closed(self, *, flush_buffer: bool) -> None:
+        """Retry cleanup after every pre-proof BaseException."""
+        should_flush = flush_buffer
+        while not self._closed:
+            try:
+                await self._stop_once(flush_buffer=should_flush)
+            except BaseException as exc:
+                self.running = False
+                self._accepting_inserts = False
+                should_flush = False
+                try:
+                    logger.critical(
+                        "Writer cleanup interrupted before ClickHouse drain proof; "
+                        "retaining database inhibitors and retrying: %s",
+                        exc,
+                    )
+                except BaseException:
+                    pass
+
+    async def _stop_once(self, *, flush_buffer: bool) -> None:
         async with self._stop_lock:
             if self._closed:
                 return
-
-            self.running = False
             try:
-                await asyncio.wait_for(
-                    self._flush(),
-                    timeout=self.shutdown_timeout,
-                )
+                if flush_buffer:
+                    await asyncio.wait_for(
+                        self._flush(),
+                        timeout=self.shutdown_timeout,
+                    )
             except TimeoutError:
                 self.stats["errors"] += 1
                 logger.error(
-                    "ClickHouse final flush exceeded %.1fs; aborting the database "
-                    "connection and leaving deliveries pending",
+                    "ClickHouse final flush exceeded %.1fs; fencing new INSERTs "
+                    "and draining the registered query",
                     self.shutdown_timeout,
                 )
-                self._disconnect_clickhouse()
-            except asyncio.CancelledError:
-                self._disconnect_clickhouse()
-                raise
-            finally:
-                self._disconnect_clickhouse()
-                await self.redis_client.aclose()
-                self._db_executor.shutdown(wait=False, cancel_futures=True)
-                self._closed = True
 
+            self._accepting_inserts = False
+            await self._drain_inflight_insert()
+            self._disconnect_clickhouse()
+            self._disconnect_clickhouse_control()
+            await self.redis_client.aclose()
+            self._db_executor.shutdown(wait=False, cancel_futures=True)
+            self._control_executor.shutdown(wait=False, cancel_futures=True)
+            self._closed = True
             logger.info("ClickHouseWriter stopped. Stats: %s", self.stats)
 
     @staticmethod
@@ -315,8 +484,17 @@ class ClickHouseWriter:
         """Close the native socket so an in-flight blocking call can unwind."""
         try:
             self.ch_client.disconnect()
-        except Exception as exc:
+        except BaseException as exc:
             logger.warning("ClickHouse disconnect failed during shutdown: %s", exc)
+
+    def _disconnect_clickhouse_control(self) -> None:
+        """Close the independent cancellation/inspection connection."""
+        try:
+            self.ch_control_client.disconnect()
+        except BaseException as exc:
+            logger.warning(
+                "ClickHouse control disconnect failed during shutdown: %s", exc
+            )
 
     async def _discover_streams(self) -> list[str]:
         """Discover all event streams using SCAN with pattern matching.
@@ -1041,16 +1219,164 @@ class ClickHouseWriter:
             (TypeMismatchError, TypeError, OverflowError, UnicodeError),
         )
 
-    def _execute_insert(self, batch: list[BufferedEvent]) -> None:
+    def _execute_insert(self, batch: list[BufferedEvent], query_id: str) -> None:
+        # Re-check inside the single executor thread. A maintenance-loss signal
+        # can close the gate after the event loop queues this future but before
+        # the native driver begins the query.
+        if not self._accepting_inserts:
+            raise RuntimeError(
+                "ClickHouse INSERTs are fenced while the writer is stopping"
+            )
         self.ch_client.execute(
-            "INSERT INTO events ("
-            "project_id, message_id, event_type, event_name, user_id, "
-            "anonymous_id, group_id, session_id, timestamp, received_at, "
-            "properties, traits, context, ip, country, device_type, browser"
-            ") VALUES",
-            [event.row for event in batch],
+            EVENT_INSERT_QUERY,
+            external_tables=[
+                {
+                    "name": EVENT_EXTERNAL_TABLE_NAME,
+                    "structure": list(EVENT_INPUT_STRUCTURE),
+                    "data": [event.row for event in batch],
+                }
+            ],
+            query_id=query_id,
             types_check=True,
         )
+
+    def _execute_control_query(
+        self,
+        query: str,
+        params: dict[str, str],
+    ) -> list[tuple]:
+        return self.ch_control_client.execute(query, params)
+
+    async def _execute_control_query_async(
+        self,
+        query: str,
+        params: dict[str, str],
+    ) -> list[tuple]:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._control_executor,
+            self._execute_control_query,
+            query,
+            params,
+        )
+
+    async def _drain_inflight_insert(self) -> None:
+        while self._inflight_insert is not None:
+            try:
+                async with self._drain_lock:
+                    await self._drain_inflight_insert_locked()
+            except BaseException as exc:
+                logger.critical(
+                    "ClickHouse drain interrupted before proof; retaining database "
+                    "inhibitors and retrying: %s",
+                    exc,
+                )
+                try:
+                    await asyncio.sleep(0)
+                except BaseException:
+                    pass
+
+    async def _drain_inflight_insert_locked(self) -> None:
+        """Prove the current INSERT completed or is killed and no longer active.
+
+        The local native-driver future must settle before an absence observation
+        is authoritative. Otherwise a queued thread could register its query
+        immediately after ``system.processes`` was checked. Failed control
+        operations are retried indefinitely so callers retain their database
+        inhibitors rather than allowing a migration to race an unknown INSERT.
+        """
+        while (inflight := self._inflight_insert) is not None:
+            if inflight.future.done():
+                try:
+                    inflight.future.result()
+                except BaseException:
+                    pass
+                else:
+                    self._inflight_insert = None
+                    return
+
+            # Closing the data socket prevents a query that has not registered
+            # yet from continuing normally. KILL handles one already executing.
+            self._disconnect_clickhouse()
+            kill_succeeded = False
+            try:
+                await self._execute_control_query_async(
+                    "KILL QUERY WHERE query_id = %(query_id)s SYNC",
+                    {"query_id": inflight.query_id},
+                )
+                kill_succeeded = True
+            except BaseException as exc:
+                logger.error(
+                    "Could not kill ClickHouse query %s; retaining database "
+                    "inhibitor and retrying: %s",
+                    inflight.query_id,
+                    exc,
+                )
+
+            local_call_settled = inflight.future.done()
+            if not local_call_settled:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(inflight.future),
+                        timeout=self.shutdown_timeout,
+                    )
+                except TimeoutError:
+                    logger.error(
+                        "ClickHouse query %s remains active in the native client; "
+                        "retaining database inhibitor and retrying",
+                        inflight.query_id,
+                    )
+                except BaseException:
+                    local_call_settled = inflight.future.done()
+                else:
+                    # A successful native call is itself completion proof.
+                    self._inflight_insert = None
+                    return
+            else:
+                try:
+                    inflight.future.result()
+                except BaseException:
+                    pass
+                else:
+                    self._inflight_insert = None
+                    return
+
+            if kill_succeeded and local_call_settled:
+                try:
+                    rows = await self._execute_control_query_async(
+                        "SELECT count() FROM system.processes "
+                        "WHERE query_id = %(query_id)s",
+                        {"query_id": inflight.query_id},
+                    )
+                    if rows == [(0,)]:
+                        self._inflight_insert = None
+                        return
+                    if len(rows) != 1 or len(rows[0]) != 1:
+                        raise RuntimeError(
+                            "system.processes returned an invalid query count"
+                        )
+                    logger.error(
+                        "ClickHouse query %s is still registered after KILL QUERY "
+                        "SYNC; retaining database inhibitor and retrying",
+                        inflight.query_id,
+                    )
+                except BaseException as exc:
+                    logger.error(
+                        "Could not prove ClickHouse query %s absent; retaining "
+                        "database inhibitor and retrying: %s",
+                        inflight.query_id,
+                        exc,
+                    )
+
+            try:
+                await asyncio.sleep(min(MAINTENANCE_HEARTBEAT_SECONDS, 0.1))
+            except BaseException as exc:
+                logger.warning(
+                    "ClickHouse drain retry delay interrupted for query %s; "
+                    "continuing with inhibitors held: %s",
+                    inflight.query_id,
+                    exc,
+                )
 
     async def _execute_insert_async(self, batch: list[BufferedEvent]) -> None:
         """Run the synchronous native driver in one bounded worker thread.
@@ -1063,13 +1389,23 @@ class ClickHouseWriter:
         batch_key = tuple(batch)
         inflight = self._inflight_insert
         if inflight is None:
+            if not self._accepting_inserts:
+                raise RuntimeError(
+                    "ClickHouse INSERTs are fenced while the writer is stopping"
+                )
+            query_id = f"apdl-runtime-writer-{uuid4()}"
             loop = asyncio.get_running_loop()
             future = loop.run_in_executor(
                 self._db_executor,
                 self._execute_insert,
                 batch,
+                query_id,
             )
-            inflight = InFlightInsert(batch=batch_key, future=future)
+            inflight = InFlightInsert(
+                batch=batch_key,
+                future=future,
+                query_id=query_id,
+            )
             self._inflight_insert = inflight
         elif inflight.batch != batch_key:
             raise RuntimeError(
@@ -1084,7 +1420,9 @@ class ClickHouseWriter:
             # flush can observe its real success/failure without double-write.
             raise
         except Exception:
-            self._inflight_insert = None
+            # A socket error does not prove that the server stopped executing.
+            # Resolve the registered query before a retry may get a new ID.
+            await self._drain_inflight_insert()
             raise
         else:
             self._inflight_insert = None
@@ -1526,6 +1864,10 @@ class ClickHouseWriter:
 
 async def main():
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    postgres_url = os.environ.get(
+        "POSTGRES_URL",
+        "postgresql://apdl:apdl_dev@localhost:5432/apdl",
+    )
     clickhouse_url = os.environ.get(
         "CLICKHOUSE_NATIVE_URL",
         "clickhouse://apdl:apdl_dev@localhost:9000/apdl",
@@ -1575,28 +1917,112 @@ async def main():
         else None
     )
 
-    writer = ClickHouseWriter(
-        redis_url=redis_url,
-        clickhouse_url=clickhouse_url,
-        buffer_size=buffer_size,
-        flush_interval=flush_interval,
-        dlq_maxlen=dlq_maxlen,
-        pending_claim_idle_ms=pending_claim_idle_ms,
-        pending_claim_interval=pending_claim_interval,
-        clickhouse_connect_timeout=clickhouse_connect_timeout,
-        clickhouse_send_receive_timeout=clickhouse_send_receive_timeout,
-        clickhouse_sync_request_timeout=clickhouse_sync_request_timeout,
-        shutdown_timeout=shutdown_timeout,
+    maintenance_pool = await asyncpg.create_pool(
+        postgres_url,
+        min_size=2,
+        max_size=2,
     )
-
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(writer.stop()))
-
+    maintenance_connections = []
+    writer = None
+    maintenance_monitors = []
+    termination_listeners = []
+    connection_lost_events = []
     try:
-        await writer.start(project_ids)
+        # Keep two dedicated backend sessions checked out for the entire writer
+        # lifetime. Losing either one fences new writes, while the other still
+        # blocks exclusive migration ownership through ClickHouse drain proof.
+        # A total PostgreSQL restart can remove both sessions together; the
+        # supported Compose quiescence path must also observe this writer stopped
+        # before it permits migration execution.
+        for _ in range(2):
+            maintenance_connection = await maintenance_pool.acquire()
+            maintenance_connections.append(maintenance_connection)
+            await _acquire_maintenance_inhibitor(maintenance_connection)
+
+        writer = ClickHouseWriter(
+            redis_url=redis_url,
+            clickhouse_url=clickhouse_url,
+            buffer_size=buffer_size,
+            flush_interval=flush_interval,
+            dlq_maxlen=dlq_maxlen,
+            pending_claim_idle_ms=pending_claim_idle_ms,
+            pending_claim_interval=pending_claim_interval,
+            clickhouse_connect_timeout=clickhouse_connect_timeout,
+            clickhouse_send_receive_timeout=clickhouse_send_receive_timeout,
+            clickhouse_sync_request_timeout=clickhouse_sync_request_timeout,
+            shutdown_timeout=shutdown_timeout,
+        )
+
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(writer.stop()))
+
+        for maintenance_connection in maintenance_connections:
+            connection_lost = asyncio.Event()
+            connection_lost_events.append(connection_lost)
+
+            def mark_connection_lost(
+                _connection,
+                *,
+                lost_event=connection_lost,
+            ) -> None:
+                loop.call_soon_threadsafe(lost_event.set)
+
+            termination_listeners.append(mark_connection_lost)
+            maintenance_connection.add_termination_listener(mark_connection_lost)
+
+        try:
+            # Close the acquire-to-monitor gap: no Redis consumption begins until
+            # both backends positively prove both lock IDs are still held.
+            await asyncio.gather(*(
+                asyncio.wait_for(
+                    _heartbeat_maintenance_inhibitor(maintenance_connection),
+                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
+                )
+                for maintenance_connection in maintenance_connections
+            ))
+            for inhibitor_index, (
+                maintenance_connection,
+                connection_lost,
+            ) in enumerate(
+                zip(
+                    maintenance_connections,
+                    connection_lost_events,
+                    strict=True,
+                ),
+                start=1,
+            ):
+                maintenance_monitors.append(
+                    asyncio.create_task(
+                        _monitor_maintenance_inhibitor(
+                            maintenance_connection,
+                            writer,
+                            connection_lost,
+                        ),
+                        name=f"maintenance-inhibitor-monitor-{inhibitor_index}",
+                    )
+                )
+
+            await writer.start(project_ids)
+        finally:
+            try:
+                await writer.stop()
+            finally:
+                for maintenance_monitor in maintenance_monitors:
+                    maintenance_monitor.cancel()
+                await asyncio.gather(*maintenance_monitors, return_exceptions=True)
+                for maintenance_connection, listener in zip(
+                    maintenance_connections,
+                    termination_listeners,
+                    strict=True,
+                ):
+                    maintenance_connection.remove_termination_listener(listener)
     finally:
-        await writer.stop()
+        # Reaching this point means writer.stop proved every native INSERT is
+        # complete or synchronously killed and absent from system.processes.
+        for maintenance_connection in reversed(maintenance_connections):
+            await maintenance_pool.release(maintenance_connection)
+        await maintenance_pool.close()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,9 @@ CONFIG_LEGACY_FIXTURE = (
     / "legacy_config_restrictive.sql"
 ).read_text()
 POSTGRES_RUNNER = (ROOT / "scripts" / "init-postgres.sh").read_text()
+DEV_CREDENTIAL_SQL = (
+    ROOT / "scripts" / "provision-dev-credential.sql"
+).read_text()
 MIGRATION_ENGINE = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
 CLICKHOUSE_RUNNER = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 CLICKHOUSE_MIGRATION_ENGINE = (
@@ -96,7 +99,8 @@ def test_auth_credentials_enforce_confidential_and_browser_kinds():
     assert "APDL_DEV_CLIENT_KEY" in POSTGRES_RUNNER
     assert '"local-dev-confidential"' in POSTGRES_RUNNER
     assert '"local-dev-browser"' in POSTGRES_RUNNER
-    assert "credential_kind, key_prefix, key_hash, roles" in POSTGRES_RUNNER
+    assert "provision-dev-credential.sql" in POSTGRES_RUNNER
+    assert "credential_kind, key_prefix, key_hash, roles" in DEV_CREDENTIAL_SQL
 
 
 def test_agents_core_migration_matches_the_running_service_contracts():
