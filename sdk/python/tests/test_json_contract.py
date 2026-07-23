@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+import apdl.types as types_module
 
 from apdl.types import (
     MAX_EVENT_SERIALIZED_BYTES,
@@ -16,6 +17,15 @@ from apdl.types import (
     canonicalize_event_payload,
     serialized_json_size,
 )
+
+
+@pytest.fixture(autouse=True)
+def fixed_event_clock(monkeypatch):
+    monkeypatch.setattr(
+        types_module,
+        "_utc_now",
+        lambda: datetime(2026, 7, 13, 12, tzinfo=timezone.utc),
+    )
 
 
 def event(properties: object) -> dict:
@@ -301,6 +311,38 @@ def test_invalid_timestamps_are_rejected_before_enqueue(timestamp):
     payload["timestamp"] = timestamp
 
     with pytest.raises(ValueError, match="timestamp"):
+        canonicalize_event_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-07-06T12:00:00Z",
+        "2026-07-13T12:05:00Z",
+    ],
+)
+def test_timestamp_window_boundaries_are_accepted(timestamp):
+    payload = event({"valid": True})
+    payload["timestamp"] = timestamp
+
+    assert canonicalize_event_payload(payload)["timestamp"] == timestamp
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        ("2026-07-06T11:59:59.999999Z", "more than 7 days older"),
+        ("2026-07-13T12:05:00.000001Z", "more than 5 minutes ahead"),
+    ],
+)
+def test_timestamps_outside_the_offline_and_clock_skew_window_are_rejected(
+    timestamp,
+    message,
+):
+    payload = event({"valid": True})
+    payload["timestamp"] = timestamp
+
+    with pytest.raises(ValueError, match=message):
         canonicalize_event_payload(payload)
 
 

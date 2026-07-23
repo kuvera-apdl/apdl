@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.flags import experiment_flag
+from app.flags.evaluator import evaluate
 from app.models.schemas import (
     ExperimentCreate,
     ExperimentMetric,
@@ -49,6 +50,7 @@ def test_build_flag_create_running_enables_flag():
         default_variant="control",
         traffic_percentage=80.0,
         targeting_rules=[],
+        bucket_by="user_id",
     )
     assert flag.key == "checkout"
     assert flag.state == "active"
@@ -72,6 +74,7 @@ def test_build_flag_create_draft_is_disabled():
         default_variant="control",
         traffic_percentage=100.0,
         targeting_rules=[],
+        bucket_by="user_id",
     )
     assert flag.state == "draft"
     assert flag.enabled is False
@@ -90,6 +93,7 @@ def test_build_flag_create_terminal_disables_flag(status):
         default_variant="control",
         traffic_percentage=100.0,
         targeting_rules=[],
+        bucket_by="user_id",
     )
     assert flag.state == "disabled"
     assert flag.enabled is False
@@ -112,6 +116,7 @@ def test_build_flag_create_projects_eligibility_rules_and_excludes_nonmatches():
         default_variant="control",
         traffic_percentage=37.5,
         targeting_rules=[rule],
+        bucket_by="user_id",
     )
     assert len(flag.rules) == 1
     assert flag.rules[0].id == "rule-1"
@@ -143,7 +148,7 @@ def test_experiment_targeting_rule_requires_canonical_name_field():
         )
 
 
-def test_build_flag_create_respects_custom_bucket_by():
+def test_anonymous_experiment_projection_enrolls_without_user_id():
     flag = experiment_flag.build_flag_create(
         flag_key="checkout",
         name="checkout",
@@ -156,6 +161,16 @@ def test_build_flag_create_respects_custom_bucket_by():
         bucket_by="anonymous_id",
     )
     assert flag.fallthrough.rollout.bucket_by == "anonymous_id"
+    result = evaluate(
+        flag.model_dump(mode="json"),
+        {
+            "anonymous_id": "anonymous-browser",
+            "attributes": {},
+        },
+    )
+    assert result["reason"] == "fallthrough"
+    assert result["bucket_by"] == "anonymous_id"
+    assert result["variant"] in {"control", "treatment"}
 
 
 # ---- internal lifecycle projection ----
@@ -171,6 +186,7 @@ def test_build_flag_projection_carries_lifecycle_state():
         default_variant="control",
         traffic_percentage=50.0,
         targeting_rules=[],
+        bucket_by="user_id",
     )
     assert projection["state"] == "disabled"
     assert projection["enabled"] is False
@@ -184,6 +200,7 @@ def test_build_flag_projection_carries_lifecycle_state():
 def test_experiment_create_accepts_display_fields_on_variants():
     exp = ExperimentCreate(
         key="checkout",
+        bucket_by="anonymous_id",
         default_variant="control",
         variants=[
             {"key": "control", "weight": 1, "description": "Current"},
@@ -197,6 +214,7 @@ def test_experiment_create_rejects_duplicate_variant_keys():
     with pytest.raises(ValidationError, match="unique keys"):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             default_variant="control",
             variants=[{"key": "control", "weight": 1}, {"key": "control", "weight": 1}],
         )
@@ -206,6 +224,7 @@ def test_experiment_create_rejects_any_non_positive_weight():
     with pytest.raises(ValidationError, match="greater than 0"):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             default_variant="control",
             variants=[{"key": "control", "weight": 0}, {"key": "treatment", "weight": 0}],
         )
@@ -215,6 +234,7 @@ def test_experiment_create_rejects_default_variant_not_in_variants():
     with pytest.raises(ValidationError, match="default_variant"):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             default_variant="missing",
             variants=[{"key": "control", "weight": 1}, {"key": "treatment", "weight": 1}],
         )
@@ -225,6 +245,7 @@ def test_experiment_create_rejects_legacy_active_status():
     with pytest.raises(ValidationError):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             status="active",
             default_variant="control",
             variants=[
@@ -239,6 +260,7 @@ def test_experiment_create_rejects_terminal_status(status):
     with pytest.raises(ValidationError):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             status=status,
             default_variant="control",
             variants=[
@@ -253,7 +275,7 @@ def test_experiment_create_requires_declared_variants_and_default():
         ExperimentCreate(key="checkout")
 
     missing = {error["loc"][0] for error in exc_info.value.errors()}
-    assert missing == {"variants", "default_variant"}
+    assert missing == {"bucket_by", "variants", "default_variant"}
 
 
 @pytest.mark.parametrize("field", ["key", "flag_key"])
@@ -262,6 +284,7 @@ def test_experiment_create_rejects_non_path_safe_resource_keys(field, value):
     payload = {
         "key": "checkout",
         "flag_key": "checkout-flag",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants": [
             {"key": "control", "weight": 1},
@@ -283,6 +306,7 @@ def test_experiment_create_requires_two_to_ten_variants(count):
     with pytest.raises(ValidationError):
         ExperimentCreate(
             key="checkout",
+            bucket_by="anonymous_id",
             default_variant="variant-0",
             variants=variants,
         )
@@ -298,6 +322,7 @@ def test_experiment_window_is_limited_to_ninety_days():
     start = datetime(2026, 8, 1, tzinfo=timezone.utc)
     common = {
         "key": "checkout",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants": [
             {"key": "control", "weight": 1},
@@ -329,4 +354,33 @@ def test_experiment_update_enforces_variant_and_metric_contracts():
         ExperimentUpdate(
             version=1,
             primary_metric={"event": "revenue", "type": "revenue"},
+        )
+
+
+@pytest.mark.parametrize("bucket_by", [None, "account_id", ""])
+def test_experiment_create_requires_explicit_actor_identity(bucket_by):
+    payload = {
+        "key": "checkout",
+        "bucket_by": bucket_by,
+        "default_variant": "control",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+    }
+    with pytest.raises(ValidationError):
+        ExperimentCreate.model_validate(payload)
+
+
+def test_experiment_update_bucket_identity_is_optional_but_never_null():
+    assert ExperimentUpdate(version=1).bucket_by is None
+    assert (
+        ExperimentUpdate(version=1, bucket_by="anonymous_id").bucket_by
+        == "anonymous_id"
+    )
+    with pytest.raises(ValidationError, match="bucket_by must not be null"):
+        ExperimentUpdate.model_validate({"version": 1, "bucket_by": None})
+    with pytest.raises(ValidationError):
+        ExperimentUpdate.model_validate(
+            {"version": 1, "bucket_by": "account_id"}
         )

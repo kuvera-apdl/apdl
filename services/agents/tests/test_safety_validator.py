@@ -54,6 +54,40 @@ def test_create_experiment_accepts_canonical_variant_flag_config():
     }
 
 
+def test_bucket_identity_restriction_applies_only_to_experiments():
+    experiment = make_experiment()
+    experiment["flag_config"]["fallthrough"]["rollout"]["bucket_by"] = "account_id"
+    experiment_result = validate_experiment(experiment)
+    experiment_variant_check = {
+        check["name"]: check for check in experiment_result["checks"]
+    }["variant_config"]
+    assert experiment_variant_check["passed"] is False
+    assert "must be anonymous_id or user_id for experiments" in experiment_variant_check["message"]
+
+    flag_result = SafetyValidator().validate(
+        AgentAction(
+            type=ActionType.update_flag,
+            config={
+                "key": "account_rollout",
+                "default_variant": "control",
+                "variants": [
+                    {"key": "control", "weight": 1},
+                    {"key": "treatment", "weight": 1},
+                ],
+                "rules": [],
+                "fallthrough": {
+                    "rollout": {"percentage": 50.0, "bucket_by": "account_id"}
+                },
+            },
+            project_id="apdl",
+        )
+    ).model_dump()
+    flag_variant_check = {check["name"]: check for check in flag_result["checks"]}[
+        "variant_config"
+    ]
+    assert flag_variant_check["passed"] is True
+
+
 def test_create_experiment_treats_variant_weights_as_relative():
     experiment = make_experiment({
         "key": "exp_checkout",

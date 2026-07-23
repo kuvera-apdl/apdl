@@ -15,16 +15,25 @@ import selectors
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from email.parser import Parser
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from app.contracts.cache import sha256_file
+from app.contracts.image_checker import (
+    IMAGE_NODE_MODULES,
+    PYRIGHT_ENTRYPOINT,
+    PYRIGHT_PACKAGE,
+    PYRIGHT_VERSION,
+    TYPESCRIPT_ENTRYPOINT,
+    TYPESCRIPT_PACKAGE,
+    TYPESCRIPT_VERSION,
+    pyright_config,
+    typescript_config,
+)
 from app.contracts.models import (
     ContractCheckRequest,
     ContractCheckResult,
@@ -40,6 +49,8 @@ from app.safety.secrets import secret_environment_name
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _DEFAULT_OUTPUT_LIMIT = 32_000
 _TRUSTED_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
@@ -421,30 +432,6 @@ def locate_python_site_packages(installed_root: Path) -> Path | None:
     return None
 
 
-def _distribution_version(site_packages: Path, package_name: str) -> str | None:
-    normalized = package_name.replace("_", "-").casefold()
-    for metadata in sorted(site_packages.glob("*.dist-info/METADATA")):
-        try:
-            resolved = metadata.resolve()
-            resolved.relative_to(site_packages.resolve())
-            parsed = Parser().parsestr(metadata.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        name = parsed.get("Name", "").replace("_", "-").casefold()
-        if name == normalized:
-            return parsed.get("Version") or None
-    return None
-
-
-def _safe_executable(installed_root: Path, relative: str) -> Path | None:
-    candidate = installed_root / relative
-    try:
-        candidate.resolve().relative_to(installed_root.resolve())
-    except (OSError, ValueError):
-        return None
-    return candidate if candidate.is_file() else None
-
-
 def _trusted_root_executable(name: str) -> Path | None:
     candidate = shutil.which(name, path=_TRUSTED_SYSTEM_PATH)
     if candidate is None:
@@ -456,16 +443,40 @@ def _trusted_root_executable(name: str) -> Path | None:
     return resolved if resolved.is_absolute() and resolved.is_file() else None
 
 
-def _root_python() -> Path | None:
+def _image_node_entrypoint(
+    package: str,
+    relative_entrypoint: Path,
+    expected_version: str,
+) -> Path | None:
+    """Resolve one exact image-owned Node tool without consulting PATH or repos."""
     try:
-        resolved = Path(sys.executable).resolve(strict=True)
-    except OSError:
+        modules_root = IMAGE_NODE_MODULES.resolve(strict=True)
+        package_root = (modules_root / package).resolve(strict=True)
+        package_root.relative_to(modules_root)
+        package_json = (package_root / "package.json").resolve(strict=True)
+        package_json.relative_to(package_root)
+        entrypoint = (package_root / relative_entrypoint).resolve(strict=True)
+        entrypoint.relative_to(package_root)
+        metadata = json.loads(package_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
         return None
-    return resolved if resolved.is_absolute() and resolved.is_file() else None
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("name") != package
+        or metadata.get("version") != expected_version
+        or not entrypoint.is_file()
+    ):
+        return None
+    return entrypoint
 
 
-class SandboxedCheckRunner:
-    """Compile/typecheck examples statically; zero exit is the only pass."""
+class ImageOwnedCheckRunner:
+    """Semantically check examples with image-owned compilers.
+
+    The exact installed dependency tree is readable compiler input.  Nothing
+    from that tree is selected as an executable, compiler config, plugin, or
+    environment source.
+    """
 
     def __init__(
         self,
@@ -547,62 +558,102 @@ class SandboxedCheckRunner:
         work: Path,
         home: Path,
     ) -> ContractCheckResult:
+        language = request.language.casefold()
+        suffixes = {
+            "javascript": (".js", True),
+            "typescript": (".ts", False),
+            "tsx": (".tsx", False),
+        }
+        language_settings = suffixes.get(language)
+        if language_settings is None:
+            return self._failure(
+                "image-owned TypeScript semantic check",
+                f"Unsupported Node example language: {request.language}.",
+            )
         node = _trusted_root_executable("node")
-        tsc = _safe_executable(installed_root, "node_modules/typescript/bin/tsc")
-        metadata = _safe_repo_path(
-            installed_root, "node_modules/typescript/package.json"
-        )
-        if node is None or tsc is None or metadata is None or not metadata.is_file():
+        if node is None:
             return self._failure(
-                "tsc --noEmit", "Installed TypeScript compiler unavailable."
+                "image-owned TypeScript semantic check",
+                "Image-owned Node is unavailable.",
+            )
+        compiler = _image_node_entrypoint(
+            TYPESCRIPT_PACKAGE,
+            TYPESCRIPT_ENTRYPOINT,
+            TYPESCRIPT_VERSION,
+        )
+        if compiler is None:
+            return self._failure(
+                "image-owned TypeScript semantic check",
+                "The exact image-owned TypeScript compiler is unavailable.",
             )
         try:
-            tool_version = str(
-                json.loads(metadata.read_text(encoding="utf-8"))["version"]
-            )
-        except (OSError, ValueError, KeyError, TypeError):
+            root = installed_root.resolve(strict=True)
+            node_modules = (root / "node_modules").resolve(strict=True)
+            node_modules.relative_to(root)
+        except (OSError, ValueError):
             return self._failure(
-                "tsc --noEmit", "TypeScript version metadata unavailable."
+                "image-owned TypeScript semantic check",
+                "The installed tree has no self-contained node_modules directory.",
             )
-        fd, example_name = tempfile.mkstemp(
-            prefix=".apdl-contract-", suffix=".ts", dir=installed_root
+        if not node_modules.is_dir():
+            return self._failure(
+                "image-owned TypeScript semantic check",
+                "The installed tree has no node_modules directory.",
+            )
+        suffix, allow_js = language_settings
+        example = work / f"contract_example{suffix}"
+        config = work / "apdl-tsconfig.json"
+        example.write_text(request.snippet, encoding="utf-8")
+        config.write_text(
+            json.dumps(
+                typescript_config(
+                    example_name=example.name,
+                    allow_js=allow_js,
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
         )
-        example = Path(example_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(request.snippet)
-            argv = (
-                node.as_posix(),
-                tsc.as_posix(),
-                "--noEmit",
-                "--skipLibCheck",
-                "--pretty",
-                "false",
-                "--module",
-                "node16",
-                "--moduleResolution",
-                "node16",
-                example.as_posix(),
+            (work / "node_modules").symlink_to(
+                node_modules,
+                target_is_directory=True,
             )
-            try:
-                result = self._executor(
-                    argv,
-                    cwd=installed_root,
-                    env=sanitized_environment(home=home),
-                    timeout_seconds=self._timeout,
-                    output_limit=self._output_limit,
-                )
-            except Exception as exc:
-                return self._failure(
-                    " ".join(argv), f"TypeScript checker failed: {exc}"
-                )
-        finally:
-            example.unlink(missing_ok=True)
-        command = " ".join(argv)
+        except OSError as exc:
+            return self._failure(
+                "image-owned TypeScript semantic check",
+                f"Could not expose installed declarations read-only: {exc}",
+            )
+        example.chmod(0o400)
+        config.chmod(0o400)
+        argv = (
+            node.as_posix(),
+            compiler.as_posix(),
+            "--project",
+            config.as_posix(),
+            "--pretty",
+            "false",
+            "--incremental",
+            "false",
+        )
+        try:
+            result = self._executor(
+                argv,
+                cwd=work,
+                env=sanitized_environment(home=home),
+                timeout_seconds=self._timeout,
+                output_limit=self._output_limit,
+            )
+        except Exception as exc:
+            return self._failure(
+                " ".join(argv), f"Image-owned TypeScript checker failed: {exc}"
+            )
         return self._result(
             result=result,
-            command=command,
-            tool_version=tool_version,
+            command=" ".join(argv),
+            tool_version=f"typescript-{TYPESCRIPT_VERSION}",
         )
 
     def _check_python(
@@ -612,54 +663,66 @@ class SandboxedCheckRunner:
         work: Path,
         home: Path,
     ) -> ContractCheckResult:
+        node = _trusted_root_executable("node")
+        if node is None:
+            return self._failure(
+                "image-owned Pyright semantic check",
+                "Image-owned Node is unavailable.",
+            )
+        checker = _image_node_entrypoint(
+            PYRIGHT_PACKAGE,
+            PYRIGHT_ENTRYPOINT,
+            PYRIGHT_VERSION,
+        )
+        if checker is None:
+            return self._failure(
+                "image-owned Pyright semantic check",
+                "The exact image-owned Pyright checker is unavailable.",
+            )
         site_packages = locate_python_site_packages(installed_root)
         if site_packages is None:
-            return self._failure("typecheck", "Python site-packages unavailable.")
-        python = _root_python()
-        if python is None:
-            return self._failure("typecheck", "Root Python interpreter unavailable.")
-        pyright = _safe_executable(installed_root, "bin/pyright")
-        mypy = _safe_executable(installed_root, "bin/mypy")
-        if pyright is not None:
-            executable = pyright
-            package_name = "pyright"
-            argv_tail: tuple[str, ...] = ()
-        elif mypy is not None:
-            executable = mypy
-            package_name = "mypy"
-            argv_tail = ("--no-incremental", "--config-file", os.devnull)
-        else:
-            return self._failure("typecheck", "Installed pyright/mypy unavailable.")
-        tool_version = _distribution_version(site_packages, package_name)
-        if tool_version is None:
             return self._failure(
-                executable.as_posix(), f"{package_name} version metadata unavailable."
+                "image-owned Pyright semantic check",
+                "The installed tree has no self-contained site-packages directory.",
             )
         example = work / "contract_example.py"
+        config = work / "apdl-pyrightconfig.json"
         example.write_text(request.snippet, encoding="utf-8")
+        config.write_text(
+            json.dumps(
+                pyright_config(site_packages=site_packages),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        example.chmod(0o400)
+        config.chmod(0o400)
         argv = (
-            python.as_posix(),
-            executable.as_posix(),
-            *argv_tail,
-            example.as_posix(),
+            node.as_posix(),
+            checker.as_posix(),
+            "--project",
+            config.as_posix(),
+            "--level",
+            "error",
         )
         try:
             result = self._executor(
                 argv,
                 cwd=work,
-                env=sanitized_environment(
-                    home=home, extra={"PYTHONPATH": site_packages.as_posix()}
-                ),
+                env=sanitized_environment(home=home),
                 timeout_seconds=self._timeout,
                 output_limit=self._output_limit,
             )
         except Exception as exc:
-            return self._failure(" ".join(argv), f"Python checker failed: {exc}")
-        command = " ".join(argv)
+            return self._failure(
+                " ".join(argv), f"Image-owned Pyright checker failed: {exc}"
+            )
         return self._result(
             result=result,
-            command=command,
-            tool_version=tool_version,
+            command=" ".join(argv),
+            tool_version=f"pyright-{PYRIGHT_VERSION}",
         )
 
 

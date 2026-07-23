@@ -14,6 +14,7 @@ import {
   isConditionValueValid,
   isIdentifier,
 } from './targeting-contract';
+import { hasCanonicalVariantWeights } from './variant-contract';
 
 type RawRecord = Record<string, unknown>;
 
@@ -198,12 +199,14 @@ function isFallthroughConfig(input: unknown): input is FallthroughConfig {
 }
 
 function isVariantList(input: unknown[], defaultVariant: string): input is VariantConfig[] {
-  if (input.length === 0) {
+  if (
+    !input.every(isRecord)
+    || !hasCanonicalVariantWeights(input)
+  ) {
     return false;
   }
 
   const keys = new Set<string>();
-  let totalWeight = 0;
 
   for (const variant of input) {
     const weight = isRecord(variant) ? variant.weight : undefined;
@@ -211,8 +214,7 @@ function isVariantList(input: unknown[], defaultVariant: string): input is Varia
       !isRecord(variant)
       || !hasOnlyKeys(variant, VARIANT_KEYS)
       || !isIdentifier(variant.key)
-      || !Number.isInteger(weight)
-      || (weight as number) < 0
+      || !Number.isSafeInteger(weight)
     ) {
       return false;
     }
@@ -222,10 +224,9 @@ function isVariantList(input: unknown[], defaultVariant: string): input is Varia
     }
 
     keys.add(variant.key);
-    totalWeight += weight as number;
   }
 
-  return totalWeight > 0 && keys.has(defaultVariant);
+  return keys.has(defaultVariant);
 }
 
 function hasOnlyKeys(input: RawRecord, allowed: Set<string>): boolean {

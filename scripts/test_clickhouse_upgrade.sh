@@ -100,7 +100,7 @@ assert_equal \
     "$(query "SELECT engine, sorting_key, primary_key FROM system.tables WHERE database = 'apdl' AND name = 'apdl_maintenance_gate'")" \
     "runtime gate engine is not canonical"
 assert_equal \
-    $'12\t12\t1\t12' \
+    $'16\t16\t1\t16' \
     "$(query "SELECT count(), uniqExact(version), min(version), max(version) FROM apdl_schema_migrations FINAL")" \
     "migration ledger is not the exact contiguous release sequence"
 assert_equal \
@@ -120,6 +120,88 @@ assert_equal \
     "$(query "SELECT (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL)")" \
     "derived projection backfill did not converge"
 assert_equal \
+    $'project_id\ttoDate(received_at)\tproject_id\ttoDate(received_at)' \
+    "$(query "SELECT (SELECT partition_key FROM system.tables WHERE database = 'apdl' AND name = 'events'), (SELECT default_expression FROM system.columns WHERE database = 'apdl' AND table = 'events' AND name = 'event_date'), (SELECT partition_key FROM system.tables WHERE database = 'apdl' AND name = 'experiment_event_deliveries'), (SELECT default_expression FROM system.columns WHERE database = 'apdl' AND table = 'experiment_event_deliveries' AND name = 'event_date')")" \
+    "event retention storage is not server-receipt authoritative"
+assert_equal \
+    '6' \
+    "$(query "SELECT count() FROM system.tables WHERE database = 'apdl' AND name IN ('events', 'experiment_event_deliveries', 'feature_flag_exposures', 'frontend_health_events', 'sessions', 'identity_alias_assertions') AND partition_key = 'project_id' AND positionCaseInsensitive(create_table_query, 'TTL') > 0")" \
+    "not every personal analytics table has project partitioning and TTL"
+assert_equal \
+    '4' \
+    "$(query "SELECT count() FROM system.columns WHERE database = 'apdl' AND name = 'received_at' AND table IN ('feature_flag_exposures', 'frontend_health_events', 'sessions', 'identity_alias_assertions')")" \
+    "a derived personal analytics table lacks receipt authority"
+assert_equal \
+    '0' \
+    "$(query "SELECT count() FROM system.tables WHERE database = 'apdl' AND name IN ('identity_alias_resolution_state', 'identity_alias_resolution_state_mv')")" \
+    "irreversible identity resolution state survived retention migration"
+query "INSERT INTO events (
+    project_id, message_id, event_type, event_name, user_id, anonymous_id,
+    group_id, session_id, timestamp, received_at, properties, traits, context,
+    ip, source_stream, source_stream_id, source_stream_id_ms,
+    source_stream_id_seq
+) VALUES (
+    'demo', 'received-at-retention-probe', 'track', 'retention_probe', '',
+    'retention-anon', '', 'retention-session', '2099-12-31 23:59:59.000',
+    '2026-07-02 03:04:05.000', '{}', '{}', '{}', '',
+    'events:raw:demo', '999-0', 999, 0
+)" >/dev/null
+assert_equal \
+    $'2026-07-02\t2099-12-31\t2026-07-02\t2026-07-02\t2099-12-31\t2026-07-02' \
+    "$(query "SELECT (SELECT toString(event_date) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(timestamp)) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(received_at)) FROM events FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(event_date) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(timestamp)) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe'), (SELECT toString(toDate(received_at)) FROM experiment_event_deliveries FINAL WHERE message_id = 'received-at-retention-probe')")" \
+    "client event time still controls a retained event date"
+
+echo "==> Verifying TTL removes every personal base and derived row"
+query "INSERT INTO events (
+    project_id, message_id, event_type, event_name, user_id, anonymous_id,
+    group_id, session_id, timestamp, received_at, properties, traits, context,
+    ip, source_stream, source_stream_id, source_stream_id_ms,
+    source_stream_id_seq
+) VALUES
+(
+    'ttlprobe', 'ttl-feature', 'track', '\$feature_flag_exposure', 'ttl-user',
+    'ttl-anon', '', 'ttl-session', now64(3),
+    toDateTime64('2000-01-01 00:00:00', 3),
+    '{\"flag_key\":\"ttl\",\"variant\":\"on\",\"reason\":\"fallthrough\"}',
+    '{}', '{}', '', 'events:raw:ttlprobe', '1-0', 1, 0
+),
+(
+    'ttlprobe', 'ttl-frontend', 'track', '\$frontend_error', 'ttl-user',
+    'ttl-anon', '', 'ttl-session', now64(3),
+    toDateTime64('2000-01-01 00:00:00', 3),
+    '{\"page\":\"/ttl\",\"error_type\":\"probe\"}', '{}', '{}', '',
+    'events:raw:ttlprobe', '2-0', 2, 0
+),
+(
+    'ttlprobe', 'ttl-identify', 'identify', '\$identify', 'ttl-user',
+    'ttl-anon', '', 'ttl-session', now64(3),
+    toDateTime64('2000-01-01 00:00:00', 3), '{}', '{}', '{}', '',
+    'events:raw:ttlprobe', '3-0', 3, 0
+)" >/dev/null
+query "INSERT INTO sessions (
+    project_id, session_id, user_id, anonymous_id, start_time, end_time,
+    duration_ms, event_count, page_count, entry_page, exit_page, country,
+    device_type, received_at
+) VALUES (
+    'ttlprobe', 'ttl-session', 'ttl-user', 'ttl-anon', now64(3), now64(3),
+    0, 3, 1, '/ttl', '/ttl', '', 'desktop',
+    toDateTime64('2000-01-01 00:00:00', 3)
+)" >/dev/null
+for table in \
+    feature_flag_exposures \
+    frontend_health_events \
+    sessions \
+    experiment_event_deliveries \
+    events \
+    identity_alias_assertions; do
+    query "ALTER TABLE \`$table\` MATERIALIZE TTL SETTINGS mutations_sync = 2" \
+        >/dev/null
+done
+assert_equal \
+    $'0\t0\t0\t0\t0\t0' \
+    "$(query "SELECT (SELECT count() FROM events FINAL WHERE project_id = 'ttlprobe'), (SELECT count() FROM feature_flag_exposures FINAL WHERE project_id = 'ttlprobe'), (SELECT count() FROM frontend_health_events FINAL WHERE project_id = 'ttlprobe'), (SELECT count() FROM sessions WHERE project_id = 'ttlprobe'), (SELECT count() FROM experiment_event_deliveries FINAL WHERE project_id = 'ttlprobe'), (SELECT count() FROM identity_alias_assertions FINAL WHERE project_id = 'ttlprobe')")" \
+    "TTL left personal source or derived rows behind"
+assert_equal \
     '0' \
     "$(query "SELECT count() FROM system.tables WHERE database = 'apdl' AND name IN ('events_v2', 'events_dlq_v2', 'decisions_v2', 'feeds_v2', 'flag_evaluations_v', 'experiment_exposures_v', 'agent_actions_v', 'personalizations_v')")" \
     "disconnected durable prototype objects survived the cutover"
@@ -131,9 +213,179 @@ if [[ "$rerun_output" != *"ClickHouse schema is already current"* ]]; then
     exit 1
 fi
 assert_equal \
-    $'2\t1\t1' \
-    "$(query "SELECT (SELECT count() FROM events FINAL), (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL)")" \
+    $'3\t1\t1\t1' \
+    "$(query "SELECT (SELECT count() FROM events FINAL), (SELECT count() FROM feature_flag_exposures FINAL), (SELECT count() FROM frontend_health_events FINAL), (SELECT count() FROM experiment_event_deliveries FINAL)")" \
     "migration rerun changed canonical row counts"
+
+echo "==> Verifying auditable project and user deletion"
+compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
+    < "$ROOT_DIR/pipeline/postgres/migrations/040_analytics_data_deletion_audit.sql" \
+    >/dev/null
+compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
+    >/dev/null <<'SQL'
+CREATE TABLE public.apdl_schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    checksum CHAR(64) NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO public.apdl_schema_migrations (version, name, checksum)
+VALUES (
+    40,
+    '040_analytics_data_deletion_audit.sql',
+    repeat('0', 64)
+);
+SQL
+query "INSERT INTO events (
+    project_id, message_id, event_type, event_name, user_id, anonymous_id,
+    group_id, session_id, timestamp, received_at, properties, traits, context,
+    ip, source_stream, source_stream_id, source_stream_id_ms,
+    source_stream_id_seq
+) VALUES
+(
+    'eraseuser', 'target-identify', 'identify', '\$identify', 'target-user',
+    'target-anon', '', 'target-session', now64(3), now64(3), '{}', '{}', '{}',
+    '', 'events:raw:eraseuser', '1001-0', 1001, 0
+),
+(
+    'eraseuser', 'target-feature', 'track', '\$feature_flag_exposure',
+    'target-user', 'target-anon', '', 'target-session', now64(3), now64(3),
+    '{\"flag_key\":\"erase\",\"variant\":\"on\",\"reason\":\"fallthrough\"}',
+    '{}', '{}', '', 'events:raw:eraseuser', '1002-0', 1002, 0
+),
+(
+    'eraseuser', 'target-frontend', 'track', '\$frontend_error', 'target-user',
+    'target-anon', '', 'target-session', now64(3), now64(3),
+    '{\"page\":\"/erase\",\"error_type\":\"probe\"}', '{}', '{}', '',
+    'events:raw:eraseuser', '1003-0', 1003, 0
+),
+(
+    'eraseuser', 'control-identify', 'identify', '\$identify', 'control-user',
+    'control-anon', '', 'control-session', now64(3), now64(3), '{}', '{}', '{}',
+    '', 'events:raw:eraseuser', '2001-0', 2001, 0
+),
+(
+    'eraseuser', 'control-feature', 'track', '\$feature_flag_exposure',
+    'control-user', 'control-anon', '', 'control-session', now64(3), now64(3),
+    '{\"flag_key\":\"control\",\"variant\":\"on\",\"reason\":\"fallthrough\"}',
+    '{}', '{}', '', 'events:raw:eraseuser', '2002-0', 2002, 0
+),
+(
+    'eraseuser', 'control-frontend', 'track', '\$frontend_error', 'control-user',
+    'control-anon', '', 'control-session', now64(3), now64(3),
+    '{\"page\":\"/control\",\"error_type\":\"probe\"}', '{}', '{}', '',
+    'events:raw:eraseuser', '2003-0', 2003, 0
+),
+(
+    'eraseproject', 'project-identify', 'identify', '\$identify', 'project-user',
+    'project-anon', '', 'project-session', now64(3), now64(3), '{}', '{}', '{}',
+    '', 'events:raw:eraseproject', '3001-0', 3001, 0
+),
+(
+    'eraseproject', 'project-feature', 'track', '\$feature_flag_exposure',
+    'project-user', 'project-anon', '', 'project-session', now64(3), now64(3),
+    '{\"flag_key\":\"project\",\"variant\":\"on\",\"reason\":\"fallthrough\"}',
+    '{}', '{}', '', 'events:raw:eraseproject', '3002-0', 3002, 0
+),
+(
+    'eraseproject', 'project-frontend', 'track', '\$frontend_error',
+    'project-user', 'project-anon', '', 'project-session', now64(3), now64(3),
+    '{\"page\":\"/project\",\"error_type\":\"probe\"}', '{}', '{}', '',
+    'events:raw:eraseproject', '3003-0', 3003, 0
+)" >/dev/null
+query "INSERT INTO sessions (
+    project_id, session_id, user_id, anonymous_id, start_time, end_time,
+    duration_ms, event_count, page_count, entry_page, exit_page, country,
+    device_type, received_at
+) VALUES
+(
+    'eraseuser', 'target-session', 'target-user', 'target-anon', now64(3),
+    now64(3), 0, 3, 1, '/', '/', '', 'desktop', now64(3)
+),
+(
+    'eraseuser', 'control-session', 'control-user', 'control-anon', now64(3),
+    now64(3), 0, 3, 1, '/', '/', '', 'desktop', now64(3)
+),
+(
+    'eraseproject', 'project-session', 'project-user', 'project-anon', now64(3),
+    now64(3), 0, 3, 1, '/', '/', '', 'desktop', now64(3)
+)" >/dev/null
+assert_equal \
+    $'3\t1\t1\t1\t3\t1' \
+    "$(query "SELECT (SELECT count() FROM events FINAL WHERE project_id = 'eraseuser' AND user_id = 'target-user'), (SELECT count() FROM feature_flag_exposures FINAL WHERE project_id = 'eraseuser' AND user_id = 'target-user'), (SELECT count() FROM frontend_health_events FINAL WHERE project_id = 'eraseuser' AND user_id = 'target-user'), (SELECT count() FROM sessions WHERE project_id = 'eraseuser' AND user_id = 'target-user'), (SELECT count() FROM experiment_event_deliveries FINAL WHERE project_id = 'eraseuser' AND user_id = 'target-user'), (SELECT count() FROM identity_alias_assertions FINAL WHERE project_id = 'eraseuser' AND user_id = 'target-user')")" \
+    "user deletion fixture did not populate every target table"
+
+user_delete_output="$(
+    COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+    CLICKHOUSE_COMPOSE_FILE="$COMPOSE_FILE" \
+    "$ROOT_DIR/scripts/delete-analytics-data.sh" user \
+        --request-id 11111111-1111-4111-8111-111111111111 \
+        --project-id eraseuser \
+        --user-id target-user \
+        --actor privacy@example.test \
+        --reason "verified user erasure request"
+)"
+if [[ "$user_delete_output" != *'"status":"completed"'* ]]; then
+    echo "user deletion did not report completion: $user_delete_output" >&2
+    exit 1
+fi
+assert_equal \
+    $'0\t0\t0\t0\t0\t0\t0' \
+    "$(query "SELECT (SELECT count() FROM events FINAL WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM feature_flag_exposures FINAL WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM frontend_health_events FINAL WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM sessions WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM experiment_event_deliveries FINAL WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM identity_alias_assertions FINAL WHERE project_id = 'eraseuser' AND (user_id = 'target-user' OR anonymous_id = 'target-anon')), (SELECT count() FROM resolved_identity_aliases WHERE project_id = 'eraseuser' AND anonymous_id = 'target-anon')")" \
+    "user deletion left personal source, derived, or identity rows behind"
+assert_equal \
+    $'3\t1\t1\t1\t3\t1' \
+    "$(query "SELECT (SELECT count() FROM events FINAL WHERE project_id = 'eraseuser' AND user_id = 'control-user'), (SELECT count() FROM feature_flag_exposures FINAL WHERE project_id = 'eraseuser' AND user_id = 'control-user'), (SELECT count() FROM frontend_health_events FINAL WHERE project_id = 'eraseuser' AND user_id = 'control-user'), (SELECT count() FROM sessions WHERE project_id = 'eraseuser' AND user_id = 'control-user'), (SELECT count() FROM experiment_event_deliveries FINAL WHERE project_id = 'eraseuser' AND user_id = 'control-user'), (SELECT count() FROM identity_alias_assertions FINAL WHERE project_id = 'eraseuser' AND user_id = 'control-user')")" \
+    "user deletion crossed the requested identity boundary"
+user_retry_output="$(
+    COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+    CLICKHOUSE_COMPOSE_FILE="$COMPOSE_FILE" \
+    "$ROOT_DIR/scripts/delete-analytics-data.sh" user \
+        --request-id 11111111-1111-4111-8111-111111111111 \
+        --project-id eraseuser \
+        --user-id target-user \
+        --actor privacy@example.test \
+        --reason "verified user erasure request"
+)"
+if [[ "$user_retry_output" != *'"status":"already_completed"'* ]]; then
+    echo "completed user deletion was not idempotent: $user_retry_output" >&2
+    exit 1
+fi
+
+project_delete_output="$(
+    COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+    CLICKHOUSE_COMPOSE_FILE="$COMPOSE_FILE" \
+    "$ROOT_DIR/scripts/delete-analytics-data.sh" project \
+        --request-id 22222222-2222-4222-8222-222222222222 \
+        --project-id eraseproject \
+        --actor privacy@example.test \
+        --reason "approved project erasure request"
+)"
+if [[ "$project_delete_output" != *'"status":"completed"'* ]]; then
+    echo "project deletion did not report completion: $project_delete_output" >&2
+    exit 1
+fi
+assert_equal \
+    $'0\t0\t0\t0\t0\t0' \
+    "$(query "SELECT (SELECT count() FROM events FINAL WHERE project_id = 'eraseproject'), (SELECT count() FROM feature_flag_exposures FINAL WHERE project_id = 'eraseproject'), (SELECT count() FROM frontend_health_events FINAL WHERE project_id = 'eraseproject'), (SELECT count() FROM sessions WHERE project_id = 'eraseproject'), (SELECT count() FROM experiment_event_deliveries FINAL WHERE project_id = 'eraseproject'), (SELECT count() FROM identity_alias_assertions FINAL WHERE project_id = 'eraseproject')")" \
+    "project deletion left personal source or derived rows behind"
+
+assert_equal \
+    '4|2|2|0' \
+    "$(compose exec -T postgres psql -X -A -t -U apdl -d apdl -c "SELECT count(*), count(*) FILTER (WHERE event_type = 'requested'), count(*) FILTER (WHERE event_type = 'completed'), count(*) FILTER (WHERE row_to_json(analytics_data_deletion_audit)::text LIKE '%target-user%') FROM analytics_data_deletion_audit")" \
+    "deletion audit is incomplete or retained a raw user target"
+if compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
+    -c "UPDATE analytics_data_deletion_audit SET actor = 'rewritten' WHERE request_id = '11111111-1111-4111-8111-111111111111'" \
+    >"$WORK_DIR/audit-update.log" 2>&1; then
+    echo "deletion audit accepted an update" >&2
+    exit 1
+fi
+if ! grep -q "analytics data deletion audit records are immutable" \
+    "$WORK_DIR/audit-update.log"; then
+    echo "deletion audit update did not fail through the immutable trigger" >&2
+    sed -n '1,120p' "$WORK_DIR/audit-update.log" >&2
+    exit 1
+fi
 
 echo "==> Verifying a remote runtime inhibitor blocks migration"
 compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \

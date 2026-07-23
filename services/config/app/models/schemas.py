@@ -20,6 +20,11 @@ from app.flags.targeting_contract import (
     is_identifier,
     is_json_number,
 )
+from app.flags.variant_contract import (
+    MAX_VARIANTS,
+    MAX_VARIANT_WEIGHT,
+    validate_variant_weight_contract,
+)
 
 
 class StrictModel(BaseModel):
@@ -58,7 +63,7 @@ ExperimentStatus = Literal[
     "stopped",
 ]
 ExperimentCreateStatus = Literal["draft", "scheduled", "running"]
-MAX_EXPERIMENT_VARIANTS = 10
+ExperimentBucketBy = Literal["anonymous_id", "user_id"]
 MAX_EXPERIMENT_DURATION_DAYS = 90
 MAX_EXPERIMENT_DURATION = timedelta(days=MAX_EXPERIMENT_DURATION_DAYS)
 EXPERIMENT_STATISTICAL_PROTOCOL = "fixed_horizon_fisher_newcombe_cc_plan_v1"
@@ -118,7 +123,12 @@ class RolloutConfig(StrictModel):
 
 class VariantConfig(StrictModel):
     key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
-    weight: int = Field(..., ge=0, strict=True)
+    weight: int = Field(
+        ...,
+        ge=0,
+        le=MAX_VARIANT_WEIGHT,
+        strict=True,
+    )
 
 
 class GateRule(StrictModel):
@@ -188,19 +198,13 @@ def validate_variants(
 
 
 def validate_variant_weights(variants: list[VariantConfig]) -> None:
-    if not variants:
-        raise ValueError("variants must contain at least one variant")
+    validate_variant_weight_contract([variant.weight for variant in variants])
 
     keys: set[str] = set()
-    total_weight = 0
     for variant in variants:
         if variant.key in keys:
             raise ValueError("variants must contain unique keys")
         keys.add(variant.key)
-        total_weight += variant.weight
-
-    if total_weight <= 0:
-        raise ValueError("variant weights must contain at least one positive weight")
 
 
 def validate_flag_variant_config(flag: Mapping[str, Any]) -> None:
@@ -261,7 +265,11 @@ class VariantFlagMixin(StrictModel):
         min_length=1,
         max_length=MAX_IDENTIFIER_LENGTH,
     )
-    variants: list[VariantConfig] = Field(...)
+    variants: list[VariantConfig] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_VARIANTS,
+    )
 
     @model_validator(mode="after")
     def validate_variant_config(self):
@@ -314,6 +322,7 @@ class ExperimentConfig(BaseModel):
     status: ExperimentStatus = "draft"
     description: str = ""
     flag_key: str = ""
+    bucket_by: ExperimentBucketBy
     default_variant: str = "control"
     variants_json: str = "[]"
     targeting_rules_json: str = "[]"
@@ -484,7 +493,11 @@ class FlagUpdate(StrictModel):
         min_length=1,
         max_length=MAX_IDENTIFIER_LENGTH,
     )
-    variants: list[VariantConfig] | None = None
+    variants: list[VariantConfig] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_VARIANTS,
+    )
     rules: list[GateRule] | None = Field(default=None, max_length=MAX_RULES)
     fallthrough: FallthroughConfig | None = None
     evaluation_mode: EvaluationMode | None = None
@@ -543,7 +556,12 @@ class ExperimentVariant(StrictModel):
     """
 
     key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
-    weight: int = Field(..., gt=0, strict=True)
+    weight: int = Field(
+        ...,
+        gt=0,
+        le=MAX_VARIANT_WEIGHT,
+        strict=True,
+    )
     description: str = ""
 
 
@@ -717,7 +735,7 @@ class ExperimentAnalysis(StrictModel):
     variants: list[str] = Field(
         ...,
         min_length=2,
-        max_length=MAX_EXPERIMENT_VARIANTS,
+        max_length=MAX_VARIANTS,
     )
     metric_event: str = Field(..., min_length=1)
     metric_direction: Literal["increase", "decrease"]
@@ -748,6 +766,7 @@ class ExperimentAnalysis(StrictModel):
 class ExperimentCreate(StrictModel):
     key: str = Field(..., pattern=RESOURCE_KEY_PATTERN)
     flag_key: str | None = Field(default=None, pattern=RESOURCE_KEY_PATTERN)
+    bucket_by: ExperimentBucketBy
     status: ExperimentCreateStatus = "draft"
     description: str = ""
     traffic_percentage: float = Field(
@@ -762,7 +781,7 @@ class ExperimentCreate(StrictModel):
     variants: list[ExperimentVariant] = Field(
         ...,
         min_length=2,
-        max_length=MAX_EXPERIMENT_VARIANTS,
+        max_length=MAX_VARIANTS,
     )
     default_variant: str = Field(
         ...,
@@ -798,6 +817,7 @@ class ExperimentCreate(StrictModel):
 
 class ExperimentUpdate(StrictModel):
     version: int = Field(..., ge=1)
+    bucket_by: ExperimentBucketBy | None = None
     status: ExperimentStatus | None = None
     description: str | None = None
     traffic_percentage: float | None = Field(
@@ -812,7 +832,7 @@ class ExperimentUpdate(StrictModel):
     variants: list[ExperimentVariant] | None = Field(
         default=None,
         min_length=2,
-        max_length=MAX_EXPERIMENT_VARIANTS,
+        max_length=MAX_VARIANTS,
     )
     default_variant: str | None = Field(
         default=None,

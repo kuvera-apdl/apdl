@@ -83,5 +83,5 @@ def test_runtime_services_do_not_publish_disconnected_envelope_models():
     ).read_text()
     assert "class Event(BaseModel):" in ingestion_schema
     assert "class EventBatch(BaseModel):" in ingestion_schema
-    assert "validate_event_batch(body)" in ingestion_route
+    assert "validate_event_batch(body, received_at=received_at)" in ingestion_route
     assert 'stream_key = f"events:raw:{project_id}"' in ingestion_route

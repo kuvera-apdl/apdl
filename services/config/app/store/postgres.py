@@ -22,8 +22,8 @@ FLAG_COLUMNS = """
 EXPERIMENT_COLUMNS = """
     key, project_id, status, description, flag_key, default_variant,
     variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
-    traffic_percentage, minimum_exposure_config_version, start_date, end_date,
-    version, creation_idempotency_key,
+    traffic_percentage, bucket_by, minimum_exposure_config_version,
+    start_date, end_date, version, creation_idempotency_key,
     creation_idempotency_request_sha256, created_at, updated_at, archived_at,
     archived_by
 """
@@ -88,6 +88,7 @@ def _row_to_experiment(row) -> dict:
         "primary_metric_json": row["primary_metric_json"],
         "statistical_plan": _json_field(row["statistical_plan"], None),
         "traffic_percentage": float(row["traffic_percentage"]),
+        "bucket_by": row["bucket_by"],
         "minimum_exposure_config_version": row[
             "minimum_exposure_config_version"
         ],

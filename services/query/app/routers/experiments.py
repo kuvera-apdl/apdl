@@ -448,6 +448,12 @@ async def experiment_results(
         for arm in arms
         if arm.sample_size < required_sample_size
     ]
+    if authority is not None and authority.state == "quarantined":
+        return ExperimentAnalysisNonFinal(
+            **common,
+            reason="pipeline_boundary_failed",
+            underpowered_variants=underpowered,
+        )
     if unknown_variant_actors:
         return ExperimentAnalysisNonFinal(
             **common,

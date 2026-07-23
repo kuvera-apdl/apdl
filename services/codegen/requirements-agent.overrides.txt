@@ -1,0 +1,18 @@
+# Security-reviewed overrides for vulnerable Aider 0.86.2 transitive pins.
+#
+# Keep this list exact. requirements-agent.constraints.txt documents the full
+# regeneration command and separately preserves the two approved no-fix pins.
+aiohttp==3.14.2
+click==8.3.3
+fastapi==0.139.2
+gitpython==3.1.53
+idna==3.15
+importlib-metadata>=8,<9
+litellm==1.85.0
+pillow==12.3.0
+pygments==2.20.0
+python-dotenv==1.2.2
+requests==2.34.2
+soupsieve==2.8.4
+starlette==1.3.1
+urllib3==2.7.0

@@ -19,6 +19,8 @@ export type {
   EventContext,
   ExperimentContext,
   DeliveryReport,
+  DroppedEvent,
+  OfflineEvictionReason,
 } from './core/types';
 
 export type {

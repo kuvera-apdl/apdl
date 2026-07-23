@@ -12,6 +12,10 @@ from starlette.responses import Response
 from app.auth import require_project
 from app.flags.evaluator import evaluate as evaluate_gate
 from app.models.schemas import GateEvaluateRequest, GateEvaluateResponse
+from app.request_body_limit import (
+    PAYLOAD_TOO_LARGE_CONTENT,
+    RequestBodyTooLarge,
+)
 from app.store import mutations
 from app.store import postgres as pg_store
 
@@ -62,6 +66,8 @@ class BoundedEvaluateRoute(APIRoute):
                     return _payload_too_large_response()
             try:
                 raw_body = await _read_bounded_body(request)
+            except RequestBodyTooLarge:
+                return _payload_too_large_response()
             except _RequestBodyTooLarge:
                 return _payload_too_large_response()
             except Exception:
@@ -168,12 +174,7 @@ async def evaluate(body: GateEvaluateRequest, request: Request):
 def _payload_too_large_response() -> JSONResponse:
     return JSONResponse(
         status_code=413,
-        content={
-            "error": "payload_too_large",
-            "message": (
-                f"Request body exceeds {MAX_EVALUATE_REQUEST_BYTES} bytes"
-            ),
-        },
+        content=PAYLOAD_TOO_LARGE_CONTENT,
     )
 
 
@@ -191,6 +192,7 @@ async def _enqueue_exposure(
         "event": FEATURE_FLAG_EXPOSURE_EVENT,
         "type": "track",
         "timestamp": timestamp,
+        "server_timestamp": timestamp,
         "message_id": message_id,
         "session_id": session_id,
         "context": {

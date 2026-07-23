@@ -5,7 +5,12 @@ export const MAX_JSON_CONTAINER_ENTRIES = 100;
 export const MAX_JSON_NODES_PER_EVENT = 1_000;
 export const MAX_SERIALIZED_EVENT_BYTES = 64 * 1024;
 export const MAX_SERIALIZED_REQUEST_BYTES = 512 * 1024;
+// Browsers share an implementation-defined keepalive quota across outstanding
+// requests (commonly 64 KiB). Keep unload payloads below that ceiling.
+export const MAX_KEEPALIVE_REQUEST_BYTES = 48 * 1024;
 export const MAX_EVENTS_PER_BATCH = 100;
+export const MAX_EVENT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_EVENT_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 const TRACK_EVENT_FIELDS = new Set([
   'type',
@@ -148,8 +153,19 @@ function validateEnvelope(event: TrackEvent): void {
   if (event.type === 'group' && event.groupId === undefined) {
     throw invalid('event.groupId', 'group events require a group ID');
   }
-  if (!isValidUtcTimestamp(event.timestamp)) {
+  const eventTime = parseUtcTimestamp(event.timestamp);
+  if (eventTime === null) {
     throw invalid('event.timestamp', 'must be a valid RFC3339 UTC timestamp');
+  }
+  const now = Date.now();
+  if (eventTime < now - MAX_EVENT_AGE_MS) {
+    throw invalid('event.timestamp', 'must be no more than 7 days old');
+  }
+  if (eventTime > now + MAX_EVENT_FUTURE_SKEW_MS) {
+    throw invalid(
+      'event.timestamp',
+      'must not be more than 5 minutes in the future'
+    );
   }
   if (!isPlainObject(event.context)) {
     throw invalid('event.context', 'must be a plain object');
@@ -422,10 +438,10 @@ function requireOptionalBoundedString(
   }
 }
 
-function isValidUtcTimestamp(value: unknown): value is string {
-  if (typeof value !== 'string') return false;
+function parseUtcTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
   const match = RFC3339_UTC_PATTERN.exec(value);
-  if (match === null) return false;
+  if (match === null) return null;
 
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -433,18 +449,32 @@ function isValidUtcTimestamp(value: unknown): value is string {
   const hour = Number(match[4]);
   const minute = Number(match[5]);
   const second = Number(match[6]);
-  const millisecond = Number((match[7] ?? '').padEnd(3, '0').slice(0, 3));
-  const parsed = new Date(Date.UTC(year, month - 1, day, hour, minute, second, millisecond));
-
-  return (
-    year >= 1_000 &&
-    parsed.getUTCFullYear() === year &&
-    parsed.getUTCMonth() === month - 1 &&
-    parsed.getUTCDate() === day &&
-    parsed.getUTCHours() === hour &&
-    parsed.getUTCMinutes() === minute &&
-    parsed.getUTCSeconds() === second
+  const parsedMilliseconds = Date.UTC(
+    year,
+    month - 1,
+    day,
+    hour,
+    minute,
+    second,
+    0
   );
+  const parsed = new Date(parsedMilliseconds);
+
+  if (
+    year < 1_000 ||
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day ||
+    parsed.getUTCHours() !== hour ||
+    parsed.getUTCMinutes() !== minute ||
+    parsed.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+
+  const fractionalMilliseconds =
+    Number((match[7] ?? '').padEnd(6, '0')) / 1_000;
+  return parsedMilliseconds + fractionalMilliseconds;
 }
 
 function invalid(path: string, message: string): TypeError {

@@ -1,0 +1,15 @@
+# Security-reviewed constraints for the published Codegen worker image.
+#
+# Regenerate the universal Python 3.12 hash lock from services/codegen with:
+#   uv pip compile pyproject.toml --extra agent \
+#     --constraints requirements-agent.constraints.txt \
+#     --overrides requirements-agent.overrides.txt \
+#     --python-version 3.12 --universal --generate-hashes \
+#     --output-file requirements-agent.lock
+#
+# Aider and diskcache intentionally remain pinned while their three no-fix
+# advisories are governed by dependency-audit-suppressions.json. Aider pins
+# several vulnerable transitive versions exactly, so reviewed security upgrades
+# live in the separate override input rather than weakening these two pins.
+aider-chat==0.86.2
+diskcache==5.6.3

@@ -17,6 +17,7 @@ from app.github.publisher import (
     BranchPublicationError,
     BranchPublisher,
     PublishedBranch,
+    UnsafeCandidateTreeError,
 )
 from app.github.pulls import (
     PullRequest,
@@ -691,6 +692,8 @@ async def _resume_cleanup_state(
 
 
 def _permanent_branch_error(error: BranchPublicationError) -> bool:
+    if isinstance(error, UnsafeCandidateTreeError):
+        return True
     detail = str(error).lower()
     return any(
         marker in detail

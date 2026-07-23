@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 _RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+EXPERIMENT_BUCKET_BY_VALUES = frozenset({"anonymous_id", "user_id"})
+ExperimentBucketBy = Literal["anonymous_id", "user_id"]
 
 
 class _StrictModel(BaseModel):
@@ -84,7 +86,7 @@ class Targeting(_StrictModel):
 
 class Rollout(_StrictModel):
     percentage: int | float = Field(ge=0, le=100)
-    bucket_by: str = Field(min_length=1)
+    bucket_by: ExperimentBucketBy
 
 
 class Fallthrough(_StrictModel):

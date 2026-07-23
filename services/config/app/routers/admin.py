@@ -62,6 +62,7 @@ def _idempotent_experiment_response(existing: dict) -> JSONResponse:
             "created": True,
             "key": existing["key"],
             "flag_key": existing["flag_key"],
+            "bucket_by": existing["bucket_by"],
             "version": existing["version"],
         },
     )
@@ -459,6 +460,7 @@ _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
 }
 _FROZEN_EXPERIMENT_REQUEST_FIELDS = frozenset(
     {
+        "bucket_by",
         "default_variant",
         "traffic_percentage",
         "targeting_rules",
@@ -507,6 +509,7 @@ def _experiment_to_response(e: dict) -> dict:
     return {
         "key": e["key"],
         "flag_key": e.get("flag_key") or e["key"],
+        "bucket_by": e["bucket_by"],
         "status": e.get("status", "draft"),
         "description": e.get("description", ""),
         "default_variant": e.get("default_variant", "control"),
@@ -605,6 +608,7 @@ async def create_experiment(body: ExperimentCreate, request: Request):
         default_variant=body.default_variant,
         traffic_percentage=body.traffic_percentage,
         targeting_rules=body.targeting_rules,
+        bucket_by=body.bucket_by,
     )
 
     exp = {
@@ -613,6 +617,7 @@ async def create_experiment(body: ExperimentCreate, request: Request):
         "status": body.status,
         "description": body.description,
         "flag_key": flag_key,
+        "bucket_by": body.bucket_by,
         "default_variant": body.default_variant,
         "variants_json": json.dumps([v.model_dump() for v in body.variants], separators=(",", ":")),
         "targeting_rules_json": json.dumps(
@@ -685,6 +690,7 @@ async def create_experiment(body: ExperimentCreate, request: Request):
             "created": True,
             "key": exp["key"],
             "flag_key": flag_key,
+            "bucket_by": created_exp["bucket_by"],
             "version": created_exp["version"],
         },
     )
@@ -739,6 +745,8 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
     exp["status"] = new_status
     if body.description is not None:
         exp["description"] = body.description
+    if body.bucket_by is not None:
+        exp["bucket_by"] = body.bucket_by
     if body.traffic_percentage is not None:
         exp["traffic_percentage"] = body.traffic_percentage
     if "start_date" in body.model_fields_set:
@@ -822,6 +830,7 @@ async def update_experiment(key: str, body: ExperimentUpdate, request: Request):
             "updated": True,
             "key": exp["key"],
             "flag_key": flag_key,
+            "bucket_by": updated_exp["bucket_by"],
             "version": updated_exp["version"],
         }
     )

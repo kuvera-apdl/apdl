@@ -20,17 +20,24 @@ interface SessionData {
  * Persists session to localStorage with in-memory fallback.
  */
 export class SessionManager {
-  private session: SessionData;
+  private session: SessionData | null = null;
   private persistence: PersistenceMode;
   private storageKey: string;
+  private enabled: boolean;
 
   constructor(
     persistence: PersistenceMode = 'localStorage',
-    scope: DeploymentStorageScope
+    scope: DeploymentStorageScope,
+    enabled = true
   ) {
     this.persistence = persistence;
     this.storageKey = scopedBrowserStorageKey('session', scope);
-    this.session = this.restore() ?? this.createSession();
+    this.enabled = enabled;
+    if (enabled) {
+      this.session = this.restore();
+    } else {
+      this.removePersisted();
+    }
   }
 
   /**
@@ -38,25 +45,31 @@ export class SessionManager {
    */
   getSessionId(): string {
     this.touch();
-    return this.session.id;
+    return this.requireSession().id;
   }
 
   /**
    * Returns the full session data.
    */
   getSession(): Readonly<SessionData> {
-    return { ...this.session };
+    this.touch();
+    return { ...this.requireSession() };
   }
 
   /**
    * Records activity — rotates session if inactive for 30+ minutes.
    */
   touch(): void {
+    this.assertEnabled();
     const now = Date.now();
-    if (now - this.session.lastActivityAt > SESSION_TIMEOUT_MS) {
+    const session = this.session;
+    if (
+      session === null ||
+      now - session.lastActivityAt > SESSION_TIMEOUT_MS
+    ) {
       this.session = this.createSession();
     } else {
-      this.session.lastActivityAt = now;
+      session.lastActivityAt = now;
     }
     this.persist();
   }
@@ -66,7 +79,7 @@ export class SessionManager {
    */
   recordEvent(): void {
     this.touch();
-    this.session.eventCount++;
+    this.requireSession().eventCount++;
     this.persist();
   }
 
@@ -75,7 +88,7 @@ export class SessionManager {
    */
   recordPage(): void {
     this.touch();
-    this.session.pageCount++;
+    this.requireSession().pageCount++;
     this.persist();
   }
 
@@ -83,8 +96,36 @@ export class SessionManager {
    * Forces a new session to start.
    */
   reset(): void {
+    if (!this.enabled) {
+      this.clear();
+      return;
+    }
     this.session = this.createSession();
     this.persist();
+  }
+
+  /**
+   * Enables or disables analytics session state.
+   *
+   * A disabled manager neither restores nor creates a session. Disabling also
+   * removes any state written while analytics consent was granted.
+   */
+  setEnabled(enabled: boolean): void {
+    if (enabled === this.enabled) return;
+
+    this.enabled = enabled;
+    if (!enabled) {
+      this.clear();
+      return;
+    }
+
+    this.session = this.restore();
+  }
+
+  /** Clears both the in-memory session and its browser-storage record. */
+  clear(): void {
+    this.session = null;
+    this.removePersisted();
   }
 
   private createSession(): SessionData {
@@ -99,7 +140,13 @@ export class SessionManager {
   }
 
   private persist(): void {
-    if (this.persistence !== 'localStorage') return;
+    if (
+      !this.enabled ||
+      this.session === null ||
+      this.persistence !== 'localStorage'
+    ) {
+      return;
+    }
 
     try {
       if (typeof localStorage !== 'undefined') {
@@ -111,7 +158,7 @@ export class SessionManager {
   }
 
   private restore(): SessionData | null {
-    if (this.persistence !== 'localStorage') return null;
+    if (!this.enabled || this.persistence !== 'localStorage') return null;
 
     try {
       if (typeof localStorage === 'undefined') return null;
@@ -139,5 +186,30 @@ export class SessionManager {
     } catch {
       return null;
     }
+  }
+
+  private removePersisted(): void {
+    if (this.persistence !== 'localStorage') return;
+
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(this.storageKey);
+      }
+    } catch {
+      // localStorage may be unavailable; the in-memory state is still cleared.
+    }
+  }
+
+  private assertEnabled(): void {
+    if (!this.enabled) {
+      throw new Error('APDL: analytics session is unavailable without consent');
+    }
+  }
+
+  private requireSession(): SessionData {
+    if (this.session === null) {
+      throw new Error('APDL: analytics session is not initialized');
+    }
+    return this.session;
   }
 }

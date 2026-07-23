@@ -110,7 +110,7 @@ class StrictExperimentTimestampConn:
         if "FROM experiments" in sql and "FOR UPDATE" in sql:
             return dict(self.row)
         if "UPDATE experiments SET" in sql:
-            start_date, end_date = args[12], args[13]
+            start_date, end_date = args[13], args[14]
             assert start_date is None or isinstance(start_date, datetime)
             assert end_date is None or isinstance(end_date, datetime)
             self.bound_timestamps.append((start_date, end_date))
@@ -123,7 +123,8 @@ class StrictExperimentTimestampConn:
                 "targeting_rules_json": args[7],
                 "primary_metric_json": args[8],
                 "traffic_percentage": args[10],
-                "minimum_exposure_config_version": args[11],
+                "bucket_by": args[11],
+                "minimum_exposure_config_version": args[12],
                 "start_date": start_date,
                 "end_date": end_date,
                 "version": self.row["version"] + 1,
@@ -173,6 +174,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "status": "draft",
         "description": "",
         "flag_key": "checkout",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants_json": '[{"key":"control","weight":1}]',
         "targeting_rules_json": "[]",
@@ -191,6 +193,26 @@ def make_experiment(overrides: dict | None = None) -> dict:
     if overrides:
         experiment.update(overrides)
     return experiment
+
+
+def test_derived_experiment_flag_uses_stored_actor_identity():
+    projected = mutations._derived_experiment_flag(
+        make_experiment(
+            {
+                "bucket_by": "anonymous_id",
+                "variants_json": (
+                    '[{"key":"control","weight":1},'
+                    '{"key":"treatment","weight":1}]'
+                ),
+            }
+        ),
+        make_flag(),
+    )
+
+    assert (
+        projected["fallthrough"]["rollout"]["bucket_by"]
+        == "anonymous_id"
+    )
 
 
 class NeverPersistConn:
@@ -477,6 +499,7 @@ async def test_stale_experiment_version_fails_before_touching_backing_flag(
 @pytest.mark.parametrize(
     ("field", "value", "api_field"),
     [
+        ("bucket_by", "user_id", "bucket_by"),
         ("default_variant", "treatment", "default_variant"),
         ("traffic_percentage", 50.0, "traffic_percentage"),
         (
@@ -1036,17 +1059,19 @@ async def test_scheduler_refuses_to_start_legacy_experiment_without_plan(monkeyp
     update_bundle.assert_not_awaited()
 
 
-def test_exposure_retry_ignores_only_generated_timestamp():
+def test_exposure_retry_ignores_generated_event_times():
     first = {
         "stream_key": "events:raw:apdl",
         "event": {
             "message_id": "stable",
             "timestamp": "2026-01-01T00:00:00Z",
+            "server_timestamp": "2026-01-01T00:00:00Z",
             "user_id": "user-1",
         },
     }
     retry = deepcopy(first)
     retry["event"]["timestamp"] = "2026-01-01T00:00:01Z"
+    retry["event"]["server_timestamp"] = "2026-01-01T00:00:01Z"
     conflict = deepcopy(retry)
     conflict["event"]["user_id"] = "user-2"
 
@@ -1060,11 +1085,13 @@ async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting
     existing_event = {
         "message_id": "eval_stable_001",
         "timestamp": "2026-07-22T10:00:00Z",
+        "server_timestamp": "2026-07-22T10:00:00Z",
         "user_id": "user-1",
     }
     requested_event = {
         **existing_event,
         "timestamp": "2026-07-22T10:00:01Z",
+        "server_timestamp": "2026-07-22T10:00:01Z",
     }
     if conflicting:
         requested_event["user_id"] = "user-2"
@@ -1108,6 +1135,7 @@ async def test_new_exposure_receipt_and_delivery_intent_are_created_together():
         event={
             "message_id": "eval_new_001",
             "timestamp": "2026-07-22T10:00:00Z",
+            "server_timestamp": "2026-07-22T10:00:00Z",
             "user_id": "user-1",
         },
     )
@@ -1116,7 +1144,12 @@ async def test_new_exposure_receipt_and_delivery_intent_are_created_together():
     receipt_payload = json.loads(conn.calls[0][1][2])
     outbox_payload = json.loads(conn.calls[1][1][3])
     assert "timestamp" not in receipt_payload["event"]
+    assert "server_timestamp" not in receipt_payload["event"]
     assert outbox_payload["event"]["timestamp"] == "2026-07-22T10:00:00Z"
+    assert (
+        outbox_payload["event"]["server_timestamp"]
+        == "2026-07-22T10:00:00Z"
+    )
 
 
 @pytest.mark.asyncio
@@ -1133,6 +1166,7 @@ async def test_exposure_receipt_rejects_a_mismatched_event_message_id():
             event={
                 "message_id": "eval_different_001",
                 "timestamp": "2026-07-22T10:00:00Z",
+                "server_timestamp": "2026-07-22T10:00:00Z",
                 "user_id": "user-1",
             },
         )

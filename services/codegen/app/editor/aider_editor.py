@@ -11,7 +11,8 @@ Execution model: the API defaults to a hardened, per-change container from
 ``Dockerfile.worker``. An in-process subprocess is available only for explicitly
 trusted local repositories while publication is disabled. The real isolated path
 still needs integration evidence with a model key and disposable live repository;
-the deterministic boundary and argv/env construction are unit-tested.
+the deterministic boundary and argv/env construction have unit and daemon-backed
+adversarial coverage.
 
 Token custody (entirely ours now — there is no Anthropic git proxy): this editor
 receives only a read-scoped GitHub token for its clone. The controller later
@@ -34,30 +35,21 @@ import base64
 import hashlib
 import logging
 import os
-import platform
-import re
 import shutil
-import subprocess
+import sys
 import tempfile
-from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app import config
-from app.contracts.cache import FilesystemContractCache
 from app.contracts.installer import (
-    BoundedCommandExecutor,
-    CommandResult,
-    SandboxedCheckRunner,
-    SandboxedInstallRunner,
     detect_contract_input_drift,
 )
-from app.contracts.models import ContractBundle, ContractRequest, RuntimeFingerprint
+from app.contracts.models import ContractBundle
 from app.contracts.render import render_contract_bundle
-from app.contracts.resolver import resolve_contracts
-from app.contracts.selection import select_contract_requests
+from app.editor.aider_launcher import TRUSTED_AIDER_MESSAGE_PREFIX
 from app.editor.base import EditRequest, EditResult
 from app.editor.brief import (
     BRIEF_SYSTEM,
@@ -87,10 +79,10 @@ from app.inspection import (
     render_dependency_slice,
     render_inspection_snapshot,
 )
+from app.inspection.preparation import contract_requests_for_ledger
 from app.profiling import profile_repository
 from app.profiling.models import CommandKind, RepoProfile
 from app.requirements import (
-    bind_contract_evidence,
     compile_requirement_ledger,
     map_implementation_evidence,
     render_requirement_ledger,
@@ -147,40 +139,6 @@ _VERIFY_ERR_TAIL = 6000
 _RUN_DEADLINE: ContextVar[CodegenRunDeadline | None] = ContextVar(
     "codegen_run_deadline", default=None
 )
-
-
-class _DeadlineCommandExecutor:
-    """Clamp every contract subprocess to the editor's shared wall deadline."""
-
-    def __init__(self, deadline: CodegenRunDeadline) -> None:
-        self._deadline = deadline
-        self._delegate = BoundedCommandExecutor()
-
-    def __call__(
-        self,
-        argv: Sequence[str],
-        *,
-        cwd: Path,
-        env: Mapping[str, str],
-        timeout_seconds: float,
-        output_limit: int,
-    ) -> CommandResult:
-        try:
-            timeout = self._deadline.clamp_timeout(timeout_seconds)
-        except CodegenDeadlineExceeded:
-            return CommandResult(
-                returncode=124,
-                output="[…Codegen job deadline exhausted before command start…]",
-                timed_out=True,
-                started=False,
-            )
-        return self._delegate(
-            argv,
-            cwd=cwd,
-            env=env,
-            timeout_seconds=timeout,
-            output_limit=output_limit,
-        )
 
 
 _PROFILE_INPUT_NAMES = {
@@ -245,6 +203,9 @@ def _agent_env(home: Path, *, model: str | None = None) -> dict[str, str]:
     env["TMPDIR"] = str(tmp)
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    env["GIT_CONFIG_VALUE_0"] = os.devnull
     env["AIDER_CONFIG_FILE"] = os.devnull
     env["AIDER_ENV_FILE"] = os.devnull
     env["AIDER_ANALYTICS"] = "false"  # headless: no phone-home / update prompts
@@ -261,7 +222,11 @@ def _git_env() -> dict[str, str]:
     }
     env.setdefault("PATH", os.defpath)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_COUNT"] = "1"
+    env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    env["GIT_CONFIG_VALUE_0"] = os.devnull
     return env
 
 
@@ -365,8 +330,9 @@ def _probe_repo(repo_dir: Path, override_cmd: str | None) -> _RepoProbe:
 def _build_message(spec: str, constraints: list[str], preamble: str = "") -> str:
     """Compose the single headless instruction handed to Aider.
 
-    ``preamble`` (the per-repo verification context) leads the message so the
-    agent reads the repo's testing reality before the task itself.
+    Aider 0.86.2 preprocesses messages beginning with ``!`` or ``/`` as local
+    commands.  The fixed service-owned first line makes every spec, helper
+    brief, and retry inert before any untrusted prose is appended.
     """
     message = spec.strip()
     if constraints:
@@ -374,7 +340,7 @@ def _build_message(spec: str, constraints: list[str], preamble: str = "") -> str
         message = f"{message}\n\nConstraints:\n{bullets}"
     if preamble.strip():
         message = f"{preamble.strip()}\n\n{message}"
-    return message
+    return f"{TRUSTED_AIDER_MESSAGE_PREFIX}\n\n{message}"
 
 
 def _with_feedback(base_message: str, feedback: str) -> str:
@@ -385,6 +351,8 @@ def _with_feedback(base_message: str, feedback: str) -> str:
     constraints, and the repo's testing reality — exactly the round most likely
     to do something desperate without them.
     """
+    if not base_message.startswith(TRUSTED_AIDER_MESSAGE_PREFIX):
+        raise ValueError("Aider retry message lacks the trusted inert prefix")
     return f"{base_message}\n\n# Previous attempt — feedback to address first\n\n{feedback}"
 
 
@@ -438,120 +406,6 @@ def _model_settings_yaml(model: str) -> str:
     return f'- name: "{model}"\n  use_temperature: false\n'
 
 
-def _contract_runtime() -> RuntimeFingerprint:
-    versions = [f"python={platform.python_version()}"]
-    for executable in ("node", "npm", "uv"):
-        try:
-            result = subprocess.run(
-                [executable, "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env={"PATH": os.environ.get("PATH", os.defpath)},
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if result.returncode == 0 and result.stdout.strip():
-            versions.append(f"{executable}={result.stdout.strip()}")
-    return RuntimeFingerprint(
-        runtime_name="apdl-codegen-worker-toolchains",
-        runtime_version=";".join(versions),
-        operating_system=platform.system().lower() or "unknown",
-        architecture=platform.machine().lower() or "unknown",
-    )
-
-
-def _contract_requests_for_ledger(
-    profile: RepoProfile, ledger: RequirementLedger
-) -> list[ContractRequest]:
-    """Select exact package names per stable requirement, merging duplicates."""
-    selected: dict[tuple[str, str, str, str | None], ContractRequest] = {}
-    for requirement in ledger.requirements:
-        if requirement.implementation_status in {
-            ImplementationStatus.blocked,
-            ImplementationStatus.descoped,
-        }:
-            continue
-        text = "\n".join(
-            [
-                requirement.original_source_text,
-                requirement.observable_behavior,
-                requirement.implementable_scope,
-            ]
-        )
-        for request in select_contract_requests(
-            profile, text, requirement_ids=[requirement.requirement_id]
-        ):
-            key = (
-                request.ecosystem,
-                request.package_path,
-                request.package_name,
-                request.exact_version,
-            )
-            previous = selected.get(key)
-            if previous is None:
-                selected[key] = request
-                continue
-            payload = previous.model_dump(mode="json")
-            payload["requirement_ids"] = sorted(
-                {*previous.requirement_ids, *request.requirement_ids}
-            )
-            selected[key] = ContractRequest.model_validate(payload)
-    return [selected[key] for key in sorted(selected)]
-
-
-_INSPECTION_STOPWORDS = frozenset(
-    {
-        "acceptance",
-        "change",
-        "existing",
-        "implement",
-        "requirement",
-        "should",
-        "tests",
-        "that",
-        "this",
-        "with",
-    }
-)
-
-
-def _inspection_for_ledger(
-    repo_dir: Path, ledger: RequirementLedger
-) -> InspectionSnapshot:
-    """Build a safe inventory enriched with bounded task-focused searches."""
-    inspector = RepositoryInspector(repo_dir)
-    snapshot = inspector.snapshot()
-    candidates: list[str] = []
-    for requirement in ledger.requirements:
-        for token in re.findall(
-            r"[A-Za-z_][A-Za-z0-9_.:/-]{3,}", requirement.observable_behavior
-        ):
-            normalized = token.strip(".,:;()[]{}")
-            if normalized.casefold() not in _INSPECTION_STOPWORDS:
-                candidates.append(normalized)
-    evidence = list(snapshot.evidence)
-    for token in list(dict.fromkeys(candidates))[:12]:
-        evidence.extend(
-            inspector.search(
-                token,
-                case_sensitive=False,
-                max_results=8,
-            )
-        )
-    evidence = sorted(
-        {item.evidence_id: item for item in evidence}.values(),
-        key=lambda item: (item.path, item.start_line or 0, item.evidence_id),
-    )
-    return InspectionSnapshot(
-        evidence=evidence,
-        skipped_paths=snapshot.skipped_paths,
-        bytes_inspected=snapshot.bytes_inspected,
-        truncated=snapshot.truncated,
-    )
-
-
 def _coverage_retry_message(coverage: VerificationCoverage) -> str:
     return (
         "The deterministic risk policy rejected the current diff because required "
@@ -581,7 +435,9 @@ class AiderEditor:
     ) -> None:
         self._model = model or config.codegen_model()
         self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
-        self._aider_bin = aider_bin or config.codegen_aider_bin()
+        # Explicit binaries remain a test/trusted-local injection seam. The
+        # production default always uses the version-pinned hardened adapter.
+        self._aider_bin = aider_bin
         self._cache_prompts = config.codegen_cache_prompts()
         self._conventions = config.codegen_conventions_enabled()
         self._sdk_reference = config.codegen_sdk_reference_enabled()
@@ -617,11 +473,12 @@ class AiderEditor:
         This is the credential-free execution seam used by the offline/shadow
         evaluator.  The caller owns a clean, already-materialized git workspace;
         this method edits that checkout in place and deliberately performs no
-        clone, branch creation, fetch, or push.  Everything between repository
-        preparation and publication remains identical to :meth:`implement`:
-        profiling, requirement compilation, exact-contract resolution, the
+        clone, branch creation, fetch, push, dependency install, or repository
+        checker execution. Read-only profiling, requirement compilation, the
         configured brief/Aider/review loop, verification coverage, and the full
-        deterministic safety gate all still run.
+        deterministic safety gate remain identical to :meth:`implement`.
+        Tasks that need exact dependency contracts require provider-free
+        preparation evidence.
 
         Evaluation workspaces cannot represent an existing-PR repair or remote
         revert because either operation requires GitHub state and credentials.
@@ -787,7 +644,8 @@ class AiderEditor:
             # 1. Production clones with one-shot auth.  Offline/shadow evaluation
             #    instead receives one clean, mutation-materialized checkout and
             #    must never gain a remote repository capability.
-            preflight = request.repository_preflight
+            preparation = request.repository_preparation
+            preflight = preparation.attestation if preparation is not None else None
             source_branch = (
                 request.branch if request.existing_branch else request.base_branch
             )
@@ -797,15 +655,16 @@ class AiderEditor:
                 and preflight is None
             ):
                 return fail(
-                    "Isolated repository editing requires credential-free preflight "
+                    "Isolated repository editing requires provider-free preparation "
                     "evidence."
                 )
-            if preflight is not None and (
+            if preparation is not None and (
                 preflight.repository != request.repo
                 or preflight.source_branch != source_branch
+                or preparation.target_branch != request.branch
             ):
                 return fail(
-                    "Repository preflight identity does not match the edit request."
+                    "Repository preparation identity does not match the edit request."
                 )
             if workspace_mode:
                 if (
@@ -898,23 +757,57 @@ class AiderEditor:
             await self._git(repo_dir, ["config", "user.email", "codegen@apdl.dev"])
             await self._git(repo_dir, ["config", "user.name", "APDL Codegen"])
 
-            # 2. Probe the repo: resolve the verification command (connection
-            #    policy first, then detect) and the agent-facing testing reality.
-            probe = _probe_repo(repo_dir, request.test_cmd)
-            repo_profile = (probe.profile or profile_repository(repo_dir)).model_copy(
-                update={"repo": request.repo, "branch": request.branch}
-            )
-
-            # 2b. Compile one strict, stable ledger before any model call. A
-            # same-PR repair reuses the original ledger and IDs verbatim.
-            if requirement_ledger is None:
-                requirement_ledger = compile_requirement_ledger(
-                    title=request.title,
-                    spec=request.spec,
-                    constraints=request.constraints,
-                    risk=request.risk_level,
-                    verification_command=probe.verify_cmd,
+            # 2. Consume the provider-free phase's strict evidence. Trusted
+            # local/evaluation callers may derive read-only metadata here, but
+            # this provider-bearing process never installs dependencies or
+            # invokes repository-owned package executables/checkers.
+            if preparation is not None:
+                probe = _RepoProbe(
+                    verify_cmd=preparation.verification_command,
+                    has_test_runner=preparation.has_test_runner,
+                    preamble=preparation.verification_preamble,
+                    profile=preparation.repo_profile,
                 )
+                repo_profile = preparation.repo_profile
+                requirement_ledger = preparation.requirement_ledger
+                inspection_snapshot = preparation.inspection_snapshot
+                verification_plan = preparation.verification_plan
+                runtime_acceptance_plan = preparation.runtime_acceptance_plan
+                contract_bundle = preparation.contract_bundle
+            else:
+                probe = _probe_repo(repo_dir, request.test_cmd)
+                repo_profile = (
+                    probe.profile or profile_repository(repo_dir)
+                ).model_copy(update={"repo": request.repo, "branch": request.branch})
+                if requirement_ledger is None:
+                    requirement_ledger = compile_requirement_ledger(
+                        title=request.title,
+                        spec=request.spec,
+                        constraints=request.constraints,
+                        risk=request.risk_level,
+                        verification_command=probe.verify_cmd,
+                    )
+                inspection_snapshot = RepositoryInspector(repo_dir).snapshot()
+                verification_plan = build_verification_plan(
+                    requirement_ledger, repo_profile
+                )
+                runtime_acceptance_plan = build_runtime_acceptance_plan(
+                    repo_profile,
+                    verification_plan,
+                    policy=request.runtime_acceptance_policy,
+                )
+                contract_bundle = ContractBundle()
+                if self._contracts_enabled and contract_requests_for_ledger(
+                    repo_profile, requirement_ledger
+                ):
+                    return fail(
+                        "Exact dependency contracts require provider-free "
+                        "repository preparation evidence."
+                    )
+
+            assert requirement_ledger is not None
+            assert verification_plan is not None
+            assert runtime_acceptance_plan is not None
             active_requirements = [
                 item
                 for item in requirement_ledger.requirements
@@ -926,16 +819,18 @@ class AiderEditor:
                     "Every requirement is explicitly blocked or descoped; no pull "
                     "request can be created."
                 )
-
-            inspection_snapshot = _inspection_for_ledger(repo_dir, requirement_ledger)
-            verification_plan = build_verification_plan(
-                requirement_ledger, repo_profile
-            )
-            runtime_acceptance_plan = build_runtime_acceptance_plan(
-                repo_profile,
-                verification_plan,
-                policy=request.runtime_acceptance_policy,
-            )
+            if contract_bundle is not None:
+                drift = [
+                    item
+                    for resolution in contract_bundle.resolutions
+                    if (item := detect_contract_input_drift(repo_dir, resolution))
+                    is not None
+                ]
+                if drift:
+                    return fail(
+                        "Prepared dependency evidence does not match the verified "
+                        "repository tree."
+                    )
             workflow_changed, workflow_error = await synchronize_runtime_workflow(
                 repo_profile, runtime_acceptance_plan
             )
@@ -954,67 +849,6 @@ class AiderEditor:
                     repo_profile,
                     verification_plan,
                     policy=request.runtime_acceptance_policy,
-                )
-
-            # 2c. Resolve every explicitly named direct dependency from an
-            # isolated frozen install before the model sees an API claim. The
-            # in-process API editor deliberately has no install authority, so
-            # such work blocks unless it runs in the credential-minimal worker.
-            if self._contracts_enabled:
-                contract_requests = _contract_requests_for_ledger(
-                    repo_profile, requirement_ledger
-                )
-                contract_executor = _DeadlineCommandExecutor(run_deadline)
-                try:
-                    contract_bundle = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            resolve_contracts,
-                            repo_dir,
-                            project_scope=request.project_scope or request.repo,
-                            repository=request.repo,
-                            requests=contract_requests,
-                            runtime=_contract_runtime(),
-                            install_runner=SandboxedInstallRunner(
-                                sandboxed=config.codegen_isolated_worker(),
-                                executor=contract_executor,
-                                timeout_seconds=(
-                                    config.codegen_contract_install_timeout()
-                                ),
-                                workdir_base=work,
-                            ),
-                            check_runner=SandboxedCheckRunner(
-                                sandboxed=config.codegen_isolated_worker(),
-                                executor=contract_executor,
-                                workdir_base=work,
-                            ),
-                            cache=FilesystemContractCache(
-                                Path(config.codegen_contract_cache_dir())
-                            ),
-                        ),
-                        timeout=run_deadline.remaining_seconds(),
-                    )
-                except TimeoutError:
-                    return fail(
-                        "Exact dependency contract resolution exhausted the "
-                        "shared Codegen job deadline."
-                    )
-                blocked = [
-                    resolution
-                    for resolution in contract_bundle.resolutions
-                    if resolution.disposition == "blocked"
-                ]
-                if blocked:
-                    details = "; ".join(
-                        f"{resolution.request.package_name}: "
-                        + ", ".join(item.message for item in resolution.blockers)
-                        for resolution in blocked
-                    )
-                    return fail(
-                        "Exact dependency contract resolution blocked the change: "
-                        + details
-                    )
-                requirement_ledger = bind_contract_evidence(
-                    requirement_ledger, contract_bundle
                 )
 
             # 3. Compile the spec into a repo-grounded engineering brief
@@ -1112,20 +946,40 @@ class AiderEditor:
             )
 
             # 4. Run Aider headless. It edits + commits locally; it does NOT push.
-            #    The settings file lives outside repo_dir so it never enters the diff.
-            settings_file = work / "aider.model.settings.yml"
+            #    Every Aider-controlled path lives in a service-owned directory
+            #    disjoint from repo_dir. The default launcher removes Aider's
+            #    ambient cwd/Git-root/home config search before parsing.
+            aider_control = work / "aider-control"
+            aider_control.mkdir(mode=0o700)
+            settings_file = aider_control / "aider.model.settings.yml"
             settings_file.write_text(
                 _model_settings_yaml(self._model), encoding="utf-8"
             )
-            # A connected repository is untrusted input. Pin Aider to empty,
-            # service-owned config/env files outside the clone and explicitly
-            # disable every facility that can run repository-provided commands.
-            aider_config = work / "aider.conf.yml"
+            aider_config = aider_control / "aider.conf.yml"
             aider_config.write_text("{}\n", encoding="utf-8")
-            aider_env = work / "aider.env"
+            aider_env = aider_control / "aider.env"
             aider_env.write_text("", encoding="utf-8")
+            model_metadata = aider_control / "aider.model.metadata.json"
+            model_metadata.write_text("{}\n", encoding="utf-8")
+            aider_ignore = aider_control / "aider.ignore"
+            aider_ignore.write_text("", encoding="utf-8")
+            input_history = aider_control / "aider.input.history"
+            input_history.touch()
+            chat_history = aider_control / "aider.chat.history.md"
+            chat_history.touch()
+            if self._aider_bin is None:
+                launcher = Path(__file__).with_name("aider_launcher.py").resolve()
+                command = [
+                    sys.executable,
+                    launcher.as_posix(),
+                    "--control-root",
+                    aider_control.as_posix(),
+                    "--",
+                ]
+            else:
+                command = [self._aider_bin]
             argv = [
-                self._aider_bin,
+                *command,
                 "--config",
                 str(aider_config),
                 "--env-file",
@@ -1134,11 +988,23 @@ class AiderEditor:
                 self._model,
                 "--model-settings-file",
                 str(settings_file),
+                "--model-metadata-file",
+                str(model_metadata),
+                "--aiderignore",
+                str(aider_ignore),
+                "--input-history-file",
+                str(input_history),
+                "--chat-history-file",
+                str(chat_history),
+                "--map-tokens",
+                "0",
                 "--yes-always",
                 "--no-stream",
                 "--no-pretty",
                 "--no-auto-lint",
                 "--no-auto-test",
+                "--no-add-gitignore-files",
+                "--no-gitignore",
                 "--no-suggest-shell-commands",
                 "--no-git-commit-verify",
                 "--no-detect-urls",
@@ -1153,23 +1019,23 @@ class AiderEditor:
                 # Standing house rules as a read-only context file (kept outside
                 # repo_dir so it never enters the diff). It joins the cacheable
                 # static prefix across editing rounds.
-                conventions_file = work / "CONVENTIONS.md"
+                conventions_file = aider_control / "CONVENTIONS.md"
                 conventions_file.write_text(CONVENTIONS_MD, encoding="utf-8")
                 argv += ["--read", str(conventions_file)]
             if inspection_snapshot is not None:
-                inspection_file = work / "INSPECTION.md"
+                inspection_file = aider_control / "INSPECTION.md"
                 inspection_file.write_text(
                     render_inspection_snapshot(inspection_snapshot), encoding="utf-8"
                 )
                 argv += ["--read", str(inspection_file)]
             if verification_plan is not None:
-                verification_file = work / "VERIFICATION_PLAN.md"
+                verification_file = aider_control / "VERIFICATION_PLAN.md"
                 verification_file.write_text(
                     render_verification_plan(verification_plan), encoding="utf-8"
                 )
                 argv += ["--read", str(verification_file)]
             if runtime_acceptance_plan is not None:
-                runtime_file = work / "RUNTIME_ACCEPTANCE_PLAN.md"
+                runtime_file = aider_control / "RUNTIME_ACCEPTANCE_PLAN.md"
                 runtime_file.write_text(
                     render_runtime_acceptance_plan(
                         runtime_acceptance_plan,
@@ -1181,7 +1047,7 @@ class AiderEditor:
                 )
                 argv += ["--read", str(runtime_file)]
             if contract_bundle and contract_bundle.resolutions:
-                contracts_file = work / "CONTRACTS.md"
+                contracts_file = aider_control / "CONTRACTS.md"
                 contracts_file.write_text(
                     render_contract_bundle(contract_bundle), encoding="utf-8"
                 )
@@ -1193,7 +1059,7 @@ class AiderEditor:
                 # path the SDK (in node_modules / site-packages) hides from the
                 # repo map. Only refs for an SDK actually present are attached.
                 for ref_name, ref_body in probe.sdk_references:
-                    ref_file = work / ref_name
+                    ref_file = aider_control / ref_name
                     ref_file.write_text(ref_body, encoding="utf-8")
                     argv += ["--read", str(ref_file)]
             if self._cache_prompts:
@@ -1247,6 +1113,11 @@ class AiderEditor:
             while True:
                 if agent_pending:
                     edit_attempt += 1
+                    if not message.startswith(TRUSTED_AIDER_MESSAGE_PREFIX):
+                        return fail(
+                            "Internal safety invariant rejected a command-capable "
+                            "Aider message."
+                        )
                     append_prompt(
                         prompts,
                         {
@@ -1738,9 +1609,9 @@ class AiderEditor:
             # token never lands on git's argv where ps / /proc would expose it.
             env = {
                 **env,
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "http.extraHeader",
-                "GIT_CONFIG_VALUE_0": auth_header,
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_1": "http.extraHeader",
+                "GIT_CONFIG_VALUE_1": auth_header,
             }
         argv = ["git"]
         if cwd is not None:

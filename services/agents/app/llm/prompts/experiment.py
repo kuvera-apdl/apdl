@@ -56,7 +56,7 @@ code change (e.g. pure traffic/config change)>",
     "fallthrough": {
       "rollout": {
         "percentage": 100,
-        "bucket_by": "user_id"
+        "bucket_by": "anonymous_id"
       }
     },
     "evaluation_mode": "client",
@@ -70,6 +70,9 @@ The flag_config is validated strictly — keep it canonical or the experiment is
 other field there; put per-variant descriptions in the top-level "variants".
 - flag_config.rules must be []. Put experiment targeting in the top-level "targeting" only.
 - flag_config.fallthrough must contain only {"rollout": {"percentage": ..., "bucket_by": ...}}.
+- flag_config.fallthrough.rollout.bucket_by is required and must be exactly "anonymous_id" or \
+"user_id". Prefer "anonymous_id" for browser experiments whose visitors may enroll before sign-in; \
+use "user_id" only when every eligible actor is authenticated before enrollment.
 - flag_config.auto_disable must be false; automatic guardrail mutation is unavailable in this release.
 - statistical_plan is immutable once the experiment leaves draft. Size it prospectively for a
 two-proportion comparison using the primary metric direction and Bonferroni-adjusted alpha

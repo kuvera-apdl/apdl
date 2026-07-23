@@ -1,0 +1,48 @@
+{
+  "schema": "apdl-codegen-dependency-audit-suppressions@1",
+  "lock_file": "services/codegen/requirements-agent.lock",
+  "suppressions": [
+    {
+      "advisory_id": "PYSEC-2026-2335",
+      "package": "aider-chat",
+      "version": "0.86.2",
+      "justification": "The advisory targets auth.py in Aider 0.86.3.dev; the pinned 0.86.2 installed distribution is build-verified not to contain that development-build file.",
+      "evidence": [
+        "services/codegen/scripts/verify_aider_distribution.py::verify_installed_distribution",
+        "services/codegen/tests/test_worker_dependency_audit.py::test_aider_suppressions_are_bound_to_absent_dev_build_files",
+        "services/codegen/tests/test_container_reproducibility.py::test_worker_uses_immutable_images_snapshot_packages_and_hash_lock"
+      ],
+      "owner": "@Sukhikhk",
+      "review_by": "2026-08-22",
+      "expires_on": "2026-10-21"
+    },
+    {
+      "advisory_id": "PYSEC-2026-2336",
+      "package": "aider-chat",
+      "version": "0.86.2",
+      "justification": "The advisory targets api_docs.py in Aider 0.86.3.dev; the pinned 0.86.2 installed distribution is build-verified not to contain that development-build file.",
+      "evidence": [
+        "services/codegen/scripts/verify_aider_distribution.py::verify_installed_distribution",
+        "services/codegen/tests/test_worker_dependency_audit.py::test_aider_suppressions_are_bound_to_absent_dev_build_files",
+        "services/codegen/tests/test_container_reproducibility.py::test_worker_uses_immutable_images_snapshot_packages_and_hash_lock"
+      ],
+      "owner": "@Sukhikhk",
+      "review_by": "2026-08-22",
+      "expires_on": "2026-10-21"
+    },
+    {
+      "advisory_id": "PYSEC-2026-2447",
+      "package": "diskcache",
+      "version": "5.6.3",
+      "justification": "The hardened Aider boundary disables repository maps and cache-backed repository analysis, accepts only service-owned control paths, and proves repository and home cache files remain unread and unchanged.",
+      "evidence": [
+        "services/codegen/app/editor/aider_launcher.py::validate_invocation",
+        "services/codegen/tests/test_aider_launcher.py::test_launcher_rejects_cache_and_control_bypass_options",
+        "services/codegen/tests/test_worker_noexec_contracts.py::test_hardened_aider_launcher_ignores_repository_and_home_control_files"
+      ],
+      "owner": "@Sukhikhk",
+      "review_by": "2026-08-22",
+      "expires_on": "2026-10-21"
+    }
+  ]
+}

@@ -128,7 +128,11 @@ class MigrationQuiescenceTests(unittest.TestCase):
         # additional pooled session is reserved for completeness authority
         # transactions and must not weaken either inhibitor.
         self.assertIn("max_size=3", WRITER_ENTRYPOINT)
-        self.assertIn("for _ in range(2)", WRITER_ENTRYPOINT)
+        self.assertIn("WRITER_SINGLETON_LOCK_ID = 4_158_044_085", WRITER_ENTRYPOINT)
+        self.assertIn("pg_try_advisory_lock($1)", WRITER_ENTRYPOINT)
+        self.assertIn("_heartbeat_writer_singleton", WRITER_ENTRYPOINT)
+        self.assertIn("for inhibitor_index in range(2)", WRITER_ENTRYPOINT)
+        self.assertIn("require_writer_singleton=inhibitor_index == 1", WRITER_ENTRYPOINT)
         self.assertIn("authority_pool=maintenance_pool", WRITER_ENTRYPOINT)
         self.assertIn("objsubid = 1", WRITER_ENTRYPOINT)
         self.assertIn("objid::bigint = ANY($1::bigint[])", WRITER_ENTRYPOINT)

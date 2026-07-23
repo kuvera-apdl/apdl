@@ -197,11 +197,19 @@ class ReleaseManifestTests(unittest.TestCase):
             "matrix: ${{ fromJSON(needs.build-artifacts.outputs.docker_matrix) }}",
             workflow,
         )
-        self.assertIn("uses: docker/build-push-action@v6", workflow)
+        self.assertIn(
+            "uses: docker/build-push-action@"
+            "10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2",
+            workflow,
+        )
         self.assertIn("platforms: linux/amd64,linux/arm64", workflow)
         self.assertIn("provenance: mode=max", workflow)
         self.assertIn("sbom: true", workflow)
-        self.assertIn("uses: actions/attest-build-provenance@v3", workflow)
+        self.assertIn(
+            "uses: actions/attest-build-provenance@"
+            "977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0",
+            workflow,
+        )
         self.assertIn("packages: write", workflow)
         self.assertIn("Check immutable GHCR publication state", workflow)
         self.assertIn("group: release-publication", workflow)
@@ -219,9 +227,11 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertIn("name: published-image-${{ matrix.name }}", workflow)
         self.assertIn("release-artifacts/container-images.json", workflow)
         self.assertIn("sha256sum container-images.json >> SHA256SUMS", workflow)
-        self.assertIn("smoke-published-core:", workflow)
-        self.assertIn("      - smoke-published-core", workflow)
-        self.assertIn("name: tested-container-image-index", workflow)
+        self.assertIn("smoke-published-images:", workflow)
+        self.assertIn("      - smoke-published-images", workflow)
+        self.assertIn("runner: ubuntu-24.04-arm", workflow)
+        self.assertIn("APDL_SMOKE_ALL_IMAGES=true make smoke-fresh", workflow)
+        self.assertIn("name: published-image-smoke-${{ matrix.arch }}", workflow)
 
 
 if __name__ == "__main__":

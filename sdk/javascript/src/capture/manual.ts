@@ -12,8 +12,9 @@ export class ManualCapture {
   private queue: EventQueue;
   private sessionManager: SessionManager;
   private contextCollector: ContextCollector;
+  private anonymousIdProvider: () => string;
+  private canCapture: () => boolean;
   private userId: string | undefined;
-  private anonymousId: string;
   private traits: Record<string, unknown> = {};
   private groupId: string | undefined;
   private groupTraits: Record<string, unknown> = {};
@@ -22,18 +23,22 @@ export class ManualCapture {
     queue: EventQueue,
     sessionManager: SessionManager,
     contextCollector: ContextCollector,
-    anonymousId: string
+    anonymousIdProvider: () => string,
+    canCapture: () => boolean
   ) {
     this.queue = queue;
     this.sessionManager = sessionManager;
     this.contextCollector = contextCollector;
-    this.anonymousId = anonymousId;
+    this.anonymousIdProvider = anonymousIdProvider;
+    this.canCapture = canCapture;
   }
 
   /**
    * Tracks a custom event with optional properties.
    */
   trackEvent(eventName: string, properties?: Record<string, unknown>): void {
+    if (!this.canCapture()) return;
+
     const event = this.buildEvent('track', {
       event: eventName,
       properties: properties ?? {},
@@ -46,6 +51,8 @@ export class ManualCapture {
    * Identifies the current user and merges traits.
    */
   identifyUser(userId: string, traits?: Record<string, unknown>): void {
+    if (!this.canCapture()) return;
+
     this.userId = userId;
     if (traits) {
       this.traits = { ...this.traits, ...traits };
@@ -62,6 +69,8 @@ export class ManualCapture {
    * Associates the user with a group (company, team, etc).
    */
   groupUser(groupId: string, traits?: Record<string, unknown>): void {
+    if (!this.canCapture()) return;
+
     this.groupId = groupId;
     if (traits) {
       this.groupTraits = { ...this.groupTraits, ...traits };
@@ -77,6 +86,8 @@ export class ManualCapture {
 
   /** Tracks a page view with a query-free URL and path. */
   pageView(name?: string, properties?: Record<string, unknown>): void {
+    if (!this.canCapture()) return;
+
     const context = this.contextCollector.collect();
 
     const pageProps: Record<string, unknown> = {
@@ -120,7 +131,7 @@ export class ManualCapture {
    * Returns the anonymous ID.
    */
   getAnonymousId(): string {
-    return this.anonymousId;
+    return this.anonymousIdProvider();
   }
 
   /**
@@ -137,13 +148,6 @@ export class ManualCapture {
     return this.groupId;
   }
 
-  /**
-   * Sets the anonymous ID (used by cookieless identity).
-   */
-  setAnonymousId(id: string): void {
-    this.anonymousId = id;
-  }
-
   private buildEvent(
     type: TrackEvent['type'],
     overrides: Partial<TrackEvent>
@@ -153,7 +157,7 @@ export class ManualCapture {
     return {
       type,
       userId: this.userId,
-      anonymousId: this.anonymousId,
+      anonymousId: this.anonymousIdProvider(),
       groupId: this.groupId,
       context,
       timestamp: new Date().toISOString(),

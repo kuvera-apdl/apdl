@@ -23,17 +23,33 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from app.safety.secrets import MAX_SECRET_SCAN_BYTES, secret_kinds
+
 
 _GIT_TIMEOUT_SECONDS = 300
 _MAX_PATCH_BYTES = 16 * 1024 * 1024
+_MAX_CHANGED_BLOB_BYTES = MAX_SECRET_SCAN_BYTES
+_MAX_CHANGED_BLOBS_BYTES = 16 * 1024 * 1024
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _APDL_BRANCH_RE = re.compile(r"^apdl/[a-z0-9][a-z0-9._/-]{0,199}$")
 _BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
+_REGULAR_BLOB_MODES = {b"100644", b"100755"}
+_PERMITTED_BINARY_TYPES = (
+    "application/pdf",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+)
 
 
 class BranchPublicationError(RuntimeError):
     """The candidate tree could not be safely reconstructed or published."""
+
+
+class UnsafeCandidateTreeError(BranchPublicationError):
+    """The exact reconstructed candidate tree failed a permanent safety gate."""
 
 
 @dataclass(frozen=True)
@@ -56,6 +72,14 @@ class PublishedBranch:
 
     branch: str
     head_sha: str
+
+
+@dataclass(frozen=True)
+class _ChangedBlob:
+    """One exact non-deleted blob from the reconstructed candidate index."""
+
+    object_id: str
+    path: bytes
 
 
 class BranchPublisher(Protocol):
@@ -236,6 +260,184 @@ def _assert_no_symlink_entries(index: bytes) -> None:
             )
 
 
+def _parse_changed_blob_inventory(inventory: bytes) -> tuple[_ChangedBlob, ...]:
+    """Parse `git diff-index --raw -z` without decoding attacker-owned paths."""
+    if not inventory:
+        return ()
+    if not inventory.endswith(b"\x00"):
+        raise UnsafeCandidateTreeError(
+            "candidate changed-blob inventory is not NUL-terminated"
+        )
+    records = inventory[:-1].split(b"\x00")
+    if len(records) % 2:
+        raise UnsafeCandidateTreeError(
+            "candidate changed-blob inventory is malformed"
+        )
+
+    changed: list[_ChangedBlob] = []
+    for header, path in zip(records[::2], records[1::2], strict=True):
+        if not path or not header.startswith(b":"):
+            raise UnsafeCandidateTreeError(
+                "candidate changed-blob inventory is malformed"
+            )
+        fields = header[1:].split(b" ")
+        if len(fields) != 5:
+            raise UnsafeCandidateTreeError(
+                "candidate changed-blob inventory is malformed"
+            )
+        old_mode, new_mode, old_object, new_object, status = fields
+        if (
+            re.fullmatch(rb"[0-7]{6}", old_mode) is None
+            or re.fullmatch(rb"[0-7]{6}", new_mode) is None
+            or status not in {b"A", b"D", b"M", b"T"}
+        ):
+            raise UnsafeCandidateTreeError(
+                "candidate changed-blob inventory is malformed"
+            )
+        try:
+            old_object_id = old_object.decode("ascii", "strict")
+            new_object_id = new_object.decode("ascii", "strict")
+        except UnicodeDecodeError as exc:
+            raise UnsafeCandidateTreeError(
+                "candidate changed-blob inventory is malformed"
+            ) from exc
+        if (
+            not _SHA_RE.fullmatch(old_object_id)
+            or not _SHA_RE.fullmatch(new_object_id)
+        ):
+            raise UnsafeCandidateTreeError(
+                "candidate changed-blob inventory contains an invalid object id"
+            )
+
+        if status == b"D":
+            if new_mode != b"000000" or set(new_object) != {ord("0")}:
+                raise UnsafeCandidateTreeError(
+                    "candidate deletion inventory is malformed"
+                )
+            continue
+        if new_mode not in _REGULAR_BLOB_MODES:
+            raise UnsafeCandidateTreeError(
+                "candidate changed entry is not a regular file blob"
+            )
+        if set(new_object) == {ord("0")}:
+            raise UnsafeCandidateTreeError(
+                "candidate changed blob has a missing object id"
+            )
+        changed.append(_ChangedBlob(object_id=new_object_id, path=path))
+    return tuple(changed)
+
+
+def _is_text_blob(content: bytes) -> bool:
+    """Accept only strict UTF-8 text without binary control characters."""
+    if b"\x00" in content:
+        return False
+    try:
+        text = content.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        return False
+    return all(
+        character in "\t\n\r\f" or ord(character) >= 0x20 for character in text
+    )
+
+
+def _permitted_binary_type(path: bytes, content: bytes) -> str | None:
+    """Resolve a narrow binary allowlist from both suffix and file magic."""
+    normalized_path = path.lower()
+    if normalized_path.endswith(b".png") and content.startswith(
+        b"\x89PNG\r\n\x1a\n"
+    ):
+        return "image/png"
+    if normalized_path.endswith((b".jpg", b".jpeg")) and content.startswith(
+        b"\xff\xd8\xff"
+    ):
+        return "image/jpeg"
+    if normalized_path.endswith(b".gif") and content.startswith(
+        (b"GIF87a", b"GIF89a")
+    ):
+        return "image/gif"
+    if (
+        normalized_path.endswith(b".webp")
+        and len(content) >= 12
+        and content.startswith(b"RIFF")
+        and content[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    if normalized_path.endswith(b".pdf") and content.startswith(b"%PDF-"):
+        return "application/pdf"
+    return None
+
+
+async def _scan_changed_blobs(workspace: Path, base_sha: str) -> None:
+    """Fail closed unless every exact changed blob is bounded and secret-free."""
+    inventory = await _run_git(
+        workspace,
+        [
+            "diff-index",
+            "--cached",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--abbrev=64",
+            base_sha,
+            "--",
+        ],
+    )
+    changed = _parse_changed_blob_inventory(inventory)
+    aggregate_bytes = 0
+    for blob in changed:
+        object_type = (
+            (await _run_git(workspace, ["cat-file", "-t", blob.object_id]))
+            .decode("ascii", "strict")
+            .strip()
+        )
+        if object_type != "blob":
+            raise UnsafeCandidateTreeError(
+                "candidate changed entry does not resolve to a Git blob"
+            )
+        size_text = (
+            (await _run_git(workspace, ["cat-file", "-s", blob.object_id]))
+            .decode("ascii", "strict")
+            .strip()
+        )
+        if re.fullmatch(r"(?:0|[1-9][0-9]*)", size_text) is None:
+            raise UnsafeCandidateTreeError(
+                "candidate changed blob has a malformed size"
+            )
+        blob_bytes = int(size_text)
+        if blob_bytes > _MAX_CHANGED_BLOB_BYTES:
+            raise UnsafeCandidateTreeError(
+                "candidate changed blob exceeds the "
+                f"{_MAX_CHANGED_BLOB_BYTES}-byte safety limit"
+            )
+        aggregate_bytes += blob_bytes
+        if aggregate_bytes > _MAX_CHANGED_BLOBS_BYTES:
+            raise UnsafeCandidateTreeError(
+                "candidate changed blobs exceed the "
+                f"{_MAX_CHANGED_BLOBS_BYTES}-byte aggregate safety limit"
+            )
+
+        content = await _run_git(workspace, ["cat-file", "blob", blob.object_id])
+        if len(content) != blob_bytes:
+            raise UnsafeCandidateTreeError(
+                "candidate changed blob content is incomplete"
+            )
+        if not _is_text_blob(content):
+            media_type = _permitted_binary_type(blob.path, content)
+            if media_type is None:
+                permitted = ", ".join(_PERMITTED_BINARY_TYPES)
+                raise UnsafeCandidateTreeError(
+                    "candidate changed blob has an unsupported binary type; "
+                    f"permitted types: {permitted}"
+                )
+        kinds = secret_kinds(content, max_bytes=_MAX_CHANGED_BLOB_BYTES)
+        if kinds:
+            descriptions = ", ".join(kind.replace("_", " ") for kind in kinds)
+            raise UnsafeCandidateTreeError(
+                "candidate changed blob contains possible "
+                f"{descriptions} secret material"
+            )
+
+
 class GitBranchPublisher:
     """Reconstruct a candidate with read authority, then push with JIT write."""
 
@@ -336,6 +538,10 @@ class GitBranchPublisher:
                 raise BranchPublicationError(
                     "controller-reconstructed tree does not match the gated candidate"
                 )
+            # This is the authoritative content boundary. The index's exact tree
+            # identity is already proven, while the caller cannot mint/use its
+            # write token until this context manager yields.
+            await _scan_changed_blobs(workspace, expected_base_sha)
             await _run_git(
                 workspace,
                 [

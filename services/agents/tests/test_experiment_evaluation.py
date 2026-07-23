@@ -16,6 +16,7 @@ def _config_experiment(key: str, status: str = "completed") -> dict:
     return {
         "key": key,
         "flag_key": key,
+        "bucket_by": "anonymous_id",
         "status": status,
         "description": "Checkout evidence",
         "default_variant": "control",
@@ -130,6 +131,19 @@ def test_experiment_evaluation_is_enabled_but_has_no_verdict_surface():
     assert registered["experiment_evaluation"] is ExperimentEvaluationAgent
     assert ExperimentEvaluationAgent.enabled is True
     assert ExperimentEvaluationAgent.produces == "experiment_evidence_summaries"
+
+
+@pytest.mark.parametrize("bucket_by", ["account_id", "", None])
+def test_config_experiment_identity_is_exact_and_required(bucket_by) -> None:
+    experiment = _config_experiment("exp_checkout")
+    experiment["bucket_by"] = bucket_by
+
+    with pytest.raises(ValueError, match="bucket_by is not canonical"):
+        evaluation._completed_experiment_keys([experiment])
+
+    del experiment["bucket_by"]
+    with pytest.raises(ValueError, match="canonical list schema"):
+        evaluation._completed_experiment_keys([experiment])
 
 
 @pytest.mark.asyncio

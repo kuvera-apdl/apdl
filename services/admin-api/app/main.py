@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app import auth, credentials, projects, proxy
 from app.config import Settings
+from app.request_body_limit import RequestBodyLimitMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,8 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")

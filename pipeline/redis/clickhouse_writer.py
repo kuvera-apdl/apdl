@@ -13,6 +13,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -49,11 +50,63 @@ SHUTDOWN_TIMEOUT_SECONDS = 10.0
 EVENT_STREAM_MAX_ENTRIES = 1_000_000
 EVENT_STREAM_ALERT_ENTRIES = 750_000
 EVENT_STREAM_ALERT_LOG_INTERVAL_SECONDS = 30.0
+MAX_EVENT_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_EVENT_FUTURE_SKEW_SECONDS = 5 * 60
 STREAM_DISCOVERY_INTERVAL_SECONDS = 5.0
 BOUNDARY_MARKER_POLL_INTERVAL_SECONDS = 1.0
+BOUNDARY_MARKER_MAX_PUBLISH_ATTEMPTS = 5
+BOUNDARY_MARKER_RETRY_BASE_SECONDS = 1
+BOUNDARY_MARKER_RETRY_MAX_SECONDS = 30
+BOUNDARY_MARKER_POSTGRES_MIGRATION_VERSION = 41
+BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME = (
+    "041_boundary_marker_retry_quarantine.sql"
+)
+BOUNDARY_MARKER_POSTGRES_MIGRATION_SHA256 = (
+    "4ea72fa9dd3589f85ee2077db439bf34611c5d9055b1664e9f06de5f9a21efa2"
+)
+BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256 = {
+    "experiment_analysis_boundaries_observed_stream_identity": (
+        "6a8b46cf5323467989510364cbf402f1fb40a4e206e5c5e9399a902b59249e82"
+    ),
+    "experiment_analysis_boundaries_publish_attempts_check": (
+        "a930d5e0fbe3bc2272dde1020c60fd964f013d845f7b637448efbaa2c44de9be"
+    ),
+    "experiment_analysis_boundaries_publish_failure_check": (
+        "dfc4f92db0bbfcae89d9f7fee981952a1414803702d9178ab27ef9cf1f681a47"
+    ),
+    "experiment_analysis_boundaries_publish_history_check": (
+        "d6eef08f418bde62750f9459dc8bf1370ffb36a22730e3909c5b22556bec50b8"
+    ),
+    "experiment_analysis_boundaries_publish_observed_id_check": (
+        "5a8c83223f1ea621195fbd023cea4d8988928a7cf96a489204653908c41b4135"
+    ),
+    "experiment_analysis_boundaries_publish_state_check": (
+        "fd7314c5e9244bb399ab84d7f46502eb69117cbeed76f51e3425c8f68d2421d6"
+    ),
+}
+BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME = (
+    "experiment_analysis_boundaries_immutable"
+)
+BOUNDARY_MARKER_POSTGRES_TRIGGER_DEFINITION = (
+    "CREATE TRIGGER experiment_analysis_boundaries_immutable "
+    "BEFORE DELETE OR UPDATE ON public.experiment_analysis_boundaries "
+    "FOR EACH ROW EXECUTE FUNCTION "
+    "enforce_experiment_analysis_boundary_immutability()"
+)
+BOUNDARY_MARKER_POSTGRES_FUNCTION_NAME = (
+    "enforce_experiment_analysis_boundary_immutability"
+)
+BOUNDARY_MARKER_POSTGRES_FUNCTION_SHA256 = (
+    "b36fa821b1282b925e46cdc2de883d0bf07dedebdc487cbf1df2c1099eb8a55e"
+)
+BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT = (
+    "experiment_analysis_boundaries_observed_stream_identity"
+)
+DURABLE_ACK_AUTHORITY_TIMEOUT_SECONDS = 5.0
 REDIS_MEMORY_ALERT_RATIO = 0.75
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
+WRITER_SINGLETON_LOCK_ID = 4_158_044_085
 MAINTENANCE_INHIBITOR_LOCK_IDS = tuple(
     sorted((MAINTENANCE_INHIBITOR_LOCK_ID, MAINTENANCE_GUARD_LOCK_ID))
 )
@@ -116,6 +169,218 @@ EVENT_INSERT_QUERY = (
 )
 
 
+async def _acquire_writer_singleton(connection) -> None:
+    """Fail closed unless this backend owns the only writer authority."""
+    acquired = await connection.fetchval(
+        "SELECT pg_try_advisory_lock($1)",
+        WRITER_SINGLETON_LOCK_ID,
+    )
+    if acquired is not True:
+        raise RuntimeError(
+            "Another ClickHouse writer owns the singleton consumer-group authority"
+        )
+    logger.info("Acquired singleton ClickHouse writer authority")
+
+
+async def _assert_boundary_marker_schema(connection) -> None:
+    """Require exact H-10 state before taking singleton runtime authority."""
+    ledger_exists = await connection.fetchval(
+        "SELECT to_regclass('public.apdl_schema_migrations') IS NOT NULL"
+    )
+    if ledger_exists is not True:
+        raise RuntimeError("PostgreSQL migration ledger is missing")
+
+    migration = await connection.fetchrow(
+        """
+        SELECT name, checksum
+        FROM public.apdl_schema_migrations
+        WHERE version = $1
+        """,
+        BOUNDARY_MARKER_POSTGRES_MIGRATION_VERSION,
+    )
+    if (
+        migration is None
+        or migration["name"] != BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME
+        or migration["checksum"] != BOUNDARY_MARKER_POSTGRES_MIGRATION_SHA256
+    ):
+        raise RuntimeError(
+            "Required boundary marker PostgreSQL migration is not exact"
+        )
+
+    required_columns = {
+        "marker_publish_state": ("text", "NO", "'pending'::text"),
+        "marker_publish_attempts": ("int2", "NO", "0"),
+        "marker_publish_next_attempt_at": (
+            "timestamptz",
+            "YES",
+            "now()",
+        ),
+        "marker_publish_failure_code": ("text", "YES", None),
+        "marker_publish_last_error_at": ("timestamptz", "YES", None),
+        "marker_publish_quarantined_at": ("timestamptz", "YES", None),
+        "marker_publish_observed_stream_id": ("text", "YES", None),
+    }
+    column_rows = await connection.fetch(
+        """
+        SELECT column_name, udt_name, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'experiment_analysis_boundaries'
+          AND column_name = ANY($1::text[])
+        """,
+        sorted(required_columns),
+    )
+    observed_columns = {
+        row["column_name"]: (
+            row["udt_name"],
+            row["is_nullable"],
+            row["column_default"],
+        )
+        for row in column_rows
+    }
+    if observed_columns != required_columns:
+        raise RuntimeError("Boundary marker PostgreSQL columns are not exact")
+
+    constraint_rows = await connection.fetch(
+        """
+        SELECT
+            constraint_record.conname,
+            constraint_record.contype::text AS contype,
+            constraint_record.condeferrable,
+            constraint_record.condeferred,
+            constraint_record.convalidated,
+            pg_get_constraintdef(
+                constraint_record.oid,
+                false
+            ) AS definition
+        FROM pg_catalog.pg_constraint AS constraint_record
+        WHERE constraint_record.conrelid =
+            'public.experiment_analysis_boundaries'::regclass
+          AND constraint_record.conname = ANY($1::text[])
+        """,
+        sorted(BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256),
+    )
+    if {
+        row["conname"] for row in constraint_rows
+    } != set(BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256):
+        raise RuntimeError(
+            "Boundary marker PostgreSQL constraints are incomplete"
+        )
+    for row in constraint_rows:
+        constraint_name = row["conname"]
+        expected_type = (
+            "u"
+            if constraint_name
+            == BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT
+            else "c"
+        )
+        definition = row["definition"]
+        definition_sha256 = (
+            hashlib.sha256(definition.encode("utf-8")).hexdigest()
+            if isinstance(definition, str)
+            else None
+        )
+        if (
+            row["contype"] != expected_type
+            or row["condeferrable"] is not False
+            or row["condeferred"] is not False
+            or row["convalidated"] is not True
+            or definition_sha256
+            != BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256[constraint_name]
+        ):
+            raise RuntimeError(
+                "Boundary marker PostgreSQL state constraint is not exact"
+            )
+
+    trigger = await connection.fetchrow(
+        """
+        SELECT
+            trigger_record.tgname,
+            trigger_record.tgenabled::text AS tgenabled,
+            trigger_record.tgtype,
+            trigger_record.tgisinternal,
+            pg_get_triggerdef(trigger_record.oid, false)
+                AS trigger_definition,
+            function_namespace.nspname AS function_schema,
+            function_record.proname AS function_name,
+            function_record.prokind::text AS prokind,
+            function_record.prosecdef,
+            function_record.proleakproof,
+            function_record.provolatile::text AS provolatile,
+            function_record.proparallel::text AS proparallel,
+            function_record.proconfig,
+            function_record.pronargs,
+            function_record.prorettype::regtype::text AS return_type,
+            pg_get_functiondef(function_record.oid)
+                AS function_definition
+        FROM pg_catalog.pg_trigger AS trigger_record
+        JOIN pg_catalog.pg_proc AS function_record
+          ON function_record.oid = trigger_record.tgfoid
+        JOIN pg_catalog.pg_namespace AS function_namespace
+          ON function_namespace.oid = function_record.pronamespace
+        WHERE trigger_record.tgrelid =
+            'public.experiment_analysis_boundaries'::regclass
+          AND trigger_record.tgname = $1
+          AND NOT trigger_record.tgisinternal
+        """,
+        BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME,
+    )
+    function_definition = (
+        trigger["function_definition"] if trigger is not None else None
+    )
+    function_sha256 = (
+        hashlib.sha256(function_definition.encode("utf-8")).hexdigest()
+        if isinstance(function_definition, str)
+        else None
+    )
+    if (
+        trigger is None
+        or trigger["tgname"] != BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME
+        or trigger["tgenabled"] != "O"
+        or trigger["tgtype"] != 27
+        or trigger["tgisinternal"] is not False
+        or trigger["trigger_definition"]
+        != BOUNDARY_MARKER_POSTGRES_TRIGGER_DEFINITION
+        or trigger["function_schema"] != "public"
+        or trigger["function_name"]
+        != BOUNDARY_MARKER_POSTGRES_FUNCTION_NAME
+        or trigger["prokind"] != "f"
+        or trigger["prosecdef"] is not False
+        or trigger["proleakproof"] is not False
+        or trigger["provolatile"] != "v"
+        or trigger["proparallel"] != "u"
+        or trigger["proconfig"] != ["search_path=pg_catalog, public"]
+        or trigger["pronargs"] != 0
+        or trigger["return_type"] != "trigger"
+        or function_sha256 != BOUNDARY_MARKER_POSTGRES_FUNCTION_SHA256
+    ):
+        raise RuntimeError(
+            "Boundary marker PostgreSQL state trigger is not exact"
+        )
+
+
+async def _heartbeat_writer_singleton(connection) -> None:
+    """Prove the checked-out backend still owns singleton writer authority."""
+    held_lock_count = await connection.fetchval(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_locks
+        WHERE pid = pg_backend_pid()
+          AND locktype = 'advisory'
+          AND mode = 'ExclusiveLock'
+          AND granted
+          AND classid = 0
+          AND objsubid = 1
+          AND objid = ($1::bigint)::oid
+        """,
+        WRITER_SINGLETON_LOCK_ID,
+    )
+    if held_lock_count != 1:
+        raise RuntimeError(
+            "PostgreSQL backend no longer holds singleton writer authority"
+        )
+
+
 async def _acquire_maintenance_inhibitor(connection) -> None:
     """Acquire both shared locks in one canonical order on this backend."""
     for lock_id in MAINTENANCE_INHIBITOR_LOCK_IDS:
@@ -153,6 +418,7 @@ async def _monitor_maintenance_inhibitor(
     connection_lost: asyncio.Event,
     *,
     heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+    require_writer_singleton: bool = False,
 ) -> None:
     """Fence writes when one inhibitor connection becomes uncertain."""
     while not connection_lost.is_set():
@@ -167,6 +433,11 @@ async def _monitor_maintenance_inhibitor(
                     _heartbeat_maintenance_inhibitor(connection),
                     timeout=heartbeat_seconds,
                 )
+                if require_writer_singleton:
+                    await asyncio.wait_for(
+                        _heartbeat_writer_singleton(connection),
+                        timeout=heartbeat_seconds,
+                    )
             except asyncio.CancelledError:
                 raise
             except BaseException:
@@ -222,6 +493,7 @@ CANONICAL_REQUIRED_EVENT_FIELDS = frozenset(
         "event",
         "type",
         "timestamp",
+        "server_timestamp",
         "context",
         "message_id",
     }
@@ -230,10 +502,78 @@ BOUNDARY_MARKER_KIND = "experiment_analysis_boundary"
 BOUNDARY_MARKER_FIELDS = frozenset({"message_kind", "boundary_token"})
 BOUNDARY_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 BOUNDARY_MARKER_DEDUP_PREFIX = "analysis:boundary:"
+BOUNDARY_MARKER_DEDUP_INVALID_REPLY = "BOUNDARY_MARKER_DEDUP_INVALID"
+BOUNDARY_MARKER_TRANSIENT_FAILURE_CODES = frozenset(
+    {
+        "event_stream_capacity",
+        "redis_publish_failed",
+        "boundary_authority_update_failed",
+        "unexpected_publish_failure",
+    }
+)
+BOUNDARY_MARKER_TERMINAL_FAILURE_CODES = frozenset(
+    {
+        "invalid_redis_marker_id",
+        "boundary_authority_update_invalid",
+        "invalid_boundary_marker_dedup",
+        "invalid_stream_authority",
+        "invalid_marker_token",
+    }
+)
+BOUNDARY_MARKER_FAILURE_CODES = (
+    BOUNDARY_MARKER_TRANSIENT_FAILURE_CODES
+    | BOUNDARY_MARKER_TERMINAL_FAILURE_CODES
+)
 BOUNDARY_MARKER_LUA = """
-local existing = redis.call('GET', KEYS[2])
+local function invalid_dedup(existing_id)
+    return {'BOUNDARY_MARKER_DEDUP_INVALID', existing_id or ''}
+end
+
+local existing_reply = redis.pcall('GET', KEYS[2])
+if type(existing_reply) == 'table' and existing_reply.err then
+    return invalid_dedup(nil)
+end
+local existing = existing_reply
 if existing then
+    if ARGV[4] ~= '' and existing ~= ARGV[4] then
+        return invalid_dedup(existing)
+    end
+    local entries = redis.pcall(
+        'XRANGE',
+        KEYS[1],
+        existing,
+        existing,
+        'COUNT',
+        1
+    )
+    if type(entries) == 'table' and entries.err then
+        return invalid_dedup(existing)
+    end
+    if #entries ~= 1 or entries[1][1] ~= existing then
+        return invalid_dedup(existing)
+    end
+    local fields = entries[1][2]
+    if #fields ~= 4 then
+        return invalid_dedup(existing)
+    end
+    local observed_kind = nil
+    local observed_token = nil
+    for index = 1, #fields, 2 do
+        if fields[index] == 'message_kind' and observed_kind == nil then
+            observed_kind = fields[index + 1]
+        elseif fields[index] == 'boundary_token' and observed_token == nil then
+            observed_token = fields[index + 1]
+        else
+            return invalid_dedup(existing)
+        end
+    end
+    if observed_kind ~= ARGV[2] or observed_token ~= ARGV[3] then
+        return invalid_dedup(existing)
+    end
     return existing
+end
+if ARGV[4] ~= '' then
+    return invalid_dedup(nil)
 end
 local current_entries = redis.call('XLEN', KEYS[1])
 if current_entries >= tonumber(ARGV[1]) then
@@ -281,6 +621,41 @@ class InFlightInsert:
     query_id: str
 
 
+@dataclass(frozen=True)
+class PendingBoundaryMarker:
+    """One database-authoritative marker publication attempt."""
+
+    project_id: str
+    experiment_key: str
+    config_version: int
+    stream_key: Any
+    marker_token: Any
+    publish_attempts: int
+    observed_stream_id: Any = None
+
+
+class BoundaryMarkerPublishError(RuntimeError):
+    """A safe, classified marker failure suitable for durable retry state."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        terminal: bool,
+        observed_stream_id: str | None = None,
+    ):
+        if code not in BOUNDARY_MARKER_FAILURE_CODES:
+            raise ValueError("boundary marker failure code is not canonical")
+        if terminal != (code in BOUNDARY_MARKER_TERMINAL_FAILURE_CODES):
+            raise ValueError(
+                "boundary marker failure terminal classification is invalid"
+            )
+        super().__init__(code)
+        self.code = code
+        self.terminal = terminal
+        self.observed_stream_id = observed_stream_id
+
+
 class ClickHouseWriter:
     """Consumes events from Redis Streams and writes to ClickHouse in batches."""
 
@@ -302,6 +677,9 @@ class ClickHouseWriter:
             CLICKHOUSE_SYNC_REQUEST_TIMEOUT_SECONDS
         ),
         shutdown_timeout: float = SHUTDOWN_TIMEOUT_SECONDS,
+        durable_ack_authority_timeout: float = (
+            DURABLE_ACK_AUTHORITY_TIMEOUT_SECONDS
+        ),
         authority_pool=None,
         boundary_marker_poll_interval: float = (BOUNDARY_MARKER_POLL_INTERVAL_SECONDS),
     ):
@@ -318,6 +696,7 @@ class ClickHouseWriter:
             ("clickhouse_send_receive_timeout", clickhouse_send_receive_timeout),
             ("clickhouse_sync_request_timeout", clickhouse_sync_request_timeout),
             ("shutdown_timeout", shutdown_timeout),
+            ("durable_ack_authority_timeout", durable_ack_authority_timeout),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -355,6 +734,7 @@ class ClickHouseWriter:
         self.pending_claim_interval = pending_claim_interval
         self.stream_discovery_interval = stream_discovery_interval
         self.shutdown_timeout = shutdown_timeout
+        self.durable_ack_authority_timeout = durable_ack_authority_timeout
         self.authority_pool = authority_pool
         self.boundary_marker_poll_interval = boundary_marker_poll_interval
         self.running = False
@@ -368,6 +748,9 @@ class ClickHouseWriter:
             "rejected": 0,
             "dead_lettered": 0,
             "lost_or_deleted_pending": 0,
+            "boundary_markers_published": 0,
+            "boundary_markers_retried": 0,
+            "boundary_markers_quarantined": 0,
             "errors": 0,
         }
         self._flush_retry_count = 0
@@ -825,8 +1208,22 @@ class ClickHouseWriter:
                     # No streams found yet, wait and retry
                     await asyncio.sleep(2.0)
                     continue
+                readable_stream_keys = [
+                    stream_key
+                    for stream_key in stream_keys
+                    if not self._delivery_is_backpressured(stream_key)
+                ]
+                if not readable_stream_keys:
+                    # Durable rows for these exact streams are still awaiting
+                    # finalization. The flush loop retries them independently;
+                    # do not redeliver more work from a blocked tenant.
+                    await asyncio.sleep(1.0)
+                    continue
 
-                stream_key = self._next_stream_key(stream_keys, pending=False)
+                stream_key = self._next_stream_key(
+                    readable_stream_keys,
+                    pending=False,
+                )
                 remaining = self._remaining_capacity()
                 if remaining <= 0:
                     continue
@@ -840,7 +1237,7 @@ class ClickHouseWriter:
                     consumername=self.consumer_name,
                     streams={stream_key: ">"},
                     count=remaining,
-                    block=max(1, 1000 // len(stream_keys)),
+                    block=max(1, 1000 // len(readable_stream_keys)),
                 )
 
                 if results:
@@ -869,6 +1266,10 @@ class ClickHouseWriter:
         stream_keys = await self._get_stream_keys(project_ids)
 
         for stream_key in self._rotated_stream_keys(stream_keys, pending=True):
+            if self._delivery_is_backpressured(stream_key):
+                # A failed PostgreSQL verification/frontier transaction for one
+                # tenant must not prevent pending sweeps for every other stream.
+                continue
             if self._delivery_is_backpressured():
                 if not await self._flush_after_retry_deadline():
                     return
@@ -1012,71 +1413,598 @@ class ClickHouseWriter:
         async with self.authority_pool.acquire() as connection:
             rows = await connection.fetch(
                 """
-                SELECT project_id, stream_key, marker_token
-                FROM experiment_analysis_boundaries
-                WHERE marker_stream_id IS NULL
-                  AND ($1::text[] IS NULL OR project_id = ANY($1::text[]))
-                ORDER BY requested_at, project_id, experiment_key, config_version
+                WITH due_markers AS (
+                    SELECT
+                        project_id,
+                        experiment_key,
+                        config_version,
+                        stream_key,
+                        marker_token,
+                        marker_publish_attempts,
+                        marker_publish_observed_stream_id,
+                        marker_publish_next_attempt_at,
+                        requested_at,
+                        row_number() OVER (
+                            PARTITION BY project_id
+                            ORDER BY
+                                marker_publish_next_attempt_at,
+                                requested_at,
+                                experiment_key,
+                                config_version
+                        ) AS project_rank
+                    FROM experiment_analysis_boundaries
+                    WHERE marker_publish_state = 'pending'
+                      AND marker_stream_id IS NULL
+                      AND marker_publish_next_attempt_at <= clock_timestamp()
+                      AND (
+                          $1::text[] IS NULL
+                          OR project_id = ANY($1::text[])
+                      )
+                )
+                SELECT
+                    project_id,
+                    experiment_key,
+                    config_version,
+                    stream_key,
+                    marker_token,
+                    marker_publish_attempts,
+                    marker_publish_observed_stream_id
+                FROM due_markers
+                WHERE project_rank = 1
+                ORDER BY
+                    marker_publish_next_attempt_at,
+                    requested_at,
+                    project_id,
+                    experiment_key,
+                    config_version
                 LIMIT 100
                 """,
                 project_ids,
             )
 
         for row in rows:
-            project_id = self._postgres_value(row, "project_id")
-            stream_key = self._postgres_value(row, "stream_key")
-            marker_token = self._postgres_value(row, "marker_token")
-            if stream_key != self._stream_key_for_project(project_id):
-                raise RuntimeError("experiment boundary stream authority is invalid")
-            if (
-                not isinstance(marker_token, str)
-                or BOUNDARY_TOKEN_PATTERN.fullmatch(marker_token) is None
-            ):
-                raise RuntimeError("experiment boundary marker token is invalid")
+            try:
+                marker = self._pending_boundary_marker(row)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.stats["errors"] += 1
+                logger.error(
+                    "Boundary marker row could not be identified; continuing "
+                    "with other tenants: %s",
+                    exc,
+                )
+                continue
 
+            try:
+                await self._publish_one_boundary_marker(marker)
+            except asyncio.CancelledError:
+                raise
+            except BoundaryMarkerPublishError as exc:
+                self.stats["errors"] += 1
+                try:
+                    state = await self._record_boundary_marker_failure(marker, exc)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as state_exc:
+                    logger.error(
+                        "Boundary marker failure state could not be persisted "
+                        "for project=%s experiment=%s version=%d; continuing "
+                        "with other tenants: %s",
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                        state_exc,
+                    )
+                    continue
+                if state == "published":
+                    self.stats["boundary_markers_published"] += 1
+                    continue
+                if state == "quarantined":
+                    self.stats["boundary_markers_quarantined"] += 1
+                    logger.error(
+                        "Boundary marker terminally quarantined "
+                        "project=%s experiment=%s version=%d failure_code=%s",
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                        exc.code,
+                    )
+                else:
+                    self.stats["boundary_markers_retried"] += 1
+                    logger.warning(
+                        "Boundary marker publication deferred "
+                        "project=%s experiment=%s version=%d failure_code=%s",
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                        exc.code,
+                    )
+                continue
+            except Exception as exc:
+                self.stats["errors"] += 1
+                failure = BoundaryMarkerPublishError(
+                    "unexpected_publish_failure",
+                    terminal=False,
+                )
+                try:
+                    state = await self._record_boundary_marker_failure(
+                        marker,
+                        failure,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as state_exc:
+                    logger.error(
+                        "Unexpected boundary marker failure and retry-state "
+                        "persistence both failed for project=%s experiment=%s "
+                        "version=%d; continuing with other tenants: %s / %s",
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                        exc,
+                        state_exc,
+                    )
+                    continue
+                if state == "published":
+                    self.stats["boundary_markers_published"] += 1
+                elif state == "quarantined":
+                    self.stats["boundary_markers_quarantined"] += 1
+                else:
+                    self.stats["boundary_markers_retried"] += 1
+                logger.exception(
+                    "Unexpected boundary marker publication failure isolated "
+                    "for project=%s experiment=%s version=%d",
+                    marker.project_id,
+                    marker.experiment_key,
+                    marker.config_version,
+                )
+                continue
+
+            self.stats["boundary_markers_published"] += 1
+
+    @classmethod
+    def _pending_boundary_marker(cls, row) -> PendingBoundaryMarker:
+        project_id = cls._postgres_value(row, "project_id")
+        experiment_key = cls._postgres_value(row, "experiment_key")
+        config_version = cls._postgres_value(row, "config_version")
+        publish_attempts = cls._postgres_value(
+            row,
+            "marker_publish_attempts",
+        )
+        observed_stream_id = cls._postgres_value(
+            row,
+            "marker_publish_observed_stream_id",
+        )
+        if (
+            not isinstance(project_id, str)
+            or PROJECT_ID_PATTERN.fullmatch(project_id) is None
+        ):
+            raise RuntimeError("boundary marker project identity is invalid")
+        if not isinstance(experiment_key, str) or not experiment_key:
+            raise RuntimeError("boundary marker experiment identity is invalid")
+        if type(config_version) is not int or config_version <= 0:
+            raise RuntimeError("boundary marker config version is invalid")
+        if (
+            type(publish_attempts) is not int
+            or publish_attempts < 0
+            or publish_attempts >= BOUNDARY_MARKER_MAX_PUBLISH_ATTEMPTS
+        ):
+            raise RuntimeError("boundary marker publish attempts are invalid")
+        if observed_stream_id is not None:
+            try:
+                observed_parts = cls._stream_id_parts(observed_stream_id)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "boundary marker observed stream ID is invalid"
+                ) from exc
+            if observed_parts[0] == 0:
+                raise RuntimeError(
+                    "boundary marker observed stream ID is invalid"
+                )
+        return PendingBoundaryMarker(
+            project_id=project_id,
+            experiment_key=experiment_key,
+            config_version=config_version,
+            stream_key=cls._postgres_value(row, "stream_key"),
+            marker_token=cls._postgres_value(row, "marker_token"),
+            publish_attempts=publish_attempts,
+            observed_stream_id=observed_stream_id,
+        )
+
+    async def _publish_one_boundary_marker(
+        self,
+        marker: PendingBoundaryMarker,
+    ) -> None:
+        expected_stream_key = self._stream_key_for_project(marker.project_id)
+        if marker.stream_key != expected_stream_key:
+            raise BoundaryMarkerPublishError(
+                "invalid_stream_authority",
+                terminal=True,
+            )
+        if (
+            not isinstance(marker.marker_token, str)
+            or BOUNDARY_TOKEN_PATTERN.fullmatch(marker.marker_token) is None
+        ):
+            raise BoundaryMarkerPublishError(
+                "invalid_marker_token",
+                terminal=True,
+            )
+
+        try:
             marker_stream_id = await self.redis_client.eval(
                 BOUNDARY_MARKER_LUA,
                 2,
-                stream_key,
-                f"{BOUNDARY_MARKER_DEDUP_PREFIX}{marker_token}",
+                marker.stream_key,
+                f"{BOUNDARY_MARKER_DEDUP_PREFIX}{marker.marker_token}",
                 EVENT_STREAM_MAX_ENTRIES,
                 BOUNDARY_MARKER_KIND,
-                marker_token,
+                marker.marker_token,
+                marker.observed_stream_id or "",
             )
-            if isinstance(marker_stream_id, bytes):
-                marker_stream_id = marker_stream_id.decode()
-            self._stream_id_parts(marker_stream_id)
+        except asyncio.CancelledError:
+            raise
+        except redis.ResponseError as exc:
+            message = str(exc)
+            if "BOUNDARY_MARKER_DEDUP_INVALID" in message:
+                raise BoundaryMarkerPublishError(
+                    "invalid_boundary_marker_dedup",
+                    terminal=True,
+                ) from exc
+            code = (
+                "event_stream_capacity"
+                if "EVENT_STREAM_CAPACITY_REACHED" in message
+                else "redis_publish_failed"
+            )
+            raise BoundaryMarkerPublishError(
+                code,
+                terminal=False,
+            ) from exc
+        except Exception as exc:
+            raise BoundaryMarkerPublishError(
+                "redis_publish_failed",
+                terminal=False,
+            ) from exc
 
+        if isinstance(marker_stream_id, (list, tuple)):
+            invalid_observed_stream_id = None
+            reply_code = marker_stream_id[0] if marker_stream_id else None
+            if isinstance(reply_code, bytes):
+                try:
+                    reply_code = reply_code.decode("utf-8")
+                except UnicodeDecodeError:
+                    reply_code = None
+            if (
+                len(marker_stream_id) == 2
+                and reply_code == BOUNDARY_MARKER_DEDUP_INVALID_REPLY
+            ):
+                candidate = marker_stream_id[1]
+                if isinstance(candidate, bytes):
+                    try:
+                        candidate = candidate.decode("utf-8")
+                    except UnicodeDecodeError:
+                        candidate = None
+                try:
+                    candidate_parts = self._stream_id_parts(candidate)
+                except ValueError:
+                    candidate_parts = None
+                if candidate_parts is not None and candidate_parts[0] > 0:
+                    invalid_observed_stream_id = candidate
+                if marker.observed_stream_id is not None:
+                    # The first validated observation is monotone authority.
+                    # A later dedup mutation must quarantine, never replace it.
+                    invalid_observed_stream_id = marker.observed_stream_id
+                raise BoundaryMarkerPublishError(
+                    "invalid_boundary_marker_dedup",
+                    terminal=True,
+                    observed_stream_id=invalid_observed_stream_id,
+                )
+            raise BoundaryMarkerPublishError(
+                "invalid_redis_marker_id",
+                terminal=True,
+            )
+
+        if isinstance(marker_stream_id, bytes):
+            try:
+                marker_stream_id = marker_stream_id.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BoundaryMarkerPublishError(
+                    "invalid_redis_marker_id",
+                    terminal=True,
+                ) from exc
+        try:
+            marker_parts = self._stream_id_parts(marker_stream_id)
+        except ValueError as exc:
+            raise BoundaryMarkerPublishError(
+                "invalid_redis_marker_id",
+                terminal=True,
+            ) from exc
+        if marker_parts[0] == 0:
+            raise BoundaryMarkerPublishError(
+                "invalid_redis_marker_id",
+                terminal=True,
+            )
+        if (
+            marker.observed_stream_id is not None
+            and marker.observed_stream_id != marker_stream_id
+        ):
+            raise BoundaryMarkerPublishError(
+                "invalid_boundary_marker_dedup",
+                terminal=True,
+            )
+
+        try:
             async with self.authority_pool.acquire() as connection:
-                result = await connection.execute(
-                    """
-                    UPDATE experiment_analysis_boundaries
-                    SET marker_stream_id = $4,
-                        marked_at = now()
-                    WHERE project_id = $1
-                      AND marker_token = $2
-                      AND stream_key = $3
-                      AND marker_stream_id IS NULL
-                    """,
-                    project_id,
-                    marker_token,
-                    stream_key,
-                    marker_stream_id,
-                )
-                if result not in {"UPDATE 0", "UPDATE 1"}:
-                    raise RuntimeError("boundary marker update returned invalid result")
-                stored = await connection.fetchval(
-                    """
-                    SELECT marker_stream_id
-                    FROM experiment_analysis_boundaries
-                    WHERE project_id = $1
-                      AND marker_token = $2
-                    """,
-                    project_id,
-                    marker_token,
-                )
-            if stored != marker_stream_id:
-                raise RuntimeError("boundary marker identity changed concurrently")
+                async with connection.transaction():
+                    stored = await connection.fetchrow(
+                        """
+                        UPDATE experiment_analysis_boundaries
+                        SET marker_stream_id = $6,
+                            marked_at = clock_timestamp(),
+                            marker_publish_state = 'published',
+                            marker_publish_next_attempt_at = NULL,
+                            marker_publish_quarantined_at = NULL,
+                            marker_publish_observed_stream_id = $6
+                        WHERE project_id = $1
+                          AND experiment_key = $2
+                          AND config_version = $3
+                          AND stream_key = $4
+                          AND marker_token = $5
+                          AND marker_publish_state = 'pending'
+                          AND marker_publish_attempts = $7
+                          AND marker_stream_id IS NULL
+                        RETURNING
+                            marker_publish_state,
+                            marker_stream_id,
+                            marker_publish_observed_stream_id
+                        """,
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                        marker.stream_key,
+                        marker.marker_token,
+                        marker_stream_id,
+                        marker.publish_attempts,
+                    )
+                    if stored is None:
+                        stored = await connection.fetchrow(
+                            """
+                            SELECT
+                                marker_publish_state,
+                                marker_stream_id,
+                                marker_publish_observed_stream_id
+                            FROM experiment_analysis_boundaries
+                            WHERE project_id = $1
+                              AND experiment_key = $2
+                              AND config_version = $3
+                            FOR SHARE
+                            """,
+                            marker.project_id,
+                            marker.experiment_key,
+                            marker.config_version,
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise BoundaryMarkerPublishError(
+                "boundary_authority_update_failed",
+                terminal=False,
+                observed_stream_id=marker_stream_id,
+            ) from exc
+
+        if stored is None:
+            raise BoundaryMarkerPublishError(
+                "boundary_authority_update_invalid",
+                terminal=True,
+                observed_stream_id=marker_stream_id,
+            )
+        if (
+            self._postgres_value(stored, "marker_publish_state") != "published"
+            or self._postgres_value(stored, "marker_stream_id")
+            != marker_stream_id
+            or self._postgres_value(
+                stored,
+                "marker_publish_observed_stream_id",
+            )
+            != marker_stream_id
+        ):
+            raise BoundaryMarkerPublishError(
+                "boundary_authority_update_invalid",
+                terminal=True,
+                observed_stream_id=marker_stream_id,
+            )
+
+    @staticmethod
+    def _boundary_marker_retry_delay(new_attempt: int) -> int:
+        if (
+            type(new_attempt) is not int
+            or new_attempt <= 0
+            or new_attempt >= BOUNDARY_MARKER_MAX_PUBLISH_ATTEMPTS
+        ):
+            raise ValueError("boundary marker retry attempt is out of range")
+        return min(
+            BOUNDARY_MARKER_RETRY_BASE_SECONDS * (2 ** (new_attempt - 1)),
+            BOUNDARY_MARKER_RETRY_MAX_SECONDS,
+        )
+
+    @staticmethod
+    async def _update_boundary_marker_failure(
+        connection,
+        marker: PendingBoundaryMarker,
+        failure: BoundaryMarkerPublishError,
+        *,
+        quarantined: bool,
+        retry_delay: int,
+        observed_stream_id: str | None,
+    ):
+        return await connection.fetchrow(
+            """
+            WITH failure_clock AS (
+                SELECT clock_timestamp() AS failed_at
+            )
+            UPDATE experiment_analysis_boundaries AS boundary
+            SET marker_publish_attempts =
+                    boundary.marker_publish_attempts + 1,
+                marker_publish_state = CASE
+                    WHEN $6::boolean
+                        OR boundary.marker_publish_attempts + 1 >= $8
+                    THEN 'quarantined'
+                    ELSE 'pending'
+                END,
+                marker_publish_next_attempt_at = CASE
+                    WHEN $6::boolean
+                        OR boundary.marker_publish_attempts + 1 >= $8
+                    THEN NULL
+                    ELSE failure_clock.failed_at
+                        + $7::integer * INTERVAL '1 second'
+                END,
+                marker_publish_failure_code = $5,
+                marker_publish_last_error_at = failure_clock.failed_at,
+                marker_publish_observed_stream_id = COALESCE(
+                    boundary.marker_publish_observed_stream_id,
+                    $9::text
+                ),
+                marker_publish_quarantined_at = CASE
+                    WHEN $6::boolean
+                        OR boundary.marker_publish_attempts + 1 >= $8
+                    THEN failure_clock.failed_at
+                    ELSE NULL
+                END
+            FROM failure_clock
+            WHERE boundary.project_id = $1
+              AND boundary.experiment_key = $2
+              AND boundary.config_version = $3
+              AND boundary.marker_publish_state = 'pending'
+              AND boundary.marker_publish_attempts = $4
+              AND boundary.marker_stream_id IS NULL
+              AND (
+                  boundary.marker_publish_observed_stream_id IS NULL
+                  OR $9::text IS NULL
+                  OR boundary.marker_publish_observed_stream_id = $9
+              )
+            RETURNING
+                boundary.marker_publish_state,
+                boundary.marker_publish_attempts,
+                boundary.marker_publish_observed_stream_id
+            """,
+            marker.project_id,
+            marker.experiment_key,
+            marker.config_version,
+            marker.publish_attempts,
+            failure.code,
+            quarantined,
+            retry_delay,
+            BOUNDARY_MARKER_MAX_PUBLISH_ATTEMPTS,
+            observed_stream_id,
+        )
+
+    async def _record_boundary_marker_failure(
+        self,
+        marker: PendingBoundaryMarker,
+        failure: BoundaryMarkerPublishError,
+    ) -> str:
+        new_attempt = marker.publish_attempts + 1
+        observed_stream_id = (
+            failure.observed_stream_id
+            if failure.observed_stream_id is not None
+            else marker.observed_stream_id
+        )
+        if (
+            marker.observed_stream_id is not None
+            and observed_stream_id != marker.observed_stream_id
+        ):
+            raise RuntimeError("boundary marker observed identity changed")
+        quarantined = (
+            failure.terminal
+            or new_attempt >= BOUNDARY_MARKER_MAX_PUBLISH_ATTEMPTS
+        )
+        retry_delay = (
+            0
+            if quarantined
+            else self._boundary_marker_retry_delay(new_attempt)
+        )
+        async with self.authority_pool.acquire() as connection:
+            async with connection.transaction():
+                persisted_observed_stream_id = observed_stream_id
+                try:
+                    async with connection.transaction():
+                        stored = await self._update_boundary_marker_failure(
+                            connection,
+                            marker,
+                            failure,
+                            quarantined=quarantined,
+                            retry_delay=retry_delay,
+                            observed_stream_id=observed_stream_id,
+                        )
+                except asyncpg.UniqueViolationError as exc:
+                    collision_can_be_discarded = (
+                        quarantined
+                        and failure.code == "invalid_boundary_marker_dedup"
+                        and marker.observed_stream_id is None
+                        and observed_stream_id is not None
+                        and exc.constraint_name
+                        == BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT
+                    )
+                    if not collision_can_be_discarded:
+                        raise
+                    # A poisoned dedup key can point at an entry already owned
+                    # by another boundary in this project. The savepoint rolls
+                    # back only the failed identity claim; terminal quarantine
+                    # then advances without stealing that authority. Genuine
+                    # post-XADD observations are never discarded.
+                    persisted_observed_stream_id = None
+                    async with connection.transaction():
+                        stored = await self._update_boundary_marker_failure(
+                            connection,
+                            marker,
+                            failure,
+                            quarantined=quarantined,
+                            retry_delay=retry_delay,
+                            observed_stream_id=None,
+                        )
+                    logger.error(
+                        "Boundary marker poison ID is already owned; "
+                        "quarantined without observed authority "
+                        "project=%s experiment=%s version=%d",
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                    )
+                if stored is None:
+                    stored = await connection.fetchrow(
+                        """
+                        SELECT
+                            marker_publish_state,
+                            marker_publish_attempts,
+                            marker_publish_observed_stream_id
+                        FROM experiment_analysis_boundaries
+                        WHERE project_id = $1
+                          AND experiment_key = $2
+                          AND config_version = $3
+                        FOR SHARE
+                        """,
+                        marker.project_id,
+                        marker.experiment_key,
+                        marker.config_version,
+                    )
+        if stored is None:
+            raise RuntimeError("boundary marker retry authority disappeared")
+        state = self._postgres_value(stored, "marker_publish_state")
+        attempts = self._postgres_value(stored, "marker_publish_attempts")
+        stored_observed_stream_id = self._postgres_value(
+            stored,
+            "marker_publish_observed_stream_id",
+        )
+        if state == "published":
+            return state
+        expected_state = "quarantined" if quarantined else "pending"
+        if (
+            state != expected_state
+            or attempts != new_attempt
+            or stored_observed_stream_id != persisted_observed_stream_id
+        ):
+            raise RuntimeError("boundary marker retry authority changed concurrently")
+        return state
 
     async def _refresh_discovered_stream_registry(self) -> list[str]:
         """Atomically replace the registry after a complete valid refresh.
@@ -1580,6 +2508,9 @@ class ClickHouseWriter:
         while self.running:
             await asyncio.sleep(1.0)
             if not self._flush_retry_is_due():
+                if self._durable_pending_ack:
+                    async with self._flush_lock:
+                        await self._ack_durable_messages()
                 continue
             elapsed = time.monotonic() - self.last_flush
             if self._durable_pending_ack or (
@@ -1588,8 +2519,10 @@ class ClickHouseWriter:
             ):
                 await self._flush()
 
-    def _delivery_is_backpressured(self) -> bool:
-        return bool(self._durable_pending_ack) or len(self.buffer) >= self.buffer_size
+    def _delivery_is_backpressured(self, stream_key: str | None = None) -> bool:
+        if stream_key is not None:
+            return stream_key in self._durable_pending_ack
+        return len(self.buffer) >= self.buffer_size
 
     def _flush_retry_delay(self) -> float:
         exponent = min(max(self._flush_retry_count - 1, 0), 5)
@@ -1645,25 +2578,60 @@ class ClickHouseWriter:
         async with self.authority_pool.acquire() as connection:
             rows = await connection.fetch(
                 """
-                SELECT marker_token, marker_stream_id
+                SELECT
+                    marker_token,
+                    marker_stream_id,
+                    marker_publish_state,
+                    marker_publish_observed_stream_id
                 FROM experiment_analysis_boundaries
                 WHERE project_id = $1
                   AND stream_key = $2
-                  AND marker_stream_id = ANY($3::text[])
+                  AND (
+                      marker_token = ANY($3::text[])
+                      OR marker_publish_observed_stream_id =
+                          ANY($4::text[])
+                  )
                 """,
                 project_id,
                 stream_key,
+                sorted(set(expected.values())),
                 list(expected),
             )
-        observed = {
-            self._postgres_value(row, "marker_stream_id"): self._postgres_value(
-                row,
-                "marker_token",
-            )
-            for row in rows
-        }
+        observed = {}
+        terminal_quarantine = False
+        for row in rows:
+            token = self._postgres_value(row, "marker_token")
+            state = self._postgres_value(row, "marker_publish_state")
+            if state == "published":
+                delivery_id = self._postgres_value(row, "marker_stream_id")
+                if expected.get(delivery_id) == token:
+                    observed[delivery_id] = token
+            elif state == "quarantined":
+                delivery_id = self._postgres_value(
+                    row,
+                    "marker_publish_observed_stream_id",
+                )
+                if delivery_id in expected:
+                    # The exact poisoned/orphaned stream ID is terminally
+                    # non-authoritative. Its fields need not match the boundary
+                    # token because finalization permanently degrades this
+                    # project's completeness frontier before ACK.
+                    observed[delivery_id] = expected[delivery_id]
+                    terminal_quarantine = True
+            else:
+                continue
         if observed != expected:
             raise RuntimeError("boundary delivery lacks matching PostgreSQL authority")
+        if terminal_quarantine:
+            await self._degrade_pipeline_authority(
+                stream_key,
+                "stream_state_unverifiable",
+            )
+            logger.critical(
+                "Finalizing quarantined boundary marker only after permanently "
+                "degrading pipeline authority for %s",
+                stream_key,
+            )
 
     async def _degrade_pipeline_authority(
         self,
@@ -1875,74 +2843,119 @@ class ClickHouseWriter:
         if clear_finalized:
             self._finalized_since_frontier.pop(stream_key, None)
 
+    async def _finalize_durable_stream(
+        self,
+        stream_key: str,
+        message_ids: list[str],
+    ) -> None:
+        """Finalize one stream without sharing its PostgreSQL wait with peers."""
+        await asyncio.wait_for(
+            self._verify_boundary_deliveries(stream_key, message_ids),
+            timeout=self.durable_ack_authority_timeout,
+        )
+        try:
+            async with self.redis_client.pipeline(
+                transaction=True
+            ) as transaction:
+                transaction.xack(
+                    stream_key,
+                    CONSUMER_GROUP,
+                    *message_ids,
+                )
+                transaction.xdel(stream_key, *message_ids)
+                results = await transaction.execute()
+        except Exception:
+            # EXEC may have committed even when its reply is lost. A retry may
+            # therefore legitimately observe (0, 0).
+            self._uncertain_redis_finalizations.add(stream_key)
+            raise
+        if (
+            not isinstance(results, list)
+            or len(results) != 2
+            or any(type(value) is not int or value < 0 for value in results)
+        ):
+            raise RuntimeError("Redis ACK/delete returned an invalid result")
+        expected = len(message_ids)
+        result_pair = tuple(results)
+        allowed_results = {(expected, expected)}
+        if stream_key in self._uncertain_redis_finalizations:
+            allowed_results.add((0, 0))
+        if result_pair not in allowed_results:
+            await asyncio.wait_for(
+                self._degrade_pipeline_authority(
+                    stream_key,
+                    "stream_state_unverifiable",
+                ),
+                timeout=self.durable_ack_authority_timeout,
+            )
+            raise RuntimeError(
+                "Redis ACK/delete did not finalize the exact durable batch"
+            )
+        # Redis has committed, but PostgreSQL may still fail. Keep the
+        # ambiguity marker until its frontier transaction succeeds.
+        self._uncertain_redis_finalizations.add(stream_key)
+        await asyncio.wait_for(
+            self._advance_pipeline_frontier(stream_key, message_ids),
+            timeout=self.durable_ack_authority_timeout,
+        )
+
     async def _ack_durable_messages(self) -> bool:
-        """Atomically ACK and delete durable rows, grouped by Redis stream."""
-        for stream_key, message_ids in list(self._durable_pending_ack.items()):
-            try:
-                await self._verify_boundary_deliveries(stream_key, message_ids)
-                try:
-                    async with self.redis_client.pipeline(
-                        transaction=True
-                    ) as transaction:
-                        transaction.xack(
-                            stream_key,
-                            CONSUMER_GROUP,
-                            *message_ids,
-                        )
-                        transaction.xdel(stream_key, *message_ids)
-                        results = await transaction.execute()
-                except Exception:
-                    # EXEC may have committed even when its reply is lost. A
-                    # retry may therefore legitimately observe (0, 0).
-                    self._uncertain_redis_finalizations.add(stream_key)
-                    raise
-                if (
-                    not isinstance(results, list)
-                    or len(results) != 2
-                    or any(type(value) is not int or value < 0 for value in results)
-                ):
-                    raise RuntimeError("Redis ACK/delete returned an invalid result")
-                expected = len(message_ids)
-                result_pair = tuple(results)
-                allowed_results = {(expected, expected)}
-                if stream_key in self._uncertain_redis_finalizations:
-                    allowed_results.add((0, 0))
-                if result_pair not in allowed_results:
-                    await self._degrade_pipeline_authority(
-                        stream_key,
-                        "stream_state_unverifiable",
-                    )
-                    raise RuntimeError(
-                        "Redis ACK/delete did not finalize the exact durable batch"
-                    )
-                # Redis has committed, but PostgreSQL may still fail. Keep the
-                # ambiguity marker until its frontier transaction succeeds.
-                self._uncertain_redis_finalizations.add(stream_key)
-                await self._advance_pipeline_frontier(stream_key, message_ids)
-            except Exception as exc:
-                delay = self._record_flush_failure()
+        """Finalize every due stream independently and retain only failures."""
+        snapshots = [
+            (stream_key, list(message_ids))
+            for stream_key, message_ids in self._durable_pending_ack.items()
+        ]
+        if not snapshots:
+            return True
+        results = await asyncio.gather(
+            *(
+                self._finalize_durable_stream(stream_key, message_ids)
+                for stream_key, message_ids in snapshots
+            ),
+            return_exceptions=True,
+        )
+        all_succeeded = True
+        for (stream_key, message_ids), result in zip(
+            snapshots,
+            results,
+            strict=True,
+        ):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                all_succeeded = False
                 self.stats["errors"] += 1
                 logger.error(
-                    "Redis ACK/delete transaction failed for %d durable events from %s "
-                    "(retrying in %.1fs): %s",
+                    "Durable finalization failed for %d events from %s; "
+                    "retaining only this stream for retry: %s",
                     len(message_ids),
                     stream_key,
-                    delay,
-                    exc,
+                    result,
                 )
-                return False
+                continue
+
             self._uncertain_redis_finalizations.discard(stream_key)
             # EXEC is the commit boundary. If the connection fails before its
             # result is known, retain these IDs and safely retry the idempotent
             # XACK/XDEL pair rather than risking an unfinalized delivery.
-            del self._durable_pending_ack[stream_key]
+            finalized_ids = set(message_ids)
+            current_ids = self._durable_pending_ack.get(stream_key, [])
+            remaining_ids = [
+                message_id
+                for message_id in current_ids
+                if message_id not in finalized_ids
+            ]
+            if remaining_ids:
+                self._durable_pending_ack[stream_key] = remaining_ids
+            else:
+                self._durable_pending_ack.pop(stream_key, None)
             for message_id in message_ids:
                 self._boundary_tokens_by_delivery.pop(
                     (stream_key, message_id),
                     None,
                 )
 
-        return True
+        return all_succeeded and not self._durable_pending_ack
 
     @staticmethod
     def _is_terminal_insert_error(exc: Exception) -> bool:
@@ -2343,13 +3356,12 @@ class ClickHouseWriter:
             value = event_json.get(required_string)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{required_string} must be a non-empty string")
-        timestamp = self._parse_timestamp(event_json.get("timestamp"), "timestamp")
-        raw_received_at = event_json.get("server_timestamp")
-        received_at = (
-            self._parse_timestamp(raw_received_at, "server_timestamp")
-            if raw_received_at is not None
-            else datetime.now(timezone.utc)
+        received_at = self._parse_timestamp(
+            event_json.get("server_timestamp"),
+            "server_timestamp",
         )
+        timestamp = self._parse_timestamp(event_json.get("timestamp"), "timestamp")
+        self._validate_event_timestamp_window(timestamp, received_at)
         if source_stream:
             if source_stream != self._stream_key_for_project(project_id):
                 raise ValueError("source stream conflicts with project authority")
@@ -2570,6 +3582,22 @@ class ClickHouseWriter:
         return parsed
 
     @staticmethod
+    def _validate_event_timestamp_window(
+        timestamp: datetime,
+        received_at: datetime,
+    ) -> None:
+        if timestamp < received_at - timedelta(seconds=MAX_EVENT_AGE_SECONDS):
+            raise ValueError(
+                "timestamp is more than 7 days older than server receipt time"
+            )
+        if timestamp > received_at + timedelta(
+            seconds=MAX_EVENT_FUTURE_SKEW_SECONDS
+        ):
+            raise ValueError(
+                "timestamp is more than 5 minutes ahead of server receipt time"
+            )
+
+    @staticmethod
     def _event_name(payload: dict[str, Any]) -> str:
         value = payload.get("event")
         if not isinstance(value, str) or not value:
@@ -2695,15 +3723,22 @@ async def main():
     connection_lost_events = []
     try:
         # Keep two dedicated backend sessions checked out for the entire writer
-        # lifetime. Losing either one fences new writes, while the other still
-        # blocks exclusive migration ownership through ClickHouse drain proof.
-        # A total PostgreSQL restart can remove both sessions together; the
-        # supported Compose quiescence path must also observe this writer stopped
-        # before it permits migration execution.
-        for _ in range(2):
+        # lifetime. The first exclusively owns the one supported consumer-group
+        # writer authority; both redundantly block migrations. Losing either
+        # session fences new writes. A total PostgreSQL restart can remove both
+        # sessions together, so Compose quiescence must also observe this writer
+        # stopped before it permits migration execution.
+        for inhibitor_index in range(2):
             maintenance_connection = await maintenance_pool.acquire()
             maintenance_connections.append(maintenance_connection)
             await _acquire_maintenance_inhibitor(maintenance_connection)
+            if inhibitor_index == 0:
+                # Hold both shared migration guards continuously across the
+                # capability check and runtime. The schema cannot race between
+                # validation and startup; failure releases this backend and
+                # every session-scoped lock in the outer cleanup.
+                await _assert_boundary_marker_schema(maintenance_connection)
+                await _acquire_writer_singleton(maintenance_connection)
 
         writer = ClickHouseWriter(
             redis_url=redis_url,
@@ -2748,7 +3783,11 @@ async def main():
                         timeout=MAINTENANCE_HEARTBEAT_SECONDS,
                     )
                     for maintenance_connection in maintenance_connections
-                )
+                ),
+                asyncio.wait_for(
+                    _heartbeat_writer_singleton(maintenance_connections[0]),
+                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
+                ),
             )
             for inhibitor_index, (
                 maintenance_connection,
@@ -2767,6 +3806,7 @@ async def main():
                             maintenance_connection,
                             writer,
                             connection_lost,
+                            require_writer_singleton=inhibitor_index == 1,
                         ),
                         name=f"maintenance-inhibitor-monitor-{inhibitor_index}",
                     )

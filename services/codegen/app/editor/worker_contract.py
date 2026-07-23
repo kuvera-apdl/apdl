@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -18,18 +19,15 @@ from pydantic import (
 )
 
 from app.editor.base import EditRequest
-from app.inspection.preflight import RepositoryPreflightAttestation
+from app.inspection.preparation import RepositoryPreparationEvidence
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.policy import EffectiveCodegenSafetyPolicy
 
-CODEGEN_WORKER_REQUEST_SCHEMA_VERSION = "codegen_worker_request@1"
-MAX_CODEGEN_WORKER_REQUEST_BYTES = 1024 * 1024
-
-# The source validation happens before the provider-free inspection container is
-# launched. Reserve more than the maximum serialized preflight attestation so an
-# input accepted there cannot cross the final envelope's global byte limit.
-_PREFLIGHT_ATTESTATION_RESERVE_BYTES = 4096
+CODEGEN_PREPARATION_REQUEST_SCHEMA_VERSION = "codegen_preparation_request@1"
+CODEGEN_WORKER_REQUEST_SCHEMA_VERSION = "codegen_worker_request@2"
+MAX_CODEGEN_PREPARATION_REQUEST_BYTES = 1024 * 1024
+MAX_CODEGEN_WORKER_REQUEST_BYTES = 8 * 1024 * 1024
 _REPOSITORY_PATTERN = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 _BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 
@@ -93,44 +91,81 @@ class _CodegenWorkerRequestSource(_StrictModel):
         return self
 
 
+class CodegenPreparationRequest(_CodegenWorkerRequestSource):
+    """Complete input for the provider-credential-free preparation phase."""
+
+    schema_version: Literal["codegen_preparation_request@1"]
+
+    def request_sha256(self) -> str:
+        return _source_request_sha256(self)
+
+    def to_edit_request(self) -> EditRequest:
+        return _source_to_edit_request(self)
+
+
 class CodegenWorkerRequest(_CodegenWorkerRequestSource):
     """Complete and sole task-bearing input accepted by the editor worker."""
 
-    schema_version: Literal["codegen_worker_request@1"]
-    repository_preflight: RepositoryPreflightAttestation
+    schema_version: Literal["codegen_worker_request@2"]
+    repository_preparation: RepositoryPreparationEvidence
 
     @model_validator(mode="after")
-    def validate_preflight_identity(self) -> CodegenWorkerRequest:
+    def validate_preparation_binding(self) -> CodegenWorkerRequest:
         expected_source = self.branch if self.existing_branch else self.base_branch
+        preparation = self.repository_preparation
         if (
-            self.repository_preflight.repository != self.repository
-            or self.repository_preflight.source_branch != expected_source
+            preparation.attestation.repository != self.repository
+            or preparation.attestation.source_branch != expected_source
+            or preparation.target_branch != self.branch
         ):
-            raise ValueError("repository preflight identity does not match worker request")
+            raise ValueError(
+                "repository preparation identity does not match worker request"
+            )
+        if preparation.request_sha256 != _source_request_sha256(self):
+            raise ValueError(
+                "repository preparation request binding does not match worker request"
+            )
         return self
 
     def to_edit_request(self) -> EditRequest:
         """Reconstruct the in-process editor request after strict validation."""
-        return EditRequest(
-            repo=self.repository,
-            project_scope=self.project_scope,
-            base_branch=self.base_branch,
-            branch=self.branch,
-            token=self.read_token,
-            title=self.title,
-            spec=self.spec,
-            constraints=list(self.constraints),
-            test_cmd=self.test_cmd,
-            safety_policy=self.safety_policy,
-            revert_sha=self.revert_sha,
-            existing_branch=self.existing_branch,
-            expected_head_sha=self.expected_head_sha,
-            risk_level=self.risk_level,
-            requirement_ledger=self.requirement_ledger,
-            runtime_acceptance_plan=self.runtime_acceptance_plan,
-            repository_preflight=self.repository_preflight,
-            runtime_acceptance_policy=self.runtime_acceptance_policy,
-        )
+        request = _source_to_edit_request(self)
+        request.repository_preparation = self.repository_preparation
+        return request
+
+
+def _source_to_edit_request(source: _CodegenWorkerRequestSource) -> EditRequest:
+    return EditRequest(
+        repo=source.repository,
+        project_scope=source.project_scope,
+        base_branch=source.base_branch,
+        branch=source.branch,
+        token=source.read_token,
+        title=source.title,
+        spec=source.spec,
+        constraints=list(source.constraints),
+        test_cmd=source.test_cmd,
+        safety_policy=source.safety_policy,
+        revert_sha=source.revert_sha,
+        existing_branch=source.existing_branch,
+        expected_head_sha=source.expected_head_sha,
+        risk_level=source.risk_level,
+        requirement_ledger=source.requirement_ledger,
+        runtime_acceptance_plan=source.runtime_acceptance_plan,
+        runtime_acceptance_policy=source.runtime_acceptance_policy,
+    )
+
+
+def _source_request_sha256(source: _CodegenWorkerRequestSource) -> str:
+    fields = set(_source_values(_source_to_edit_request(source))) - {"read_token"}
+    payload = source.model_dump(mode="json", include=fields)
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _source_values(request: EditRequest) -> dict[str, object]:
@@ -169,24 +204,43 @@ def validate_codegen_worker_request_source(request: EditRequest) -> None:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-    if len(serialized) > (
-        MAX_CODEGEN_WORKER_REQUEST_BYTES - _PREFLIGHT_ATTESTATION_RESERVE_BYTES
-    ):
+    if len(serialized) > MAX_CODEGEN_PREPARATION_REQUEST_BYTES:
         raise CodegenWorkerRequestError("codegen worker request exceeds its input limit")
+
+
+def encode_codegen_preparation_request(request: EditRequest) -> bytes:
+    """Serialize the provider-free phase's one canonical bounded request."""
+    try:
+        envelope = CodegenPreparationRequest.model_validate(
+            {
+                **_source_values(request),
+                "schema_version": CODEGEN_PREPARATION_REQUEST_SCHEMA_VERSION,
+            }
+        )
+    except ValidationError as exc:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request violates the strict schema"
+        ) from exc
+    serialized = envelope.model_dump_json().encode("utf-8")
+    if len(serialized) > MAX_CODEGEN_PREPARATION_REQUEST_BYTES:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request exceeds its input limit"
+        )
+    return serialized
 
 
 def encode_codegen_worker_request(request: EditRequest) -> bytes:
     """Serialize one canonical worker request, enforcing the global byte bound."""
-    if request.repository_preflight is None:
+    if request.repository_preparation is None:
         raise CodegenWorkerRequestError(
-            "codegen worker request requires repository preflight evidence"
+            "codegen worker request requires repository preparation evidence"
         )
     try:
         envelope = CodegenWorkerRequest.model_validate(
             {
                 **_source_values(request),
                 "schema_version": CODEGEN_WORKER_REQUEST_SCHEMA_VERSION,
-                "repository_preflight": request.repository_preflight,
+                "repository_preparation": request.repository_preparation,
             }
         )
     except ValidationError as exc:
@@ -243,6 +297,43 @@ def decode_codegen_worker_request(raw: bytes) -> CodegenWorkerRequest:
         raise CodegenWorkerRequestError(
             "codegen worker request violates the strict schema"
         ) from exc
+
+
+def decode_codegen_preparation_request(raw: bytes) -> CodegenPreparationRequest:
+    """Decode one strict provider-free preparation envelope."""
+    if len(raw) > MAX_CODEGEN_PREPARATION_REQUEST_BYTES:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request exceeds its input limit"
+        )
+    try:
+        decoded = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request must be UTF-8 JSON"
+        ) from exc
+    try:
+        _parse_strict_json_object(decoded)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request is not a strict JSON object"
+        ) from exc
+    try:
+        return CodegenPreparationRequest.model_validate_json(decoded)
+    except ValidationError as exc:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request violates the strict schema"
+        ) from exc
+
+
+def read_codegen_preparation_request(stream: BinaryIO) -> CodegenPreparationRequest:
+    """Read one byte beyond the provider-free request bound and fail closed."""
+    try:
+        raw = stream.read(MAX_CODEGEN_PREPARATION_REQUEST_BYTES + 1)
+    except OSError as exc:
+        raise CodegenWorkerRequestError(
+            "codegen preparation request could not be read"
+        ) from exc
+    return decode_codegen_preparation_request(raw)
 
 
 def read_codegen_worker_request(stream: BinaryIO) -> CodegenWorkerRequest:

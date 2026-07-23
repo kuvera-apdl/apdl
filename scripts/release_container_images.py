@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import sys
@@ -18,7 +19,11 @@ else:
 
 IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 RECORD_KEYS = {"name", "repository", "digest", "tag", "version"}
-CORE_COMPOSE_IMAGES = (
+INDEX_KEYS = {"schema_version", "version", "tag", "images"}
+INDEX_IMAGE_KEYS = RECORD_KEYS | {"reference"}
+EVIDENCE_KEYS = {"schema_version", "platform", "version", "tag", "images"}
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
+COMPOSE_IMAGES = (
     "postgres-migrate",
     "ingestion",
     "config",
@@ -26,6 +31,8 @@ CORE_COMPOSE_IMAGES = (
     "clickhouse-writer",
     "admin-api",
     "admin",
+    "agents",
+    "codegen",
 )
 
 
@@ -111,37 +118,58 @@ def assemble_index(manifest_path: Path, records_dir: Path) -> dict[str, Any]:
     }
 
 
-def render_core_compose_override(index: dict[str, Any]) -> str:
-    """Bind the supported core Compose services to immutable release digests."""
+def _validate_index(index: Any) -> dict[str, Any]:
+    if not isinstance(index, dict) or set(index) != INDEX_KEYS:
+        raise PublishedImageError("container image index has an invalid schema")
+    if index.get("schema_version") != 1:
+        raise PublishedImageError("container image index schema version must be 1")
+    if not isinstance(index.get("version"), str) or not isinstance(
+        index.get("tag"), str
+    ):
+        raise PublishedImageError("container image index metadata is invalid")
 
     images = index.get("images")
-    if not isinstance(images, list):
+    if not isinstance(images, list) or not images:
         raise PublishedImageError("container image index is missing its images array")
+    seen: set[str] = set()
+    for image in images:
+        if not isinstance(image, dict) or set(image) != INDEX_IMAGE_KEYS:
+            raise PublishedImageError("container image index contains an invalid image")
+        if any(not isinstance(image[key], str) for key in INDEX_IMAGE_KEYS):
+            raise PublishedImageError("container image index image fields must be strings")
+        name = image["name"]
+        if name in seen:
+            raise PublishedImageError(f"duplicate indexed image name: {name}")
+        seen.add(name)
+        if IMAGE_DIGEST_RE.fullmatch(image["digest"]) is None:
+            raise PublishedImageError(f"invalid indexed image digest: {name}")
+        expected_reference = f"{image['repository']}@{image['digest']}"
+        if image["reference"] != expected_reference:
+            raise PublishedImageError(f"indexed image reference differs: {name}")
+        if image["version"] != index["version"] or image["tag"] != index["tag"]:
+            raise PublishedImageError(f"indexed image metadata differs: {name}")
+    return index
+
+
+def render_compose_override(index: dict[str, Any]) -> str:
+    """Bind every Compose-backed official service to immutable release digests."""
+
+    images = _validate_index(index)["images"]
     references: dict[str, str] = {}
     for image in images:
-        if not isinstance(image, dict):
-            raise PublishedImageError(
-                "container image index contains a non-object image"
-            )
-        name = image.get("name")
-        reference = image.get("reference")
-        if not isinstance(name, str) or not isinstance(reference, str):
-            raise PublishedImageError("container image index contains an invalid image")
-        if name in references:
-            raise PublishedImageError(f"duplicate indexed image name: {name}")
-        references[name] = reference
+        references[image["name"]] = image["reference"]
 
-    missing = [name for name in CORE_COMPOSE_IMAGES if name not in references]
+    missing = [name for name in COMPOSE_IMAGES if name not in references]
     if missing:
-        raise PublishedImageError(f"core release images are missing: {missing!r}")
+        raise PublishedImageError(f"Compose release images are missing: {missing!r}")
 
     lines = ["services:"]
-    for name in CORE_COMPOSE_IMAGES:
+    for name in COMPOSE_IMAGES:
         lines.extend((f"  {name}:", f"    image: {references[name]}"))
     return "\n".join(lines) + "\n"
 
 
-def write_outputs(
+def write_prepared_outputs(
     index: dict[str, Any], *, index_path: Path, compose_override_path: Path
 ) -> None:
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,29 +179,144 @@ def write_outputs(
         encoding="utf-8",
     )
     compose_override_path.write_text(
-        render_core_compose_override(index),
+        render_compose_override(index),
         encoding="utf-8",
     )
 
 
+def write_smoke_evidence(
+    index: dict[str, Any],
+    *,
+    platform: str,
+    evidence_path: Path,
+) -> None:
+    """Record a platform proof only after every image probe has passed."""
+
+    validated = _validate_index(index)
+    if platform not in SUPPORTED_PLATFORMS:
+        raise PublishedImageError(f"unsupported smoke platform: {platform}")
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "platform": platform,
+                "version": validated["version"],
+                "tag": validated["tag"],
+                "images": copy.deepcopy(validated["images"]),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def merge_smoke_evidence(evidence_paths: list[Path]) -> dict[str, Any]:
+    """Merge exact per-platform proofs into the release's tested image index."""
+
+    if len(evidence_paths) != len(SUPPORTED_PLATFORMS):
+        raise PublishedImageError(
+            "smoke evidence count differs from the supported platform count"
+        )
+
+    by_platform: dict[str, dict[str, Any]] = {}
+    for path in evidence_paths:
+        evidence = _load_json(path)
+        if not isinstance(evidence, dict) or set(evidence) != EVIDENCE_KEYS:
+            raise PublishedImageError(f"invalid smoke evidence: {path.name}")
+        if evidence.get("schema_version") != 1:
+            raise PublishedImageError(
+                f"smoke evidence schema version must be 1: {path.name}"
+            )
+        platform = evidence.get("platform")
+        if platform not in SUPPORTED_PLATFORMS:
+            raise PublishedImageError(f"unsupported smoke platform: {platform}")
+        if platform in by_platform:
+            raise PublishedImageError(f"duplicate smoke platform: {platform}")
+        candidate_index = {
+            "schema_version": 1,
+            "version": evidence.get("version"),
+            "tag": evidence.get("tag"),
+            "images": evidence.get("images"),
+        }
+        by_platform[platform] = _validate_index(candidate_index)
+
+    missing = sorted(set(SUPPORTED_PLATFORMS) - set(by_platform))
+    if missing:
+        raise PublishedImageError(f"missing smoke platform evidence: {missing!r}")
+
+    canonical = by_platform[SUPPORTED_PLATFORMS[0]]
+    for platform in SUPPORTED_PLATFORMS[1:]:
+        candidate = by_platform[platform]
+        if candidate != canonical:
+            raise PublishedImageError(
+                f"published image identities differ for platform: {platform}"
+            )
+
+    tested_images = []
+    for image in canonical["images"]:
+        tested_images.append(
+            {
+                **copy.deepcopy(image),
+                "tested_platforms": list(SUPPORTED_PLATFORMS),
+            }
+        )
+    return {
+        "schema_version": 2,
+        "version": canonical["version"],
+        "tag": canonical["tag"],
+        "images": tested_images,
+    }
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--records-dir", type=Path, required=True)
-    parser.add_argument("--index", type=Path, required=True)
-    parser.add_argument("--compose-override", type=Path, required=True)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    prepare = commands.add_parser("prepare")
+    prepare.add_argument("--manifest", type=Path, required=True)
+    prepare.add_argument("--records-dir", type=Path, required=True)
+    prepare.add_argument("--index", type=Path, required=True)
+    prepare.add_argument("--compose-override", type=Path, required=True)
+
+    attest = commands.add_parser("attest")
+    attest.add_argument("--index", type=Path, required=True)
+    attest.add_argument("--platform", choices=SUPPORTED_PLATFORMS, required=True)
+    attest.add_argument("--evidence", type=Path, required=True)
+
+    merge = commands.add_parser("merge")
+    merge.add_argument("--evidence-dir", type=Path, required=True)
+    merge.add_argument("--index", type=Path, required=True)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        index = assemble_index(args.manifest, args.records_dir)
-        write_outputs(
-            index,
-            index_path=args.index,
-            compose_override_path=args.compose_override,
-        )
+        if args.command == "prepare":
+            index = assemble_index(args.manifest, args.records_dir)
+            write_prepared_outputs(
+                index,
+                index_path=args.index,
+                compose_override_path=args.compose_override,
+            )
+        elif args.command == "attest":
+            index = _validate_index(_load_json(args.index))
+            write_smoke_evidence(
+                index,
+                platform=args.platform,
+                evidence_path=args.evidence,
+            )
+        else:
+            evidence_paths = sorted(args.evidence_dir.glob("*.json"))
+            tested_index = merge_smoke_evidence(evidence_paths)
+            args.index.parent.mkdir(parents=True, exist_ok=True)
+            args.index.write_text(
+                json.dumps(tested_index, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
     except PublishedImageError as exc:
         print(f"release image validation failed: {exc}", file=sys.stderr)
         return 1

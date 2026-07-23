@@ -10,6 +10,7 @@ import pytest_asyncio
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app import main as query_main
 from app.auth import Principal, authenticate_request
 from app.config_client import ConfigExperimentAnalysis
 from app.main import app
@@ -51,6 +52,7 @@ def test_non_final_schema_has_canonical_unverified_completeness_reason():
 
     assert schema["properties"]["data_completeness"]["const"] == "not_verified"
     assert "data_completeness_unverified" in schema["properties"]["reason"]["enum"]
+    assert "pipeline_boundary_failed" in schema["properties"]["reason"]["enum"]
 
 
 def test_guardrail_response_schema_requires_canonical_window_boundaries():
@@ -122,21 +124,78 @@ async def test_health_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_readiness_ok(client):
-    app.state.ch_client.execute = AsyncMock(return_value=[{"1": 1}])
+async def test_readiness_ok(client, monkeypatch):
+    monkeypatch.setattr(
+        query_main,
+        "assert_clickhouse_decision_schema",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_main,
+        "assert_postgres_decision_schema",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_main,
+        "assert_experiment_analysis_capability",
+        AsyncMock(),
+    )
+
     resp = await client.get("/ready")
+
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ready"
+    assert resp.json() == {
+        "status": "ready",
+        "service": "apdl-query",
+        "checks": {
+            "clickhouse_schema": "ready",
+            "postgres_schema": "ready",
+            "config_analysis": "ready",
+        },
+    }
 
 
 @pytest.mark.asyncio
-async def test_readiness_fail(client):
-    app.state.ch_client.execute = AsyncMock(side_effect=ConnectionError("down"))
+@pytest.mark.parametrize(
+    ("failed_check", "probe_name"),
+    [
+        ("clickhouse_schema", "assert_clickhouse_decision_schema"),
+        ("postgres_schema", "assert_postgres_decision_schema"),
+        ("config_analysis", "assert_experiment_analysis_capability"),
+    ],
+)
+async def test_readiness_fails_closed_for_each_capability(
+    client,
+    monkeypatch,
+    failed_check,
+    probe_name,
+):
+    secret = "postgresql://user:secret@private/database"
+    for name in (
+        "assert_clickhouse_decision_schema",
+        "assert_postgres_decision_schema",
+        "assert_experiment_analysis_capability",
+    ):
+        monkeypatch.setattr(
+            query_main,
+            name,
+            AsyncMock(
+                side_effect=RuntimeError(secret) if name == probe_name else None
+            ),
+        )
+
     resp = await client.get("/ready")
+
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
+    assert body["checks"][failed_check] == "not_ready"
+    assert all(
+        value == "ready"
+        for name, value in body["checks"].items()
+        if name != failed_check
+    )
+    assert secret not in resp.text
 
 
 # ------------------------------------------------------------------
@@ -1225,6 +1284,77 @@ async def test_historical_rows_without_provenance_prevent_snapshot(
     assert response.status_code == 200
     assert response.json()["reason"] == "pipeline_provenance_unavailable"
     persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "aggregates",
+    [
+        pytest.param([], id="no-exposures"),
+        pytest.param(
+            [
+                {
+                    "variant": variant,
+                    "sample_size": 1,
+                    "conversions": 0,
+                    "crossover_actors": 0,
+                    "unknown_variant_actors": 0,
+                    "identity_conflict_actors": 0,
+                }
+                for variant in ("control", "treatment")
+            ],
+            id="underpowered",
+        ),
+        pytest.param(
+            [
+                {
+                    "variant": variant,
+                    "sample_size": 20,
+                    "conversions": 2,
+                    "crossover_actors": 0,
+                    "unknown_variant_actors": 1,
+                    "identity_conflict_actors": 0,
+                }
+                for variant in ("control", "treatment")
+            ],
+            id="unknown-variant",
+        ),
+    ],
+)
+async def test_terminal_boundary_publication_failure_is_explicit(
+    client,
+    monkeypatch,
+    aggregates,
+):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    monkeypatch.setattr(app.state, "completeness_pool", object(), raising=False)
+    monkeypatch.setattr(
+        experiments,
+        "get_or_create_experiment_boundary",
+        AsyncMock(
+            return_value=experiments.ExperimentBoundaryAuthority(
+                state="quarantined",
+                marker_stream_id=None,
+                marker_stream_id_parts=None,
+                snapshot=None,
+                failure_reason="event_stream_capacity",
+            )
+        ),
+    )
+    app.state.ch_client.execute = AsyncMock(return_value=aggregates)
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis_status"] == "non_final"
+    assert response.json()["reason"] == "pipeline_boundary_failed"
 
 
 @pytest.mark.asyncio

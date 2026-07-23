@@ -18,13 +18,20 @@ Streams is the only event bus included in APDL.
 ## ClickHouse writer
 
 `redis/clickhouse_writer.py` is a single-file async consumer
-(deps: `redis`, `clickhouse-driver`). The synchronous ClickHouse driver is
+(deps: `redis`, `clickhouse-driver`, `asyncpg`). The synchronous ClickHouse driver is
 isolated in one dedicated worker thread, so inserts cannot block Redis reads,
 pending claims, monitoring, or signal handling on the asyncio loop. It reads
 from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
 `PROJECT_IDS` — using the `clickhouse-writer` consumer group (consumer name
 `worker-{pid}`) and batch-inserts into the `events` table.
 
+- **Single writer authority:** exactly one process may advance the
+  `clickhouse-writer` group. Before reading Redis, startup takes a dedicated
+  PostgreSQL session advisory lock and exits if another writer owns it. The
+  same checked-out session is heartbeat-verified for the writer lifetime, and
+  supported Compose declares one replica. This keeps the process-local
+  completeness frontier equal to the group-wide frontier; horizontal writer
+  scaling requires a shared frontier redesign.
 - **Batching:** rotates fairly across streams and reads one tenant at a time so
   Redis's per-stream `COUNT` behavior cannot exceed the global 1000-event
   buffer (`BUFFER_SIZE`). It flushes when full or every 5 seconds
@@ -34,15 +41,18 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   existing backlog is consumed on first discovery. The writer periodically uses
   `XAUTOCLAIM` to take over stale Pending Entries List deliveries from prior
   consumers. Messages are atomically XACKed and XDEL'd only after ClickHouse or
-  the DLQ accepts their rows. This keeps `XLEN` equal to outstanding work so
+  the DLQ accepts their rows. Durable finalization is isolated per stream:
+  PostgreSQL verification/frontier waits are bounded, a blocked stream retains
+  only its own IDs, and healthy streams continue to be read and finalized.
+  This keeps `XLEN` equal to outstanding work so
   both event producers can enforce the shared 1,000,000-entry capacity without
   trimming accepted data. A crash between insert and ACK may replay an insert,
   but the stable client
   `message_id` and `(project_id, message_id)` replacement key make supported
-  `FINAL` reads return that event exactly once. Retries must preserve the
-  complete logical event, especially its original timestamp: ClickHouse does
-  not merge replacement keys across monthly partitions, so changing the
-  timestamp while reusing an ID violates the idempotency contract.
+  `FINAL` reads return that event exactly once. The canonical event tables
+  partition by project, while retention dates derive from server-authoritative
+  receipt time. Retries must preserve the complete logical event; reusing an ID
+  for changed content has undefined winner semantics.
 - **Tenant authority:** the project is derived only from a validated
   `events:raw:{project_id}` stream key. Conflicting project assertions inside a
   Redis message or its event JSON are rejected.
@@ -57,15 +67,32 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   backoff shared by the consumer and periodic flusher; events are not dropped
   after an arbitrary retry count. Only narrow client-side row serialization
   errors are terminal—server/schema failures retain the batch.
+- **Experiment boundaries:** marker publication selects at most one due marker
+  per project per sweep. Each marker failure is isolated from later tenants and
+  persists a server-time exponential-backoff deadline in PostgreSQL. Transient
+  failures enter terminal quarantine on the fifth failed publication attempt;
+  malformed markers quarantine immediately. Both paths persist a fixed safe
+  failure code. Existing Redis dedup IDs are atomically checked against the
+  exact stream entry and marker fields before reuse. The first valid observed
+  stream ID is retained across retries; a quarantined observed delivery is
+  ACKed only after its project completeness frontier is permanently degraded.
+  A poisoned dedup ID already owned by another boundary is quarantined without
+  stealing that ID, while genuine post-XADD observations remain mandatory.
+  Redis insertion remains token-idempotent, and the original project,
+  experiment, version, window, stream, token, and observed identity never
+  changes. Startup holds the migration guards while proving the exact migration
+  041 ledger checksum, columns, canonical constraint definitions, and exact
+  monotone/terminal trigger function before taking singleton writer authority.
 - **Shutdown:** SIGINT/SIGTERM trigger a bounded final flush and stats log.
   Cancellation never marks a still-running synchronous insert as complete. If
   the shutdown deadline expires, the writer closes the native ClickHouse socket
   and leaves the Redis deliveries pending for replay instead of ACKing an
   unobserved insert result.
 
-The deletion contract permits any number of consumers in the one required
-`clickhouse-writer` group, but no second durable consumer group. Adding another
-group requires all-group acknowledgement tracking before entries can be
+The deletion and completeness contract permits exactly one live consumer in
+the one required `clickhouse-writer` group and no second durable consumer
+group. Adding a consumer requires a shared completeness frontier; adding a
+group also requires all-group acknowledgement tracking before entries can be
 deleted. Redis must use non-evicting memory policy plus durable persistence;
 the supported Compose stack uses AOF (`appendfsync everysec`) and
 an explicit aggregate memory ceiling with `maxmemory-policy noeviction`. Route
@@ -94,6 +121,9 @@ bounded producers. Mixed old/new producers are unsupported because one legacy
 producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
+`POSTGRES_URL` (default
+`postgresql://apdl:apdl_dev@localhost:5432/apdl`, used for singleton writer and
+migration-inhibitor authority),
 `CLICKHOUSE_NATIVE_URL` (default
 `clickhouse://apdl:apdl_dev@localhost:9000/apdl`), `BUFFER_SIZE`,
 `FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),
@@ -129,6 +159,12 @@ key. Migrations 006 and 007 then rebuild their derived projections from
 `events FINAL`. Stop the writer and Query service while applying an upgrade so
 no process observes the short projection-rebuild window.
 
+Migration 016 gives every personally attributable base and derived analytics
+table the same 12-month server-receipt retention boundary and removes the
+irreversible identity aggregate. The supported, fenced project/user purge
+workflow and its append-only completion evidence are documented in
+[Analytics data retention and deletion](../docs/data-retention.md).
+
 ### Canonical developer-preview event contract
 
 The release has one event contract and one analytical source of truth:
@@ -158,12 +194,10 @@ schemas remain outside the developer-preview contract.
   evaluation results projected from events
 - `frontend_health_events` (007, ReplacingMergeTree) — idempotent frontend
   errors and web-vitals projected from events
-- `identity_alias_assertions` (011, ReplacingMergeTree) — durable tenant-bound,
+- `identity_alias_assertions` (011/016, ReplacingMergeTree) — retained
+  tenant-bound,
   append-only `identify` assertions keyed by the complete claim; exact retries
   collapse, but reusing a message ID cannot retract an accepted identity command
-- `identity_alias_resolution_state` (011, AggregatingMergeTree) — compact
-  min/max claim state per project and anonymous ID; matching extrema resolve an
-  alias and differing extrema record a conflict
 
 **Materialized views**
 
@@ -171,16 +205,14 @@ schemas remain outside the developer-preview contract.
 - `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
 - `identity_alias_assertions_mv` (011) — projects only `identify` events that
   contain both canonical identity fields
-- `identity_alias_resolution_state_mv` (011) — folds assertions into the
-  constant-size conflict-aware resolution state
 
 `resolved_identity_aliases` resolves only when the minimum and maximum claimed
 user IDs match. Conflicting claims stay visible with an empty resolved user and
-Query leaves those actors separate. Accepted assertions are irreversible; an
-operator must rebuild the assertion and resolution tables to remove a bad
-claim. The alias becomes visible after writer durability and applies
-retroactively across retained event history. A user-only `identify` is a trait
-update, not an alias assertion.
+Query leaves those actors separate. Migration 016 computes resolution directly
+from retained assertions, so TTL or the supported deletion workflow cannot
+leave irreversible aggregate state behind. The alias becomes visible after
+writer durability and applies retroactively across retained event history. A
+user-only `identify` is a trait update, not an alias assertion.
 
 Historical recovery lives in `pipeline/clickhouse/backfills/`, outside the
 replayed schema migrations. The initializer records each backfill's name and

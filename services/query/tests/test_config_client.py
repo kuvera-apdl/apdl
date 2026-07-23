@@ -8,6 +8,7 @@ from app.config_client import (
     ConfigServiceUnavailable,
     ExperimentNotAnalyzable,
     ExperimentNotFound,
+    assert_experiment_analysis_capability,
     fetch_experiment_analysis,
 )
 
@@ -50,6 +51,57 @@ def _install_transport(monkeypatch, handler):
 
     monkeypatch.setattr(config_client.httpx, "AsyncClient", client_factory)
     monkeypatch.setattr(config_client, "CONFIG_SERVICE_URL", "https://config.test")
+
+
+def _capability(**overrides) -> dict:
+    payload = {
+        "status": "ready",
+        "service": "apdl-config",
+        "capability": "experiment_analysis",
+        "schema_version": "config_experiment_analysis@1",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_analysis_capability_accepts_only_the_exact_version(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.raw_path == b"/ready/experiment-analysis"
+        assert not request.url.params
+        assert "x-api-key" not in request.headers
+        return httpx.Response(200, json=_capability())
+
+    _install_transport(monkeypatch, handler)
+
+    await assert_experiment_analysis_capability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _capability(schema_version="config_experiment_analysis@2"),
+        _capability(status="not_ready"),
+        _capability(compatibility_alias="analysis@1"),
+    ],
+)
+async def test_analysis_capability_rejects_drift(monkeypatch, payload):
+    _install_transport(monkeypatch, lambda _: httpx.Response(200, json=payload))
+
+    with pytest.raises(ConfigServiceUnavailable, match="contract is invalid"):
+        await assert_experiment_analysis_capability()
+
+
+@pytest.mark.asyncio
+async def test_analysis_capability_rejects_unready_config(monkeypatch):
+    _install_transport(
+        monkeypatch,
+        lambda _: httpx.Response(503, json=_capability(status="not_ready")),
+    )
+
+    with pytest.raises(ConfigServiceUnavailable, match="is not ready"):
+        await assert_experiment_analysis_capability()
 
 
 @pytest.mark.asyncio

@@ -8,11 +8,13 @@ import { useState } from 'react'
 import { z } from 'zod'
 
 import {
+  experimentBucketBySchema,
   experimentCreateStatusSchema,
   experimentPathKeySchema,
   experimentTargetingRuleSchema,
 } from '@/api/schemas/experiments'
 import type {
+  ExperimentBucketBy,
   ExperimentCreate,
   ExperimentEntry,
   ExperimentMetric,
@@ -54,6 +56,7 @@ export interface ExperimentFormValues {
   flagKey: string
   status: ExperimentStatus
   description: string
+  bucket_by: ExperimentBucketBy
   traffic_percentage: number
   start_date: string
   end_date: string
@@ -76,6 +79,7 @@ export function emptyExperimentValues(): ExperimentFormValues {
     flagKey: '',
     status: 'draft',
     description: '',
+    bucket_by: 'anonymous_id',
     traffic_percentage: 100,
     start_date: '',
     end_date: '',
@@ -102,6 +106,7 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     flagKey: entry.flag_key,
     status: entry.status,
     description: entry.description,
+    bucket_by: entry.bucket_by,
     traffic_percentage: entry.traffic_percentage,
     start_date: entry.start_date ?? '',
     end_date: entry.end_date ?? '',
@@ -191,6 +196,7 @@ export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
     flag_key: values.flagKey.trim() || values.key.trim(),
     status: experimentCreateStatusSchema.parse(values.status),
     description: values.description,
+    bucket_by: values.bucket_by,
     traffic_percentage: values.traffic_percentage,
     start_date: toAwareDateTime(values.start_date),
     end_date: toAwareDateTime(values.end_date),
@@ -223,6 +229,7 @@ export function buildUpdate(
   // draft. Merely echoing their current values still counts as an attempted
   // mutation, so non-draft updates must omit them entirely.
   if (base.status === 'draft') {
+    if (values.bucket_by !== base.bucket_by) update.bucket_by = values.bucket_by
     if (values.traffic_percentage !== base.traffic_percentage) {
       update.traffic_percentage = values.traffic_percentage
     }
@@ -254,6 +261,7 @@ export function buildUpdate(
 interface ExperimentFormErrors {
   key?: string
   flagKey?: string
+  bucket_by?: string
   variants?: string
   default_variant?: string
   targeting?: string
@@ -271,6 +279,9 @@ export function validateExperimentForm(values: ExperimentFormValues): Experiment
   }
   if (flagKey !== '' && !experimentPathKeySchema.safeParse(flagKey).success) {
     errors.flagKey = 'Use 1–128 letters, numbers, dots, underscores, or hyphens'
+  }
+  if (!experimentBucketBySchema.safeParse(values.bucket_by).success) {
+    errors.bucket_by = 'Choose anonymous_id or user_id'
   }
   const keys = values.variants.map((variant) => variant.key.trim())
   if (values.variants.length < 2) errors.variants = 'Add at least two variants'
@@ -511,7 +522,7 @@ export function ExperimentForm({
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
         <div className="space-y-1.5">
           <Label>Control variant</Label>
           <Select
@@ -549,6 +560,26 @@ export function ExperimentForm({
             aria-label="Traffic percentage"
             className="tabular-nums"
           />
+        </div>
+        <div className="space-y-1.5">
+          <Label>Bucketing identity</Label>
+          <Select
+            value={values.bucket_by}
+            onChange={(event) => set({ bucket_by: event.target.value as ExperimentBucketBy })}
+            disabled={analysisFieldsLocked}
+            aria-label="Bucketing identity"
+          >
+            <option value="anonymous_id">Anonymous visitor</option>
+            <option value="user_id">Authenticated user</option>
+          </Select>
+          {errors.bucket_by ? (
+            <p className="text-xs text-destructive">{errors.bucket_by}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Immutable after draft. Use anonymous visitors for browser experiments that start
+              before sign-in.
+            </p>
+          )}
         </div>
       </div>
 

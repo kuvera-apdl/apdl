@@ -24,6 +24,11 @@ from .targeting_contract import (
     is_condition_value_valid,
     is_identifier,
 )
+from .variant_contract import (
+    MAX_VARIANTS,
+    MAX_VARIANT_WEIGHT,
+    validate_variant_weight_contract,
+)
 
 
 class ConditionOperator(str, Enum):
@@ -101,7 +106,11 @@ class VariantConfig(BaseModel):
     key: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     # ``strict`` rejects floats (incl. ``1.0``), booleans, and numeric strings,
     # matching ``services/config/app/models/schemas.py``.
-    weight: int = Field(ge=0, strict=True)
+    weight: int = Field(
+        ge=0,
+        le=MAX_VARIANT_WEIGHT,
+        strict=True,
+    )
 
 
 class FallthroughConfig(BaseModel):
@@ -116,19 +125,13 @@ def validate_variants(variants: list[VariantConfig], default_variant: str) -> No
     Shared by :class:`GateConfig`; mirrors ``validate_variants`` in the config
     service so the SDK and server agree on what a valid variant set is.
     """
-    if not variants:
-        raise ValueError("variants must contain at least one variant")
+    validate_variant_weight_contract([variant.weight for variant in variants])
 
     keys: set[str] = set()
-    total_weight = 0
     for variant in variants:
         if variant.key in keys:
             raise ValueError("variants must contain unique keys")
         keys.add(variant.key)
-        total_weight += variant.weight
-
-    if total_weight <= 0:
-        raise ValueError("variant weights must contain at least one positive weight")
     if default_variant not in keys:
         raise ValueError("default_variant must match a variant key")
 
@@ -141,7 +144,10 @@ class GateConfig(BaseModel):
     key: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     enabled: bool
     default_variant: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
-    variants: list[VariantConfig]
+    variants: list[VariantConfig] = Field(
+        min_length=1,
+        max_length=MAX_VARIANTS,
+    )
     salt: str = Field(max_length=MAX_STRING_LENGTH)
     rules: list[GateRule] = Field(max_length=MAX_RULES)
     fallthrough: FallthroughConfig

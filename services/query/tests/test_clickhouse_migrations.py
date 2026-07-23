@@ -15,6 +15,12 @@ ASSIGNMENT_EXPOSURES_SQL = (MIGRATIONS_DIR / "013_assignment_exposures.sql").rea
 EVENT_STREAM_PROVENANCE_SQL = (
     MIGRATIONS_DIR / "014_event_stream_provenance.sql"
 ).read_text()
+RECEIVED_AT_RETENTION_SQL = (
+    MIGRATIONS_DIR / "015_received_at_event_retention.sql"
+).read_text()
+PERSONAL_DATA_RETENTION_SQL = (
+    MIGRATIONS_DIR / "016_personal_data_retention.sql"
+).read_text()
 EVENTS_SQL = (MIGRATIONS_DIR / "001_events.sql").read_text()
 FRONTEND_HEALTH_EVENTS_SQL = (
     MIGRATIONS_DIR / "007_frontend_health_events.sql"
@@ -124,6 +130,101 @@ def test_event_stream_provenance_is_preserved_on_events_and_exposures():
     assert "CREATE MATERIALIZED VIEW experiment_event_deliveries_mv" in (
         EVENT_STREAM_PROVENANCE_SQL
     )
+
+
+def test_event_retention_and_partitions_use_server_receipt_time():
+    events_table = RECEIVED_AT_RETENTION_SQL.split(
+        "CREATE TABLE events__apdl_migration_015 (", 1
+    )[1].split(
+        "INSERT INTO events__apdl_migration_015", 1
+    )[0]
+    delivery_table = RECEIVED_AT_RETENTION_SQL.split(
+        "CREATE TABLE experiment_event_deliveries__apdl_migration_015 (", 1
+    )[1].split(
+        "INSERT INTO experiment_event_deliveries__apdl_migration_015", 1
+    )[0]
+
+    for table_definition in (events_table, delivery_table):
+        assert "event_date" in table_definition
+        assert "Date DEFAULT toDate(received_at)" in table_definition
+        assert "PARTITION BY project_id" in table_definition
+        assert "TTL event_date + INTERVAL 12 MONTH" in table_definition
+        assert "DEFAULT toDate(timestamp)" not in table_definition
+
+    assert "toDate(received_at)\nFROM events;" in RECEIVED_AT_RETENTION_SQL
+    assert (
+        "toDate(received_at)\nFROM experiment_event_deliveries;"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    assert (
+        "EXCHANGE TABLES events AND events__apdl_migration_015"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    assert (
+        "EXCHANGE TABLES experiment_event_deliveries"
+        in RECEIVED_AT_RETENTION_SQL
+    )
+    for view in (
+        "feature_flag_exposures_mv",
+        "frontend_health_events_mv",
+        "identity_alias_assertions_mv",
+        "experiment_event_deliveries_mv",
+    ):
+        assert f"DROP TABLE IF EXISTS {view}" in RECEIVED_AT_RETENTION_SQL
+        assert f"CREATE MATERIALIZED VIEW {view}" in RECEIVED_AT_RETENTION_SQL
+
+
+def test_every_personal_analytics_table_has_one_receipt_time_retention_policy():
+    assert (
+        "ALTER TABLE events\n"
+        "    MODIFY TTL toDate(received_at) + INTERVAL 12 MONTH"
+        in PERSONAL_DATA_RETENTION_SQL
+    )
+    assert (
+        "ALTER TABLE experiment_event_deliveries\n"
+        "    MODIFY TTL toDate(received_at) + INTERVAL 12 MONTH"
+        in PERSONAL_DATA_RETENTION_SQL
+    )
+
+    table_contracts = {
+        "sessions": "MergeTree",
+        "feature_flag_exposures": "ReplacingMergeTree(received_at)",
+        "frontend_health_events": "ReplacingMergeTree(received_at)",
+        "identity_alias_assertions": "ReplacingMergeTree(received_at)",
+    }
+    for table, engine in table_contracts.items():
+        definition = PERSONAL_DATA_RETENTION_SQL.split(
+            f"CREATE TABLE {table}__apdl_migration_016 (", 1
+        )[1].split(f"INSERT INTO {table}__apdl_migration_016", 1)[0]
+        assert "received_at" in definition
+        assert "Date DEFAULT toDate(received_at)" in definition
+        assert f"ENGINE = {engine}" in definition
+        assert "PARTITION BY project_id" in definition
+        assert "TTL toDate(received_at) + INTERVAL 12 MONTH" in definition
+        assert "timestamp + INTERVAL 12 MONTH" not in definition
+
+    assert "receipt.matched_session_id = '',\n            now64(3)" in (
+        PERSONAL_DATA_RETENTION_SQL
+    )
+    assert "session.end_time,\n        receipt.received_at" not in (
+        PERSONAL_DATA_RETENTION_SQL
+    )
+
+
+def test_personal_projections_copy_the_server_receipt_authority():
+    for view in (
+        "feature_flag_exposures_mv",
+        "frontend_health_events_mv",
+        "identity_alias_assertions_mv",
+        "experiment_event_deliveries_mv",
+    ):
+        definition = PERSONAL_DATA_RETENTION_SQL.split(
+            f"CREATE MATERIALIZED VIEW {view}", 1
+        )[1]
+        if view != "experiment_event_deliveries_mv":
+            definition = definition.split("CREATE MATERIALIZED VIEW", 1)[0]
+        assert "received_at" in definition
+        assert "toDate(received_at) AS event_date" in definition
 
 
 def test_duplicate_amplifying_aggregate_views_are_retired():
@@ -237,9 +338,21 @@ def test_resolved_identity_aliases_are_tenant_bound_and_conflicts_fail_closed():
     assert "GROUP BY\n    project_id,\n    anonymous_id" in IDENTITY_ALIASES_SQL
 
 
-def test_identity_alias_assertions_outlive_the_source_event_ttl():
-    table_definition = IDENTITY_ALIASES_SQL.split(
+def test_identity_alias_retention_replaces_irreversible_resolution_state():
+    legacy_table_definition = IDENTITY_ALIASES_SQL.split(
         "CREATE TABLE IF NOT EXISTS identity_alias_assertions (", 1
     )[1].split("ALTER TABLE identity_alias_assertions", 1)[0]
 
-    assert "TTL" not in table_definition
+    assert "TTL" not in legacy_table_definition
+    assert "DROP TABLE IF EXISTS identity_alias_resolution_state_mv" in (
+        PERSONAL_DATA_RETENTION_SQL
+    )
+    assert "DROP TABLE IF EXISTS identity_alias_resolution_state" in (
+        PERSONAL_DATA_RETENTION_SQL
+    )
+    resolved_view = PERSONAL_DATA_RETENTION_SQL.split(
+        "CREATE VIEW resolved_identity_aliases AS", 1
+    )[1].split("CREATE MATERIALIZED VIEW", 1)[0]
+    assert "FROM identity_alias_assertions FINAL" in resolved_view
+    assert "identity_alias_resolution_state" not in resolved_view
+    assert "min(user_id) != max(user_id) AS has_conflict" in resolved_view

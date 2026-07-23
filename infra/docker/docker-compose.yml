@@ -336,6 +336,17 @@ services:
     # volumes:
     #   - ${GITHUB_APP_PRIVATE_KEY_PATH}:${GITHUB_APP_PRIVATE_KEY_PATH}:ro
     #   - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8084/ready', timeout=2))['status'] == 'ready'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       postgres:
         condition: service_healthy
@@ -346,6 +357,10 @@ services:
     build:
       context: ../../pipeline/redis
       dockerfile: Dockerfile
+    # The writer's completeness frontier is intentionally single-authority.
+    # A PostgreSQL advisory lock also rejects accidental runtime scaling.
+    deploy:
+      replicas: 1
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl

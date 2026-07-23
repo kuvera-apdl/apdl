@@ -5,6 +5,7 @@ app with a mock Redis backend.
 """
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -43,6 +44,12 @@ from app.validation.json_contract import MAX_REQUEST_BYTES
 API_KEY = "proj_testproj_abcdefghijklmnop"
 HEADERS = {"X-API-Key": API_KEY}
 URL = "/v1/events"
+REFERENCE_TIME = datetime(2026, 7, 13, 12, 0, 4, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def fixed_ingestion_clock(monkeypatch):
+    monkeypatch.setattr(events_router, "_utc_now", lambda: REFERENCE_TIME)
 
 
 def canonical_event(
@@ -183,7 +190,7 @@ async def test_valid_batch_with_track_event(client):
         "button_click",
         user_id="usr_123",
         properties={"button": "signup"},
-        timestamp="2025-01-01T00:00:00.000Z",
+        timestamp="2026-07-13T12:00:00.000Z",
     )]}
     resp = await client.post(URL, json=payload, headers=HEADERS)
     assert resp.status_code == 202
@@ -201,7 +208,7 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
             "anonymous_id": "anon-sdk-1",
             "session_id": "sess-sdk-1",
             "message_id": "msg-sdk-1",
-            "timestamp": "2026-05-26T02:26:53.455Z",
+            "timestamp": "2026-07-13T12:00:00.000Z",
             "properties": {"source": "sdk-contract-test"},
             "context": {
                 "browser": {"name": "Chrome", "version": "123"},
@@ -232,11 +239,33 @@ async def test_sdk_aligned_payload_is_published_to_project_stream(client):
     assert published["context"]["browser"] == {"name": "Chrome", "version": "123"}
     assert published["context"]["device"] == {"type": "desktop"}
     assert published["project_id"] == "testproj"
-    assert "server_timestamp" in published
+    assert published["server_timestamp"] == "2026-07-13T12:00:04.000Z"
     assert "ip" in published
     assert "anonymousId" not in published
     assert "sessionId" not in published
     assert "messageId" not in published
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        ("2026-07-06T12:00:03.999999Z", "more than 7 days older"),
+        ("2026-07-13T12:05:04.000001Z", "more than 5 minutes ahead"),
+    ],
+)
+async def test_out_of_window_event_time_is_rejected_before_publish(
+    client,
+    timestamp,
+    message,
+):
+    event = canonical_event("outside-window", timestamp=timestamp)
+
+    response = await client.post(URL, json={"events": [event]}, headers=HEADERS)
+
+    assert response.status_code == 400
+    assert any(message in error["message"] for error in response.json()["errors"])
+    assert publisher_calls() == []
 
 
 @pytest.mark.asyncio
@@ -390,7 +419,7 @@ async def test_feature_flag_exposure_payload_is_published(client):
             "anonymous_id": "anon-sdk-1",
             "session_id": "sess-sdk-1",
             "message_id": "msg-sdk-1",
-            "timestamp": "2026-05-26T02:26:53.455Z",
+            "timestamp": "2026-07-13T12:00:00.000Z",
             "context": {},
             "properties": {
                 "flag_key": "checkout-gate",
@@ -587,7 +616,7 @@ async def test_unchanged_message_id_retry_is_admitted_across_requests(client):
     event = canonical_event(
         "retryable-event",
         message_id="message-stable-across-retry",
-        timestamp="2026-07-15T18:00:00.000Z",
+        timestamp="2026-07-13T12:00:00.000Z",
         properties={"attempt_invariant": True},
     )
 
@@ -741,7 +770,8 @@ async def test_reject_oversized_request_before_json_parse(client):
 
     assert resp.status_code == 413
     assert resp.json()["error"] == "payload_too_large"
-    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("preauth")) == 1
+    assert quota_calls("request") == []
     assert quota_calls("byte") == []
     assert quota_calls("event") == []
     assert publisher_calls() == []
@@ -806,7 +836,7 @@ async def test_chunked_body_stops_at_bound_before_downstream_stages(monkeypatch)
     assert resp.status_code == 413
     assert json.loads(resp.body) == {
         "error": "payload_too_large",
-        "message": f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+        "message": "Request body exceeds the configured limit",
     }
     assert receive_count == 2
     request_admission.assert_awaited_once()

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlparse
 
+from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
+
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 API_KEY_PATTERN = re.compile(
     r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
@@ -287,5 +289,10 @@ class Settings:
             raise ValueError(
                 "APDL_ADMIN_LOGIN_RISK_HMAC_KEY must be deployment-unique "
                 "when secure cookies are enabled"
+            )
+        if settings.max_request_bytes > DEFAULT_MAX_REQUEST_BODY_BYTES:
+            raise ValueError(
+                "APDL_ADMIN_MAX_REQUEST_BYTES cannot exceed the outer "
+                f"{DEFAULT_MAX_REQUEST_BODY_BYTES}-byte request limit"
             )
         return settings

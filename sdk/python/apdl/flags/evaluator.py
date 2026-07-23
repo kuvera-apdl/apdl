@@ -32,6 +32,7 @@ from .targeting_contract import (
     parse_numeric,
     scalar_equal,
 )
+from .variant_contract import validate_variant_weight_contract
 
 _NUMERIC_OPS = {
     ConditionOperator.GT,
@@ -49,11 +50,16 @@ def assign_weighted_variant(
     Returns the key of the first variant whose cumulative weight interval
     contains ``(variant_bucket / 100) * total_weight``, clamping to the last
     positive-weight variant at the upper boundary. Zero-weight variants are
-    never assigned. Returns ``None`` when the total weight is not positive.
+    never assigned. Returns ``None`` when the weighted-variant contract is
+    invalid.
     """
-    total_weight = sum(variant.weight for variant in variants)
-    if total_weight <= 0:
+    try:
+        validate_variant_weight_contract(
+            [variant.weight for variant in variants]
+        )
+    except ValueError:
         return None
+    total_weight = sum(variant.weight for variant in variants)
 
     target = (variant_bucket / 100.0) * total_weight
     cumulative = 0

@@ -18,6 +18,17 @@ _API_KEY_PATTERN = re.compile(
 _RESOURCE_KEY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
 
+class ConfigExperimentAnalysisCapability(BaseModel):
+    """The exact unauthenticated capability proof Query accepts from Config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ready"]
+    service: Literal["apdl-config"]
+    capability: Literal["experiment_analysis"]
+    schema_version: Literal["config_experiment_analysis@1"]
+
+
 class ConfigExperimentStatisticalPlan(BaseModel):
     """The immutable fixed-horizon plan Config owns for Query."""
 
@@ -82,6 +93,31 @@ class ExperimentNotAnalyzable(RuntimeError):
 
 class ConfigServiceUnavailable(RuntimeError):
     """Authoritative experiment metadata could not be obtained safely."""
+
+
+async def assert_experiment_analysis_capability() -> None:
+    """Fail unless Config advertises the exact analysis contract Query uses."""
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.get("/ready/experiment-analysis")
+    except httpx.RequestError as exc:
+        raise ConfigServiceUnavailable(
+            "Config experiment-analysis capability request failed"
+        ) from exc
+    if response.status_code != 200:
+        raise ConfigServiceUnavailable(
+            "Config experiment-analysis capability is not ready"
+        )
+    try:
+        ConfigExperimentAnalysisCapability.model_validate(response.json())
+    except (ValueError, ValidationError) as exc:
+        raise ConfigServiceUnavailable(
+            "Config experiment-analysis capability contract is invalid"
+        ) from exc
 
 
 def _config_error_detail(response: httpx.Response, fallback: str) -> str:

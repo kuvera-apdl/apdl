@@ -24,6 +24,7 @@ from app.llm.prompts.evaluation import (
     EXPERIMENT_EVALUATION_PROMPT,
     EXPERIMENT_EVALUATION_SYSTEM,
 )
+from app.models.experiment_design import EXPERIMENT_BUCKET_BY_VALUES
 from app.tools.experiments import get_active_experiments, get_experiment_results
 
 
@@ -40,6 +41,7 @@ _CONFIG_EXPERIMENT_FIELDS = frozenset(
     {
         "key",
         "flag_key",
+        "bucket_by",
         "status",
         "description",
         "default_variant",
@@ -245,9 +247,15 @@ def _completed_experiment_keys(experiments: list[dict[str, Any]]) -> list[str]:
                 "Config experiment entries must use the canonical list schema"
             )
         key = raw.get("key")
+        bucket_by = raw.get("bucket_by")
         status = raw.get("status")
         if not isinstance(key, str) or _RESOURCE_KEY_PATTERN.fullmatch(key) is None:
             raise ValueError("Config experiment key is not canonical")
+        if (
+            not isinstance(bucket_by, str)
+            or bucket_by not in EXPERIMENT_BUCKET_BY_VALUES
+        ):
+            raise ValueError("Config experiment bucket_by is not canonical")
         if status not in {
             "draft",
             "scheduled",

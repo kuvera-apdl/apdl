@@ -136,6 +136,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         default_variant="control",
+        bucket_by="anonymous_id",
         primary_metric={"event": "purchase", "type": "conversion", "direction": "increase"},
         statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={"conditions": [{"attribute": "plan", "operator": "equals", "value": "pro"}]},
@@ -156,6 +157,7 @@ async def test_create_experiment_draft_uses_config_admin_schema(monkeypatch):
             {"key": "treatment", "weight": 1, "description": "New checkout"},
         ],
         "default_variant": "control",
+        "bucket_by": "anonymous_id",
         "traffic_percentage": 100.0,
         "primary_metric": {"event": "purchase", "type": "conversion", "direction": "increase"},
         "statistical_plan": VALID_STATISTICAL_PLAN,
@@ -213,6 +215,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
                 {"key": "treatment", "weight": 50},
             ],
             default_variant="control",
+            bucket_by="anonymous_id",
             primary_metric={"event": "purchase"},
             statistical_plan=VALID_STATISTICAL_PLAN,
             targeting={
@@ -238,6 +241,7 @@ async def test_targeting_rejects_aliases_and_extra_fields(monkeypatch):
                 {"key": "treatment", "weight": 50},
             ],
             default_variant="control",
+            bucket_by="anonymous_id",
             primary_metric={"event": "purchase"},
             statistical_plan=VALID_STATISTICAL_PLAN,
             targeting={
@@ -259,6 +263,7 @@ async def test_targeting_presence_condition_uses_omitted_value(monkeypatch):
         hypothesis="h",
         variants=[{"key": "control", "weight": 50}, {"key": "treatment", "weight": 50}],
         default_variant="control",
+        bucket_by="anonymous_id",
         primary_metric={"event": "purchase"},
         statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={
@@ -290,6 +295,7 @@ async def test_empty_targeting_conditions_are_omitted(monkeypatch):
         hypothesis="h",
         variants=[{"key": "control", "weight": 1}, {"key": "treatment", "weight": 1}],
         default_variant="control",
+        bucket_by="user_id",
         primary_metric={"event": "purchase"},
         statistical_plan=VALID_STATISTICAL_PLAN,
         targeting={"conditions": []},
@@ -311,11 +317,38 @@ async def test_experiment_draft_requires_primary_metric(monkeypatch):
             {"key": "treatment", "weight": 1},
         ],
         "default_variant": "control",
+        "bucket_by": "anonymous_id",
         "statistical_plan": VALID_STATISTICAL_PLAN,
     }
 
     with pytest.raises(ValueError, match="primary_metric.event"):
         await experiments.create_experiment_draft(**common, primary_metric={})
+
+
+@pytest.mark.asyncio
+async def test_experiment_draft_requires_canonical_explicit_bucket_by(monkeypatch):
+    captured = _capture_post(monkeypatch)
+    common = {
+        "project_id": "apdl",
+        "idempotency_key": IDEMPOTENCY_KEY,
+        "experiment_id": "exp_identity",
+        "hypothesis": "h",
+        "variants": [
+            {"key": "control", "weight": 1},
+            {"key": "treatment", "weight": 1},
+        ],
+        "default_variant": "control",
+        "primary_metric": {"event": "purchase"},
+        "statistical_plan": VALID_STATISTICAL_PLAN,
+    }
+
+    with pytest.raises(TypeError, match="bucket_by"):
+        await experiments.create_experiment_draft(**common)
+    with pytest.raises(ValueError, match="anonymous_id or user_id"):
+        await experiments.create_experiment_draft(**common, bucket_by="account_id")
+
+    await experiments.create_experiment_draft(**common, bucket_by="user_id")
+    assert captured["json"]["bucket_by"] == "user_id"
 
 
 def test_automatic_experiment_status_mutator_is_not_exposed():

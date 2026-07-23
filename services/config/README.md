@@ -108,18 +108,22 @@ targeting, and rollout onto it.
 
 Experiments use timezone-aware `start_date` and `end_date` values and the
 `draft`, `scheduled`, `running`, `completed`, or `stopped` states. Authoring
-requires 2-10 unique, positive-weight variants and an explicit
-`default_variant`; that one field is both the statistical control and the
-backing flag's fallback variant. Primary metrics are conversion events only,
-and a complete window is limited to 90 days. Scheduled and running experiments
-require the metric, window, and one strict
+requires 2-10 unique, positive-weight variants, an explicit `default_variant`,
+and exactly one `bucket_by` identity (`anonymous_id` or `user_id`);
+`anonymous_id` supports browser enrollment before sign-in. The default variant
+is both the statistical control and the backing flag's fallback variant, while
+the selected identity is projected onto every experiment-owned rollout.
+Primary metrics are conversion events only, and a complete window is limited
+to 90 days. Scheduled and running experiments require the metric, window, and
+one strict
 `fixed_horizon_fisher_newcombe_cc_plan_v1` statistical plan. The plan declares
 baseline conversion, MDE, significance level, nominal power, a
 continuity-corrected per-arm target, and an explicit data-settlement hold.
 Nominal power is a planning input, not a guarantee of exact achieved Fisher
-power. After an experiment leaves `draft`, its default/control variant,
-variants, primary metric, statistical plan, and dates are immutable. Completing
-before the planned end is rejected; stopping truncates the observed window.
+power. After an experiment leaves `draft`, its bucketing identity,
+default/control variant, variants, primary metric, statistical plan, and dates
+are immutable. Completing before the planned end is rejected; stopping
+truncates the observed window.
 The lifecycle worker validates the plan before activating scheduled traffic and
 atomically completes due experiments. Legacy rows without a plan can never be
 started. Stopping a draft or scheduled experiment clears its

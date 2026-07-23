@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -38,6 +40,368 @@ def test_each_maintenance_session_acquires_and_verifies_both_lock_ids() -> None:
         assert connection.acquired == [4_158_044_083, 4_158_044_084]
         assert "pid = pg_backend_pid()" in connection.heartbeat_query
         assert "objsubid = 1" in connection.heartbeat_query
+
+    asyncio.run(scenario())
+
+
+def test_boundary_marker_schema_gate_requires_exact_ledger_columns_and_state(
+    monkeypatch,
+):
+    constraint_definitions = {
+        name: f"canonical definition for {name}"
+        for name in writer_module.BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256
+    }
+    function_definition = "canonical monotone terminal function"
+    monkeypatch.setattr(
+        writer_module,
+        "BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256",
+        {
+            name: hashlib.sha256(definition.encode()).hexdigest()
+            for name, definition in constraint_definitions.items()
+        },
+    )
+    monkeypatch.setattr(
+        writer_module,
+        "BOUNDARY_MARKER_POSTGRES_FUNCTION_SHA256",
+        hashlib.sha256(function_definition.encode()).hexdigest(),
+    )
+
+    class Connection:
+        async def fetchval(self, query, *_args):
+            assert "to_regclass" in query
+            return True
+
+        async def fetchrow(self, query, *args):
+            if "apdl_schema_migrations" in query:
+                assert args == (41,)
+                return {
+                    "name": writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME,
+                    "checksum": (
+                        writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_SHA256
+                    ),
+                }
+            assert "pg_catalog.pg_trigger" in query
+            assert args == (
+                writer_module.BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME,
+            )
+            return {
+                "tgname": writer_module.BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME,
+                "tgenabled": "O",
+                "tgtype": 27,
+                "tgisinternal": False,
+                "trigger_definition": (
+                    writer_module.BOUNDARY_MARKER_POSTGRES_TRIGGER_DEFINITION
+                ),
+                "function_schema": "public",
+                "function_name": (
+                    writer_module.BOUNDARY_MARKER_POSTGRES_FUNCTION_NAME
+                ),
+                "prokind": "f",
+                "prosecdef": False,
+                "proleakproof": False,
+                "provolatile": "v",
+                "proparallel": "u",
+                "proconfig": ["search_path=pg_catalog, public"],
+                "pronargs": 0,
+                "return_type": "trigger",
+                "function_definition": function_definition,
+            }
+
+        async def fetch(self, query, names):
+            if "information_schema.columns" in query:
+                expected = {
+                    "marker_publish_state": (
+                        "text",
+                        "NO",
+                        "'pending'::text",
+                    ),
+                    "marker_publish_attempts": ("int2", "NO", "0"),
+                    "marker_publish_next_attempt_at": (
+                        "timestamptz",
+                        "YES",
+                        "now()",
+                    ),
+                    "marker_publish_failure_code": ("text", "YES", None),
+                    "marker_publish_last_error_at": (
+                        "timestamptz",
+                        "YES",
+                        None,
+                    ),
+                    "marker_publish_quarantined_at": (
+                        "timestamptz",
+                        "YES",
+                        None,
+                    ),
+                    "marker_publish_observed_stream_id": (
+                        "text",
+                        "YES",
+                        None,
+                    ),
+                }
+                assert names == sorted(expected)
+                return [
+                    {
+                        "column_name": name,
+                        "udt_name": values[0],
+                        "is_nullable": values[1],
+                        "column_default": values[2],
+                    }
+                    for name, values in expected.items()
+                ]
+            assert "pg_catalog.pg_constraint" in query
+            assert names == sorted(constraint_definitions)
+            return [
+                {
+                    "conname": name,
+                    "contype": (
+                        "u"
+                        if name
+                        == writer_module.BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT
+                        else "c"
+                    ),
+                    "condeferrable": False,
+                    "condeferred": False,
+                    "convalidated": True,
+                    "definition": definition,
+                }
+                for name, definition in constraint_definitions.items()
+            ]
+
+    asyncio.run(writer_module._assert_boundary_marker_schema(Connection()))
+
+
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    [
+        ("constraint", "state constraint is not exact"),
+        ("trigger", "state trigger is not exact"),
+        ("function", "state trigger is not exact"),
+    ],
+)
+def test_boundary_marker_schema_gate_rejects_state_machine_weakening(
+    monkeypatch,
+    drift,
+    error,
+):
+    definitions = {
+        name: f"exact-{name}"
+        for name in writer_module.BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256
+    }
+    function_definition = "exact-function"
+    monkeypatch.setattr(
+        writer_module,
+        "BOUNDARY_MARKER_POSTGRES_CONSTRAINT_SHA256",
+        {
+            name: hashlib.sha256(definition.encode()).hexdigest()
+            for name, definition in definitions.items()
+        },
+    )
+    monkeypatch.setattr(
+        writer_module,
+        "BOUNDARY_MARKER_POSTGRES_FUNCTION_SHA256",
+        hashlib.sha256(function_definition.encode()).hexdigest(),
+    )
+
+    class Connection:
+        async def fetchval(self, *_args):
+            return True
+
+        async def fetchrow(self, query, *_args):
+            if "apdl_schema_migrations" in query:
+                return {
+                    "name": writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME,
+                    "checksum": (
+                        writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_SHA256
+                    ),
+                }
+            return {
+                "tgname": writer_module.BOUNDARY_MARKER_POSTGRES_TRIGGER_NAME,
+                "tgenabled": "O",
+                "tgtype": 19 if drift == "trigger" else 27,
+                "tgisinternal": False,
+                "trigger_definition": (
+                    writer_module.BOUNDARY_MARKER_POSTGRES_TRIGGER_DEFINITION
+                ),
+                "function_schema": "public",
+                "function_name": (
+                    writer_module.BOUNDARY_MARKER_POSTGRES_FUNCTION_NAME
+                ),
+                "prokind": "f",
+                "prosecdef": False,
+                "proleakproof": False,
+                "provolatile": "v",
+                "proparallel": "u",
+                "proconfig": ["search_path=pg_catalog, public"],
+                "pronargs": 0,
+                "return_type": "trigger",
+                "function_definition": (
+                    function_definition + "-weakened"
+                    if drift == "function"
+                    else function_definition
+                ),
+            }
+
+        async def fetch(self, query, names):
+            if "information_schema.columns" in query:
+                columns = {
+                    "marker_publish_state": (
+                        "text",
+                        "NO",
+                        "'pending'::text",
+                    ),
+                    "marker_publish_attempts": ("int2", "NO", "0"),
+                    "marker_publish_next_attempt_at": (
+                        "timestamptz",
+                        "YES",
+                        "now()",
+                    ),
+                    "marker_publish_failure_code": ("text", "YES", None),
+                    "marker_publish_last_error_at": (
+                        "timestamptz",
+                        "YES",
+                        None,
+                    ),
+                    "marker_publish_quarantined_at": (
+                        "timestamptz",
+                        "YES",
+                        None,
+                    ),
+                    "marker_publish_observed_stream_id": (
+                        "text",
+                        "YES",
+                        None,
+                    ),
+                }
+                assert names == sorted(columns)
+                return [
+                    {
+                        "column_name": name,
+                        "udt_name": values[0],
+                        "is_nullable": values[1],
+                        "column_default": values[2],
+                    }
+                    for name, values in columns.items()
+                ]
+            weakened_name = next(iter(definitions))
+            return [
+                {
+                    "conname": name,
+                    "contype": (
+                        "u"
+                        if name
+                        == writer_module.BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT
+                        else "c"
+                    ),
+                    "condeferrable": False,
+                    "condeferred": False,
+                    "convalidated": True,
+                    "definition": (
+                        definition + "-weakened"
+                        if drift == "constraint" and name == weakened_name
+                        else definition
+                    ),
+                }
+                for name, definition in definitions.items()
+            ]
+
+    with pytest.raises(RuntimeError, match=error):
+        asyncio.run(writer_module._assert_boundary_marker_schema(Connection()))
+
+
+def test_boundary_marker_schema_gate_checksum_matches_migration():
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "postgres"
+        / "migrations"
+        / writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME
+    )
+    assert hashlib.sha256(migration.read_bytes()).hexdigest() == (
+        writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_SHA256
+    )
+
+
+def test_boundary_marker_schema_gate_rejects_wrong_ledger_checksum():
+    class Connection:
+        async def fetchval(self, query, *_args):
+            assert "to_regclass" in query
+            return True
+
+        async def fetchrow(self, query, version):
+            assert "apdl_schema_migrations" in query
+            assert version == 41
+            return {
+                "name": writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME,
+                "checksum": "0" * 64,
+            }
+
+        async def fetch(self, *_args):
+            raise AssertionError("column checks must follow exact ledger proof")
+
+    with pytest.raises(RuntimeError, match="migration is not exact"):
+        asyncio.run(
+            writer_module._assert_boundary_marker_schema(Connection())
+        )
+
+
+def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
+    monkeypatch,
+):
+    class Pool:
+        def __init__(self):
+            self.connection = object()
+            self.released = []
+            self.closed = False
+
+        async def acquire(self):
+            return self.connection
+
+        async def release(self, connection):
+            self.released.append(connection)
+
+        async def close(self):
+            self.closed = True
+
+    async def scenario():
+        pool = Pool()
+        singleton_calls = []
+        inhibitor_calls = []
+
+        async def create_pool(*_args, **_kwargs):
+            return pool
+
+        async def fail_schema(_connection):
+            raise RuntimeError("migration 041 is absent")
+
+        async def record_singleton(*_args, **_kwargs):
+            singleton_calls.append(True)
+
+        async def record_inhibitor(*_args, **_kwargs):
+            inhibitor_calls.append(True)
+
+        monkeypatch.setattr(writer_module.asyncpg, "create_pool", create_pool)
+        monkeypatch.setattr(
+            writer_module,
+            "_assert_boundary_marker_schema",
+            fail_schema,
+        )
+        monkeypatch.setattr(
+            writer_module,
+            "_acquire_writer_singleton",
+            record_singleton,
+        )
+        monkeypatch.setattr(
+            writer_module,
+            "_acquire_maintenance_inhibitor",
+            record_inhibitor,
+        )
+
+        with pytest.raises(RuntimeError, match="migration 041 is absent"):
+            await writer_module.main()
+
+        assert inhibitor_calls == [True]
+        assert singleton_calls == []
+        assert pool.released == [pool.connection]
+        assert pool.closed is True
 
     asyncio.run(scenario())
 
@@ -405,6 +769,7 @@ def canonical_event(event="signup", **overrides):
         "type": "track",
         "anonymous_id": "anon-test",
         "timestamp": "2026-07-13T12:00:00.000Z",
+        "server_timestamp": "2026-07-13T12:00:00.000Z",
         "context": {},
         "message_id": f"message-{event}",
     }
@@ -1589,7 +1954,8 @@ def test_writer_uses_shared_canonical_contract_fixture(monkeypatch):
 
     rows = []
     for event in fixture["valid"]:
-        row = writer._parse_event({"event_json": json.dumps(event)}, "demo")
+        payload = {**event, "server_timestamp": event["timestamp"]}
+        row = writer._parse_event({"event_json": json.dumps(payload)}, "demo")
         assert row["message_id"] == event["message_id"]
         assert row["event_type"] == event["type"]
         rows.append(row)
@@ -1698,6 +2064,62 @@ def test_invalid_canonical_row_is_dlqd_before_source_ack(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_out_of_window_event_time_is_quarantined_without_rewrite(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch)
+        event = canonical_event(timestamp="2026-07-06T11:59:59.999999Z")
+        results = [
+            (
+                "events:raw:demo",
+                [("1-0", {"event_json": json.dumps(event)})],
+            )
+        ]
+
+        assert await writer._process_messages(results) == 0
+        assert ch_client.inserts == []
+        assert event["timestamp"] == "2026-07-06T11:59:59.999999Z"
+        assert len(redis_client.adds) == 1
+        dlq_stream, fields, _ = redis_client.adds[0]
+        assert dlq_stream == "events:dlq:demo"
+        assert fields["reason_code"] == "invalid_event_schema"
+        assert fields["error_type"] == "ValueError"
+        assert redis_client.acks == []
+
+        assert await writer._flush() is True
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_missing_server_timestamp_is_quarantined_before_source_ack(monkeypatch):
+    async def scenario():
+        writer, redis_client, ch_client = make_writer(monkeypatch)
+        event = canonical_event()
+        event.pop("server_timestamp")
+
+        assert await writer._process_messages([
+            (
+                "events:raw:demo",
+                [("1-0", {"event_json": json.dumps(event)})],
+            )
+        ]) == 0
+        assert ch_client.inserts == []
+        assert len(redis_client.adds) == 1
+        _, fields, _ = redis_client.adds[0]
+        assert fields["reason_code"] == "invalid_event_schema"
+        assert fields["error_type"] == "ValueError"
+        assert redis_client.acks == []
+
+        assert await writer._flush() is True
+        assert redis_client.acks == [
+            ("events:raw:demo", "clickhouse-writer", ("1-0",))
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_stream_delivery_provenance_is_written_to_clickhouse_row(monkeypatch):
     writer, _, _ = make_writer(monkeypatch)
 
@@ -1733,6 +2155,484 @@ def test_boundary_marker_contract_is_strict():
                 "event_json": "{}",
             }
         )
+
+
+def test_boundary_marker_publication_isolated_and_fair_per_project(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.query = ""
+
+        async def fetch(self, query, project_ids):
+            self.query = query
+            assert project_ids is None
+            return [
+                {
+                    "project_id": "blocked",
+                    "experiment_key": "old",
+                    "config_version": 1,
+                    "stream_key": "events:raw:blocked",
+                    "marker_token": "a" * 64,
+                    "marker_publish_attempts": 0,
+                    "marker_publish_observed_stream_id": None,
+                },
+                {
+                    "project_id": "healthy",
+                    "experiment_key": "ready",
+                    "config_version": 1,
+                    "stream_key": "events:raw:healthy",
+                    "marker_token": "b" * 64,
+                    "marker_publish_attempts": 0,
+                    "marker_publish_observed_stream_id": None,
+                },
+            ]
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, _, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        attempted = []
+
+        async def publish(marker):
+            attempted.append(marker.project_id)
+            if marker.project_id == "blocked":
+                raise writer_module.BoundaryMarkerPublishError(
+                    "redis_publish_failed",
+                    terminal=False,
+                )
+
+        async def persist_failure(marker, failure):
+            assert marker.project_id == "blocked"
+            assert failure.code == "redis_publish_failed"
+            return "pending"
+
+        monkeypatch.setattr(writer, "_publish_one_boundary_marker", publish)
+        monkeypatch.setattr(
+            writer,
+            "_record_boundary_marker_failure",
+            persist_failure,
+        )
+
+        await writer._publish_pending_boundary_markers(None)
+
+        assert attempted == ["blocked", "healthy"]
+        assert "PARTITION BY project_id" in connection.query
+        assert "WHERE project_rank = 1" in connection.query
+        assert "marker_publish_next_attempt_at <= clock_timestamp()" in (
+            connection.query
+        )
+        assert writer.stats["boundary_markers_retried"] == 1
+        assert writer.stats["boundary_markers_published"] == 1
+        assert writer.stats["errors"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_boundary_marker_retry_schedule_is_bounded():
+    assert [
+        ClickHouseWriter._boundary_marker_retry_delay(attempt)
+        for attempt in range(1, 5)
+    ] == [1, 2, 4, 8]
+    with pytest.raises(ValueError, match="out of range"):
+        ClickHouseWriter._boundary_marker_retry_delay(5)
+
+
+@pytest.mark.parametrize(
+    ("attempts", "failure_code", "terminal"),
+    [
+        (4, "event_stream_capacity", False),
+        (0, "invalid_marker_token", True),
+    ],
+)
+def test_boundary_marker_exhaustion_or_malformed_input_is_quarantined(
+    monkeypatch,
+    attempts,
+    failure_code,
+    terminal,
+):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.call = None
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            self.call = (query, args)
+            return {
+                "marker_publish_state": "quarantined",
+                "marker_publish_attempts": attempts + 1,
+                "marker_publish_observed_stream_id": None,
+            }
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, _, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        marker = writer_module.PendingBoundaryMarker(
+            project_id="demo",
+            experiment_key="experiment",
+            config_version=3,
+            stream_key="events:raw:demo",
+            marker_token="a" * 64,
+            publish_attempts=attempts,
+        )
+        state = await writer._record_boundary_marker_failure(
+            marker,
+            writer_module.BoundaryMarkerPublishError(
+                failure_code,
+                terminal=terminal,
+            ),
+        )
+
+        assert state == "quarantined"
+        query, args = connection.call
+        assert "marker_publish_attempts + 1" in query
+        assert "clock_timestamp()" in query
+        assert args[3] == attempts
+        assert args[4] == failure_code
+        assert args[5] is True
+        assert args[6] == 0
+        assert args[7] == 5
+        assert args[8] is None
+
+    asyncio.run(scenario())
+
+
+def test_boundary_marker_poison_id_collision_quarantines_without_claiming(
+    monkeypatch,
+):
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Connection:
+        def __init__(self):
+            self.update_candidates = []
+
+        def transaction(self):
+            return Transaction()
+
+        async def fetchrow(self, query, *args):
+            assert "UPDATE experiment_analysis_boundaries" in query
+            candidate = args[8]
+            self.update_candidates.append(candidate)
+            if candidate is not None:
+                collision = writer_module.asyncpg.UniqueViolationError(
+                    "duplicate observed marker authority"
+                )
+                collision.constraint_name = (
+                    writer_module.BOUNDARY_MARKER_OBSERVED_IDENTITY_CONSTRAINT
+                )
+                raise collision
+            return {
+                "marker_publish_state": "quarantined",
+                "marker_publish_attempts": 1,
+                "marker_publish_observed_stream_id": None,
+            }
+
+    class Acquire:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def acquire(self):
+            return Acquire(self.connection)
+
+    async def scenario():
+        connection = Connection()
+        writer, _, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(connection),
+        )
+        marker = writer_module.PendingBoundaryMarker(
+            project_id="demo",
+            experiment_key="colliding",
+            config_version=1,
+            stream_key="events:raw:demo",
+            marker_token="a" * 64,
+            publish_attempts=0,
+        )
+
+        state = await writer._record_boundary_marker_failure(
+            marker,
+            writer_module.BoundaryMarkerPublishError(
+                "invalid_boundary_marker_dedup",
+                terminal=True,
+                observed_stream_id="123-4",
+            ),
+        )
+
+        assert state == "quarantined"
+        assert connection.update_candidates == ["123-4", None]
+
+        post_xadd_marker = writer_module.PendingBoundaryMarker(
+            project_id="demo",
+            experiment_key="post_xadd",
+            config_version=1,
+            stream_key="events:raw:demo",
+            marker_token="b" * 64,
+            publish_attempts=4,
+        )
+        with pytest.raises(writer_module.asyncpg.UniqueViolationError):
+            await writer._record_boundary_marker_failure(
+                post_xadd_marker,
+                writer_module.BoundaryMarkerPublishError(
+                    "boundary_authority_update_failed",
+                    terminal=False,
+                    observed_stream_id="456-7",
+                ),
+            )
+        assert connection.update_candidates == ["123-4", None, "456-7"]
+
+    asyncio.run(scenario())
+
+
+def test_boundary_marker_malformed_authority_is_classified_before_redis(
+    monkeypatch,
+):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        marker = writer_module.PendingBoundaryMarker(
+            project_id="demo",
+            experiment_key="experiment",
+            config_version=3,
+            stream_key="events:raw:other",
+            marker_token="a" * 64,
+            publish_attempts=0,
+        )
+
+        with pytest.raises(
+            writer_module.BoundaryMarkerPublishError,
+            match="invalid_stream_authority",
+        ) as exc_info:
+            await writer._publish_one_boundary_marker(marker)
+
+        assert exc_info.value.terminal is True
+
+    asyncio.run(scenario())
+
+
+def test_boundary_marker_dedup_poison_is_terminal_and_expected_id_is_bound(
+    monkeypatch,
+):
+    class DedupPoisonRedis(FakeRedis):
+        def __init__(self):
+            super().__init__()
+            self.eval_args = None
+
+        async def eval(self, *args):
+            self.eval_args = args
+            return [
+                writer_module.BOUNDARY_MARKER_DEDUP_INVALID_REPLY,
+                "123-4",
+            ]
+
+    async def scenario():
+        redis_client = DedupPoisonRedis()
+        writer, _, _ = make_writer(
+            monkeypatch,
+            redis_client=redis_client,
+        )
+        marker = writer_module.PendingBoundaryMarker(
+            project_id="demo",
+            experiment_key="experiment",
+            config_version=3,
+            stream_key="events:raw:demo",
+            marker_token="a" * 64,
+            publish_attempts=1,
+            observed_stream_id="123-4",
+        )
+
+        with pytest.raises(
+            writer_module.BoundaryMarkerPublishError,
+            match="invalid_boundary_marker_dedup",
+        ) as exc_info:
+            await writer._publish_one_boundary_marker(marker)
+
+        assert exc_info.value.terminal is True
+        assert exc_info.value.observed_stream_id == "123-4"
+        assert redis_client.eval_args[-1] == "123-4"
+        assert "XRANGE" in writer_module.BOUNDARY_MARKER_LUA
+        assert "observed_kind ~= ARGV[2]" in writer_module.BOUNDARY_MARKER_LUA
+        assert "observed_token ~= ARGV[3]" in writer_module.BOUNDARY_MARKER_LUA
+
+    asyncio.run(scenario())
+
+
+def test_quarantined_observed_marker_degrades_before_becoming_ackable(
+    monkeypatch,
+):
+    token = "a" * 64
+
+    class Connection:
+        async def fetch(
+            self,
+            query,
+            project_id,
+            stream_key,
+            tokens,
+            delivery_ids,
+        ):
+            assert "marker_publish_observed_stream_id" in query
+            assert project_id == "demo"
+            assert stream_key == "events:raw:demo"
+            assert tokens == [token]
+            assert delivery_ids == ["123-4"]
+            return [
+                {
+                    "marker_token": token,
+                    "marker_stream_id": None,
+                    "marker_publish_state": "quarantined",
+                    "marker_publish_observed_stream_id": "123-4",
+                }
+            ]
+
+    class Acquire:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Acquire()
+
+    async def scenario():
+        writer, _, _ = make_writer(
+            monkeypatch,
+            authority_pool=Pool(),
+        )
+        degraded = []
+
+        async def degrade(stream_key, failure_reason):
+            degraded.append((stream_key, failure_reason))
+
+        monkeypatch.setattr(writer, "_degrade_pipeline_authority", degrade)
+        writer._boundary_tokens_by_delivery[
+            ("events:raw:demo", "123-4")
+        ] = token
+
+        await writer._verify_boundary_deliveries(
+            "events:raw:demo",
+            ["123-4"],
+        )
+
+        assert degraded == [
+            ("events:raw:demo", "stream_state_unverifiable")
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_durable_ack_lock_contention_isolated_per_stream(monkeypatch):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        blocked_started = asyncio.Event()
+        release_blocked = asyncio.Event()
+        healthy_finished = asyncio.Event()
+
+        async def finalize(stream_key, message_ids):
+            assert message_ids == ["1-0"]
+            if stream_key == "events:raw:blocked":
+                blocked_started.set()
+                await release_blocked.wait()
+                raise TimeoutError("PostgreSQL row lock timed out")
+            assert stream_key == "events:raw:healthy"
+            healthy_finished.set()
+
+        monkeypatch.setattr(writer, "_finalize_durable_stream", finalize)
+        writer._queue_durable_ack(
+            [
+                BufferedEvent(
+                    stream_key="events:raw:blocked",
+                    message_id="1-0",
+                    row={},
+                ),
+                BufferedEvent(
+                    stream_key="events:raw:healthy",
+                    message_id="1-0",
+                    row={},
+                ),
+            ]
+        )
+
+        ack_task = asyncio.create_task(writer._ack_durable_messages())
+        await blocked_started.wait()
+        await asyncio.wait_for(healthy_finished.wait(), timeout=0.1)
+        assert ack_task.done() is False
+        release_blocked.set()
+
+        assert await ack_task is False
+        assert writer._durable_pending_ack == {
+            "events:raw:blocked": ["1-0"]
+        }
+        assert writer._delivery_is_backpressured() is False
+        assert writer._delivery_is_backpressured(
+            "events:raw:blocked"
+        ) is True
+        assert writer._delivery_is_backpressured(
+            "events:raw:healthy"
+        ) is False
+
+    asyncio.run(scenario())
 
 
 def test_ack_advances_authority_only_after_clickhouse_durable_redis_ack(monkeypatch):
@@ -2052,6 +2952,54 @@ def test_noncanonical_timestamps_are_rejected(monkeypatch, timestamp):
         writer._parse_event({"event_json": json.dumps(payload)}, "demo")
 
 
+def test_server_timestamp_is_required_at_the_writer_boundary(monkeypatch):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event()
+    payload.pop("server_timestamp")
+
+    with pytest.raises(
+        ValueError,
+        match="missing required fields: server_timestamp",
+    ):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "message"),
+    [
+        ("2026-07-06T11:59:59.999999Z", "more than 7 days older"),
+        ("2026-07-13T12:05:00.000001Z", "more than 5 minutes ahead"),
+    ],
+)
+def test_out_of_window_timestamps_are_rejected_at_the_writer_boundary(
+    monkeypatch,
+    timestamp,
+    message,
+):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(timestamp=timestamp)
+
+    with pytest.raises(ValueError, match=message):
+        writer._parse_event({"event_json": json.dumps(payload)}, "demo")
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-07-06T12:00:00.000Z",
+        "2026-07-13T12:05:00.000Z",
+    ],
+)
+def test_event_timestamp_window_boundaries_are_accepted(monkeypatch, timestamp):
+    writer, _, _ = make_writer(monkeypatch)
+    payload = canonical_event(timestamp=timestamp)
+
+    assert writer._parse_event(
+        {"event_json": json.dumps(payload)},
+        "demo",
+    )["timestamp"] == datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -2270,6 +3218,42 @@ def test_consume_reads_one_stream_per_call_in_round_robin_order(monkeypatch):
         ]
         assert {call["count"] for call in redis_client.read_args} == {
             writer.buffer_size
+        }
+
+    asyncio.run(scenario())
+
+
+def test_consume_skips_only_stream_with_unresolved_durable_ack(monkeypatch):
+    class StoppingRedis(FakeRedis):
+        writer = None
+
+        async def xreadgroup(self, **kwargs):
+            result = await super().xreadgroup(**kwargs)
+            self.writer.running = False
+            return result
+
+    async def scenario():
+        redis_client = StoppingRedis()
+        writer, _, _ = make_writer(monkeypatch, redis_client=redis_client)
+        redis_client.writer = writer
+        writer._queue_durable_ack(
+            [
+                BufferedEvent(
+                    stream_key="events:raw:alpha",
+                    message_id="1-0",
+                    row={},
+                )
+            ]
+        )
+        writer.running = True
+
+        await writer._consume_loop(["alpha", "beta"])
+
+        assert [call["streams"] for call in redis_client.read_args] == [
+            {"events:raw:beta": ">"}
+        ]
+        assert writer._durable_pending_ack == {
+            "events:raw:alpha": ["1-0"]
         }
 
     asyncio.run(scenario())

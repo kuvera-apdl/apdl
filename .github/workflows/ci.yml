@@ -11,12 +11,22 @@ permissions:
   contents: read
 
 jobs:
+  workflow-policy:
+    name: Immutable Workflow Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Enforce full-SHA GitHub Action pins
+        run: python3 scripts/check_github_action_pins.py
+      - name: Test workflow dependency policy
+        run: python3 -m unittest scripts.tests.test_github_action_pins
+
   javascript-sdk:
     name: JavaScript SDK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: npm
@@ -40,10 +50,10 @@ jobs:
     name: Admin Console
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -70,7 +80,7 @@ jobs:
         working-directory: services/admin
       - name: Upload full Admin coverage
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: admin-coverage-full
           path: services/admin/coverage/full
@@ -78,7 +88,7 @@ jobs:
           retention-days: 14
       - name: Upload changed-file Admin coverage
         if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: admin-coverage-changed
           path: services/admin/coverage/changed
@@ -89,11 +99,11 @@ jobs:
     name: Admin API
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/admin-api
       - run: .venv/bin/ruff check app/ scripts/ tests/
@@ -105,11 +115,11 @@ jobs:
     name: Python SDK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: sdk/python
       - run: .venv/bin/ruff check apdl/ tests/
@@ -133,11 +143,11 @@ jobs:
     env:
       APDL_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/ingestion
       - run: .venv/bin/ruff check app/
@@ -149,11 +159,11 @@ jobs:
     name: Config Service
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/config
       - run: .venv/bin/ruff check app/
@@ -165,11 +175,11 @@ jobs:
     name: Query Service
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/query
       - run: .venv/bin/ruff check app/
@@ -182,11 +192,11 @@ jobs:
     name: Agents Service
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/agents
       - run: .venv/bin/ruff check app/
@@ -195,14 +205,14 @@ jobs:
         working-directory: services/agents
 
   codegen-service:
-    name: Codegen Service (source-only)
+    name: Codegen Service and Worker
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/codegen
       - run: .venv/bin/ruff check app/ tests/
@@ -213,28 +223,45 @@ jobs:
   clickhouse-writer:
     name: ClickHouse Writer
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+        env:
+          POSTGRES_DB: apdl
+          POSTGRES_USER: apdl
+          POSTGRES_PASSWORD: apdl_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apdl -d apdl"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      APDL_WRITER_SINGLETON_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: uv venv --python 3.12 .venv && uv pip install -r requirements-dev.txt --python .venv/bin/python
         working-directory: pipeline/redis
       - run: .venv/bin/ruff check clickhouse_writer.py tests/
         working-directory: pipeline/redis
       - run: .venv/bin/python -m pytest -q
         working-directory: pipeline/redis
+      - run: make test-boundary-markers
 
   python-dependency-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - name: Audit reproducible core runtime locks
         shell: bash
         run: |
@@ -246,11 +273,12 @@ jobs:
             services/agents/requirements.lock \
             services/admin-api/requirements.lock \
             services/codegen/requirements.lock \
-            services/codegen/requirements-agent.lock \
             pipeline/redis/requirements.lock
           do
-            uvx pip-audit --strict --require-hashes -r "$lock"
+            uvx --python 3.12 pip-audit --strict --require-hashes -r "$lock"
           done
+      - name: Audit published Codegen worker lock
+        run: services/codegen/scripts/audit_worker_dependencies.sh
       - name: Audit resolved published and preview Python runtimes
         shell: bash
         run: |
@@ -263,7 +291,7 @@ jobs:
               --python-version 3.12 \
               --output-file "$requirements" \
               --quiet
-            uvx pip-audit --strict -r "$requirements"
+            uvx --python 3.12 pip-audit --strict -r "$requirements"
           done
 
   package-contracts:
@@ -273,16 +301,16 @@ jobs:
       NODE: node
       NPM: npm
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: sdk/javascript/package-lock.json
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       - run: npm ci
         working-directory: sdk/javascript
       - name: Install packed-contract validator
@@ -300,8 +328,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - run: make smoke-fresh
@@ -311,8 +339,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - run: make smoke-experiment-fresh
@@ -322,5 +350,5 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: make test-clickhouse-upgrade

@@ -4,6 +4,7 @@ import type {
   experimentAnalysisDecisionSnapshotSchema,
   experimentAnalysisNonFinalSchema,
   experimentArmResultSchema,
+  experimentBucketBySchema,
   experimentComparisonSchema,
   experimentCreateResponseSchema,
   experimentCreateSchema,
@@ -22,6 +23,7 @@ import type {
 
 export type ExperimentEntry = z.infer<typeof experimentEntrySchema>
 export type ExperimentsListResponse = z.infer<typeof experimentsListResponseSchema>
+export type ExperimentBucketBy = z.infer<typeof experimentBucketBySchema>
 export type ExperimentCreate = z.infer<typeof experimentCreateSchema>
 export type ExperimentUpdate = z.infer<typeof experimentUpdateSchema>
 export type ExperimentStatus = z.infer<typeof experimentStatusSchema>

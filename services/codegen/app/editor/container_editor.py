@@ -4,10 +4,10 @@ Where :class:`~app.editor.aider_editor.AiderEditor` runs Aider inside the
 codegen API process, ``ContainerAiderEditor``
 launches an ephemeral container from the hardened sandbox image
 (``Dockerfile.worker``) and runs clone → Aider → gate there —
-after a separate provider-free inspection container attests the exact source
-tree. The untrusted repo code therefore never executes in
-the API container that holds the GitHub App key, the Postgres DSN, and the
-internal token. The inspection credential and the editor's complete task
+after a separate provider-free preparation container attests the exact source
+tree and resolves dependency contracts. The untrusted repo code therefore never
+executes in the API container that holds the GitHub App key, the Postgres DSN,
+and the internal token. The repository credential and each phase's complete task
 request are consumed from bounded stdin contracts rather than process metadata.
 Only the second container receives the model provider key. It returns a binary
 patch and Git object identities;
@@ -19,9 +19,9 @@ trusted local in-process mode requires an explicit opt-in. It shells out to
 ``docker run``, so the codegen process needs a Docker client + socket (run
 codegen on a Docker host, or mount the socket for Docker-out-of-Docker).
 
-INTEGRATION-UNTESTED, like the editor it wraps: needs a built sandbox image, a
-Docker socket, a model key, and a live repo. The pure pieces (argv/env assembly,
-result parsing, the never-raise contract) are unit-tested.
+The worker image's real Docker launch, writable-workspace, hardening, and
+verified-cleanup path has a daemon-backed smoke contract. A live model/repository
+edit still requires deployment credentials and remains an external integration.
 
 Hardening applied here via ``docker run`` flags: ``--rm``, ``--network none``
 for evaluated work, a read-only root,
@@ -43,6 +43,8 @@ import re
 import subprocess
 import uuid
 from dataclasses import replace
+
+from pydantic import ValidationError
 
 from app.config import (
     codegen_controller_image_id,
@@ -67,11 +69,16 @@ from app.editor.environment import (
 )
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.worker_contract import (
+    encode_codegen_preparation_request,
     encode_codegen_worker_request,
     validate_codegen_worker_request_source,
 )
 from app.inspection.models import DependencySlice, InspectionSnapshot
-from app.inspection.preflight import RepositoryPreflightAttestation
+from app.inspection.preparation import (
+    RepositoryPreparationEvidence,
+    RepositoryPreparationFailure,
+    RepositoryPreparationSuccess,
+)
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
@@ -277,12 +284,12 @@ class ContainerAiderEditor:
                 self._preflight_argv(request, container_name=inspection_name),
                 self._docker_control_env(),
                 container_name=inspection_name,
-                stdin_data=self._preflight_credential_envelope(request.token),
+                stdin_data=encode_codegen_preparation_request(request),
             )
-            attestation = self._parse_preflight_result(rc, out, err, request)
+            preparation = self._parse_preflight_result(rc, out, err, request)
             editor_request = replace(
                 request,
-                repository_preflight=attestation,
+                repository_preparation=preparation,
             )
             container_name = f"apdl-codegen-edit-{run_id}"
             if self._proxy_environment:
@@ -320,8 +327,8 @@ class ContainerAiderEditor:
         container_name: str | None = None,
     ) -> list[str]:
         """Assemble the model-bearing editor command after source attestation."""
-        if request.repository_preflight is None:
-            raise ValueError("sandbox editor requires repository preflight evidence")
+        if request.repository_preparation is None:
+            raise ValueError("sandbox editor requires repository preparation evidence")
         argv = self._sandbox_argv(container_name=container_name, role="editor")
         # Task data is carried exclusively by the bounded stdin contract. This
         # argv contains only sandbox/runtime configuration and provider-key
@@ -368,8 +375,10 @@ class ContainerAiderEditor:
             "run",
             "--rm",
             "-i",
-            "--pid",
-            "private",
+            # Docker's default is an isolated PID namespace. There is no
+            # portable `--pid private` value (Docker 29 rejects it), so leave
+            # the option unset rather than turning every worker launch into an
+            # invalid command.
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -410,15 +419,8 @@ class ContainerAiderEditor:
         container_name: str | None = None,
     ) -> list[str]:
         """Build the provider-free repository-inspection container command."""
-        source_branch = (
-            request.branch if request.existing_branch else request.base_branch
-        )
         argv = self._sandbox_argv(container_name=container_name, role="inspection")
         argv += [
-            "-e",
-            f"CS_REPO={request.repo}",
-            "-e",
-            f"CS_SOURCE_BRANCH={source_branch}",
             "-e",
             "HOME=/workspace/home",
             "-e",
@@ -426,6 +428,9 @@ class ContainerAiderEditor:
         ]
         for name, value in self._proxy_environment.items():
             argv += ["-e", f"{name}={value}"]
+        for key in _CONFIG_ENV_FORWARD:
+            if os.environ.get(key):
+                argv += ["-e", f"{key}={os.environ[key]}"]
         argv += ["--entrypoint", "python", self._image]
         if self._proxy_environment:
             argv += relay_command(["python", "-m", "app.inspection.preflight_cli"])
@@ -438,10 +443,6 @@ class ContainerAiderEditor:
         env = self._docker_control_env()
         env.update(self._selected_provider_environment())
         return env
-
-    @staticmethod
-    def _preflight_credential_envelope(token: str) -> bytes:
-        return (json.dumps({"read_token": token}) + "\n").encode()
 
     @staticmethod
     def _docker_control_env() -> dict[str, str]:
@@ -541,27 +542,37 @@ class ContainerAiderEditor:
         stdout: str,
         stderr: str,
         request: EditRequest,
-    ) -> RepositoryPreflightAttestation:
-        """Validate the first container's metadata-only inspection result."""
+    ) -> RepositoryPreparationEvidence:
+        """Validate the provider-free phase's strict tree-bound evidence."""
         data = _last_json(stdout)
-        if rc != 0 or data is None or data.get("success") is not True:
-            if isinstance(data, dict) and isinstance(data.get("error"), str):
-                detail = data["error"]
-            else:
-                detail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
+        if data is None:
+            detail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
             raise RuntimeError(f"repository preflight failed: {detail}")
-        attestation = RepositoryPreflightAttestation.model_validate(
-            data.get("attestation")
-        )
+        encoded = json.dumps(data)
+        if rc != 0 or data.get("success") is not True:
+            try:
+                failure = RepositoryPreparationFailure.model_validate_json(encoded)
+                detail = failure.error
+            except ValidationError:
+                detail = "provider-free preparation returned an invalid failure"
+            raise RuntimeError(f"repository preflight failed: {detail}")
+        try:
+            response = RepositoryPreparationSuccess.model_validate_json(encoded)
+        except ValidationError as exc:
+            raise RuntimeError(
+                "repository preparation returned invalid evidence"
+            ) from exc
+        preparation = response.preparation
         source_branch = (
             request.branch if request.existing_branch else request.base_branch
         )
         if (
-            attestation.repository != request.repo
-            or attestation.source_branch != source_branch
+            preparation.attestation.repository != request.repo
+            or preparation.attestation.source_branch != source_branch
+            or preparation.target_branch != request.branch
         ):
-            raise RuntimeError("repository preflight identity mismatch")
-        return attestation
+            raise RuntimeError("repository preparation identity mismatch")
+        return preparation
 
     async def _run_docker(
         self,

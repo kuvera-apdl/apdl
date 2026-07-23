@@ -7,6 +7,7 @@ import {
   type BrowserStorageKind,
 } from '../../src/core/storage-scope';
 import type { TrackEvent } from '../../src/core/types';
+import { CookielessIdentity } from '../../src/privacy/cookieless';
 import {
   CLIENT_KEY,
   ENDPOINT,
@@ -636,6 +637,50 @@ describe('APDLClient', () => {
   });
 
   describe('getVariant()', () => {
+    it('enrolls an anonymous experiment and records its actor identity', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('anonymous-enrollment', {
+            fallthrough: {
+              rollout: {
+                percentage: 100,
+                bucket_by: 'anonymous_id',
+              },
+            },
+          })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const anonymousClient = new APDLClient(createTestConfig());
+      await flushAsync();
+
+      const result = anonymousClient.getVariantDetails(
+        'anonymous-enrollment'
+      );
+      const exposure = (
+        anonymousClient.debug.getQueue() as TrackEvent[]
+      ).find((event) => event.event === '$feature_flag_exposure');
+
+      expect(result).toMatchObject({
+        reason: 'fallthrough',
+        bucket_by: 'anonymous_id',
+        variant: 'treatment',
+      });
+      expect(exposure?.userId).toBeUndefined();
+      expect(exposure?.anonymousId).toBeTypeOf('string');
+      expect(exposure?.anonymousId).not.toBe('');
+      expect(exposure?.properties).toMatchObject({
+        flag_key: 'anonymous-enrollment',
+        bucket_by: 'anonymous_id',
+      });
+
+      await anonymousClient.shutdown();
+    });
+
     it('should return null and details when flag not found', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
@@ -1202,6 +1247,7 @@ describe('APDLClient', () => {
       expect(featureFlagExposures(flaggedClient)).toHaveLength(0);
 
       flaggedClient.consent.update({ analytics: true });
+      flaggedClient.identify('user_123');
       flaggedClient.getVariant('consent-flag');
       expect(featureFlagExposures(flaggedClient)).toHaveLength(1);
     });
@@ -1444,6 +1490,167 @@ describe('APDLClient', () => {
 
       const queue = client.debug.getQueue();
       expect(queue.length).toBe(0);
+    });
+
+    it('should keep analytics identity and session storage absent until consent and remove it on revocation', async () => {
+      const anonymousKey = browserStorageKey('anonymous_id', 'apdl');
+      const sessionKey = browserStorageKey('session', 'apdl');
+      const consentKey = browserStorageKey('consent', 'apdl');
+      localStorage.setItem(anonymousKey, 'stale-anonymous-id');
+      localStorage.setItem(sessionKey, JSON.stringify({
+        id: 'stale-session',
+        startedAt: Date.now(),
+        lastActivityAt: Date.now(),
+        eventCount: 3,
+        pageCount: 1,
+      }));
+      const getItemSpy = vi.spyOn(Storage.prototype, 'getItem');
+
+      const deniedClient = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+        consent: {
+          analytics: false,
+          personalization: false,
+          experiments: false,
+        },
+      }));
+
+      const identityReads = getItemSpy.mock.calls
+        .map(([key]) => key)
+        .filter((key) => key === anonymousKey || key === sessionKey);
+      expect(identityReads).toEqual([]);
+      getItemSpy.mockRestore();
+      expect(Object.keys(localStorage).sort()).toEqual([consentKey]);
+
+      deniedClient.track('denied_track');
+      deniedClient.identify('denied-user', { plan: 'secret' });
+      deniedClient.group('denied-group', { tier: 'secret' });
+      deniedClient.page('Denied page');
+      deniedClient.reset();
+
+      expect(deniedClient.debug.getQueue()).toEqual([]);
+      expect(Object.keys(localStorage).sort()).toEqual([consentKey]);
+
+      deniedClient.consent.update({ analytics: true });
+      expect(localStorage.getItem(anonymousKey)).not.toBeNull();
+      expect(localStorage.getItem(sessionKey)).toBeNull();
+
+      deniedClient.track('consented_track');
+      expect(localStorage.getItem(sessionKey)).not.toBeNull();
+      expect(deniedClient.debug.getQueue()).toHaveLength(1);
+
+      deniedClient.consent.update({ analytics: false });
+      await flushAsync();
+
+      expect(deniedClient.debug.getQueue()).toEqual([]);
+      expect(Object.keys(localStorage).sort()).toEqual([consentKey]);
+      expect(JSON.parse(localStorage.getItem(consentKey) ?? 'null')).toEqual({
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      });
+
+      await deniedClient.shutdown();
+    });
+
+    it('should derive cookieless identity only while identity consent is granted', async () => {
+      let resolveRevokedIdentity!: (value: string) => void;
+      const generateAnonymousId = vi
+        .spyOn(CookielessIdentity.prototype, 'generateAnonymousId')
+        .mockImplementationOnce(() => new Promise((resolve) => {
+          resolveRevokedIdentity = resolve;
+        }))
+        .mockResolvedValueOnce('cl_regranted');
+      const cookielessClient = new APDLClient(createTestConfig({
+        privacyMode: 'cookieless',
+        persistence: 'localStorage',
+        consent: {
+          analytics: false,
+          personalization: false,
+          experiments: false,
+        },
+      }));
+
+      cookielessClient.track('denied_track');
+      await flushAsync();
+      expect(generateAnonymousId).not.toHaveBeenCalled();
+
+      cookielessClient.consent.update({ analytics: true });
+      expect(generateAnonymousId).toHaveBeenCalledTimes(1);
+
+      cookielessClient.consent.update({ analytics: false });
+      resolveRevokedIdentity('cl_revoked');
+      await flushAsync();
+      cookielessClient.consent.update({ analytics: true });
+      await flushAsync();
+      cookielessClient.track('second_grant');
+
+      expect(generateAnonymousId).toHaveBeenCalledTimes(2);
+      expect((cookielessClient.debug.getQueue()[0] as TrackEvent).anonymousId)
+        .toBe('cl_regranted');
+      expect(localStorage.getItem(browserStorageKey('anonymous_id', 'apdl')))
+        .toBeNull();
+
+      await cookielessClient.shutdown();
+    });
+
+    it('should retain stable experiment identity but clear analytics identity on analytics revocation', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [
+            makeFlag('anonymous-experiment', {
+              fallthrough: {
+                rollout: {
+                  percentage: 100,
+                  bucket_by: 'anonymous_id',
+                },
+              },
+            }),
+            makeFlag('identified-experiment'),
+          ],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const experimentClient = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+        consent: {
+          analytics: true,
+          personalization: false,
+          experiments: true,
+        },
+      }));
+      await flushAsync();
+
+      experimentClient.identify('analytics-user', { plan: 'private' });
+      expect(experimentClient.getVariantDetails('identified-experiment').reason)
+        .toBe('fallthrough');
+      const anonymousKey = browserStorageKey('anonymous_id', 'apdl');
+      const sessionKey = browserStorageKey('session', 'apdl');
+      const anonymousId = localStorage.getItem(anonymousKey);
+      expect(anonymousId).not.toBeNull();
+      expect(localStorage.getItem(sessionKey)).not.toBeNull();
+
+      experimentClient.consent.update({ analytics: false });
+      await flushAsync();
+
+      expect(localStorage.getItem(sessionKey)).toBeNull();
+      expect(localStorage.getItem(anonymousKey)).toBe(anonymousId);
+      expect(experimentClient.getVariantDetails('identified-experiment').reason)
+        .toBe('error');
+      const first = experimentClient.getVariantDetails('anonymous-experiment');
+      const second = experimentClient.getVariantDetails('anonymous-experiment');
+      expect(first.reason).toBe('fallthrough');
+      expect(second).toMatchObject({
+        variant: first.variant,
+        rollout_bucket: first.rollout_bucket,
+        variant_bucket: first.variant_bucket,
+      });
+
+      await experimentClient.shutdown();
     });
 
     it('should make explicit current consent authoritative over a persisted grant', async () => {

@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.models.experiment_design import EXPERIMENT_BUCKET_BY_VALUES
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,7 @@ def _validate_variant_flag_config(
     config: dict[str, Any],
     *,
     require_complete: bool,
+    experiment: bool,
 ) -> str | None:
     rejected = sorted(field for field in _REJECTED_FLAG_FIELDS if field in config)
     if rejected:
@@ -79,7 +82,7 @@ def _validate_variant_flag_config(
         error = _validate_variants(
             variants,
             default_variant,
-            experiment=require_complete,
+            experiment=experiment,
         )
         if error is not None:
             return error
@@ -95,12 +98,16 @@ def _validate_variant_flag_config(
                 return "rules must contain objects."
             if "variants" in rule or "default_variant" in rule:
                 return "rules must not define variants or default_variant."
-            rollout_error = _validate_rollout(rule.get("rollout"), "rules.rollout")
+            rollout_error = _validate_rollout(
+                rule.get("rollout"),
+                "rules.rollout",
+                experiment=experiment,
+            )
             if rollout_error is not None:
                 return rollout_error
 
     if fallthrough is not None:
-        error = _validate_fallthrough(fallthrough)
+        error = _validate_fallthrough(fallthrough, experiment=experiment)
         if error is not None:
             return error
 
@@ -164,7 +171,7 @@ def _validate_variants(
     return None
 
 
-def _validate_fallthrough(fallthrough: Any) -> str | None:
+def _validate_fallthrough(fallthrough: Any, *, experiment: bool) -> str | None:
     if not isinstance(fallthrough, dict):
         return "fallthrough must be an object."
     extra_fields = set(fallthrough) - {"rollout"}
@@ -174,10 +181,19 @@ def _validate_fallthrough(fallthrough: Any) -> str | None:
             f"found: {', '.join(sorted(extra_fields))}."
         )
 
-    return _validate_rollout(fallthrough.get("rollout"), "fallthrough.rollout")
+    return _validate_rollout(
+        fallthrough.get("rollout"),
+        "fallthrough.rollout",
+        experiment=experiment,
+    )
 
 
-def _validate_rollout(rollout: Any, field_name: str) -> str | None:
+def _validate_rollout(
+    rollout: Any,
+    field_name: str,
+    *,
+    experiment: bool,
+) -> str | None:
     if not isinstance(rollout, dict):
         return f"{field_name} must be an object."
     extra_rollout_fields = set(rollout) - {"percentage", "bucket_by"}
@@ -199,6 +215,11 @@ def _validate_rollout(rollout: Any, field_name: str) -> str | None:
     bucket_by = rollout.get("bucket_by")
     if not isinstance(bucket_by, str) or not bucket_by:
         return f"{field_name}.bucket_by must be a non-empty string."
+    if experiment and bucket_by not in EXPERIMENT_BUCKET_BY_VALUES:
+        return (
+            f"{field_name}.bucket_by must be anonymous_id or user_id "
+            "for experiments."
+        )
 
     return None
 
@@ -361,7 +382,11 @@ class SafetyValidator:
                     "message": "Experiment design must include canonical flag_config.",
                 }
 
-            error = _validate_variant_flag_config(flag_config, require_complete=True)
+            error = _validate_variant_flag_config(
+                flag_config,
+                require_complete=True,
+                experiment=True,
+            )
             if error is not None:
                 return {
                     "name": "variant_config",
@@ -376,7 +401,11 @@ class SafetyValidator:
             }
 
         if action.type == ActionType.update_flag:
-            error = _validate_variant_flag_config(action.config, require_complete=False)
+            error = _validate_variant_flag_config(
+                action.config,
+                require_complete=False,
+                experiment=False,
+            )
             if error is not None:
                 return {
                     "name": "variant_config",

@@ -136,9 +136,13 @@ Unknown assigned variants use the machine-readable reason
 hold, and arm targets have elapsed returns a `decision_snapshot`, never a
 winner verdict.
 
-The pipeline has no durable processed-through watermark. Therefore every
-snapshot explicitly reports `data_completeness: not_verified`, and late
-durable events can change a later snapshot. It also reports
+Completed experiments use an immutable, token-idempotent Redis stream boundary
+plus PostgreSQL's contiguous processed-through watermark before freezing a
+`data_completeness: verified` decision snapshot. Pending publication or
+coverage returns `awaiting_pipeline_boundary`; a terminally quarantined marker
+returns `pipeline_boundary_failed` ahead of exposure, power, or identity
+diagnostics, while degraded or unverifiable provenance uses its distinct
+non-final reason. Every response still reports
 `deployment_readiness: not_assessed`; statistical significance is evidence,
 not authorization or a rollout recommendation.
 Config timestamps are converted to explicit UTC epoch-millisecond boundaries

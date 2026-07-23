@@ -32,12 +32,12 @@ mode, without a Docker socket or branch/PR authority. Publication tooling in the
 source tree is experimental operator infrastructure and is outside the supported
 release surface.
 
-The 0.3.0 dependency gate covers only the offline API/control-plane dependency
-set used by `make dev-all`. It does **not** cover or support the Aider editor,
-the `.[agent]` optional dependencies, `Dockerfile.worker`, sandbox execution,
-or any publication overlay. Those experimental paths are retained as source
-for future hardening and must not be exposed to tenants or treated as a
-release-qualified runtime.
+The 0.3.0 dependency gate covers both the offline API/control plane and the
+published `Dockerfile.worker` Aider dependency graph. The worker uses a
+reproducible universal Python 3.12 hash lock, and CI permits only three exact,
+expiring no-fix advisories with checked-in reachability evidence. Publication
+credentials, tenant exposure, and rollout overlays remain experimental
+operator infrastructure outside the supported deployment surface.
 
 ### Canonical repository profiler
 
@@ -460,11 +460,14 @@ make test-codegen        # pytest
 make lint-codegen        # ruff
 ```
 
-The real editor is outside the 0.3.0 release contract. Developers researching
-that unsupported path may install `.[agent]`, but it is not covered by the
-release vulnerability gate and must not be used as a release-qualified service.
+The release builds the Codegen worker from `Dockerfile.worker` and gates its
+universal Python 3.12 hash lock in CI. Aider remains pinned at 0.86.2; its two
+development-build-only advisories and diskcache's unreachable pickle-cache
+advisory have exact, expiring, machine-validated suppressions. Every advisory
+with an available fix is blocked, as is any new, stale, mismatched, or expired
+suppression.
 
-## Editor execution model (experimental and unsupported in 0.3.0)
+## Editor execution model (release-gated worker; publication remains preview)
 
 The editor sits behind the `Editor` interface; *how/where* it runs is config:
 
@@ -528,9 +531,10 @@ the API and worker launcher on a dedicated host or use a remote worker boundary.
 
 ## Going live (future design; unsupported in 0.3.0)
 
-Nothing in this section is a 0.3.0 deployment procedure. The editor/worker,
-publication dependencies, sandbox, and rollout overlays are outside the
-release support and vulnerability-audit boundary.
+Nothing in this section is a 0.3.0 deployment procedure. The worker image and
+its dependencies are release-built and vulnerability-gated, but publication
+credentials, external GitHub controls, sandbox deployment, and rollout
+overlays remain outside the supported deployment boundary.
 
 The autonomous loop runs once these external pieces are set up:
 

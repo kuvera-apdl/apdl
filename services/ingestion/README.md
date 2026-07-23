@@ -34,7 +34,9 @@ Each `POST /v1/events` request goes through six stages:
    events. Every event requires `event`, `type`, a canonical RFC3339 UTC
    `timestamp` (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`),
    nested `context`, a stable `message_id`, and at least one of `user_id` or
-   `anonymous_id`. Types are `track`, `identify`, `group`, and `page` only;
+   `anonymous_id`. Event time may be at most seven days before the request's
+   server receipt time and at most five minutes after it; out-of-window values
+   are rejected, never rewritten. Types are `track`, `identify`, `group`, and `page` only;
    lifecycle events use the canonical event names `identify`, `group`, and
    `page`. Camel-case aliases and unknown fields are rejected. Limits: event
    name ≤ 256 chars, property keys ≤ 256 chars, string property values ≤ 8192
@@ -114,12 +116,13 @@ Ingestion rejects repeated IDs inside one batch, but intentionally does not
 reserve IDs across requests. Two requests carrying the same unchanged event may
 both return `202` and enqueue it. The ClickHouse writer provides at-least-once
 delivery, and supported Query Service reads use `FINAL` so rows with the same
-storage identity converge to one visible event. The event timestamp is part of
-ClickHouse partition placement, so changing it on a retry can place the same ID
-in another partition where replacement cannot converge. Reusing an ID for
-changed content or timestamps violates the contract and has undefined winner
-semantics. The `accepted` response count is the number admitted by that HTTP
-request, not a count of newly unique storage identities.
+storage identity converge to one visible event. ClickHouse partitions by
+project so retries of one identity can still converge. The 12-month TTL and
+stored `event_date` derive only from server-authoritative `received_at`, never
+from client event time. Reusing an ID for changed content or timestamps
+violates the contract and has undefined winner semantics. The `accepted`
+response count is the number admitted by that HTTP request, not a count of
+newly unique storage identities.
 
 ## API
 

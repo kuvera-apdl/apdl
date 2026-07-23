@@ -14,18 +14,28 @@ await run(
     const harness = createHarness();
     const { window } = harness;
     const scopedKey = storageKey('consent', FIRST_ENDPOINT);
+    const anonymousKey = storageKey('anonymous_id', FIRST_ENDPOINT);
+    const sessionKey = storageKey('session', FIRST_ENDPOINT);
     const grant = {
       analytics: true,
       personalization: true,
       experiments: true,
     };
     window.localStorage.setItem(scopedKey, JSON.stringify(grant));
+    window.localStorage.setItem(anonymousKey, 'stale-anonymous-id');
+    window.localStorage.setItem(sessionKey, JSON.stringify({
+      id: 'stale-session',
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      eventCount: 1,
+      pageCount: 1,
+    }));
     window.localStorage.setItem('apdl_consent_apdl', JSON.stringify(grant));
 
     const client = new harness.APDLClient({
       endpoint: FIRST_ENDPOINT,
       auth: { clientKey: CLIENT_KEY },
-      autoCapture: true,
+      autoCapture: false,
       persistence: 'localStorage',
       consent: {
         analytics: false,
@@ -45,7 +55,29 @@ await run(
       personalization: false,
       experiments: false,
     });
+    assert.equal(window.localStorage.getItem(anonymousKey), null);
+    assert.equal(window.localStorage.getItem(sessionKey), null);
     assert.equal(window.localStorage.getItem('apdl_consent_apdl'), null);
+
+    client.track('denied-event');
+    client.identify('denied-user');
+    client.page('Denied page');
+    client.reset();
+    assert.deepEqual(normalize(client.debug.getQueue()), []);
+    assert.equal(window.localStorage.getItem(anonymousKey), null);
+    assert.equal(window.localStorage.getItem(sessionKey), null);
+
+    client.consent.update({ analytics: true });
+    assert.notEqual(window.localStorage.getItem(anonymousKey), null);
+    assert.equal(window.localStorage.getItem(sessionKey), null);
+    client.track('granted-event');
+    assert.notEqual(window.localStorage.getItem(sessionKey), null);
+
+    client.consent.update({ analytics: false });
+    await settle(window);
+    assert.deepEqual(normalize(client.debug.getQueue()), []);
+    assert.equal(window.localStorage.getItem(anonymousKey), null);
+    assert.equal(window.localStorage.getItem(sessionKey), null);
 
     await client.shutdown();
     harness.close();

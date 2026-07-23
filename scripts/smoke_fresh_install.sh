@@ -39,6 +39,21 @@ export POSTGRES_PASSWORD="apdl_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
 export ANTHROPIC_API_KEY=""
 export OPENAI_API_KEY=""
+export CODEGEN_CI_POLL_INTERVAL=0
+export CODEGEN_STALE_SWEEP_INTERVAL=0
+
+case "${APDL_SMOKE_ALL_IMAGES:-false}" in
+    true)
+        smoke_all_images=true
+        ;;
+    false)
+        smoke_all_images=false
+        ;;
+    *)
+        echo "APDL_SMOKE_ALL_IMAGES must be true or false" >&2
+        exit 1
+        ;;
+esac
 
 # Run beside a normal developer stack. Callers may pin a base or any individual
 # port; otherwise the process id gives concurrent local/CI jobs disjoint ranges.
@@ -162,6 +177,18 @@ assert_not_created() {
     echo "==> Optional Agents and Codegen services were not created"
 }
 
+assert_optional_created() {
+    local service container_id
+    for service in agents codegen; do
+        container_id="$(compose_all_profiles ps -q "$service")"
+        if [ -z "$container_id" ]; then
+            echo "Published-image smoke did not create optional service: $service" >&2
+            return 1
+        fi
+    done
+    echo "==> Optional Agents and Codegen services are healthy"
+}
+
 echo "==> Validating core Compose contract"
 compose config --quiet
 
@@ -172,13 +199,23 @@ case "${APDL_SMOKE_NO_BUILD:-false}" in
             exit 1
         }
         echo "==> Pulling immutable release images without registry credentials"
-        compose pull postgres-migrate ingestion config query clickhouse-writer \
+        published_compose_services=(
+            postgres-migrate ingestion config query clickhouse-writer
             admin-api admin
+        )
+        if [ "$smoke_all_images" = true ]; then
+            published_compose_services+=(agents codegen)
+        fi
+        compose_all_profiles pull "${published_compose_services[@]}"
         startup_build_args=(--no-build)
         smoke_migrator_build=false
         smoke_packaged_migrations=true
         ;;
     false)
+        if [ "$smoke_all_images" = true ]; then
+            echo "APDL_SMOKE_ALL_IMAGES=true requires APDL_SMOKE_NO_BUILD=true" >&2
+            exit 1
+        fi
         startup_build_args=(--build)
         smoke_migrator_build=true
         smoke_packaged_migrations=false
@@ -201,11 +238,28 @@ POSTGRES_COMPOSE_OVERRIDE_FILE="${APDL_SMOKE_COMPOSE_OVERRIDE:-}" \
     "$ROOT_DIR/scripts/init-postgres.sh"
 assert_credentials
 
-echo "==> Starting only the supported fresh-smoke service set"
-compose up -d "${startup_build_args[@]}" --wait \
-    --wait-timeout "${APDL_SMOKE_STARTUP_TIMEOUT:-180}" \
+startup_services=(
     ingestion config query clickhouse-writer admin-api admin gateway
-assert_not_created
+)
+if [ "$smoke_all_images" = true ]; then
+    startup_services+=(agents codegen)
+fi
+
+echo "==> Starting the supported fresh-smoke service set"
+compose_all_profiles up -d "${startup_build_args[@]}" --wait \
+    --wait-timeout "${APDL_SMOKE_STARTUP_TIMEOUT:-180}" \
+    "${startup_services[@]}"
+if [ "$smoke_all_images" = true ]; then
+    assert_optional_created
+    [ -n "${APDL_SMOKE_IMAGE_INDEX:-}" ] || {
+        echo "APDL_SMOKE_IMAGE_INDEX is required for the all-image smoke" >&2
+        exit 1
+    }
+    "$ROOT_DIR/scripts/smoke_published_auxiliary_images.sh" \
+        "$APDL_SMOKE_IMAGE_INDEX"
+else
+    assert_not_created
+fi
 
 export APDL_GATEWAY_URL="http://127.0.0.1:$APDL_GATEWAY_HOST_PORT"
 export APDL_INGESTION_URL="http://127.0.0.1:$APDL_INGESTION_HOST_PORT"

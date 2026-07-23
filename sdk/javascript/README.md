@@ -210,11 +210,16 @@ strings, booleans, nulls, arrays, and plain string-keyed objects. Cycles,
 `BigInt`, accessors, sparse arrays, unsupported values, malformed timestamps,
 unknown context fields, excessive nesting/cardinality, and events over 64 KiB
 are rejected synchronously before queue ownership. Requests are split below
-512 KiB. Network errors, HTTP 408/425/429, and 5xx retain the same stable
+512 KiB. Event timestamps may be at most seven days old and at most five
+minutes ahead of the browser clock, matching the ingestion and offline-storage
+window; the SDK rejects out-of-window time instead of rewriting it. Network
+errors, HTTP 408/425/429, and 5xx retain the same stable
 message IDs for retry; other non-2xx responses are permanent and cannot poison
 later queue entries. If both a retryable send and offline persistence fail, the
 batch is requeued once in memory and returned in the drain's `pending` report;
-the SDK does not spin or silently discard it.
+the SDK does not spin or silently discard it. IndexedDB overflow is also
+explicit: each count/byte eviction is returned in `DeliveryReport.dropped`
+with the evicted event and one canonical reason.
 
 ## User Identification
 
@@ -350,15 +355,21 @@ Retryable delivery failures therefore remain in `DeliveryReport.pending` for
 an explicit same-session retry instead of being reported as persisted.
 
 With `persistence: 'localStorage'`, failed analytics deliveries may be retained
-in IndexedDB for up to seven days.
+in IndexedDB for up to seven days. Restore takes a five-minute client lease
+without deleting the record; deletion occurs only after an accepted or
+permanently rejected server response. Retryable failures release the lease,
+crashed-client leases are reclaimable after expiry, and a stale client cannot
+acknowledge a record reclaimed by another tab.
 Each record is scoped to the canonical project ID derived from the client key;
 the key itself is never persisted. A client cannot drain or clear another
 project's records on the same origin, and current analytics consent is checked
 again before any retained event is restored. Legacy, invalid, and expired
 records are discarded. Each project retains at most the newest 1,000 events and
 5 MiB of UTF-8 JSON event payloads; older records are evicted deterministically
-without counting or deleting another project's records. A single oversized or
-non-JSON-serializable event is not retained.
+without counting or deleting another project's records. Active leases are
+never evicted. Every overflow or invalid-storage rejection is returned in the
+immutable delivery report rather than counted as persisted. A single oversized
+or non-JSON-serializable event is not retained.
 
 ## Local UI Renderer (No 0.3.0 Backend Delivery)
 
@@ -391,6 +402,7 @@ const report = await apdl.debug.flush();
 
 console.log(report.delivered, report.persisted);
 console.log(report.permanentRejections, report.pending);
+console.log(report.dropped);
 
 const finalReport = await apdl.shutdown();
 ```
@@ -398,7 +410,11 @@ const finalReport = await apdl.shutdown();
 `flush()` drains all currently owned in-memory events, and concurrent flushes
 join the same operation. Its frozen `DeliveryReport` distinguishes delivered,
 offline-persisted, permanently rejected, consent-discarded, and still-pending
-events. `shutdown()` stops accepting tracking immediately, joins concurrent
+events. Its `dropped` entries separately identify offline evictions and invalid
+storage rejections by stable event `messageId`; `persisted` counts only records
+that survived in durable IndexedDB. The exact eviction reasons are
+`offline_count_limit` and `offline_byte_limit`; an invalid storage candidate is
+reported as `offline_invalid_event`. `shutdown()` stops accepting tracking immediately, joins concurrent
 callers, tears down capture and SSE, and returns the final drain report. Calls
 to `track`, `identify`, `group`, `page`, or `reset` after shutdown throw.
 

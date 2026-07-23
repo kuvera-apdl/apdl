@@ -78,6 +78,7 @@ class ArchivedExperimentError(MutationError):
 
 
 _FROZEN_EXPERIMENT_FIELDS = {
+    "bucket_by": "bucket_by",
     "default_variant": "default_variant",
     "traffic_percentage": "traffic_percentage",
     "targeting_rules_json": "targeting_rules",
@@ -500,12 +501,13 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         INSERT INTO experiments (
             key, project_id, status, description, flag_key, default_variant,
             variants_json, targeting_rules_json, primary_metric_json, statistical_plan,
-            traffic_percentage, minimum_exposure_config_version, start_date, end_date,
-            creation_idempotency_key, creation_idempotency_request_sha256
+            traffic_percentage, bucket_by, minimum_exposure_config_version,
+            start_date, end_date, creation_idempotency_key,
+            creation_idempotency_request_sha256
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14,
-            $15, $16
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13,
+            $14, $15, $16, $17
         )
         RETURNING {pg_store.EXPERIMENT_COLUMNS}
         """,
@@ -522,6 +524,7 @@ async def _insert_experiment(conn, experiment: dict) -> dict:
         if experiment.get("statistical_plan") is not None
         else None,
         experiment.get("traffic_percentage", 100.0),
+        experiment["bucket_by"],
         experiment.get("minimum_exposure_config_version"),
         experiment.get("start_date"),
         experiment.get("end_date"),
@@ -547,9 +550,10 @@ async def _update_experiment(
             primary_metric_json = $9,
             statistical_plan = $10::jsonb,
             traffic_percentage = $11,
-            minimum_exposure_config_version = $12,
-            start_date = $13,
-            end_date = $14,
+            bucket_by = $12,
+            minimum_exposure_config_version = $13,
+            start_date = $14,
+            end_date = $15,
             version = version + 1,
             updated_at = now()
         WHERE project_id = $1 AND key = $2 AND version = $3
@@ -568,6 +572,7 @@ async def _update_experiment(
         if experiment.get("statistical_plan") is not None
         else None,
         experiment["traffic_percentage"],
+        experiment["bucket_by"],
         experiment.get("minimum_exposure_config_version"),
         experiment.get("start_date"),
         experiment.get("end_date"),
@@ -746,6 +751,7 @@ def _derived_experiment_flag(experiment: dict, backing: dict) -> dict:
         default_variant=experiment["default_variant"],
         traffic_percentage=float(experiment["traffic_percentage"]),
         targeting_rules=rules,
+        bucket_by=experiment["bucket_by"],
     )
     merged = {**backing, **updates}
     validate_flag_variant_config(merged)
@@ -1301,7 +1307,7 @@ async def enqueue_exposure(
 
 
 def _canonical_exposure_payload(payload: Any) -> dict | None:
-    """Remove only the generated event timestamp from a receipt payload."""
+    """Remove server-generated event times from a receipt payload."""
     if not isinstance(payload, dict):
         return None
     canonical = json.loads(_json(payload))
@@ -1312,6 +1318,7 @@ def _canonical_exposure_payload(payload: Any) -> dict | None:
     if not isinstance(event, dict):
         return None
     event.pop("timestamp", None)
+    event.pop("server_timestamp", None)
     return canonical
 
 

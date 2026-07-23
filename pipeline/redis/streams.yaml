@@ -7,7 +7,10 @@ streams:
     alert_outstanding_entries: 750000
     consumer_group: clickhouse-writer
     required_consumer_groups: 1
-    consumers_per_group: 4
+    # Completeness watermarks are process-local, so exactly one live writer may
+    # advance this group. Startup enforces the topology with a PostgreSQL
+    # singleton advisory lock; a second replica exits before reading Redis.
+    consumers_per_group: 1
     upgrade_requires_legacy_producer_quiescence: true
 
   config:updates:

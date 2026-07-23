@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import main as config_main
 from app import outbox
 from app.main import app
 
@@ -78,6 +79,58 @@ async def test_liveness_does_not_touch_dependencies(health_state):
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "service": "apdl-config"}
     app.state.redis.ping.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_experiment_analysis_capability_is_exact_and_schema_backed(
+    health_state,
+    monkeypatch,
+):
+    schema_probe = AsyncMock()
+    monkeypatch.setattr(config_main, "assert_schema_ready", schema_probe)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/ready/experiment-analysis")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "service": "apdl-config",
+        "capability": "experiment_analysis",
+        "schema_version": "config_experiment_analysis@1",
+    }
+    schema_probe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_experiment_analysis_capability_fails_closed_without_leaking(
+    health_state,
+    monkeypatch,
+):
+    secret = "postgresql://user:secret@private/database"
+    monkeypatch.setattr(
+        config_main,
+        "assert_schema_ready",
+        AsyncMock(side_effect=RuntimeError(secret)),
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/ready/experiment-analysis")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "not_ready",
+        "service": "apdl-config",
+        "capability": "experiment_analysis",
+        "schema_version": "config_experiment_analysis@1",
+    }
+    assert secret not in response.text
 
 
 @pytest.mark.asyncio

@@ -16,13 +16,35 @@ export interface TrackEvent {
   sessionId: string;
 }
 
+export type OfflineEvictionReason =
+  | 'offline_count_limit'
+  | 'offline_byte_limit';
+
+export type OfflineRejectionReason =
+  | 'offline_invalid_event'
+  | 'offline_storage_failure';
+
+export type DroppedEvent =
+  | {
+      readonly category: 'evicted';
+      readonly reason: OfflineEvictionReason;
+      readonly event: Readonly<TrackEvent>;
+    }
+  | {
+      readonly category: 'rejected';
+      readonly reason: 'offline_invalid_event';
+      readonly event: Readonly<TrackEvent>;
+    };
+
 /**
  * Immutable outcome returned after an explicit event drain.
  *
  * A drain never silently forgets accepted events: retryable batches are either
  * persisted for a later session or returned in `pending` when persistence also
  * fails. Server-side permanent rejections are returned separately so callers
- * can inspect what the ingestion boundary refused.
+ * can inspect what the ingestion boundary refused. Offline capacity eviction
+ * and invalid-storage rejection are returned in `dropped` with one canonical
+ * category/reason pair.
  */
 export interface DeliveryReport {
   readonly delivered: number;
@@ -30,6 +52,7 @@ export interface DeliveryReport {
   readonly permanentRejections: readonly Readonly<TrackEvent>[];
   readonly discardedForConsent: number;
   readonly pending: readonly Readonly<TrackEvent>[];
+  readonly dropped: readonly Readonly<DroppedEvent>[];
 }
 
 export interface EventContext {

@@ -6,7 +6,7 @@ import json
 import math
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from pydantic import (
@@ -37,6 +37,8 @@ MAX_PROPERTY_KEY_LENGTH = 256
 MAX_STRING_PROPERTY_LENGTH = 8_192
 MAX_EVENT_SERIALIZED_BYTES = 64 * 1024
 MAX_REQUEST_SERIALIZED_BYTES = 512 * 1024
+MAX_EVENT_AGE_SECONDS = 7 * 24 * 60 * 60
+MAX_EVENT_FUTURE_SKEW_SECONDS = 5 * 60
 
 _RFC3339_UTC_PATTERN = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?Z$"
@@ -68,9 +70,13 @@ def generate_id() -> str:
     return str(uuid.uuid4())
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def utc_now_iso() -> str:
     """Returns the current UTC time as an ISO-8601 string with a ``Z`` suffix."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return _utc_now().isoformat().replace("+00:00", "Z")
 
 
 class NamedVersionContext(BaseModel):
@@ -188,6 +194,17 @@ class IngestionEvent(BaseModel):
             raise ValueError("timestamp must be a valid RFC3339 value") from exc
         if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
             raise ValueError("timestamp must use canonical UTC notation")
+        reference_time = _utc_now()
+        if parsed < reference_time - timedelta(seconds=MAX_EVENT_AGE_SECONDS):
+            raise ValueError(
+                "timestamp must not be more than 7 days older than the SDK clock"
+            )
+        if parsed > reference_time + timedelta(
+            seconds=MAX_EVENT_FUTURE_SKEW_SECONDS
+        ):
+            raise ValueError(
+                "timestamp must not be more than 5 minutes ahead of the SDK clock"
+            )
         return value
 
     @field_validator("properties")
