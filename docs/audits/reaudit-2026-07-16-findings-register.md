@@ -13,7 +13,41 @@ flip its Status to `Fixed` and link the PR/commit.
 - **Integration status:** the audited stack merged into `main` on 2026-07-17 via
   PRs #98–#109 with all CI gates green, so every finding below applies to current
   `main` unless its Status says otherwise.
-- **Register status as of:** 2026-07-17 — all 18 findings **Open**.
+- **Register status as of:** 2026-07-22 — RA-01 through RA-12 have
+  remediation PRs on cumulative branches but remain **Open** pending merge into
+  `main` and independent re-audit. RA-13 through RA-18 remain
+  **Open** and are outside this implementation pass.
+
+## Pending remediation PR stack
+
+The branches below are cumulative, based on `a94c40f` (`origin/main`). Each
+branch contains its finding commit plus all preceding rows. These commits record
+remediation work, not finding closure; every finding remains **Open** until the
+stack is merged and independently re-audited.
+
+| Order | Finding | PR | Cumulative branch | Finding commit |
+|---:|---|---|---|---|
+| 1 | RA-01 | [#111](https://github.com/kuvera-apdl/apdl/pull/111) | `audit/ra-01-sdk-consent-isolation` | `53cae5b` |
+| 2 | RA-02 | [#112](https://github.com/kuvera-apdl/apdl/pull/112) | `audit/ra-02-database-maintenance-fence` | `6d91b36` |
+| 3 | RA-03 | [#113](https://github.com/kuvera-apdl/apdl/pull/113) | `audit/ra-03-sdk-safe-rendering` | `2fb64b7` |
+| 4 | RA-04 | [#114](https://github.com/kuvera-apdl/apdl/pull/114) | `audit/ra-04-clickhouse-selector-compatibility` | `4dfdd50` |
+| 5 | RA-05 | [#115](https://github.com/kuvera-apdl/apdl/pull/115) | `audit/ra-05-strict-selector-types` | `f753848` |
+| 6 | RA-06 | [#116](https://github.com/kuvera-apdl/apdl/pull/116) | `audit/ra-06-immutable-enrollment` | `62c56d8` |
+| 7 | RA-07 | [#117](https://github.com/kuvera-apdl/apdl/pull/117) | `audit/ra-07-archive-experiment-authority` | `ee5489a` |
+| 8 | RA-08 | [#118](https://github.com/kuvera-apdl/apdl/pull/118) | `audit/ra-08-stable-exposure-message-id` | `884a083` |
+| 9 | RA-09 | [#119](https://github.com/kuvera-apdl/apdl/pull/119) | `audit/ra-09-unknown-variant-finality` | `d84fd28` |
+| 10 | RA-10 | [#120](https://github.com/kuvera-apdl/apdl/pull/120) | `audit/ra-10-tenant-codegen-capability` | `b038c14` |
+| 11 | RA-12 | [#121](https://github.com/kuvera-apdl/apdl/pull/121) | `audit/ra-12-config-outbox-quarantine` | `6d13be6` |
+| 12 | RA-11 | [#122](https://github.com/kuvera-apdl/apdl/pull/122) | `audit/ra-11-agent-run-concurrency-lane` | `2c60f24` |
+
+RA-12 intentionally precedes RA-11 in the stack because their PostgreSQL
+migrations are respectively `033_config_outbox_quarantine.sql` and
+`034_agent_project_execution_lane.sql`.
+
+This pass covers the formal Critical and High entries in the register's
+**Release blockers** table (RA-01–RA-12). RA-13–RA-18 remain important and
+Open, but the register classifies them as **High-priority gaps**, not formal
+High-severity entries in that table.
 
 ## Release blockers
 
@@ -98,7 +132,7 @@ flip its Status to `Fixed` and link the PR/commit.
 | 3 | GitHub Actions referenced by mutable major/release tags, not commit SHAs | Open |
 | 4 | No SBOM, image scanning, or container signing/provenance path | Open |
 | 5 | Dependency gate excludes the privileged Codegen agent/Aider extra | Open (explicitly excluded by SUPPORT.md) |
-| 6 | Fresh smokes did not exercise every accepted Query selector (let RA-04/RA-05 through) | Open — closes with RA-04/RA-05 test work |
+| 6 | Fresh smokes did not exercise every accepted Query selector (let RA-04/RA-05 through) | Open — remediation exists in the RA-04/RA-05 stack layers; pending merge and independent re-audit |
 | 7 | Stacked branch far ahead of `main`; reconciliation required before release | **Closed 2026-07-17** — PRs #98–#109 merged with per-layer CI gates; `main` fully green |
 | 8 | Markdown docs not certified (no-read constraint during audit) | Open |
 
