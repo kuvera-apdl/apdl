@@ -74,6 +74,7 @@ def test_authoring_models_enforce_variant_weight_contract():
     ExperimentCreate.model_validate(
         {
             "key": "high_bound",
+            "bucket_by": "anonymous_id",
             "variants": accepted,
             "default_variant": "control",
         }
@@ -99,6 +100,7 @@ def test_authoring_models_enforce_variant_weight_contract():
     ExperimentCreate.model_validate(
         {
             "key": "maximum_count",
+            "bucket_by": "anonymous_id",
             "variants": maximum_count["variants"],
             "default_variant": maximum_count["default_variant"],
         }
@@ -110,6 +112,7 @@ def test_authoring_models_enforce_variant_weight_contract():
             ExperimentCreate.model_validate(
                 {
                     "key": f"rejected_{case['name'].replace(' ', '_')}",
+                    "bucket_by": "anonymous_id",
                     "variants": case["variants"],
                     "default_variant": case["default_variant"],
                 }

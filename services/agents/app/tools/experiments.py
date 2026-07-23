@@ -9,6 +9,10 @@ from urllib.parse import quote
 
 import httpx
 
+from app.models.experiment_design import (
+    EXPERIMENT_BUCKET_BY_VALUES,
+    ExperimentBucketBy,
+)
 from app.service_auth import service_headers
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
@@ -185,6 +189,7 @@ async def create_experiment_draft(
     hypothesis: str,
     variants: list[dict[str, Any]],
     default_variant: str,
+    bucket_by: ExperimentBucketBy,
     primary_metric: dict[str, str],
     statistical_plan: dict[str, Any],
     targeting: dict[str, Any] | None = None,
@@ -204,6 +209,7 @@ async def create_experiment_draft(
         hypothesis: The hypothesis being tested (stored as the description).
         variants: Variant definitions with "key", "weight", and optional "description".
         default_variant: Explicit declared control variant key.
+        bucket_by: Explicit stable actor identity used for experiment assignment.
         primary_metric: Dict with "event", "type", and "direction".
         statistical_plan: Immutable fixed-horizon decision contract. Config
             validates its prospective sample target before accepting traffic.
@@ -217,6 +223,8 @@ async def create_experiment_draft(
     """
     if _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key) is None:
         raise ValueError("idempotency_key must be a canonical 1 to 200 character key")
+    if not isinstance(bucket_by, str) or bucket_by not in EXPERIMENT_BUCKET_BY_VALUES:
+        raise ValueError("bucket_by must be anonymous_id or user_id")
     if not isinstance(primary_metric, dict) or not primary_metric.get("event"):
         raise ValueError("primary_metric.event is required for an experiment draft")
     if primary_metric.get("type", "conversion") != "conversion":
@@ -244,6 +252,7 @@ async def create_experiment_draft(
         "description": hypothesis,
         "variants": variants,
         "default_variant": default_variant,
+        "bucket_by": bucket_by,
         "traffic_percentage": traffic_percentage,
         "primary_metric": {
             "event": primary_metric["event"],

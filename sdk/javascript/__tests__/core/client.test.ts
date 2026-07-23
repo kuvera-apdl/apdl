@@ -637,6 +637,50 @@ describe('APDLClient', () => {
   });
 
   describe('getVariant()', () => {
+    it('enrolls an anonymous experiment and records its actor identity', async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({
+          schema_version: 2,
+          project_id: 'apdl',
+          flags: [makeFlag('anonymous-enrollment', {
+            fallthrough: {
+              rollout: {
+                percentage: 100,
+                bucket_by: 'anonymous_id',
+              },
+            },
+          })],
+        }),
+        status: 200,
+        headers: new Headers(),
+      });
+      const anonymousClient = new APDLClient(createTestConfig());
+      await flushAsync();
+
+      const result = anonymousClient.getVariantDetails(
+        'anonymous-enrollment'
+      );
+      const exposure = (
+        anonymousClient.debug.getQueue() as TrackEvent[]
+      ).find((event) => event.event === '$feature_flag_exposure');
+
+      expect(result).toMatchObject({
+        reason: 'fallthrough',
+        bucket_by: 'anonymous_id',
+        variant: 'treatment',
+      });
+      expect(exposure?.userId).toBeUndefined();
+      expect(exposure?.anonymousId).toBeTypeOf('string');
+      expect(exposure?.anonymousId).not.toBe('');
+      expect(exposure?.properties).toMatchObject({
+        flag_key: 'anonymous-enrollment',
+        bucket_by: 'anonymous_id',
+      });
+
+      await anonymousClient.shutdown();
+    });
+
     it('should return null and details when flag not found', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

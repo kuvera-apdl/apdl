@@ -6,12 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 42
-MIGRATION_NAME = "042_variant_weight_contract.sql"
+MIGRATION_VERSION = 43
+MIGRATION_NAME = "043_experiment_bucket_identity.sql"
 REQUIRED_CONSTRAINTS = frozenset(
     {
         ("flags", "flags_variants_canonical_check"),
         ("experiments", "experiments_variants_canonical_check"),
+        ("experiments", "experiments_bucket_by_check"),
     }
 )
 REQUIRED_COLUMNS = frozenset(
@@ -36,6 +37,7 @@ REQUIRED_COLUMNS = frozenset(
         ("experiments", "project_id"),
         ("experiments", "status"),
         ("experiments", "flag_key"),
+        ("experiments", "bucket_by"),
         ("experiments", "default_variant"),
         ("experiments", "variants_json"),
         ("experiments", "targeting_rules_json"),
@@ -155,7 +157,7 @@ async def assert_schema_ready(conn: Any) -> None:
             for table, constraint in missing_constraints
         )
         raise RuntimeError(
-            f"Config PostgreSQL variant constraints are incomplete "
+            f"Config PostgreSQL required constraints are incomplete "
             f"({formatted}); restore the database or apply migrations "
             "before startup"
         )

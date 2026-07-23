@@ -13,6 +13,7 @@ the flag itself — that is what keeps the two from drifting.
 from __future__ import annotations
 
 from app.models.schemas import (
+    ExperimentBucketBy,
     FallthroughConfig,
     ExperimentTargetingRule,
     FlagCreate,
@@ -20,10 +21,6 @@ from app.models.schemas import (
     RolloutConfig,
     VariantConfig,
 )
-
-# Bucket key for the synthesized fallthrough rollout — the system-wide flag
-# default (see the flags DDL and DEFAULT_FALLTHROUGH).
-DEFAULT_BUCKET_BY = "user_id"
 
 # Experiment status → (flag state, enabled). This is the single place an
 # experiment's lifecycle drives flag serving. ``validate_state_enabled`` (run by
@@ -53,7 +50,7 @@ def _flag_fields(
     default_variant: str,
     traffic_percentage: float,
     targeting_rules: list[ExperimentTargetingRule],
-    bucket_by: str,
+    bucket_by: ExperimentBucketBy,
 ) -> dict:
     """Derived flag fields shared by the create and update projections.
 
@@ -103,7 +100,7 @@ def build_flag_create(
     default_variant: str,
     traffic_percentage: float,
     targeting_rules: list[ExperimentTargetingRule],
-    bucket_by: str = DEFAULT_BUCKET_BY,
+    bucket_by: ExperimentBucketBy,
 ) -> FlagCreate:
     """Project an experiment onto a ``FlagCreate`` (validated by the flag model)."""
     return FlagCreate(
@@ -132,7 +129,7 @@ def build_flag_projection(
     default_variant: str,
     traffic_percentage: float,
     targeting_rules: list[ExperimentTargetingRule],
-    bucket_by: str = DEFAULT_BUCKET_BY,
+    bucket_by: ExperimentBucketBy,
 ) -> dict:
     """Return lifecycle-owned fields for an experiment backing flag.
 

@@ -173,6 +173,7 @@ def test_row_to_experiment_includes_canonical_columns():
         "status": "running",
         "description": "d",
         "flag_key": "checkout",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants_json": "[]",
         "targeting_rules_json": "[]",
@@ -192,6 +193,7 @@ def test_row_to_experiment_includes_canonical_columns():
     exp = postgres._row_to_experiment(row)
 
     assert exp["flag_key"] == "checkout"
+    assert exp["bucket_by"] == "anonymous_id"
     assert exp["default_variant"] == "control"
     assert exp["primary_metric_json"] == "{}"
     assert exp["statistical_plan"] is None
@@ -213,6 +215,7 @@ def test_create_experiments_table_defines_canonical_columns():
     assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
     assert "primary_metric_json TEXT NOT NULL DEFAULT '{}'" in create_sql
     assert "status IN ('draft', 'running', 'completed', 'stopped')" in create_sql
+    assert "bucket_by" in postgres.EXPERIMENT_COLUMNS
 
 
 def test_migrate_experiments_table_adds_columns_and_normalizes_status():

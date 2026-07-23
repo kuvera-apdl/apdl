@@ -8,6 +8,7 @@ import json
 import pytest
 
 from app.graphs.experiment_design import ExperimentDesignAgent
+from app.llm.prompts.experiment import EXPERIMENT_DESIGN_SYSTEM
 
 
 def _design() -> dict:
@@ -63,6 +64,29 @@ def test_parse_preserves_descriptions_and_strict_flag_projection() -> None:
         {"key": "control", "weight": 1},
         {"key": "treatment", "weight": 1},
     ]
+    assert parsed[0]["flag_config"]["fallthrough"]["rollout"]["bucket_by"] == "user_id"
+
+
+def test_experiment_bucket_identity_is_exact_and_prompt_prefers_browser_identity() -> None:
+    anonymous = _design()
+    anonymous["flag_config"]["fallthrough"]["rollout"]["bucket_by"] = "anonymous_id"
+    assert ExperimentDesignAgent().parse(json.dumps([anonymous]))[0]["flag_config"][
+        "fallthrough"
+    ]["rollout"]["bucket_by"] == "anonymous_id"
+
+    for invalid in ("account_id", "", None):
+        design = _design()
+        design["flag_config"]["fallthrough"]["rollout"]["bucket_by"] = invalid
+        with pytest.raises(ValueError, match="invalid experiment design"):
+            ExperimentDesignAgent().parse(json.dumps([design]))
+
+    missing = _design()
+    del missing["flag_config"]["fallthrough"]["rollout"]["bucket_by"]
+    with pytest.raises(ValueError, match="invalid experiment design"):
+        ExperimentDesignAgent().parse(json.dumps([missing]))
+
+    assert '"bucket_by": "anonymous_id"' in EXPERIMENT_DESIGN_SYSTEM
+    assert 'Prefer "anonymous_id" for browser experiments' in EXPERIMENT_DESIGN_SYSTEM
 
 
 @pytest.mark.parametrize(

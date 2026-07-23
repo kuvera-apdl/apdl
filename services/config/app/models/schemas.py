@@ -63,6 +63,7 @@ ExperimentStatus = Literal[
     "stopped",
 ]
 ExperimentCreateStatus = Literal["draft", "scheduled", "running"]
+ExperimentBucketBy = Literal["anonymous_id", "user_id"]
 MAX_EXPERIMENT_DURATION_DAYS = 90
 MAX_EXPERIMENT_DURATION = timedelta(days=MAX_EXPERIMENT_DURATION_DAYS)
 EXPERIMENT_STATISTICAL_PROTOCOL = "fixed_horizon_fisher_newcombe_cc_plan_v1"
@@ -321,6 +322,7 @@ class ExperimentConfig(BaseModel):
     status: ExperimentStatus = "draft"
     description: str = ""
     flag_key: str = ""
+    bucket_by: ExperimentBucketBy
     default_variant: str = "control"
     variants_json: str = "[]"
     targeting_rules_json: str = "[]"
@@ -764,6 +766,7 @@ class ExperimentAnalysis(StrictModel):
 class ExperimentCreate(StrictModel):
     key: str = Field(..., pattern=RESOURCE_KEY_PATTERN)
     flag_key: str | None = Field(default=None, pattern=RESOURCE_KEY_PATTERN)
+    bucket_by: ExperimentBucketBy
     status: ExperimentCreateStatus = "draft"
     description: str = ""
     traffic_percentage: float = Field(
@@ -814,6 +817,7 @@ class ExperimentCreate(StrictModel):
 
 class ExperimentUpdate(StrictModel):
     version: int = Field(..., ge=1)
+    bucket_by: ExperimentBucketBy | None = None
     status: ExperimentStatus | None = None
     description: str | None = None
     traffic_percentage: float | None = Field(

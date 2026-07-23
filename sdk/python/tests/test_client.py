@@ -174,6 +174,51 @@ def test_exposure_logged_once_per_identity_version_variant():
     assert isinstance(exposures[0]["session_id"], str) and exposures[0]["session_id"]
 
 
+def test_anonymous_experiment_enrolls_and_records_actor_identity():
+    from apdl.flags.models import (
+        FallthroughConfig,
+        RolloutConfig,
+        VariantConfig,
+    )
+
+    transport = RecordingTransport()
+    client = make_client(transport, log_exposures=True)
+    client.set_flags([
+        make_flag(
+            "anonymous-enrollment",
+            variants=[
+                VariantConfig(key="control", weight=0),
+                VariantConfig(key="treatment", weight=1),
+            ],
+            fallthrough=FallthroughConfig(
+                rollout=RolloutConfig(
+                    percentage=100.0,
+                    bucket_by="anonymous_id",
+                )
+            ),
+        )
+    ])
+
+    result = client.get_variant_details(
+        "anonymous-enrollment",
+        anonymous_id="anonymous-browser",
+    )
+    client.flush()
+    client.shutdown()
+
+    exposure = next(
+        event
+        for event in transport.all_events()
+        if event["event"] == FEATURE_FLAG_EXPOSURE_EVENT
+    )
+    assert result.reason == "fallthrough"
+    assert result.bucket_by == "anonymous_id"
+    assert result.variant == "treatment"
+    assert exposure["anonymous_id"] == "anonymous-browser"
+    assert "user_id" not in exposure
+    assert exposure["properties"]["bucket_by"] == "anonymous_id"
+
+
 def test_successful_exposure_dedupe_is_bounded_with_fifo_eviction():
     transport = RecordingTransport()
     client = make_client(

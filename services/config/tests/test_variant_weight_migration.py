@@ -99,13 +99,12 @@ def test_migration_fails_if_invalid_experiment_cannot_be_disabled():
     assert "backing flag authority" in preflight
 
 
-def test_config_startup_requires_migration_042_and_both_constraints():
-    assert schema.MIGRATION_VERSION == 42
-    assert schema.MIGRATION_NAME == "042_variant_weight_contract.sql"
-    assert schema.REQUIRED_CONSTRAINTS == {
+def test_config_startup_retains_both_variant_constraints_after_migration_042():
+    assert schema.MIGRATION_VERSION >= 42
+    assert {
         ("flags", "flags_variants_canonical_check"),
         ("experiments", "experiments_variants_canonical_check"),
-    }
+    } <= schema.REQUIRED_CONSTRAINTS
     assert (
         "VALIDATE CONSTRAINT flags_variants_canonical_check"
         in MIGRATION_SQL

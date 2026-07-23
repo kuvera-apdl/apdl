@@ -67,6 +67,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "status": "draft",
         "description": "New checkout",
         "flag_key": "checkout_exp",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants_json": (
             '[{"key":"control","weight":1},'
@@ -304,6 +305,7 @@ async def test_create_experiment_delegates_one_bundle_and_omits_presence_value(
         params={"project_id": "apdl"},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "draft",
             "default_variant": "control",
             "variants": [
@@ -326,11 +328,56 @@ async def test_create_experiment_delegates_one_bundle_and_omits_presence_value(
     assert response.status_code == 201
     kwargs = command.await_args.kwargs
     stored_rules = json.loads(kwargs["experiment"]["targeting_rules_json"])
+    assert kwargs["experiment"]["bucket_by"] == "anonymous_id"
+    assert (
+        kwargs["flag"]["fallthrough"]["rollout"]["bucket_by"]
+        == "anonymous_id"
+    )
+    assert kwargs["flag"]["rules"][0]["rollout"]["bucket_by"] == "anonymous_id"
     assert stored_rules[0]["conditions"][0] == {
         "attribute": "plan",
         "operator": "exists",
     }
+    assert response.json()["bucket_by"] == "anonymous_id"
     assert kwargs["actor"] == "credential:test-config"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bucket_payload",
+    [{}, {"bucket_by": None}, {"bucket_by": "account_id"}],
+)
+async def test_create_experiment_requires_explicit_actor_identity(
+    bucket_payload,
+):
+    response = await _request(
+        "POST",
+        "/v1/admin/experiments",
+        params={"project_id": "apdl"},
+        json_body={
+            "key": "checkout_exp",
+            **bucket_payload,
+            "default_variant": "control",
+            "variants": [
+                {"key": "control", "weight": 1},
+                {"key": "treatment", "weight": 1},
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_update_experiment_rejects_explicit_null_actor_identity():
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 1, "bucket_by": None},
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -348,6 +395,7 @@ async def test_create_experiment_persists_and_reuses_idempotency_key(monkeypatch
     )
     payload = {
         "key": "checkout_exp",
+        "bucket_by": "anonymous_id",
         "status": "draft",
         "default_variant": "control",
         "variants": [
@@ -390,6 +438,7 @@ async def test_create_experiment_persists_and_reuses_idempotency_key(monkeypatch
         "created": True,
         "key": "checkout_exp",
         "flag_key": "checkout_exp",
+        "bucket_by": "anonymous_id",
         "version": 1,
     }
     assert command.await_count == 1
@@ -402,6 +451,7 @@ async def test_create_experiment_reconciles_a_concurrent_idempotent_insert(
     key = "test:experiment:concurrent"
     payload = {
         "key": "checkout_exp",
+        "bucket_by": "anonymous_id",
         "status": "draft",
         "default_variant": "control",
         "variants": [
@@ -468,6 +518,7 @@ async def test_create_experiment_rejects_idempotency_key_reuse_for_changed_reque
         headers={"Idempotency-Key": key},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "draft",
             "default_variant": "control",
             "variants": [
@@ -493,6 +544,7 @@ async def test_create_experiment_rejects_noncanonical_idempotency_key(monkeypatc
         headers={"Idempotency-Key": " contains whitespace"},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "draft",
             "default_variant": "control",
             "variants": [
@@ -513,6 +565,7 @@ async def test_create_experiment_requires_running_decision_contract():
         params={"project_id": "apdl"},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "running",
             "default_variant": "control",
             "variants": [
@@ -540,6 +593,7 @@ async def test_create_running_experiment_persists_valid_statistical_plan(
         params={"project_id": "apdl"},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "running",
             "default_variant": "control",
             "variants": [
@@ -572,6 +626,7 @@ async def test_create_experiment_rejects_understated_predeclared_sample_target()
         params={"project_id": "apdl"},
         json_body={
             "key": "checkout_exp",
+            "bucket_by": "anonymous_id",
             "status": "running",
             "default_variant": "control",
             "variants": [
@@ -616,6 +671,36 @@ async def test_update_experiment_rejects_stale_version(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_draft_experiment_changes_explicit_actor_identity(
+    monkeypatch,
+):
+    existing = make_experiment({"bucket_by": "anonymous_id"})
+    monkeypatch.setattr(
+        admin.pg_store,
+        "get_experiment",
+        AsyncMock(return_value=existing),
+    )
+    command = AsyncMock(
+        return_value=(
+            make_experiment({"bucket_by": "user_id", "version": 4}),
+            make_flag(),
+        )
+    )
+    monkeypatch.setattr(admin.mutations, "update_experiment_bundle", command)
+
+    response = await _request(
+        "PUT",
+        "/v1/admin/experiments/checkout_exp",
+        params={"project_id": "apdl"},
+        json_body={"version": 3, "bucket_by": "user_id"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bucket_by"] == "user_id"
+    assert command.await_args.kwargs["desired"]["bucket_by"] == "user_id"
+
+
+@pytest.mark.asyncio
 async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
     existing = make_experiment(
         {
@@ -657,6 +742,7 @@ async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
 @pytest.mark.parametrize(
     "field,value",
     [
+        ("bucket_by", "user_id"),
         ("default_variant", "treatment"),
         ("traffic_percentage", 50.0),
         (

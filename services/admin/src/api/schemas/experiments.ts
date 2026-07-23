@@ -25,6 +25,7 @@ export const experimentStatusSchema = z.enum([
   'stopped',
 ])
 export const experimentCreateStatusSchema = z.enum(['draft', 'scheduled', 'running'])
+export const experimentBucketBySchema = z.enum(['anonymous_id', 'user_id'])
 
 const awareDateTimeSchema = z.string().datetime({ offset: true })
 
@@ -74,6 +75,7 @@ export const experimentEntrySchema = z
   .object({
     key: experimentPathKeySchema,
     flag_key: experimentPathKeySchema,
+    bucket_by: experimentBucketBySchema,
     status: experimentStatusSchema,
     description: z.string(),
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
@@ -103,6 +105,7 @@ export const experimentCreateSchema = z
   .object({
     key: experimentPathKeySchema,
     flag_key: experimentPathKeySchema.optional(),
+    bucket_by: experimentBucketBySchema,
     status: experimentCreateStatusSchema,
     description: z.string(),
     traffic_percentage: z.number().min(0).max(100),
@@ -119,6 +122,7 @@ export const experimentCreateSchema = z
 export const experimentUpdateSchema = z
   .object({
     version: z.number().int().min(1),
+    bucket_by: experimentBucketBySchema.optional(),
     status: experimentStatusSchema.optional(),
     description: z.string().optional(),
     traffic_percentage: z.number().min(0).max(100).optional(),
@@ -137,6 +141,7 @@ export const experimentCreateResponseSchema = z
     created: z.boolean(),
     key: experimentPathKeySchema,
     flag_key: experimentPathKeySchema,
+    bucket_by: experimentBucketBySchema,
     version: z.number().int().min(1),
   })
   .strict()
@@ -145,6 +150,7 @@ export const experimentUpdateResponseSchema = z
     updated: z.boolean(),
     key: experimentPathKeySchema,
     flag_key: experimentPathKeySchema,
+    bucket_by: experimentBucketBySchema,
     version: z.number().int().min(1),
   })
   .strict()

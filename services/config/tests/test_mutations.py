@@ -110,7 +110,7 @@ class StrictExperimentTimestampConn:
         if "FROM experiments" in sql and "FOR UPDATE" in sql:
             return dict(self.row)
         if "UPDATE experiments SET" in sql:
-            start_date, end_date = args[12], args[13]
+            start_date, end_date = args[13], args[14]
             assert start_date is None or isinstance(start_date, datetime)
             assert end_date is None or isinstance(end_date, datetime)
             self.bound_timestamps.append((start_date, end_date))
@@ -123,7 +123,8 @@ class StrictExperimentTimestampConn:
                 "targeting_rules_json": args[7],
                 "primary_metric_json": args[8],
                 "traffic_percentage": args[10],
-                "minimum_exposure_config_version": args[11],
+                "bucket_by": args[11],
+                "minimum_exposure_config_version": args[12],
                 "start_date": start_date,
                 "end_date": end_date,
                 "version": self.row["version"] + 1,
@@ -173,6 +174,7 @@ def make_experiment(overrides: dict | None = None) -> dict:
         "status": "draft",
         "description": "",
         "flag_key": "checkout",
+        "bucket_by": "anonymous_id",
         "default_variant": "control",
         "variants_json": '[{"key":"control","weight":1}]',
         "targeting_rules_json": "[]",
@@ -191,6 +193,26 @@ def make_experiment(overrides: dict | None = None) -> dict:
     if overrides:
         experiment.update(overrides)
     return experiment
+
+
+def test_derived_experiment_flag_uses_stored_actor_identity():
+    projected = mutations._derived_experiment_flag(
+        make_experiment(
+            {
+                "bucket_by": "anonymous_id",
+                "variants_json": (
+                    '[{"key":"control","weight":1},'
+                    '{"key":"treatment","weight":1}]'
+                ),
+            }
+        ),
+        make_flag(),
+    )
+
+    assert (
+        projected["fallthrough"]["rollout"]["bucket_by"]
+        == "anonymous_id"
+    )
 
 
 class NeverPersistConn:
@@ -477,6 +499,7 @@ async def test_stale_experiment_version_fails_before_touching_backing_flag(
 @pytest.mark.parametrize(
     ("field", "value", "api_field"),
     [
+        ("bucket_by", "user_id", "bucket_by"),
         ("default_variant", "treatment", "default_variant"),
         ("traffic_percentage", 50.0, "traffic_percentage"),
         (

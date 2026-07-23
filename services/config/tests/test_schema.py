@@ -120,6 +120,18 @@ async def test_rejects_missing_variant_weight_constraint():
 
 
 @pytest.mark.asyncio
+async def test_rejects_missing_experiment_bucket_constraint():
+    constraints = REQUIRED_CONSTRAINTS - {
+        ("experiments", "experiments_bucket_by_check")
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="experiments.experiments_bucket_by_check",
+    ):
+        await assert_schema_ready(FakeConn(constraints=constraints))
+
+
+@pytest.mark.asyncio
 async def test_rejects_unvalidated_variant_weight_constraint():
     unvalidated = {
         ("flags", "flags_variants_canonical_check"),

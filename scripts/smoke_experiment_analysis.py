@@ -528,6 +528,10 @@ def _run(args: argparse.Namespace) -> None:
         create_payload = {
             "key": experiment_key,
             "flag_key": flag_key,
+            # This analysis fixture intentionally models authenticated actors
+            # (plus explicit identity-conflict edge cases), so choose the
+            # experiment identity rather than relying on a service default.
+            "bucket_by": "user_id",
             "status": "running",
             "description": "Cross-service authoritative analysis smoke fixture",
             "traffic_percentage": 100.0,
@@ -557,6 +561,11 @@ def _run(args: argparse.Namespace) -> None:
         _assert_equal(created["created"], True, "Config create acknowledgement")
         _assert_equal(created["key"], experiment_key, "created experiment key")
         _assert_equal(created["flag_key"], flag_key, "created flag key")
+        _assert_equal(
+            created["bucket_by"],
+            create_payload["bucket_by"],
+            "created experiment bucketing identity",
+        )
         created_version = int(created["version"])
         print("  ok  Config created experiment and backing flag atomically")
 

@@ -29,7 +29,12 @@ from app.llm.prompts.experiment import (
 )
 from app.llm.router import chat_completion
 from app.llm.utils import parse_llm_json
-from app.models.experiment_design import ExperimentDesign, ExperimentSafetyReview
+from app.models.experiment_design import (
+    EXPERIMENT_BUCKET_BY_VALUES,
+    ExperimentBucketBy,
+    ExperimentDesign,
+    ExperimentSafetyReview,
+)
 from app.safety.validator import (
     ActionType,
     AgentAction,
@@ -70,6 +75,18 @@ def _flag_key_of(design: dict[str, Any]) -> str:
     flag = design.get("flag_config")
     key = flag.get("key") if isinstance(flag, dict) else ""
     return str(key or design.get("experiment_id") or "").strip()
+
+
+def _experiment_bucket_by(flag_config: dict[str, Any]) -> ExperimentBucketBy:
+    """Read the explicit experiment identity without inventing a default."""
+    fallthrough = flag_config.get("fallthrough")
+    rollout = fallthrough.get("rollout") if isinstance(fallthrough, dict) else None
+    bucket_by = rollout.get("bucket_by") if isinstance(rollout, dict) else None
+    if not isinstance(bucket_by, str) or bucket_by not in EXPERIMENT_BUCKET_BY_VALUES:
+        raise ValueError(
+            "flag_config.fallthrough.rollout.bucket_by must be anonymous_id or user_id"
+        )
+    return bucket_by
 
 
 def treatment_changeset_task(design: dict[str, Any]) -> tuple[str, str] | None:
@@ -205,6 +222,7 @@ async def stage_experiment_draft(
         hypothesis=description,
         variants=variants,
         default_variant=flag_config.get("default_variant"),
+        bucket_by=_experiment_bucket_by(flag_config),
         primary_metric=experiment.get("primary_metric", {}),
         statistical_plan=experiment.get("statistical_plan"),
         targeting=experiment.get("targeting"),
