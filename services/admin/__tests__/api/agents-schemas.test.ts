@@ -2,10 +2,49 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  agentDefinitionsResponseSchema,
   approvalRequestSchema,
   approvalResponseSchema,
   customAgentSpecSchema,
+  triggerResponseSchema,
 } from '../../src/api/schemas/agents'
+
+describe('agent capability schemas', () => {
+  const definition = {
+    name: 'behavior_analysis',
+    display_name: 'Behavior analysis',
+    description: 'Produces insights.',
+    order: 10,
+    produces: 'insights',
+    requires: [],
+    model_tier: 'reasoning',
+    is_custom: false,
+  }
+
+  test('requires the canonical started response and non-empty fields', () => {
+    expect(triggerResponseSchema.safeParse({ run_id: 'run-1', status: 'started' }).success).toBe(true)
+    expect(triggerResponseSchema.safeParse({ run_id: '', status: 'started' }).success).toBe(false)
+    expect(triggerResponseSchema.safeParse({ run_id: 'run-1', status: 'queued' }).success).toBe(false)
+    expect(
+      agentDefinitionsResponseSchema.safeParse({ agents: [definition], tool_catalog: [] }).success,
+    ).toBe(true)
+    expect(
+      agentDefinitionsResponseSchema.safeParse({
+        agents: [{ ...definition, description: '' }],
+        tool_catalog: [],
+      }).success,
+    ).toBe(false)
+  })
+
+  test('rejects duplicate definition names', () => {
+    expect(
+      agentDefinitionsResponseSchema.safeParse({
+        agents: [definition, { ...definition, display_name: 'Duplicate' }],
+        tool_catalog: [],
+      }).success,
+    ).toBe(false)
+  })
+})
 
 describe('approvalResponseSchema', () => {
   test('accepts the strict durable command envelope', () => {

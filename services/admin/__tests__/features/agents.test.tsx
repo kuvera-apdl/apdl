@@ -23,6 +23,42 @@ const requests: { path: string; body: unknown }[] = []
 let monitorStatus = 'waiting_approval'
 let monitorPhase = 'experiment_design_approval'
 
+const EXECUTABLE_DEFINITIONS = {
+  agents: [
+    {
+      name: 'behavior_analysis',
+      display_name: 'Behavior analysis',
+      description: 'Produces insights.',
+      order: 10,
+      produces: 'insights',
+      requires: [],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+    {
+      name: 'experiment_design',
+      display_name: 'Experiment design',
+      description: 'Produces experiment designs.',
+      order: 20,
+      produces: 'experiment_designs',
+      requires: ['insights'],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+    {
+      name: 'feature_proposal',
+      display_name: 'Feature proposals',
+      description: 'Produces feature proposals.',
+      order: 40,
+      produces: 'feature_proposals',
+      requires: ['insights'],
+      model_tier: 'reasoning',
+      is_custom: false,
+    },
+  ],
+  tool_catalog: [],
+}
+
 function queuedApproval(runId: string) {
   return {
     command_id: '018f3d4e-c1c2-7000-8000-000000000001',
@@ -210,6 +246,11 @@ describe('TriggerPage', () => {
   })
 
   test('posts the manual trigger and navigates to the run', async () => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+    )
     renderWithProviders(
       <Routes>
         <Route path="/agents/trigger" element={<TriggerPage />} />
@@ -217,13 +258,13 @@ describe('TriggerPage', () => {
       </Routes>,
       '/agents/trigger',
     )
+    expect(await screen.findByText('Produces insights.')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 
     // Navigates to the new run — no client-side run tracking (the server
     // owns run history now).
     expect(await screen.findByText('monitor page')).toBeInTheDocument()
-    // Default mode runs the full built-in loop when definition discovery is
-    // unavailable, so the built-in fallback list is selected.
+    // Default mode runs only the built-ins confirmed by live capability discovery.
     expect(requests[0]?.body).toEqual({
       project_id: 'demo',
       trigger_type: 'manual',
@@ -235,6 +276,34 @@ describe('TriggerPage', () => {
       time_range_days: 7,
       autonomy_level: 2,
     })
+  })
+
+  test.each([
+    {
+      name: 'an unavailable endpoint',
+      response: HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
+      message: /agent definitions are unavailable/i,
+    },
+    {
+      name: 'an invalid response',
+      response: HttpResponse.json({ agents: [{ name: 'behavior_analysis' }], tool_catalog: [] }),
+      message: /agent definitions are unavailable/i,
+    },
+    {
+      name: 'an empty executable list',
+      response: HttpResponse.json({ agents: [], tool_catalog: [] }),
+      message: /no executable agent definitions/i,
+    },
+  ])('fails closed for $name', async ({ response, message }) => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () => response.clone()),
+    )
+    renderWithProviders(<TriggerPage />, '/agents/trigger')
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Start run' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: /curl/i })).not.toBeInTheDocument()
+    expect(requests.some((entry) => entry.path === 'trigger')).toBe(false)
   })
 
   test('filters experiment evaluation from live definitions and trigger payloads', async () => {

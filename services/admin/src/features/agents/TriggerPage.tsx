@@ -27,29 +27,6 @@ interface AnalysisOption {
   isCustom: boolean
 }
 
-// Static fallback: shown until /definitions responds, and kept when the
-// endpoint is unavailable (older agents service) — console convention.
-const BUILTIN_ANALYSIS_TYPES: AnalysisOption[] = [
-  {
-    type: 'behavior_analysis',
-    label: 'Behavior analysis',
-    description: 'Reads event history and produces insights — the input every other agent needs.',
-    isCustom: false,
-  },
-  {
-    type: 'experiment_design',
-    label: 'Experiment design',
-    description: 'Turns insights into experiment designs with flags and variants.',
-    isCustom: false,
-  },
-  {
-    type: 'feature_proposal',
-    label: 'Feature proposals',
-    description: 'Drafts prioritized feature proposals — always requires approval.',
-    isCustom: false,
-  },
-]
-
 // code_implementation is deliberately absent from the manual trigger list —
 // it runs via the approval flow. Filter it out of the live listing too.
 const HIDDEN_AGENTS = new Set(['code_implementation', 'experiment_evaluation'])
@@ -82,9 +59,7 @@ function TriggerForm() {
   const navigate = useNavigate()
   // 'default' runs the full built-in loop; 'custom' hand-picks agents.
   const [mode, setMode] = useState<'default' | 'custom'>('default')
-  const [selected, setSelected] = useState<Set<string>>(
-    () => new Set<string>(['behavior_analysis']),
-  )
+  const [selected, setSelected] = useState<Set<string>>(() => new Set<string>())
   const [timeRangeDays, setTimeRangeDays] = useState(7)
   const [autonomyLevel, setAutonomyLevel] = useState(2)
   const [submitting, setSubmitting] = useState(false)
@@ -98,7 +73,7 @@ function TriggerForm() {
     queryFn: ({ signal }) => listAgentDefinitions(conn!, projectId!, { signal }),
   })
 
-  const analysisTypes: AnalysisOption[] = definitionsQuery.data
+  const analysisTypes: AnalysisOption[] = definitionsQuery.isSuccess
     ? definitionsQuery.data.agents
         .filter((agent) => !HIDDEN_AGENTS.has(agent.name))
         .map((agent) => ({
@@ -107,7 +82,8 @@ function TriggerForm() {
           description: agent.description,
           isCustom: agent.is_custom,
         }))
-    : BUILTIN_ANALYSIS_TYPES
+    : []
+  const definitionsReady = definitionsQuery.isSuccess && analysisTypes.length > 0
 
   // The default loop = every built-in (non-custom) agent. Stable string dep so
   // the sync effect doesn't loop on analysisTypes' fresh array each render.
@@ -135,7 +111,7 @@ function TriggerForm() {
   }
 
   const body =
-    projectId && selected.size > 0
+    definitionsReady && projectId && selected.size > 0
       ? {
           project_id: projectId,
           trigger_type: 'manual' as const,
@@ -204,6 +180,29 @@ function TriggerForm() {
           </div>
         </CardHeader>
         <CardContent className="space-y-2">
+          {definitionsQuery.isPending ? (
+            <p className="rounded-md border p-3 text-sm text-muted-foreground" role="status">
+              Loading executable agent definitions…
+            </p>
+          ) : null}
+          {definitionsQuery.isError ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              Agent definitions are unavailable. Starting a run is disabled until the agents
+              service returns a valid capability list.
+            </p>
+          ) : null}
+          {definitionsQuery.isSuccess && analysisTypes.length === 0 ? (
+            <p
+              className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+              role="alert"
+            >
+              No executable agent definitions are available for this project. Starting a run is
+              disabled.
+            </p>
+          ) : null}
           {analysisTypes.map((entry) => (
             <label
               key={entry.type}
