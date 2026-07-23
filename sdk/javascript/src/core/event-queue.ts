@@ -35,15 +35,20 @@ interface DeliveryAccumulator {
   discardedForConsent: number;
 }
 
+interface PendingEvent {
+  event: TrackEvent;
+  durableRecordId?: number;
+}
+
 interface PreparedBatch {
-  events: TrackEvent[];
+  events: PendingEvent[];
   payload: { events: IngestionEvent[] };
 }
 
 interface BatchDelivery {
-  delivered: number;
-  permanentRejections: TrackEvent[];
-  retryableEvents: TrackEvent[];
+  delivered: PendingEvent[];
+  permanentRejections: PendingEvent[];
+  retryableEvents: PendingEvent[];
 }
 
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
@@ -54,7 +59,7 @@ const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
  * On failure, persists to IndexedDB for retry on next session.
  */
 export class EventQueue {
-  private queue: TrackEvent[] = [];
+  private queue: PendingEvent[] = [];
   private transport: Transport;
   private storage: OfflineStorage;
   private config: ResolvedConfig;
@@ -151,7 +156,7 @@ export class EventQueue {
       throw new Error('APDL: event queue is full');
     }
 
-    this.queue.push(canonicalEvent);
+    this.queue.push({ event: canonicalEvent });
 
     // Auto-flush when batch size is reached
     if (this.queue.length >= this.config.batchSize) {
@@ -207,7 +212,10 @@ export class EventQueue {
     this.startPromise = this.restoreOfflineEvents();
     void this.startPromise.then(() => {
       this.startComplete = true;
-      if (this.queue.length >= this.config.batchSize) {
+      if (
+        this.queue.length >= this.config.batchSize ||
+        this.queue.some((pending) => pending.durableRecordId !== undefined)
+      ) {
         void this.flush();
       }
     });
@@ -215,62 +223,99 @@ export class EventQueue {
   }
 
   private async restoreOfflineEvents(): Promise<void> {
-    // Drain offline storage and re-enqueue events. Consent is checked before
-    // and after the asynchronous read because revocation is an immediate fence.
+    await this.claimOfflineEvents();
+  }
+
+  /**
+   * Claims one bounded durable batch without deleting it.
+   *
+   * Consent is checked before and after the asynchronous claim because
+   * revocation is an immediate fence. Invalid claimed records are a permanent
+   * local disposition and are acknowledged explicitly so they cannot poison
+   * every later recovery attempt.
+   */
+  private async claimOfflineEvents(): Promise<number> {
     try {
       if (this.consentFencePending) {
         await this.consentFence;
       }
       if (!this.consentManager.isGranted('analytics')) {
         await this.storage.clear();
-        return;
+        return 0;
       }
 
+      const availableCapacity =
+        this.config.maxQueueSize - this.queue.length - this.inFlightEventCount;
+      if (availableCapacity <= 0) return 0;
+      const claimLimit = Math.min(this.config.batchSize, availableCapacity);
       const restoreEpoch = this.consentEpoch;
-      const offlineEvents = await this.storage.drain();
+      const claims = await this.storage.claim(claimLimit);
       if (
         restoreEpoch !== this.consentEpoch ||
         !this.consentManager.isGranted('analytics')
       ) {
-        this.consentDiscardedSinceReport += offlineEvents.length;
-        if (offlineEvents.length > 0 && this.config.debug) {
+        this.consentDiscardedSinceReport += claims.length;
+        if (claims.length > 0 && this.config.debug) {
           console.debug(
-            `APDL: Discarded ${offlineEvents.length} offline events — analytics consent not granted`
+            `APDL: Discarded ${claims.length} offline events — analytics consent not granted`
           );
         }
         await this.storage.clear();
-        return;
+        return 0;
       }
 
-      if (offlineEvents.length > 0) {
+      if (claims.length > 0) {
         if (this.config.debug) {
-          console.debug(`APDL: Drained ${offlineEvents.length} events from offline storage`);
+          console.debug(`APDL: Claimed ${claims.length} events from offline storage`);
         }
+        const currentCapacity =
+          this.config.maxQueueSize - this.queue.length - this.inFlightEventCount;
+        const usableClaims = claims.slice(0, Math.max(0, currentCapacity));
+        const excessClaims = claims.slice(usableClaims.length);
+        if (excessClaims.length > 0) {
+          await this.storage.release(excessClaims.map((claim) => claim.id));
+        }
+
         // Offline events already passed through configurable scrubbers, but
         // legacy records can predate mandatory validation and auto-capture
         // safety rules. Permanently invalid records are quarantined here.
-        for (const event of offlineEvents) {
+        const permanentDispositionIds: number[] = [];
+        const claimedPending: PendingEvent[] = [];
+        for (const claim of usableClaims) {
           try {
             const canonical = canonicalizeTrackEvent(
-              sanitizeAutoCaptureEvent(event)
+              sanitizeAutoCaptureEvent(claim.event)
             );
             if (!this.isConsentGrantedForEvent(canonical)) {
               this.consentDiscardedSinceReport += 1;
+              permanentDispositionIds.push(claim.id);
               continue;
             }
             assertSerializedEventSize(this.toIngestionEvent(canonical));
-            this.queue.push(canonical);
+            claimedPending.push({
+              event: canonical,
+              durableRecordId: claim.id,
+            });
           } catch (err) {
+            permanentDispositionIds.push(claim.id);
             if (this.config.debug) {
               console.warn('APDL: Discarded invalid offline event:', err);
             }
           }
         }
+        if (permanentDispositionIds.length > 0) {
+          await this.storage.acknowledge(permanentDispositionIds);
+        }
+        // Durable backlog predates volatile events accepted during the
+        // asynchronous claim and must reach transport before its lease ages.
+        this.queue.unshift(...claimedPending);
       }
+      return claims.length;
     } catch (err) {
       if (this.config.debug) {
-        console.error('APDL: Failed to drain offline storage:', err);
+        console.error('APDL: Failed to claim offline storage:', err);
       }
+      return 0;
     }
   }
 
@@ -306,7 +351,7 @@ export class EventQueue {
   revokeExperimentsConsent(): Promise<void> {
     this.consentEpoch += 1;
     const retained = this.queue.filter(
-      (event) => event.event !== FEATURE_FLAG_EXPOSURE_EVENT
+      (pending) => pending.event.event !== FEATURE_FLAG_EXPOSURE_EVENT
     );
     this.consentDiscardedSinceReport += this.queue.length - retained.length;
     this.queue = retained;
@@ -371,7 +416,7 @@ export class EventQueue {
    * Returns a snapshot of the current queue (for debugging).
    */
   getQueue(): TrackEvent[] {
-    return [...this.queue];
+    return this.queue.map((pending) => pending.event);
   }
 
   /**
@@ -403,7 +448,19 @@ export class EventQueue {
       await this.startPromise;
     }
 
-    while (this.queue.length > 0) {
+    let stopAfterRetryableFailure = false;
+    while (true) {
+      if (this.queue.length === 0) {
+        if (
+          !stopAfterRetryableFailure &&
+          this.startPromise !== null &&
+          (await this.claimOfflineEvents()) > 0
+        ) {
+          continue;
+        }
+        break;
+      }
+
       if (this.consentFencePending) {
         await this.consentFence;
       }
@@ -414,9 +471,13 @@ export class EventQueue {
       }
 
       const epoch = this.consentEpoch;
-      const prepared = this.dequeueBatch();
+      const localDispositionIds: number[] = [];
+      const prepared = this.dequeueBatch(localDispositionIds);
+      this.inFlightEventCount = prepared?.events.length ?? 0;
+      if (localDispositionIds.length > 0) {
+        await this.storage.acknowledge(localDispositionIds);
+      }
       if (prepared === null) continue;
-      this.inFlightEventCount = prepared.events.length;
 
       // There is no await between this final consent check and fetch creation,
       // so revocation cannot cross the send boundary without aborting it.
@@ -443,7 +504,7 @@ export class EventQueue {
           console.error('APDL: Unexpected error during flush:', err);
         }
         delivery = {
-          delivered: 0,
+          delivered: [],
           permanentRejections: [],
           retryableEvents: prepared.events,
         };
@@ -462,8 +523,23 @@ export class EventQueue {
         continue;
       }
 
-      report.delivered += delivery.delivered;
-      report.permanentRejections.push(...delivery.permanentRejections);
+      const finalDurableRecordIds = [
+        ...delivery.delivered,
+        ...delivery.permanentRejections,
+      ]
+        .map((pending) => pending.durableRecordId)
+        .filter((id): id is number => id !== undefined);
+      if (finalDurableRecordIds.length > 0) {
+        // The server outcome is known before durable ownership is released.
+        // A stale/expired owner cannot delete a record that another tab has
+        // already reclaimed.
+        await this.storage.acknowledge(finalDurableRecordIds);
+      }
+
+      report.delivered += delivery.delivered.length;
+      report.permanentRejections.push(
+        ...delivery.permanentRejections.map((pending) => pending.event)
+      );
 
       if (delivery.permanentRejections.length > 0 && this.config.debug) {
         console.warn(
@@ -472,23 +548,51 @@ export class EventQueue {
       }
 
       if (delivery.retryableEvents.length > 0) {
-        if (this.config.persistence === 'memory') {
+        stopAfterRetryableFailure = true;
+        const durableRetryable = delivery.retryableEvents.filter(
+          (pending) => pending.durableRecordId !== undefined
+        );
+        const volatileRetryable = delivery.retryableEvents.filter(
+          (pending) => pending.durableRecordId === undefined
+        );
+        if (durableRetryable.length > 0) {
+          await this.storage.release(
+            durableRetryable.map((pending) => pending.durableRecordId!)
+          );
+        }
+        if (
+          epoch !== this.consentEpoch ||
+          !this.consentManager.isGranted('analytics')
+        ) {
+          await this.storage.clear();
+          report.discardedForConsent += delivery.retryableEvents.length;
+          this.inFlightEventCount = 0;
+          continue;
+        }
+
+        if (
+          this.config.persistence === 'memory' &&
+          volatileRetryable.length > 0
+        ) {
           // Memory mode has no durable retry store. Keep ownership in the
           // public pending queue so callers can retry or inspect every event.
           if (this.config.debug) {
             console.warn('APDL: Retryable event send failure remains pending');
           }
-          this.queue.unshift(...delivery.retryableEvents);
+          report.persisted += durableRetryable.length;
+          this.queue.unshift(...volatileRetryable);
           this.inFlightEventCount = 0;
           break;
         }
-        if (this.config.debug) {
+        if (volatileRetryable.length > 0 && this.config.debug) {
           console.warn(
             'APDL: Retryable event send failure, persisting to offline storage'
           );
         }
         try {
-          await this.storage.store(delivery.retryableEvents);
+          await this.storage.store(
+            volatileRetryable.map((pending) => pending.event)
+          );
           if (
             epoch !== this.consentEpoch ||
             !this.consentManager.isGranted('analytics')
@@ -496,7 +600,8 @@ export class EventQueue {
             await this.storage.clear();
             report.discardedForConsent += delivery.retryableEvents.length;
           } else {
-            report.persisted += delivery.retryableEvents.length;
+            report.persisted +=
+              durableRetryable.length + volatileRetryable.length;
           }
           this.inFlightEventCount = 0;
         } catch (err) {
@@ -510,9 +615,10 @@ export class EventQueue {
             report.discardedForConsent += delivery.retryableEvents.length;
             this.inFlightEventCount = 0;
           } else {
+            report.persisted += durableRetryable.length;
             // Keep ownership in memory and stop this drain. Continuing would
             // immediately retry the same failed batch forever.
-            this.queue.unshift(...delivery.retryableEvents);
+            this.queue.unshift(...volatileRetryable);
             this.inFlightEventCount = 0;
             break;
           }
@@ -543,21 +649,21 @@ export class EventQueue {
     const outcome = await this.sendPreparedBatch(prepared, useKeepalive, signal);
     if (outcome === 'accepted') {
       return {
-        delivered: prepared.events.length,
+        delivered: prepared.events,
         permanentRejections: [],
         retryableEvents: [],
       };
     }
     if (outcome === 'retryable') {
       return {
-        delivered: 0,
+        delivered: [],
         permanentRejections: [],
         retryableEvents: prepared.events,
       };
     }
     if (outcome === 'permanent_rejection' || prepared.events.length === 1) {
       return {
-        delivered: 0,
+        delivered: [],
         permanentRejections: prepared.events,
         retryableEvents: [],
       };
@@ -585,7 +691,7 @@ export class EventQueue {
       signal
     );
     return {
-      delivered: leftDelivery.delivered + rightDelivery.delivered,
+      delivered: [...leftDelivery.delivered, ...rightDelivery.delivered],
       permanentRejections: [
         ...leftDelivery.permanentRejections,
         ...rightDelivery.permanentRejections,
@@ -634,8 +740,8 @@ export class EventQueue {
     const permanentRejections = report.permanentRejections.map((event) =>
       deepFreeze(canonicalizeTrackEvent(event))
     );
-    const pending = this.queue.map((event) =>
-      deepFreeze(canonicalizeTrackEvent(event))
+    const pending = this.queue.map((item) =>
+      deepFreeze(canonicalizeTrackEvent(item.event))
     );
 
     return Object.freeze({
@@ -687,8 +793,10 @@ export class EventQueue {
    * Every record is validated again so a debug reference or custom integration
    * cannot mutate an already-queued event into a permanent poison record.
    */
-  private dequeueBatch(): PreparedBatch | null {
-    const events: TrackEvent[] = [];
+  private dequeueBatch(
+    permanentDispositionIds: number[]
+  ): PreparedBatch | null {
+    const events: PendingEvent[] = [];
     const ingestionEvents: IngestionEvent[] = [];
     const maxEvents = Math.min(this.config.batchSize, MAX_EVENTS_PER_BATCH);
 
@@ -699,10 +807,13 @@ export class EventQueue {
 
       try {
         canonical = canonicalizeTrackEvent(
-          sanitizeAutoCaptureEvent(queued)
+          sanitizeAutoCaptureEvent(queued.event)
         );
         if (!this.isConsentGrantedForEvent(canonical)) {
           this.consentDiscardedSinceReport += 1;
+          if (queued.durableRecordId !== undefined) {
+            permanentDispositionIds.push(queued.durableRecordId);
+          }
           continue;
         }
         ingestionEvent = this.toIngestionEvent(canonical);
@@ -710,6 +821,9 @@ export class EventQueue {
       } catch (err) {
         if (this.config.debug) {
           console.warn('APDL: Discarded permanently invalid queued event:', err);
+        }
+        if (queued.durableRecordId !== undefined) {
+          permanentDispositionIds.push(queued.durableRecordId);
         }
         continue;
       }
@@ -724,13 +838,26 @@ export class EventQueue {
           if (this.config.debug) {
             console.warn('APDL: Discarded event that exceeds request size limit');
           }
+          if (queued.durableRecordId !== undefined) {
+            permanentDispositionIds.push(queued.durableRecordId);
+          }
           continue;
         }
-        this.queue.unshift(canonical);
+        this.queue.unshift({
+          event: canonical,
+          ...(queued.durableRecordId === undefined
+            ? {}
+            : { durableRecordId: queued.durableRecordId }),
+        });
         break;
       }
 
-      events.push(canonical);
+      events.push({
+        event: canonical,
+        ...(queued.durableRecordId === undefined
+          ? {}
+          : { durableRecordId: queued.durableRecordId }),
+      });
       ingestionEvents.push(ingestionEvent);
     }
 

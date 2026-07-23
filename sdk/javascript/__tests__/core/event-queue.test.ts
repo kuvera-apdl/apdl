@@ -1007,6 +1007,62 @@ describe('EventQueue', () => {
   });
 
   describe('offline fallback', () => {
+    it('acknowledges a claimed durable record only after server success', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const offlineEvent = createEvent({
+        event: 'durable_success_order',
+        messageId: 'durable-success-order',
+      });
+      await storage.store([offlineEvent]);
+      let resolveSend: ((outcome: 'accepted') => void) | undefined;
+      const sendSpy = vi.spyOn(transport, 'send').mockImplementation(
+        () => new Promise((resolve) => {
+          resolveSend = resolve;
+        })
+      );
+      await persistentQueue.start();
+
+      const flush = persistentQueue.flush();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+
+      expect(await storage.count()).toBe(1);
+      resolveSend?.('accepted');
+      await expect(flush).resolves.toMatchObject({ delivered: 1 });
+      expect(await storage.count()).toBe(0);
+      persistentQueue.stop();
+    });
+
+    it('acknowledges a claimed durable record after permanent server disposition', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const offlineEvent = createEvent({
+        event: 'durable_permanent_rejection',
+        messageId: 'durable-permanent-rejection',
+      });
+      await storage.store([offlineEvent]);
+      vi.spyOn(transport, 'send').mockResolvedValue('permanent_rejection');
+
+      await persistentQueue.start();
+      const report = await persistentQueue.flush();
+
+      expect(report.permanentRejections.map((event) => event.messageId)).toEqual([
+        'durable-permanent-rejection',
+      ]);
+      expect(await storage.count()).toBe(0);
+      persistentQueue.stop();
+    });
+
     it('should persist events to offline storage on send failure', async () => {
       const persistentQueue = new EventQueue(
         createConfig({ persistence: 'localStorage' }),
@@ -1153,7 +1209,7 @@ describe('EventQueue', () => {
       const sendSpy = vi
         .spyOn(transport, 'send')
         .mockResolvedValue('accepted');
-      vi.spyOn(storage, 'drain').mockResolvedValue([]);
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
 
       await queue.start();
 
@@ -1167,39 +1223,64 @@ describe('EventQueue', () => {
       queue.stop();
     });
 
-    it('should drain offline events on start', async () => {
+    it('should claim offline events without deleting them on start', async () => {
       const offlineEvent = createEvent({ event: 'offline_event' });
-      vi.spyOn(storage, 'drain').mockResolvedValue([offlineEvent]);
+      const claimSpy = vi.spyOn(storage, 'claim')
+        .mockResolvedValueOnce([{ id: 1, event: offlineEvent }])
+        .mockResolvedValue([]);
+      const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue('accepted');
 
       await queue.start();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
 
-      expect(queue.length).toBeGreaterThanOrEqual(1);
+      expect(claimSpy).toHaveBeenCalled();
+      const payload = sendSpy.mock.calls[0][1] as {
+        events: Array<{ event: string }>;
+      };
+      expect(payload.events).toEqual([
+        expect.objectContaining({ event: 'offline_event' }),
+      ]);
+      await queue.flush();
 
       queue.stop();
     });
 
     it('should remove text from legacy auto-capture events before direct requeue', async () => {
-      vi.spyOn(storage, 'drain').mockResolvedValue([
-        createEvent({
-          event: '$click',
-          properties: { text: 'stored-password', tag: 'input' },
-        }),
-        createEvent({
-          event: '$rage_click',
-          properties: {
-            text: 'stored-password',
-            tag: 'input',
-            clickCount: 3,
+      vi.spyOn(storage, 'claim')
+        .mockResolvedValueOnce([
+          {
+            id: 1,
+            event: createEvent({
+              event: '$click',
+              properties: { text: 'stored-password', tag: 'input' },
+            }),
           },
-        }),
-      ]);
+          {
+            id: 2,
+            event: createEvent({
+              event: '$rage_click',
+              properties: {
+                text: 'stored-password',
+                tag: 'input',
+                clickCount: 3,
+              },
+            }),
+          },
+        ])
+        .mockResolvedValue([]);
+      const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue('accepted');
 
       await queue.start();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
 
-      expect(queue.getQueue().map((event) => event.properties)).toEqual([
+      const payload = sendSpy.mock.calls[0][1] as {
+        events: Array<{ properties?: Record<string, unknown> }>;
+      };
+      expect(payload.events.map((event) => event.properties)).toEqual([
         { tag: 'input' },
         { tag: 'input', clickCount: 3 },
       ]);
+      await queue.flush();
     });
 
     it('should discard restored events when analytics consent was revoked', async () => {
@@ -1215,19 +1296,22 @@ describe('EventQueue', () => {
 
     it('should reject an offline restore that crossed revoke and regrant', async () => {
       const offlineEvent = createEvent({ event: 'consent_race_event' });
-      let resolveDrain: ((events: TrackEvent[]) => void) | undefined;
-      vi.spyOn(storage, 'drain').mockImplementation(
-        () => new Promise((resolve) => {
-          resolveDrain = resolve;
-        })
-      );
+      let resolveClaim:
+        ((events: Array<{ id: number; event: TrackEvent }>) => void) | undefined;
+      vi.spyOn(storage, 'claim')
+        .mockImplementationOnce(
+          () => new Promise((resolve) => {
+            resolveClaim = resolve;
+          })
+        )
+        .mockResolvedValue([]);
 
       const startPromise = queue.start();
       await Promise.resolve();
       consentManager.update({ analytics: false });
       const cleared = queue.revokeAnalyticsConsent();
       consentManager.update({ analytics: true });
-      resolveDrain?.([offlineEvent]);
+      resolveClaim?.([{ id: 1, event: offlineEvent }]);
       await Promise.all([startPromise, cleared]);
 
       expect(queue.length).toBe(0);

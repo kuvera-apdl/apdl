@@ -353,7 +353,11 @@ Retryable delivery failures therefore remain in `DeliveryReport.pending` for
 an explicit same-session retry instead of being reported as persisted.
 
 With `persistence: 'localStorage'`, failed analytics deliveries may be retained
-in IndexedDB for up to seven days.
+in IndexedDB for up to seven days. Restore takes a five-minute client lease
+without deleting the record; deletion occurs only after an accepted or
+permanently rejected server response. Retryable failures release the lease,
+crashed-client leases are reclaimable after expiry, and a stale client cannot
+acknowledge a record reclaimed by another tab.
 Each record is scoped to the canonical project ID derived from the client key;
 the key itself is never persisted. A client cannot drain or clear another
 project's records on the same origin, and current analytics consent is checked
