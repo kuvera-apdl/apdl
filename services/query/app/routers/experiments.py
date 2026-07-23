@@ -21,7 +21,6 @@ from app.config_client import (
     fetch_experiment_analysis,
 )
 from app.models.schemas import (
-    ExperimentAnalysisDecisionSnapshot,
     ExperimentAnalysisNonFinal,
     ExperimentAnalysisResponse,
     ExperimentArmResult,
@@ -440,29 +439,13 @@ async def experiment_results(
             underpowered_variants=underpowered,
         )
 
-    by_variant = {arm.variant: arm for arm in arms}
-    treatments = [
-        variant
-        for variant in metadata.variants
-        if variant != metadata.control_variant
-    ]
-    comparisons: list[ExperimentComparison] = []
-    for treatment in treatments:
-        result = _comparison(
-            by_variant[metadata.control_variant],
-            by_variant[treatment],
-            len(treatments),
-            metadata.statistical_plan.significance_level,
-        )
-        if result is None:
-            return ExperimentAnalysisNonFinal(
-                **common,
-                reason="non_finite_statistics",
-                underpowered_variants=[],
-            )
-        comparisons.append(result)
-
-    return ExperimentAnalysisDecisionSnapshot(
+    # The settlement delay is only a query-admission hold. It cannot prove that
+    # Redis Streams were consumed contiguously or that ClickHouse contains every
+    # event through the experiment boundary. Until an authoritative pipeline
+    # watermark is integrated, expose the observed aggregates but never promote
+    # them to an immutable decision snapshot.
+    return ExperimentAnalysisNonFinal(
         **common,
-        comparisons=comparisons,
+        reason="data_completeness_unverified",
+        underpowered_variants=[],
     )

@@ -15,6 +15,7 @@ from app.config_client import ConfigExperimentAnalysis
 from app.main import app
 from app.models.schemas import (
     ExperimentAnalysisDecisionSnapshot,
+    ExperimentAnalysisNonFinal,
     ExperimentArmResult,
     GuardrailEvaluateResponse,
 )
@@ -41,6 +42,15 @@ def test_decision_snapshot_schema_requires_zero_unknown_variant_actors():
     schema = ExperimentAnalysisDecisionSnapshot.model_json_schema()
 
     assert schema["properties"]["unknown_variant_actors"]["const"] == 0
+    assert schema["properties"]["data_completeness"]["const"] == "verified"
+    assert "data_completeness" in schema["required"]
+
+
+def test_non_final_schema_has_canonical_unverified_completeness_reason():
+    schema = ExperimentAnalysisNonFinal.model_json_schema()
+
+    assert schema["properties"]["data_completeness"]["const"] == "not_verified"
+    assert "data_completeness_unverified" in schema["properties"]["reason"]["enum"]
 
 
 def test_guardrail_response_schema_requires_canonical_window_boundaries():
@@ -880,7 +890,10 @@ def _experiment_metadata(
 
 
 @pytest.mark.asyncio
-async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch):
+async def test_completed_experiment_retains_live_stats_without_claiming_completeness(
+    client,
+    monkeypatch,
+):
     metadata = _experiment_metadata(
         variants=["blue", "baseline", "green"],
         control_variant="baseline",
@@ -923,7 +936,9 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "decision_snapshot"
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "data_completeness_unverified"
+    assert body["data_completeness"] == "not_verified"
     assert body["experiment_key"] == "exp_123"
     assert body["flag_key"] == "checkout-experiment"
     assert body["metric_event"] == "purchase"
@@ -932,19 +947,10 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
         "baseline",
         "green",
     ]
-    assert [item["treatment_variant"] for item in body["comparisons"]] == [
-        "blue",
-        "green",
-    ]
-    assert all(
-        comparison["control_variant"] == "baseline"
-        for comparison in body["comparisons"]
-    )
-    assert body["correction"] == "bonferroni"
-    for comparison in body["comparisons"]:
-        assert comparison["adjusted_p_value"] == pytest.approx(
-            min(comparison["raw_p_value"] * 2, 1.0)
-        )
+    assert [arm["sample_size"] for arm in body["arms"]] == [100, 100, 100]
+    assert [arm["conversions"] for arm in body["arms"]] == [20, 10, 15]
+    assert body["underpowered_variants"] == []
+    assert "comparisons" not in body
     assert "recommendation" not in body
     assert body["deployment_readiness"] == "not_assessed"
     fetch.assert_awaited_once_with(PROJECT_ID, "exp_123", PROJECT_API_KEY)
@@ -987,7 +993,10 @@ async def test_experiment_shared_fixture_rejects_unknown_variant_finality(
 
 
 @pytest.mark.asyncio
-async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
+async def test_experiment_all_zero_conversions_remain_live_non_final_stats(
+    client,
+    monkeypatch,
+):
     monkeypatch.setattr(
         experiments,
         "fetch_experiment_analysis",
@@ -1021,13 +1030,9 @@ async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "decision_snapshot"
-    comparison = body["comparisons"][0]
-    assert comparison["raw_p_value"] == 1.0
-    assert comparison["adjusted_p_value"] == 1.0
-    assert comparison["rate_difference"] == 0.0
-    assert comparison["confidence_interval"][0] < 0.0
-    assert comparison["confidence_interval"][1] > 0.0
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "data_completeness_unverified"
+    assert "comparisons" not in body
     assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
 
 
@@ -1538,43 +1543,27 @@ async def test_experiment_forbids_legacy_caller_parameters(
     app.state.ch_client.execute.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_experiment_preserves_exact_zero_p_value(client, monkeypatch):
-    monkeypatch.setattr(
-        experiments,
-        "fetch_experiment_analysis",
-        AsyncMock(return_value=_experiment_metadata()),
-    )
-    app.state.ch_client.execute = AsyncMock(
-        return_value=[
-            {
-                "variant": "control",
-                "sample_size": 1_000_000,
-                "conversions": 0,
-                "crossover_actors": 0,
-                "unknown_variant_actors": 0,
-                "identity_conflict_actors": 0,
-            },
-            {
-                "variant": "treatment",
-                "sample_size": 1_000_000,
-                "conversions": 1_000_000,
-                "crossover_actors": 0,
-                "unknown_variant_actors": 0,
-                "identity_conflict_actors": 0,
-            },
-        ]
+def test_comparison_preserves_exact_zero_p_value():
+    comparison = experiments._comparison(
+        ExperimentArmResult(
+            variant="control",
+            sample_size=1_000_000,
+            conversions=0,
+            conversion_rate=0.0,
+        ),
+        ExperimentArmResult(
+            variant="treatment",
+            sample_size=1_000_000,
+            conversions=1_000_000,
+            conversion_rate=1.0,
+        ),
+        comparison_count=1,
+        significance_level=0.05,
     )
 
-    resp = await client.get(
-        "/v1/query/experiment/exp_123",
-        params={"project_id": PROJECT_ID},
-    )
-
-    assert resp.status_code == 200
-    comparison = resp.json()["comparisons"][0]
-    assert comparison["raw_p_value"] == 0.0
-    assert comparison["adjusted_p_value"] == 0.0
+    assert comparison is not None
+    assert comparison.raw_p_value == 0.0
+    assert comparison.adjusted_p_value == 0.0
 
 
 @pytest.mark.asyncio

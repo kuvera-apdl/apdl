@@ -660,12 +660,12 @@ class _ExperimentAnalysisBase(_FiniteExperimentModel):
     unknown_variant_actors: int = Field(..., ge=0)
     identity_conflict_actors: int = Field(..., ge=0)
     identity_quality: Literal["degraded", "unambiguous"]
-    data_completeness: Literal["not_verified"] = "not_verified"
     deployment_readiness: Literal["not_assessed"] = "not_assessed"
 
 
 class ExperimentAnalysisDecisionSnapshot(_ExperimentAnalysisBase):
     analysis_status: Literal["decision_snapshot"] = "decision_snapshot"
+    data_completeness: Literal["verified"]
     unknown_variant_actors: Literal[0] = 0
     inference_method: Literal["fisher_exact_two_sided"] = "fisher_exact_two_sided"
     interval_method: Literal["newcombe_wilson"] = "newcombe_wilson"
@@ -675,6 +675,7 @@ class ExperimentAnalysisDecisionSnapshot(_ExperimentAnalysisBase):
 
 class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
     analysis_status: Literal["non_final"] = "non_final"
+    data_completeness: Literal["not_verified"] = "not_verified"
     reason: Literal[
         "experiment_not_started",
         "experiment_window_open",
@@ -686,6 +687,7 @@ class ExperimentAnalysisNonFinal(_ExperimentAnalysisBase):
         "non_finite_statistics",
         "identity_alias_conflicts",
         "unknown_variant_exposures",
+        "data_completeness_unverified",
     ]
     underpowered_variants: list[str]
 
