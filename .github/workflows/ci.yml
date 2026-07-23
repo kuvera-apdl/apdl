@@ -245,6 +245,8 @@ jobs:
             services/query/requirements.lock \
             services/agents/requirements.lock \
             services/admin-api/requirements.lock \
+            services/codegen/requirements.lock \
+            services/codegen/requirements-agent.lock \
             pipeline/redis/requirements.lock
           do
             uvx pip-audit --strict --require-hashes -r "$lock"
@@ -253,10 +255,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # services/codegen means the offline API dependency set only. The
-          # unsupported Aider editor/worker `agent` extra is not installed by
-          # the 0.3.0 stack and is explicitly excluded by SUPPORT.md.
-          for project in sdk/python services/codegen
+          for project in sdk/python
           do
             slug="${project//\//-}"
             requirements="$RUNNER_TEMP/$slug-audit.txt"

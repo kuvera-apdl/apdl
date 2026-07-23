@@ -23,14 +23,15 @@
 # disabled; GitHub CI remains the execution authority.
 ARG CODEGEN_REVISION
 
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS node-runtime
+
 # The evaluation controller contains sealed corpus/oracle material. The candidate
 # must run the same production editor without receiving those answers. Prune them
 # in an intermediate stage, then copy only that pruned tree into the final image;
 # deleting them after a direct COPY would leave them recoverable from an image
 # layer.
-FROM python:3.12-slim AS candidate-source
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS candidate-source
 WORKDIR /candidate
-COPY pyproject.toml .
 COPY app/ app/
 RUN rm -rf \
         app/evaluations/fixtures \
@@ -38,27 +39,35 @@ RUN rm -rf \
         app/evaluations/oracles_v1.json \
     && find app -type d -name __pycache__ -prune -exec rm -rf '{}' +
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 ARG CODEGEN_REVISION
 RUN test -n "$CODEGEN_REVISION" \
     && test "$CODEGEN_REVISION" != "development-unversioned"
 LABEL org.opencontainers.image.revision="$CODEGEN_REVISION" \
       dev.apdl.codegen.revision="$CODEGEN_REVISION" \
       dev.apdl.codegen.role="candidate"
-# git: clone/commit. nodejs (Node 20 LTS via NodeSource, bundles npm): sanitized
-# exact-lock contract inspection for JS/TS repositories needs a Node toolchain.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+# git: clone/commit. Node 20 LTS and npm come from an immutable official image;
+# sanitized exact-lock contract inspection for JS/TS repositories needs them.
+ARG DEBIAN_SNAPSHOT=20260623T000000Z
+ARG GIT_VERSION=1:2.47.3-0+deb13u1
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie main" \
+        > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends "git=${GIT_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
-# Install the pruned APDL package and its pinned, model-agnostic Aider engine.
-# This also installs the `apdl-codegen-evaluate-candidate` entry point used by
-# the Docker evaluation controller. Production changesets continue to enter via
-# run_changeset.py below, so both paths exercise the same packaged editor code.
-COPY --from=candidate-source /candidate /opt/apdl-codegen
-RUN pip install --no-cache-dir uv "/opt/apdl-codegen[agent]" \
-    && rm -rf /opt/apdl-codegen
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
+# Install the pinned, model-agnostic Aider engine, then copy the pruned APDL
+# source directly. Both production and evaluation invoke explicit Python
+# modules, avoiding a build-isolation dependency download for the local package.
+COPY requirements-agent.lock /tmp/requirements-agent.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements-agent.lock \
+    && rm /tmp/requirements-agent.lock
+COPY --from=candidate-source /candidate/app /app/app
 COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \

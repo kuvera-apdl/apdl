@@ -1,4 +1,6 @@
-FROM python:3.14-slim
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS node-runtime
+
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 # git: the in-process editor clones/commits with it.
 # docker CLI: only used when CODEGEN_SANDBOX=docker (Option B) to launch the
 #   per-changeset sandbox container via a mounted Docker socket; unused otherwise.
@@ -6,15 +8,26 @@ FROM python:3.14-slim
 #   docker.io package: on current slim images docker-cli is only a recommended
 #   package, so --no-install-recommends otherwise produces a controller without
 #   the executable container_editor invokes.
-# nodejs (Node 20 LTS via NodeSource, bundles npm): the default in-process editor
+# nodejs (Node 20 LTS copied from an immutable official image, including npm):
+# the default in-process editor
 #   runs the customer repo's build/test command here, so JS/TS repos need a Node
 #   toolchain to satisfy detected commands like `npm install && npm run build`.
 ARG TARGETARCH
 ARG DOCKER_CLI_VERSION=27.5.1
 ARG DOCKER_CLI_SHA256_AMD64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
 ARG DOCKER_CLI_SHA256_ARM64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
+ARG DEBIAN_SNAPSHOT=20260623T000000Z
+ARG GIT_VERSION=1:2.47.3-0+deb13u1
+ARG CURL_VERSION=8.14.1-2+deb13u3
+ARG CA_CERTIFICATES_VERSION=20250419
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && echo "deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} trixie main" \
+        > /etc/apt/sources.list \
+    && apt-get -o Acquire::Check-Valid-Until=false update \
+    && apt-get install -y --no-install-recommends \
+        "git=${GIT_VERSION}" \
+        "curl=${CURL_VERSION}" \
+        "ca-certificates=${CA_CERTIFICATES_VERSION}" \
     && case "$TARGETARCH" in \
         amd64) docker_arch=x86_64; docker_sha256="$DOCKER_CLI_SHA256_AMD64" ;; \
         arm64) docker_arch=aarch64; docker_sha256="$DOCKER_CLI_SHA256_ARM64" ;; \
@@ -26,14 +39,17 @@ RUN apt-get update \
     && tar -xzf /tmp/docker.tgz --strip-components=1 -C /usr/local/bin docker/docker \
     && rm /tmp/docker.tgz \
     && docker --version \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
 WORKDIR /app
-COPY pyproject.toml .
 # The API orchestrates isolated workers; it deliberately does not carry Aider or
 # execute customer repositories in this credential-bearing process.
-RUN pip install --no-cache-dir .
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY app/ app/
 # Run the API as a non-root user. Evaluation and Compose deliberately replace
 # this UID with the invoking host UID so bind-mounted artifacts stay writable.

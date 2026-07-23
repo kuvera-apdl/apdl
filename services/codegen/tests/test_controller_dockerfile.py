@@ -31,3 +31,19 @@ def test_controller_installs_a_pinned_checksum_verified_docker_cli() -> None:
     assert "sha256sum -c -" in source
     assert "docker --version" in source
     assert "git docker.io curl" not in source
+
+
+def test_controller_dependencies_are_immutable_and_hash_locked() -> None:
+    source = CONTROLLER_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert source.startswith(
+        "FROM node:20-bookworm-slim@sha256:"
+    )
+    assert (
+        "FROM python:3.12-slim@sha256:"
+        "423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf"
+    ) in source
+    assert "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" in source
+    assert "COPY requirements.lock ." in source
+    assert "pip install --no-cache-dir --require-hashes -r requirements.lock" in source
+    assert "deb.nodesource.com" not in source
