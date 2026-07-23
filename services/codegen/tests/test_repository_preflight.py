@@ -10,9 +10,18 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from app.editor.base import EditRequest
+from app.editor.worker_contract import (
+    decode_codegen_preparation_request,
+    encode_codegen_preparation_request,
+)
 from app.inspection.preflight import (
     RepositoryPreflightAttestation,
     attest_repository_checkout,
+)
+from app.inspection.preparation import (
+    RepositoryPreparationEvidence,
+    prepare_repository,
 )
 from app.inspection.repository import InspectionPathError
 from app.inspection import preflight_cli
@@ -100,17 +109,64 @@ def test_attestation_schema_is_strict():
         )
 
 
+def test_provider_free_preparation_returns_strict_head_and_tree_bound_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CODEGEN_CONTRACTS", "false")
+    repo = _repository(tmp_path)
+    request = EditRequest(
+        repo="acme/widgets",
+        base_branch="main",
+        branch="apdl/change",
+        token="read-only-token",
+        title="Make a bounded change",
+        spec="Update the safe repository documentation.",
+    )
+    envelope = decode_codegen_preparation_request(
+        encode_codegen_preparation_request(request)
+    )
+    request.token = ""
+
+    evidence = prepare_repository(
+        repo,
+        request,
+        request_sha256=envelope.request_sha256(),
+        workdir_base=tmp_path,
+    )
+
+    assert evidence.request_sha256 == envelope.request_sha256()
+    assert evidence.attestation.head_sha == _git(repo, "rev-parse", "HEAD")
+    assert evidence.attestation.tree_sha == _git(repo, "rev-parse", "HEAD^{tree}")
+    assert evidence.repo_profile.repo == request.repo
+    assert evidence.repo_profile.branch == request.branch
+    payload = evidence.model_dump(mode="json")
+    payload["legacy_preflight"] = {}
+    with pytest.raises(ValidationError):
+        RepositoryPreparationEvidence.model_validate_json(json.dumps(payload))
+
+
 def test_cli_keeps_clone_stderr_and_exception_text_inside_boundary(
     monkeypatch,
     capsys,
     tmp_path,
 ):
-    monkeypatch.setenv("CS_REPO", "acme/widgets")
-    monkeypatch.setenv("CS_SOURCE_BRANCH", "main")
     monkeypatch.setenv("CODEGEN_WORKDIR", str(tmp_path))
+    request = EditRequest(
+        repo="acme/widgets",
+        base_branch="main",
+        branch="apdl/change",
+        token="ghs_read",
+        title="Make a bounded change",
+        spec="Keep repository input inside the preparation boundary.",
+    )
+
+    class Stdin:
+        buffer = io.BytesIO(encode_codegen_preparation_request(request))
+
     monkeypatch.setattr(
         "sys.stdin",
-        io.StringIO(json.dumps({"read_token": "ghs_read"}) + "\n"),
+        Stdin(),
     )
 
     def fail_clone(**_kwargs):
@@ -122,6 +178,8 @@ def test_cli_keeps_clone_stderr_and_exception_text_inside_boundary(
     output = capsys.readouterr().out
     assert "provider-secret" not in output
     assert "raw git stderr" not in output
-    assert json.loads(output)["error"] == (
+    failure = json.loads(output)
+    assert failure["schema_version"] == "repository_preparation_failure@1"
+    assert failure["error"] == (
         "repository preflight refused: RuntimeError"
     )

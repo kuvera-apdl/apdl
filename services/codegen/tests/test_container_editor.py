@@ -16,11 +16,11 @@ from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.editor.environment import MODEL_PROVIDER_ENV
 from app.editor.worker_contract import (
+    decode_codegen_preparation_request,
     decode_codegen_worker_request,
     encode_codegen_worker_request,
 )
 from app.inspection.models import DependencySlice, InspectionSnapshot
-from app.inspection.preflight import RepositoryPreflightAttestation
 from app.profiling import RepoProfile
 from app.requirements import compile_requirement_ledger
 from app.runtime.models import (
@@ -35,6 +35,7 @@ from app.safety.policy import (
 )
 from app.semantic_review import assemble_review_verdict
 from app.verification import build_verification_plan, evaluate_verification_coverage
+from tests.preparation_fakes import repository_preparation
 
 
 @pytest.fixture(autouse=True)
@@ -56,16 +57,11 @@ def _req(**over) -> EditRequest:
         spec="do the thing",
         constraints=["keep tests green"],
         test_cmd="python -m pytest -q",
-        repository_preflight=RepositoryPreflightAttestation(
-            repository="acme/widgets",
-            source_branch="main",
-            head_sha="a" * 40,
-            tree_sha="b" * 40,
-            file_count=3,
-        ),
     )
     base.update(over)
-    return EditRequest(**base)
+    request = EditRequest(**base)
+    request.repository_preparation = repository_preparation(request)
+    return request
 
 
 def test_docker_argv_has_hardening_and_image_last():
@@ -400,8 +396,8 @@ def test_preflight_launch_uses_default_pid_isolation_and_no_provider_env(
         "-m",
         "app.inspection.preflight_cli",
     ]
-    assert "CS_REPO=acme/widgets" in argv
-    assert "CS_SOURCE_BRANCH=main" in argv
+    assert "CS_REPO" not in argv
+    assert "CS_SOURCE_BRANCH" not in argv
     assert "GH_TOKEN" not in joined
     assert "ghs_secrettoken" not in joined
     for name in MODEL_PROVIDER_ENV:
@@ -418,22 +414,34 @@ def test_last_json_finds_result_among_noise():
 
 def test_parse_preflight_rejects_identity_substitution():
     editor = ContainerAiderEditor()
+    preparation = repository_preparation(_req()).model_dump(mode="json")
     payload = json.dumps(
         {
+            "schema_version": "repository_preparation_success@1",
             "success": True,
-            "attestation": {
-                "schema_version": "repository_preflight@1",
-                "repository": "other/widgets",
-                "source_branch": "main",
-                "head_sha": "a" * 40,
-                "tree_sha": "b" * 40,
-                "file_count": 1,
-            },
+            "preparation": preparation,
         }
     )
 
     with pytest.raises(RuntimeError, match="identity mismatch"):
-        editor._parse_preflight_result(0, payload, "", _req())
+        editor._parse_preflight_result(0, payload, "", _req(repo="other/widgets"))
+
+
+def test_parse_preflight_rejects_unknown_response_fields():
+    payload = {
+        "schema_version": "repository_preparation_success@1",
+        "success": True,
+        "preparation": _req().repository_preparation.model_dump(mode="json"),
+        "legacy_attestation": {},
+    }
+
+    with pytest.raises(RuntimeError, match="invalid evidence"):
+        ContainerAiderEditor()._parse_preflight_result(
+            0,
+            json.dumps(payload),
+            "",
+            _req(),
+        )
 
 
 def test_parse_result_maps_success_json():
@@ -562,7 +570,10 @@ async def test_oversized_task_is_rejected_before_any_container_launch(monkeypatc
         raise AssertionError("oversized input must not reach Docker")
 
     monkeypatch.setattr(editor, "_run_docker", run)
-    result = await editor.implement(_req(spec="x" * (256 * 1024 + 1)))
+    request = _req()
+    request.spec = "x" * (256 * 1024 + 1)
+    request.repository_preparation = None
+    result = await editor.implement(request)
 
     assert result.success is False
     assert "strict schema" in (result.error or "")
@@ -594,14 +605,17 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
     async def run(_argv, _env, *, container_name, stdin_data):
         assert container_name.startswith("apdl-codegen-")
         if "app.inspection.preflight_cli" in _argv:
-            assert json.loads(stdin_data) == {"read_token": "ghs_secrettoken"}
+            preparation_request = decode_codegen_preparation_request(stdin_data)
+            assert preparation_request.read_token == "ghs_secrettoken"
+            assert preparation_request.repository == "acme/widgets"
             events.append("preflight")
             return (
                 0,
                 json.dumps(
                     {
+                        "schema_version": "repository_preparation_success@1",
                         "success": True,
-                        "attestation": _req().repository_preflight.model_dump(
+                        "preparation": _req().repository_preparation.model_dump(
                             mode="json"
                         ),
                     }
@@ -952,8 +966,9 @@ async def test_implement_parses_a_successful_run(monkeypatch):
     editor = ContainerAiderEditor()
     preflight = json.dumps(
         {
+            "schema_version": "repository_preparation_success@1",
             "success": True,
-            "attestation": _req().repository_preflight.model_dump(mode="json"),
+            "preparation": _req().repository_preparation.model_dump(mode="json"),
         }
     )
     payload = json.dumps(
@@ -980,9 +995,11 @@ async def test_implement_parses_a_successful_run(monkeypatch):
     assert container_names[0].startswith("apdl-codegen-inspect-")
     assert container_names[1].startswith("apdl-codegen-edit-")
     assert container_names[0] != container_names[1]
-    assert json.loads(launches[0][2]) == {"read_token": "ghs_secrettoken"}
+    preparation_request = decode_codegen_preparation_request(launches[0][2])
+    assert preparation_request.read_token == "ghs_secrettoken"
+    assert preparation_request.repository == "acme/widgets"
     worker_request = decode_codegen_worker_request(launches[1][2])
-    assert worker_request.schema_version == "codegen_worker_request@1"
+    assert worker_request.schema_version == "codegen_worker_request@2"
     assert worker_request.read_token == "ghs_secrettoken"
     assert worker_request.spec == "do the thing"
     assert "GH_TOKEN" not in launches[0][1]
@@ -1001,6 +1018,7 @@ async def test_failed_preflight_never_launches_provider_container(monkeypatch):
             1,
             json.dumps(
                 {
+                    "schema_version": "repository_preparation_failure@1",
                     "success": False,
                     "error": "repository preflight refused: InspectionPathError",
                 }

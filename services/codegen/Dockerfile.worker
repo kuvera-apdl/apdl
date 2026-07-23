@@ -1,9 +1,10 @@
 # APDL codegen agent sandbox — the untrusted-code boundary (decision D4 / Option B).
 #
 # Two sequential ephemeral containers per changeset use this image. The first is
-# a provider-free, private-PID inspection preflight that rejects symlinks and
-# binds the exact source head/tree. Only then does the second run the pinned OSS
-# coding agent (Aider) and return a gated candidate patch — all isolated
+# a provider-free preparation phase in Docker's default private PID namespace;
+# it rejects symlinks, binds the exact source head/tree, and resolves dependency
+# contracts with image-owned checkers. Only then does the second run the pinned
+# OSS coding agent (Aider) and return a gated candidate patch — all isolated
 # from the codegen API container (which holds the GitHub App key, the Postgres
 # DSN, and the internal token). The orchestrator
 # (app.editor.container_editor.ContainerAiderEditor) launches it with `docker run`;
@@ -16,14 +17,27 @@
 #   * Docker --network none + a read-only attested proxy Unix socket; a sealed
 #     loopback relay preserves normal HTTP proxy clients without bridge access
 #   * direct public, APDL, private, link-local, metadata, and DNS egress probes
-# A strict, bounded task request and read-only install token are consumed in one
-# versioned stdin envelope and never enter process arguments or environment. The
-# controller owns reconstruction and push.
+# Each phase consumes one strict, bounded, versioned stdin envelope; task data
+# and the read-only installation token never enter process arguments or
+# environment. The controller owns reconstruction and push.
 # Repository-defined lint, test, hook, shell-suggestion, and browser commands are
 # disabled; GitHub CI remains the execution authority.
 ARG CODEGEN_REVISION
 
 FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS node-runtime
+ARG IMAGE_TYPESCRIPT_VERSION=5.9.3
+ARG IMAGE_PYRIGHT_VERSION=1.1.405
+# These compilers belong to the immutable worker image.  Exact versions have
+# no install lifecycle access and are later invoked through image-owned Node;
+# repository copies of tsc/pyright and repository compiler configs are data
+# only and never executable inputs.
+RUN npm install --global --ignore-scripts --no-audit --no-fund --omit=optional \
+        "typescript@${IMAGE_TYPESCRIPT_VERSION}" \
+        "pyright@${IMAGE_PYRIGHT_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/typescript/package.json').version")" \
+        = "${IMAGE_TYPESCRIPT_VERSION}" \
+    && test "$(node -p "require('/usr/local/lib/node_modules/pyright/package.json').version")" \
+        = "${IMAGE_PYRIGHT_VERSION}"
 
 # The evaluation controller contains sealed corpus/oracle material. The candidate
 # must run the same production editor without receiving those answers. Prune them

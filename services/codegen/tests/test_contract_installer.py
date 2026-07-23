@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from app.contracts.cache import build_cache_identity
 from app.contracts.installer import (
     BoundedCommandExecutor,
     CommandResult,
-    SandboxedCheckRunner,
+    ImageOwnedCheckRunner,
     SandboxedInstallRunner,
     detect_contract_input_drift,
     locate_python_site_packages,
@@ -75,6 +76,9 @@ class CaptureExecutor:
     def __call__(
         self, argv, *, cwd, env, timeout_seconds, output_limit
     ) -> CommandResult:
+        project_path = (
+            Path(argv[argv.index("--project") + 1]) if "--project" in argv else None
+        )
         self.calls.append(
             {
                 "argv": tuple(argv),
@@ -82,7 +86,11 @@ class CaptureExecutor:
                 "env": dict(env),
                 "timeout": timeout_seconds,
                 "output_limit": output_limit,
-                "example_exists": Path(argv[-1]).is_file() if argv else False,
+                "project_text": (
+                    project_path.read_text(encoding="utf-8")
+                    if project_path is not None and project_path.is_file()
+                    else None
+                ),
             }
         )
         return self.result
@@ -228,7 +236,7 @@ def test_unknown_lockfile_and_failed_command_are_explicit_results(tmp_path):
     assert "registry failed" in (failed.message or "")
 
 
-def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(
+def test_node_checker_uses_only_image_owned_semantic_compiler_and_config(
     monkeypatch, tmp_path
 ):
     installed = tmp_path / "installed"
@@ -237,10 +245,22 @@ def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(
     monkeypatch.setattr(
         contract_installer,
         "_trusted_root_executable",
-        lambda _name: Path(sys.executable),
+        lambda name: Path("/usr/local/bin/node") if name == "node" else None,
+    )
+    monkeypatch.setattr(
+        contract_installer,
+        "_image_node_entrypoint",
+        lambda package, entrypoint, expected: Path(
+            f"/usr/local/lib/node_modules/{package}/{entrypoint}"
+        ),
     )
     compiler = _write(installed, "node_modules/typescript/bin/tsc", "binary")
     _write(installed, "node_modules/typescript/package.json", '{"version":"5.7.2"}')
+    _write(
+        installed,
+        "tsconfig.json",
+        '{"compilerOptions":{"plugins":[{"name":"repo-owned-plugin"}]}}',
+    )
     executor = CaptureExecutor(CommandResult(returncode=0, output="clean"))
     request = ContractCheckRequest(
         ecosystem="node",
@@ -251,19 +271,25 @@ def test_typescript_checker_uses_installed_compiler_and_zero_exit_only(
         snippet='import { Client } from "example-sdk";\nvoid Client;',
     )
 
-    passed = SandboxedCheckRunner(sandboxed=True, executor=executor, workdir_base=work)(
+    passed = ImageOwnedCheckRunner(sandboxed=True, executor=executor, workdir_base=work)(
         request
     )
 
     assert passed.status is ContractCheckStatus.passed
-    assert passed.tool_version == "5.7.2"
+    assert passed.tool_version == "typescript-5.9.3"
     assert Path(executor.calls[0]["argv"][0]).is_absolute()
-    assert executor.calls[0]["argv"][1] == compiler.as_posix()
-    assert "--noEmit" in executor.calls[0]["argv"]
-    assert executor.calls[0]["example_exists"] is True
-    assert not Path(executor.calls[0]["argv"][-1]).exists()
+    assert executor.calls[0]["argv"][1] == (
+        "/usr/local/lib/node_modules/typescript/bin/tsc"
+    )
+    assert executor.calls[0]["argv"][2] == "--project"
+    assert compiler.as_posix() not in executor.calls[0]["argv"]
+    project = json.loads(executor.calls[0]["project_text"])
+    assert project["compilerOptions"]["noEmit"] is True
+    assert project["compilerOptions"]["strict"] is True
+    assert "plugins" not in project["compilerOptions"]
+    assert "extends" not in project
 
-    failed = SandboxedCheckRunner(
+    failed = ImageOwnedCheckRunner(
         sandboxed=True,
         executor=CaptureExecutor(CommandResult(returncode=1, output="bad import")),
         workdir_base=work,
@@ -288,12 +314,19 @@ def test_checker_execution_failures_are_unavailable(
     monkeypatch.setattr(
         contract_installer,
         "_trusted_root_executable",
-        lambda _name: Path(sys.executable),
+        lambda name: Path("/usr/local/bin/node") if name == "node" else None,
+    )
+    monkeypatch.setattr(
+        contract_installer,
+        "_image_node_entrypoint",
+        lambda package, entrypoint, expected: Path(
+            f"/usr/local/lib/node_modules/{package}/{entrypoint}"
+        ),
     )
     _write(installed, "node_modules/typescript/bin/tsc", "binary")
     _write(installed, "node_modules/typescript/package.json", '{"version":"5.7.2"}')
 
-    result = SandboxedCheckRunner(
+    result = ImageOwnedCheckRunner(
         sandboxed=True,
         executor=CaptureExecutor(command_result),
         workdir_base=work,
@@ -309,6 +342,66 @@ def test_checker_execution_failures_are_unavailable(
     )
 
     assert result.status is ContractCheckStatus.unavailable
+
+
+def test_checker_fails_closed_when_pinned_image_compiler_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    installed = tmp_path / "installed"
+    work = tmp_path / "work"
+    work.mkdir()
+    _write(installed, "node_modules/example-sdk/index.d.ts", "export {};\n")
+    executor = CaptureExecutor()
+    monkeypatch.setattr(
+        contract_installer,
+        "_trusted_root_executable",
+        lambda name: Path("/usr/local/bin/node") if name == "node" else None,
+    )
+    monkeypatch.setattr(
+        contract_installer,
+        "_image_node_entrypoint",
+        lambda _package, _entrypoint, _expected: None,
+    )
+
+    result = ImageOwnedCheckRunner(
+        sandboxed=True,
+        executor=executor,
+        workdir_base=work,
+    )(
+        ContractCheckRequest(
+            ecosystem="node",
+            package_name="example-sdk",
+            exact_version="1.2.3",
+            installed_root=installed.as_posix(),
+            language="TypeScript",
+            snippet='import "example-sdk";',
+        )
+    )
+
+    assert result.status is ContractCheckStatus.unavailable
+    assert "exact image-owned TypeScript compiler" in result.output
+    assert executor.calls == []
+
+
+def test_image_compiler_identity_rejects_unexpected_version(monkeypatch, tmp_path):
+    modules = tmp_path / "image-node-modules"
+    package = modules / "typescript"
+    _write(
+        package,
+        "package.json",
+        '{"name":"typescript","version":"5.9.2"}',
+    )
+    _write(package, "bin/tsc", "image compiler")
+    monkeypatch.setattr(contract_installer, "IMAGE_NODE_MODULES", modules)
+
+    entrypoint = contract_installer._image_node_entrypoint(
+        "typescript",
+        Path("bin/tsc"),
+        "5.9.3",
+    )
+
+    assert entrypoint is None
 
 
 def test_contract_check_result_rejects_legacy_boolean_schema():
@@ -327,7 +420,7 @@ def test_checker_refuses_without_explicit_sandbox(tmp_path):
     installed = tmp_path / "installed"
     installed.mkdir()
     executor = CaptureExecutor()
-    result = SandboxedCheckRunner(sandboxed=False, executor=executor)(
+    result = ImageOwnedCheckRunner(sandboxed=False, executor=executor)(
         ContractCheckRequest(
             ecosystem="node",
             package_name="example-sdk",
@@ -359,10 +452,25 @@ def test_installer_converts_executor_fault_to_explicit_failure(tmp_path):
     assert "package manager missing" in (result.message or "")
 
 
-def test_python_checker_locates_site_packages_without_importing(tmp_path):
+def test_python_checker_uses_image_pyright_without_importing_installed_tree(
+    monkeypatch,
+    tmp_path,
+):
     installed = tmp_path / "venv"
     work = tmp_path / "work"
     work.mkdir()
+    monkeypatch.setattr(
+        contract_installer,
+        "_trusted_root_executable",
+        lambda name: Path("/usr/local/bin/node") if name == "node" else None,
+    )
+    monkeypatch.setattr(
+        contract_installer,
+        "_image_node_entrypoint",
+        lambda package, entrypoint, expected: Path(
+            f"/usr/local/lib/node_modules/{package}/{entrypoint}"
+        ),
+    )
     checker = _write(installed, "bin/pyright", "binary")
     site = installed / "lib/python3.12/site-packages"
     _write(
@@ -373,11 +481,18 @@ def test_python_checker_locates_site_packages_without_importing(tmp_path):
     _write(
         installed,
         "lib/python3.12/site-packages/example_sdk/__init__.py",
-        "raise RuntimeError('must not import')\n",
+        "class Client: pass\nraise RuntimeError('must not import')\n",
+    )
+    _write(
+        installed,
+        "pyrightconfig.json",
+        '{"stubPath":"/tmp/repo-owned","venvPath":"/tmp/repo-owned"}',
     )
     executor = CaptureExecutor()
 
-    result = SandboxedCheckRunner(sandboxed=True, executor=executor, workdir_base=work)(
+    result = ImageOwnedCheckRunner(
+        sandboxed=True, executor=executor, workdir_base=work
+    )(
         ContractCheckRequest(
             ecosystem="python",
             package_name="example-sdk",
@@ -390,10 +505,19 @@ def test_python_checker_locates_site_packages_without_importing(tmp_path):
 
     assert locate_python_site_packages(installed) == site.resolve()
     assert result.status is ContractCheckStatus.passed
-    assert result.tool_version == "1.1.390"
+    assert result.tool_version == "pyright-1.1.405"
     assert Path(executor.calls[0]["argv"][0]).is_absolute()
-    assert executor.calls[0]["argv"][1] == checker.as_posix()
-    assert executor.calls[0]["env"]["PYTHONPATH"] == site.as_posix()
+    assert executor.calls[0]["argv"][1] == (
+        "/usr/local/lib/node_modules/pyright/index.js"
+    )
+    assert executor.calls[0]["argv"][2] == "--project"
+    assert checker.as_posix() not in executor.calls[0]["argv"]
+    assert "PYTHONPATH" not in executor.calls[0]["env"]
+    project = json.loads(executor.calls[0]["project_text"])
+    assert project["extraPaths"] == [site.resolve().as_posix()]
+    assert project["reportMissingImports"] == "error"
+    assert "stubPath" not in project
+    assert "venvPath" not in project
 
 
 def test_bounded_executor_caps_output_and_kills_timeout(tmp_path):

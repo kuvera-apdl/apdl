@@ -10,11 +10,10 @@ pushes the returned patch. Keeping the engine behind a Protocol makes the engine
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
-from app.inspection.preflight import RepositoryPreflightAttestation
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
@@ -29,6 +28,9 @@ from app.safety.policy import (
 )
 from app.semantic_review.models import ReviewVerdict
 from app.verification.models import VerificationCoverage, VerificationPlan
+
+if TYPE_CHECKING:
+    from app.inspection.preparation import RepositoryPreparationEvidence
 
 
 def _default_effective_safety_policy() -> EffectiveCodegenSafetyPolicy:
@@ -59,10 +61,10 @@ class EditRequest:
     verification_plan: VerificationPlan | None = None
     verification_coverage: VerificationCoverage | None = None
     runtime_acceptance_plan: RuntimeAcceptancePlan | None = None
-    #: Exact symlink-free source tree approved by the separate credential-free
-    #: inspection container. Production sandbox execution requires this before
-    #: any repository-derived text can reach a model.
-    repository_preflight: RepositoryPreflightAttestation | None = None
+    #: Exact source-tree-bound profile, plans, and dependency evidence produced
+    #: by the provider-free preparation container. The isolated editor requires
+    #: this canonical bundle before repository text can reach a model.
+    repository_preparation: RepositoryPreparationEvidence | None = None
     runtime_acceptance_policy: RuntimeAcceptancePolicy = field(
         default_factory=RuntimeAcceptancePolicy
     )

@@ -12,7 +12,7 @@ Contract with the orchestrator: emit the ``EditResult`` as a single JSON object
 on **stdout** and send everything else (logs and Aider output) to **stderr**,
 so stdout stays cleanly parseable.
 
-Input custody: one strict, bounded ``codegen_worker_request@1`` JSON object
+Input custody: one strict, bounded ``codegen_worker_request@2`` JSON object
 arrives on stdin. Task text and the short-lived read-only installation token
 therefore never enter process arguments or environment. ``AiderEditor`` uses
 the token only for the one-shot clone header. The worker never receives

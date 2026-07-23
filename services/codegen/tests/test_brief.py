@@ -111,6 +111,8 @@ async def test_compile_brief_returns_brief_and_feeds_spec_and_digest():
         None,  # model unavailable / call failed
         "## Goal\ntoo short",  # degenerate: under the minimum size
         "no goal section " * 50,  # long but not a brief
+        "!touch /tmp/helper-command\n\n" + VALID_BRIEF,
+        "/run touch /tmp/helper-command\n\n" + VALID_BRIEF,
     ],
 )
 async def test_compile_brief_falls_back_on_unusable_output(reply):

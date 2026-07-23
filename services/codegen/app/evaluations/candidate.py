@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -274,7 +275,11 @@ async def evaluate_candidate(
     editor: WorkspaceEditor | None = None,
 ) -> EvaluationExecution:
     """Run one public invocation without access to evaluator-only identity."""
-    resolved_editor = editor or AiderEditor()
+    # The evaluation harness owns this process and may inject a deterministic
+    # fake executable for protocol tests. Production changeset workers do not
+    # consult CODEGEN_AIDER_BIN and therefore always use the hardened launcher.
+    injected_aider = os.getenv("CODEGEN_AIDER_BIN")
+    resolved_editor = editor or AiderEditor(aider_bin=injected_aider or None)
     request = EditRequest(
         repo=_EVALUATION_REPOSITORY,
         project_scope=_EVALUATION_PROJECT_SCOPE,

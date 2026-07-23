@@ -145,7 +145,11 @@ async def compile_brief(
         verification_context=verification_context,
     )
     brief = await complete(BRIEF_SYSTEM, user)
-    if brief is None or len(brief) < _MIN_BRIEF_CHARS or "## Goal" not in brief:
+    if (
+        brief is None
+        or len(brief) < _MIN_BRIEF_CHARS
+        or not brief.startswith("## Goal\n")
+    ):
         logger.warning(
             "Brief compilation produced no usable brief for %r; "
             "falling back to the raw spec.",
