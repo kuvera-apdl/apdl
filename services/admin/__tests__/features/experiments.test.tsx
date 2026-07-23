@@ -270,7 +270,18 @@ describe('experiment schemas', () => {
     }
 
     expect(experimentResultSchema.safeParse(snapshot).success).toBe(true)
+    expect(
+      experimentResultSchema.safeParse({ ...snapshot, unknown_variant_actors: 1 }).success,
+    ).toBe(false)
     expect(experimentResultSchema.safeParse(nonFinal).success).toBe(true)
+    expect(
+      experimentResultSchema.safeParse({
+        ...nonFinal,
+        unknown_variant_actors: 2,
+        reason: 'unknown_variant_exposures',
+        underpowered_variants: [],
+      }).success,
+    ).toBe(true)
     expect(
       experimentResultSchema.safeParse({
         ...snapshot,

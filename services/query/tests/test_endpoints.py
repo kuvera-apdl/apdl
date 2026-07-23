@@ -13,7 +13,10 @@ from httpx import ASGITransport, AsyncClient
 from app.auth import Principal, authenticate_request
 from app.config_client import ConfigExperimentAnalysis
 from app.main import app
-from app.models.schemas import ExperimentArmResult
+from app.models.schemas import (
+    ExperimentAnalysisDecisionSnapshot,
+    ExperimentArmResult,
+)
 from app.routers import experiments
 
 PROJECT_ID = "apiasport"
@@ -31,6 +34,12 @@ EXPERIMENT_FIXTURE_PATH = (
     / "experiments"
     / "three-arm-analysis.json"
 )
+
+
+def test_decision_snapshot_schema_requires_zero_unknown_variant_actors():
+    schema = ExperimentAnalysisDecisionSnapshot.model_json_schema()
+
+    assert schema["properties"]["unknown_variant_actors"]["const"] == 0
 
 
 def _guardrail_request(flag_key: str, guardrail: dict) -> dict:
@@ -833,6 +842,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
                 "sample_size": 100,
                 "conversions": 10,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -840,6 +850,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
                 "sample_size": 100,
                 "conversions": 20,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -847,6 +858,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
                 "sample_size": 100,
                 "conversions": 15,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -887,7 +899,7 @@ async def test_experiment_analyzes_every_declared_treatment(client, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_experiment_shared_three_arm_fixture_is_finite_and_complete(
+async def test_experiment_shared_fixture_rejects_unknown_variant_finality(
     client,
     monkeypatch,
 ):
@@ -911,21 +923,15 @@ async def test_experiment_shared_three_arm_fixture_is_finite_and_complete(
     body = response.json()
     expected = fixture["expected"]
     assert body["analysis_status"] == expected["analysis_status"]
+    assert body["reason"] == expected["reason"]
+    assert body["underpowered_variants"] == expected["underpowered_variants"]
     assert [arm["variant"] for arm in body["arms"]] == expected["arm_order"]
-    assert [
-        comparison["treatment_variant"]
-        for comparison in body["comparisons"]
-    ] == expected["comparison_order"]
     assert body["crossover_actors"] == expected["crossover_actors"]
     assert body["unknown_variant_actors"] == expected["unknown_variant_actors"]
     assert body["identity_conflict_actors"] == expected["identity_conflict_actors"]
     assert body["identity_quality"] == "unambiguous"
     assert all(arm["conversion_rate"] == 0.0 for arm in body["arms"])
-    assert all(
-        comparison["raw_p_value"] == expected["raw_p_value"]
-        and comparison["adjusted_p_value"] == expected["adjusted_p_value"]
-        for comparison in body["comparisons"]
-    )
+    assert "comparisons" not in body
 
 
 @pytest.mark.asyncio
@@ -942,6 +948,7 @@ async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -949,6 +956,7 @@ async def test_experiment_all_zero_conversions_are_finite(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -1009,6 +1017,7 @@ async def test_experiment_underpowered_declared_arm_is_typed(client, monkeypatch
                 "sample_size": 20,
                 "conversions": 5,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1016,6 +1025,7 @@ async def test_experiment_underpowered_declared_arm_is_typed(client, monkeypatch
                 "sample_size": 1,
                 "conversions": 1,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -1053,6 +1063,7 @@ async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 5,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1060,6 +1071,7 @@ async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
                 "sample_size": 20,
                 "conversions": 6,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -1083,7 +1095,7 @@ async def test_experiment_zero_fills_missing_declared_arm(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_experiment_reports_crossovers_and_unknown_variants(client, monkeypatch):
+async def test_unknown_variant_exposures_prevent_decision_snapshot(client, monkeypatch):
     monkeypatch.setattr(
         experiments,
         "fetch_experiment_analysis",
@@ -1096,6 +1108,7 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
                 "sample_size": 20,
                 "conversions": 1,
                 "crossover_actors": 1,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1103,6 +1116,7 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
                 "sample_size": 20,
                 "conversions": 2,
                 "crossover_actors": 1,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1110,6 +1124,7 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
                 "sample_size": 4,
                 "conversions": 4,
                 "crossover_actors": 2,
+                "unknown_variant_actors": 4,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -1122,10 +1137,58 @@ async def test_experiment_reports_crossovers_and_unknown_variants(client, monkey
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["analysis_status"] == "decision_snapshot"
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "unknown_variant_exposures"
     assert body["crossover_actors"] == 4
     assert body["unknown_variant_actors"] == 4
     assert [arm["sample_size"] for arm in body["arms"]] == [20, 20]
+    assert body["underpowered_variants"] == []
+    assert "comparisons" not in body
+
+
+@pytest.mark.asyncio
+async def test_declared_first_unknown_exposure_prevents_finality(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 1,
+                "crossover_actors": 1,
+                "unknown_variant_actors": 1,
+                "identity_conflict_actors": 0,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 20,
+                "conversions": 2,
+                "crossover_actors": 0,
+                "unknown_variant_actors": 0,
+                "identity_conflict_actors": 0,
+            },
+        ]
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "unknown_variant_exposures"
+    assert body["unknown_variant_actors"] == 1
+    assert "comparisons" not in body
+    assert app.state.ch_client.execute.await_args.args[1]["declared_variants"] == (
+        "control",
+        "treatment",
+    )
 
 
 @pytest.mark.asyncio
@@ -1142,6 +1205,7 @@ async def test_identity_alias_conflicts_prevent_decision_snapshot(client, monkey
                 "sample_size": 20,
                 "conversions": 5,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 1,
             },
             {
@@ -1149,6 +1213,7 @@ async def test_identity_alias_conflicts_prevent_decision_snapshot(client, monkey
                 "sample_size": 20,
                 "conversions": 10,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 1,
             },
         ]
@@ -1182,6 +1247,7 @@ async def test_experiment_rejects_non_integer_clickhouse_aggregates(client, monk
                 "sample_size": 2.5,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             }
         ]
@@ -1218,10 +1284,11 @@ async def test_experiment_uses_authoritative_metric_and_window(client, monkeypat
     call = app.state.ch_client.execute.await_args
     assert "FROM feature_flag_exposures AS exposure FINAL" in call.args[0]
     assert call.args[1] == {
-        "project_id": PROJECT_ID,
-        "flag_key": metadata.flag_key,
-        "metric_event": metadata.metric_event,
-        "start_ms": 1_735_689_600_124,
+            "project_id": PROJECT_ID,
+            "flag_key": metadata.flag_key,
+            "metric_event": metadata.metric_event,
+            "declared_variants": ("control", "treatment"),
+            "start_ms": 1_735_689_600_124,
         "end_ms": 1_738_281_600_655,
     }
 
@@ -1267,6 +1334,7 @@ async def test_non_final_lifecycle_never_emits_comparisons(
                 "sample_size": 100,
                 "conversions": 10,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1274,6 +1342,7 @@ async def test_non_final_lifecycle_never_emits_comparisons(
                 "sample_size": 100,
                 "conversions": 30,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
@@ -1402,6 +1471,7 @@ async def test_experiment_preserves_exact_zero_p_value(client, monkeypatch):
                 "sample_size": 1_000_000,
                 "conversions": 0,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
             {
@@ -1409,6 +1479,7 @@ async def test_experiment_preserves_exact_zero_p_value(client, monkeypatch):
                 "sample_size": 1_000_000,
                 "conversions": 1_000_000,
                 "crossover_actors": 0,
+                "unknown_variant_actors": 0,
                 "identity_conflict_actors": 0,
             },
         ]
