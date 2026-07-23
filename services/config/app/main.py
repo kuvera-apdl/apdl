@@ -21,6 +21,7 @@ from app.auth import (
 )
 from app.client_ip import parse_trusted_proxy_cidrs
 from app.experiments import lifecycle
+from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import admin, evaluate, experiments, flags, stream
 from app.schema import assert_schema_ready
 from app.sse.broadcaster import SSEBroadcaster, SSESettings
@@ -358,6 +359,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(flags.router, dependencies=auth_dependencies)

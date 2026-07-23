@@ -22,6 +22,7 @@ from app.readiness import (
     assert_decision_dependencies_ready,
     assert_postgres_decision_schema,
 )
+from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import cohorts, events, experiments, funnels, guardrails, retention
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(events.router, dependencies=auth_dependencies)

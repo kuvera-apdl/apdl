@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 
 from app.auth import AdminSession, require_csrf, require_session
 from app.config import PROJECT_ID_PATTERN, SERVICE_NAMES, Settings
+from app.request_body_limit import RequestBodyTooLarge
 from app.security import require_allowed_origin
 
 router = APIRouter(tags=["service proxy"])
@@ -408,32 +409,33 @@ async def _request_body(
     if content_length is not None:
         try:
             if int(content_length) > settings.max_request_bytes:
-                raise HTTPException(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
-                )
+                raise RequestBodyTooLarge
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid content length"
             ) from exc
-    body = await request.body()
-    if len(body) > settings.max_request_bytes:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > settings.max_request_bytes:
+            raise RequestBodyTooLarge
+        body.extend(chunk)
+    raw_body = bytes(body)
     media_type = (
         request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     )
-    if body and require_json and media_type != _JSON_MEDIA_TYPE:
+    if raw_body and require_json and media_type != _JSON_MEDIA_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Codegen request bodies must use application/json",
         )
-    if body and media_type == _JSON_MEDIA_TYPE:
+    if raw_body and media_type == _JSON_MEDIA_TYPE:
         try:
-            payload = json.loads(body)
+            payload = json.loads(raw_body)
         except json.JSONDecodeError:
-            return body
+            return raw_body
         if isinstance(payload, Mapping):
             _assert_tenant_value(payload.get("project_id"), project_id)
-    return body
+    return raw_body
 
 
 async def _require_codegen_scope(

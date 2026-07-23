@@ -6,6 +6,7 @@ import json
 import pytest
 
 from app.config import Settings
+from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
 from app.security import hash_password, token_hash, verify_password
 
 
@@ -86,6 +87,19 @@ def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:
         with pytest.raises(ValueError, match="must be positive"):
             Settings.from_env()
         monkeypatch.delenv(name)
+
+
+def test_settings_cannot_exceed_outer_request_body_limit(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv(
+        "APDL_ADMIN_MAX_REQUEST_BYTES",
+        str(DEFAULT_MAX_REQUEST_BODY_BYTES + 1),
+    )
+
+    with pytest.raises(ValueError, match="cannot exceed the outer"):
+        Settings.from_env()
 
 
 def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None:

@@ -13,6 +13,10 @@ from app.auth import require_role
 from app.client_ip import client_ip
 from app.middleware.rate_limit import admit_bytes, admit_events, admit_request
 from app.privacy import sanitize_auto_capture_events
+from app.request_body_limit import (
+    PAYLOAD_TOO_LARGE_CONTENT,
+    RequestBodyTooLarge,
+)
 from app.streaming.redis_producer import (
     EVENT_STREAM_RETRY_AFTER_SECONDS,
     StreamOverloaded,
@@ -31,10 +35,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class _RequestBodyTooLarge(Exception):
-    """Raised as soon as an incrementally read body crosses the hard bound."""
-
-
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -43,7 +43,7 @@ async def _read_bounded_body(request: Request) -> bytes:
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > MAX_REQUEST_BYTES:
-            raise _RequestBodyTooLarge
+            raise RequestBodyTooLarge
         body.extend(chunk)
     return bytes(body)
 
@@ -70,19 +70,19 @@ async def ingest_events(request: Request):
             if int(content_length) > MAX_REQUEST_BYTES:
                 return _error_response(
                     413,
-                    "payload_too_large",
-                    f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+                    PAYLOAD_TOO_LARGE_CONTENT["error"],
+                    PAYLOAD_TOO_LARGE_CONTENT["message"],
                 )
         except ValueError:
             return _error_response(400, "bad_request", "Invalid Content-Length")
 
     try:
         raw_body = await _read_bounded_body(request)
-    except _RequestBodyTooLarge:
+    except RequestBodyTooLarge:
         return _error_response(
             413,
-            "payload_too_large",
-            f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+            PAYLOAD_TOO_LARGE_CONTENT["error"],
+            PAYLOAD_TOO_LARGE_CONTENT["message"],
         )
     except Exception:
         return _error_response(400, "bad_request", "Could not read request body")

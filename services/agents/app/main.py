@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.pgvector_store import PgVectorStore
 from app.readiness import capability_report
+from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import approvals, capabilities, custom_agents, runs, status, triggers
 from app.schema import assert_schema_ready
 from app.store.approval_effects import run_approval_effect_worker_forever
@@ -252,6 +253,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # custom_agents first: it owns static shapes (/custom/*, /definitions) that
 # must win over the run routers' /{run_id}/... wildcards.

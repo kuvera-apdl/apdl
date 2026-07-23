@@ -15,7 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.client_ip import parse_trusted_proxy_cidrs
 from app.middleware.rate_limit import PreAuthRateLimitMiddleware
+from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import events
+from app.validation.json_contract import MAX_REQUEST_BYTES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -234,6 +236,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_bytes=MAX_REQUEST_BYTES,
+)
 app.add_middleware(PreAuthRateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,

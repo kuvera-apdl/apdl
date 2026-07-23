@@ -66,6 +66,7 @@ from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
+from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import capabilities, changesets, connections, webhooks
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
@@ -571,6 +572,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(connections.router, dependencies=auth_dependencies)

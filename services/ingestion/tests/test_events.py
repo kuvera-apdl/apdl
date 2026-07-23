@@ -770,7 +770,8 @@ async def test_reject_oversized_request_before_json_parse(client):
 
     assert resp.status_code == 413
     assert resp.json()["error"] == "payload_too_large"
-    assert len(quota_calls("request")) == 1
+    assert len(quota_calls("preauth")) == 1
+    assert quota_calls("request") == []
     assert quota_calls("byte") == []
     assert quota_calls("event") == []
     assert publisher_calls() == []
@@ -835,7 +836,7 @@ async def test_chunked_body_stops_at_bound_before_downstream_stages(monkeypatch)
     assert resp.status_code == 413
     assert json.loads(resp.body) == {
         "error": "payload_too_large",
-        "message": f"Request body exceeds {MAX_REQUEST_BYTES} bytes",
+        "message": "Request body exceeds the configured limit",
     }
     assert receive_count == 2
     request_admission.assert_awaited_once()
