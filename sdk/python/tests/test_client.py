@@ -9,7 +9,12 @@ import pytest
 from conftest import RecordingTransport, make_flag
 
 from apdl import APDL, APDLClient, APDLConfig
-from apdl.config import MAX_BATCH_SIZE
+from apdl.config import (
+    MAX_BATCH_SIZE,
+    MAX_FLUSH_INTERVAL,
+    MAX_QUEUE_SIZE,
+    MIN_FLUSH_INTERVAL,
+)
 from apdl.types import FEATURE_FLAG_EXPOSURE_EVENT
 
 CANONICAL_EXPOSURE_KEYS = {
@@ -484,6 +489,42 @@ def test_config_rejects_coercive_scalar_inputs(field, value):
     ],
 )
 def test_config_rejects_values_outside_explicit_bounds(field, value):
+    with pytest.raises(ValueError):
+        APDLConfig(
+            api_key="proj_test_0123456789abcdef",
+            endpoint="https://apdl.test",
+            **{field: value},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_queue_size", 1),
+        ("max_queue_size", MAX_QUEUE_SIZE),
+        ("flush_interval", MIN_FLUSH_INTERVAL),
+        ("flush_interval", MAX_FLUSH_INTERVAL),
+    ],
+)
+def test_config_accepts_resource_constraint_boundaries(field, value):
+    config = APDLConfig(
+        api_key="proj_test_0123456789abcdef",
+        endpoint="https://apdl.test",
+        **{field: value},
+    )
+
+    assert getattr(config, field) == value
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_queue_size", MAX_QUEUE_SIZE + 1),
+        ("flush_interval", MIN_FLUSH_INTERVAL - 0.000_001),
+        ("flush_interval", MAX_FLUSH_INTERVAL + 0.000_001),
+    ],
+)
+def test_config_rejects_resource_constraints_just_outside_boundaries(field, value):
     with pytest.raises(ValueError):
         APDLConfig(
             api_key="proj_test_0123456789abcdef",
