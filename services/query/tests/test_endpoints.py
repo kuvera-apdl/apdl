@@ -10,6 +10,7 @@ import pytest_asyncio
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
+from app import main as query_main
 from app.auth import Principal, authenticate_request
 from app.config_client import ConfigExperimentAnalysis
 from app.main import app
@@ -122,21 +123,78 @@ async def test_health_endpoint(client):
 
 
 @pytest.mark.asyncio
-async def test_readiness_ok(client):
-    app.state.ch_client.execute = AsyncMock(return_value=[{"1": 1}])
+async def test_readiness_ok(client, monkeypatch):
+    monkeypatch.setattr(
+        query_main,
+        "assert_clickhouse_decision_schema",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_main,
+        "assert_postgres_decision_schema",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_main,
+        "assert_experiment_analysis_capability",
+        AsyncMock(),
+    )
+
     resp = await client.get("/ready")
+
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ready"
+    assert resp.json() == {
+        "status": "ready",
+        "service": "apdl-query",
+        "checks": {
+            "clickhouse_schema": "ready",
+            "postgres_schema": "ready",
+            "config_analysis": "ready",
+        },
+    }
 
 
 @pytest.mark.asyncio
-async def test_readiness_fail(client):
-    app.state.ch_client.execute = AsyncMock(side_effect=ConnectionError("down"))
+@pytest.mark.parametrize(
+    ("failed_check", "probe_name"),
+    [
+        ("clickhouse_schema", "assert_clickhouse_decision_schema"),
+        ("postgres_schema", "assert_postgres_decision_schema"),
+        ("config_analysis", "assert_experiment_analysis_capability"),
+    ],
+)
+async def test_readiness_fails_closed_for_each_capability(
+    client,
+    monkeypatch,
+    failed_check,
+    probe_name,
+):
+    secret = "postgresql://user:secret@private/database"
+    for name in (
+        "assert_clickhouse_decision_schema",
+        "assert_postgres_decision_schema",
+        "assert_experiment_analysis_capability",
+    ):
+        monkeypatch.setattr(
+            query_main,
+            name,
+            AsyncMock(
+                side_effect=RuntimeError(secret) if name == probe_name else None
+            ),
+        )
+
     resp = await client.get("/ready")
+
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "not_ready"
+    assert body["checks"][failed_check] == "not_ready"
+    assert all(
+        value == "ready"
+        for name, value in body["checks"].items()
+        if name != failed_check
+    )
+    assert secret not in resp.text
 
 
 # ------------------------------------------------------------------

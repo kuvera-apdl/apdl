@@ -16,6 +16,12 @@ from app.clickhouse.client import (
     QueryBudgetExceeded,
     QueryConcurrencyExceeded,
 )
+from app.config_client import assert_experiment_analysis_capability
+from app.readiness import (
+    assert_clickhouse_decision_schema,
+    assert_decision_dependencies_ready,
+    assert_postgres_decision_schema,
+)
 from app.routers import cohorts, events, experiments, funnels, guardrails, retention
 
 logger = logging.getLogger(__name__)
@@ -143,6 +149,8 @@ async def lifespan(application: FastAPI):
             reset=_reset_maintenance_inhibitor,
             max_inactive_connection_lifetime=0,
         )
+        await assert_decision_dependencies_ready(client, auth_pool)
+        logger.info("Experiment decision dependencies verified")
         maintenance_connection = await auth_pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
             maintenance_connection
@@ -227,13 +235,37 @@ async def health_check():
 
 @app.get("/ready")
 async def readiness_check():
-    """Readiness probe — verifies ClickHouse connectivity."""
-    try:
-        client: ClickHouseClient = app.state.ch_client
-        await client.execute("SELECT 1", {})
-        async with app.state.auth_pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        return {"status": "ready"}
-    except Exception as exc:
-        logger.error("Readiness check failed: %s", exc)
-        return JSONResponse(status_code=503, content={"status": "not_ready"})
+    """Fail closed unless every final-decision capability is still usable."""
+    client: ClickHouseClient = app.state.ch_client
+    checks_to_run = (
+        ("clickhouse_schema", assert_clickhouse_decision_schema(client)),
+        ("postgres_schema", assert_postgres_decision_schema(app.state.auth_pool)),
+        ("config_analysis", assert_experiment_analysis_capability()),
+    )
+    results = await asyncio.gather(
+        *(check for _, check in checks_to_run),
+        return_exceptions=True,
+    )
+    checks = {}
+    for (name, _), result in zip(checks_to_run, results, strict=True):
+        if isinstance(result, asyncio.CancelledError):
+            raise result
+        if isinstance(result, BaseException):
+            logger.error(
+                "Readiness capability %s failed: %s",
+                name,
+                type(result).__name__,
+            )
+            checks[name] = "not_ready"
+        else:
+            checks[name] = "ready"
+
+    payload = {
+        "status": "ready",
+        "service": "apdl-query",
+        "checks": checks,
+    }
+    if any(value != "ready" for value in checks.values()):
+        payload["status"] = "not_ready"
+        return JSONResponse(status_code=503, content=payload)
+    return payload

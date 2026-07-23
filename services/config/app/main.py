@@ -33,6 +33,7 @@ MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
 MAINTENANCE_HEARTBEAT_SECONDS = 1.0
 MAINTENANCE_HEARTBEAT_TIMEOUT_SECONDS = 2.0
+EXPERIMENT_ANALYSIS_CAPABILITY_SCHEMA_VERSION = "config_experiment_analysis@1"
 
 
 async def _acquire_maintenance_inhibitor(connection) -> None:
@@ -382,6 +383,34 @@ async def authenticated_identity(
 async def health_check():
     """Process liveness does not depend on downstream availability."""
     return {"status": "ok", "service": "apdl-config"}
+
+
+@app.get("/ready/experiment-analysis")
+async def experiment_analysis_capability_check(request: Request):
+    """Prove the exact Config analysis contract and its backing schema."""
+    try:
+        async with request.app.state.pg_pool.acquire() as conn:
+            await assert_schema_ready(conn)
+    except Exception as exc:
+        logger.error(
+            "Experiment-analysis capability check failed: %s",
+            type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "service": "apdl-config",
+                "capability": "experiment_analysis",
+                "schema_version": EXPERIMENT_ANALYSIS_CAPABILITY_SCHEMA_VERSION,
+            },
+        )
+    return {
+        "status": "ready",
+        "service": "apdl-config",
+        "capability": "experiment_analysis",
+        "schema_version": EXPERIMENT_ANALYSIS_CAPABILITY_SCHEMA_VERSION,
+    }
 
 
 @app.get("/ready")
