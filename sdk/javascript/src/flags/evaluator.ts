@@ -23,6 +23,7 @@ import {
   parseNumeric,
   scalarEqual,
 } from './targeting-contract';
+import { hasCanonicalVariantWeights } from './variant-contract';
 
 type ResolvedAttribute =
   | { exists: true; value: unknown }
@@ -388,10 +389,10 @@ export function assignWeightedVariant(
   variants: VariantConfig[],
   variantBucket: number
 ): string | null {
-  const totalWeight = variants.reduce((total, variant) => total + variant.weight, 0);
-  if (totalWeight <= 0) {
+  if (!hasCanonicalVariantWeights(variants)) {
     return null;
   }
+  const totalWeight = variants.reduce((total, variant) => total + variant.weight, 0);
 
   const target = (variantBucket / 100) * totalWeight;
   let cumulative = 0;

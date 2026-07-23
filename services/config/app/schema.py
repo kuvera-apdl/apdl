@@ -6,8 +6,14 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 39
-MIGRATION_NAME = "039_event_received_at_contract.sql"
+MIGRATION_VERSION = 42
+MIGRATION_NAME = "042_variant_weight_contract.sql"
+REQUIRED_CONSTRAINTS = frozenset(
+    {
+        ("flags", "flags_variants_canonical_check"),
+        ("experiments", "experiments_variants_canonical_check"),
+    }
+)
 REQUIRED_COLUMNS = frozenset(
     {
         ("flags", "key"),
@@ -115,4 +121,41 @@ async def assert_schema_ready(conn: Any) -> None:
         raise RuntimeError(
             f"Config PostgreSQL schema is incomplete ({formatted}); "
             "restore the database or apply migrations before startup"
+        )
+
+    constraint_rows: list[Mapping[str, Any]] = await conn.fetch(
+        """
+        SELECT
+            table_record.relname AS table_name,
+            constraint_record.conname AS constraint_name,
+            constraint_record.convalidated AS constraint_validated
+        FROM pg_catalog.pg_constraint AS constraint_record
+        JOIN pg_catalog.pg_class AS table_record
+          ON table_record.oid = constraint_record.conrelid
+        JOIN pg_catalog.pg_namespace AS table_namespace
+          ON table_namespace.oid = table_record.relnamespace
+        WHERE table_namespace.nspname = 'public'
+          AND table_record.relname = ANY($1::text[])
+          AND constraint_record.conname = ANY($2::text[])
+        """,
+        sorted({table for table, _ in REQUIRED_CONSTRAINTS}),
+        sorted({constraint for _, constraint in REQUIRED_CONSTRAINTS}),
+    )
+    available_constraints = {
+        (row["table_name"], row["constraint_name"])
+        for row in constraint_rows
+        if row["constraint_validated"] is True
+    }
+    missing_constraints = sorted(
+        REQUIRED_CONSTRAINTS - available_constraints
+    )
+    if missing_constraints:
+        formatted = ", ".join(
+            f"{table}.{constraint}"
+            for table, constraint in missing_constraints
+        )
+        raise RuntimeError(
+            f"Config PostgreSQL variant constraints are incomplete "
+            f"({formatted}); restore the database or apply migrations "
+            "before startup"
         )

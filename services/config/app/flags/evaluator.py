@@ -19,6 +19,7 @@ from app.flags.targeting_contract import (
     parse_numeric,
     scalar_equal,
 )
+from app.flags.variant_contract import validate_variant_weight_contract
 from app.models.schemas import FallthroughConfig, RolloutConfig
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,15 @@ def _canonical_evaluation_flag(flag: dict) -> dict:
     canonical["fallthrough"] = FallthroughConfig.model_validate(
         flag.get("fallthrough")
     ).model_dump(mode="python")
+    variants = flag.get("variants")
+    if not isinstance(variants, list):
+        raise ValueError("variants must contain at least one variant")
+    validate_variant_weight_contract(
+        [
+            variant.get("weight") if isinstance(variant, dict) else None
+            for variant in variants
+        ]
+    )
     return canonical
 
 
@@ -228,13 +238,14 @@ def _apply_rollout(
 
 
 def assign_weighted_variant(variants: list[dict], variant_bucket: float) -> str | None:
-    total_weight = sum(
-        variant.get("weight", 0)
-        for variant in variants
-        if isinstance(variant, dict) and isinstance(variant.get("weight"), int)
-    )
-    if total_weight <= 0:
+    if not all(isinstance(variant, dict) for variant in variants):
         return None
+    weights = [variant.get("weight") for variant in variants]
+    try:
+        validate_variant_weight_contract(weights)
+    except ValueError:
+        return None
+    total_weight = sum(weights)
 
     target = (variant_bucket / 100.0) * total_weight
     cumulative = 0

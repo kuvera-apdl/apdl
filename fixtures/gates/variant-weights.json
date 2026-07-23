@@ -1,0 +1,118 @@
+{
+  "limits": {
+    "max_variants": 10,
+    "max_variant_weight": 9007199254740991,
+    "max_total_variant_weight": 9007199254740991
+  },
+  "validation_cases": [
+    {
+      "name": "maximum total is accepted",
+      "valid": true,
+      "default_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 9007199254740990 },
+        { "key": "treatment", "weight": 1 }
+      ]
+    },
+    {
+      "name": "maximum individual weight is accepted",
+      "valid": true,
+      "default_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 9007199254740991 },
+        { "key": "treatment", "weight": 0 }
+      ]
+    },
+    {
+      "name": "maximum variant count is accepted",
+      "valid": true,
+      "default_variant": "v01",
+      "variants": [
+        { "key": "v01", "weight": 1 },
+        { "key": "v02", "weight": 1 },
+        { "key": "v03", "weight": 1 },
+        { "key": "v04", "weight": 1 },
+        { "key": "v05", "weight": 1 },
+        { "key": "v06", "weight": 1 },
+        { "key": "v07", "weight": 1 },
+        { "key": "v08", "weight": 1 },
+        { "key": "v09", "weight": 1 },
+        { "key": "v10", "weight": 1 }
+      ]
+    },
+    {
+      "name": "weight above safe integer is rejected",
+      "valid": false,
+      "default_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 9007199254740992 },
+        { "key": "treatment", "weight": 1 }
+      ]
+    },
+    {
+      "name": "total above safe integer is rejected",
+      "valid": false,
+      "default_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 9007199254740991 },
+        { "key": "treatment", "weight": 1 }
+      ]
+    },
+    {
+      "name": "more than ten variants is rejected",
+      "valid": false,
+      "default_variant": "v01",
+      "variants": [
+        { "key": "v01", "weight": 1 },
+        { "key": "v02", "weight": 1 },
+        { "key": "v03", "weight": 1 },
+        { "key": "v04", "weight": 1 },
+        { "key": "v05", "weight": 1 },
+        { "key": "v06", "weight": 1 },
+        { "key": "v07", "weight": 1 },
+        { "key": "v08", "weight": 1 },
+        { "key": "v09", "weight": 1 },
+        { "key": "v10", "weight": 1 },
+        { "key": "v11", "weight": 1 }
+      ]
+    },
+    {
+      "name": "zero total is rejected",
+      "valid": false,
+      "default_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 0 },
+        { "key": "treatment", "weight": 0 }
+      ]
+    }
+  ],
+  "assignment_cases": [
+    {
+      "name": "high-bound lower interval",
+      "bucket": 49.999999999999986,
+      "expected_variant": "control",
+      "variants": [
+        { "key": "control", "weight": 4503599627370495 },
+        { "key": "treatment", "weight": 4503599627370496 }
+      ]
+    },
+    {
+      "name": "high-bound exact transition",
+      "bucket": 49.99999999999999,
+      "expected_variant": "treatment",
+      "variants": [
+        { "key": "control", "weight": 4503599627370495 },
+        { "key": "treatment", "weight": 4503599627370496 }
+      ]
+    },
+    {
+      "name": "high-bound upper interval",
+      "bucket": 99.99999999999999,
+      "expected_variant": "treatment",
+      "variants": [
+        { "key": "control", "weight": 4503599627370495 },
+        { "key": "treatment", "weight": 4503599627370496 }
+      ]
+    }
+  ]
+}

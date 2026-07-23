@@ -8,6 +8,7 @@ from app.schema import (
     MIGRATION_NAME,
     MIGRATION_VERSION,
     REQUIRED_COLUMNS,
+    REQUIRED_CONSTRAINTS,
     assert_schema_ready,
 )
 
@@ -19,10 +20,14 @@ class FakeConn:
         ledger_exists: bool = True,
         migration_name: str | None = MIGRATION_NAME,
         columns=REQUIRED_COLUMNS,
+        constraints=REQUIRED_CONSTRAINTS,
+        unvalidated_constraints=frozenset(),
     ):
         self.ledger_exists = ledger_exists
         self.migration_name = migration_name
         self.columns = set(columns)
+        self.constraints = set(constraints)
+        self.unvalidated_constraints = set(unvalidated_constraints)
         self.migration_version = None
 
     async def fetchval(self, sql: str, *args):
@@ -34,11 +39,24 @@ class FakeConn:
         raise AssertionError(sql)
 
     async def fetch(self, sql: str, *args):
-        assert "information_schema.columns" in sql
-        return [
-            {"table_name": table, "column_name": column}
-            for table, column in self.columns
-        ]
+        if "information_schema.columns" in sql:
+            return [
+                {"table_name": table, "column_name": column}
+                for table, column in self.columns
+            ]
+        if "pg_catalog.pg_constraint" in sql:
+            return [
+                {
+                    "table_name": table,
+                    "constraint_name": constraint,
+                    "constraint_validated": (
+                        (table, constraint)
+                        not in self.unvalidated_constraints
+                    ),
+                }
+                for table, constraint in self.constraints
+            ]
+        raise AssertionError(sql)
 
 
 @pytest.mark.asyncio
@@ -87,6 +105,32 @@ async def test_rejects_missing_atomic_mutation_columns():
         ),
     ):
         await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_variant_weight_constraint():
+    constraints = REQUIRED_CONSTRAINTS - {
+        ("experiments", "experiments_variants_canonical_check")
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="experiments.experiments_variants_canonical_check",
+    ):
+        await assert_schema_ready(FakeConn(constraints=constraints))
+
+
+@pytest.mark.asyncio
+async def test_rejects_unvalidated_variant_weight_constraint():
+    unvalidated = {
+        ("flags", "flags_variants_canonical_check"),
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="flags.flags_variants_canonical_check",
+    ):
+        await assert_schema_ready(
+            FakeConn(unvalidated_constraints=unvalidated)
+        )
 
 
 def test_config_startup_executes_no_postgres_ddl():
