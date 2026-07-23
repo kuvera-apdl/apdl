@@ -11,6 +11,7 @@ from typing import Mapping, Sequence
 
 from fastapi import Request
 from fastapi.responses import Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.auth import CredentialKind, Principal
 from app.client_ip import client_ip
@@ -56,6 +57,12 @@ CONFIDENTIAL_EVENT_LIMIT = BucketLimit(1_000, 100)
 BROWSER_EVENT_LIMIT = BucketLimit(200, 20)
 IP_EVENT_LIMIT = BucketLimit(500, 50)
 IDENTITY_EVENT_LIMIT = BucketLimit(200, 20)
+
+# Unauthenticated traffic must be bounded before an API key can cause a
+# PostgreSQL lookup. These limits are intentionally independent from the
+# authenticated request quota: a valid request pays both admission stages.
+PREAUTH_GLOBAL_REQUEST_LIMIT = BucketLimit(2_000, 200)
+PREAUTH_IP_REQUEST_LIMIT = BucketLimit(100, 10)
 
 
 _HIERARCHICAL_TOKEN_BUCKET_LUA = """
@@ -198,6 +205,58 @@ def _identity_costs(
 def byte_cost(serialized_bytes: int) -> int:
     """Charge at least one unit, then one unit per started KiB."""
     return max(1, math.ceil(serialized_bytes / 1024))
+
+
+async def admit_pre_auth_request(redis, request: Request) -> Response | None:
+    """Bound event-ingestion traffic before any credential-registry lookup."""
+    ip_hash = _hash_bucket_identifier("ip", client_ip(request))
+    buckets = [
+        BucketDebit(
+            "apdl:rate:preauth:global",
+            PREAUTH_GLOBAL_REQUEST_LIMIT,
+            1,
+        ),
+        BucketDebit(
+            f"apdl:rate:preauth:ip:{ip_hash}",
+            PREAUTH_IP_REQUEST_LIMIT,
+            1,
+        ),
+    ]
+    return await _admit(
+        redis,
+        buckets,
+        quota_name="Pre-authentication request",
+    )
+
+
+class PreAuthRateLimitMiddleware:
+    """Apply Redis admission only to the exact event-ingestion operation."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or scope["path"] != "/v1/events"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        redis = getattr(request.app.state, "redis", None)
+        response = await admit_pre_auth_request(redis, request)
+        if response is not None:
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 async def admit_request(
