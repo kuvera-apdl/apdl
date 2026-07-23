@@ -225,7 +225,12 @@ async def capability_report() -> dict[str, Any]:
             for name, capability in capabilities.items()
             if name != "codegen"
         )
-        and codegen["changeset_creation"] == "available"
+        # Generic Codegen readiness deliberately cannot authorize a tenant.
+        # ``tenant_scoped`` means the service is healthy and callers must use
+        # its authenticated project capability before mutating.  Requiring the
+        # impossible project-only ``available`` state made this report remain
+        # degraded even when every generic dependency was healthy.
+        and codegen["changeset_creation"] == "tenant_scoped"
     )
     return {
         "status": "available" if fully_available else "degraded",
@@ -239,7 +244,12 @@ async def codegen_changeset_capability(
 ) -> CodegenChangesetCapability:
     """Return authenticated, executable capability for exactly one project."""
     try:
-        capability = await get_changeset_creation_capability(project_id)
-    except (httpx.HTTPError, RuntimeError, TypeError, ValueError):
+        capability = await asyncio.wait_for(
+            get_changeset_creation_capability(project_id),
+            timeout=_PROBE_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, httpx.HTTPError, RuntimeError, TypeError, ValueError):
         return "unavailable"
-    return capability  # type: ignore[return-value]
+    if capability not in {"available", "disabled"}:
+        return "unavailable"
+    return capability

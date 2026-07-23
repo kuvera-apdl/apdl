@@ -47,4 +47,6 @@ export const queryKeys = {
     [wsId, 'custom-agents', 'detail', projectId, agentId] as const,
   agentDefinitions: (wsId: string, projectId: string) =>
     [wsId, 'custom-agents', 'definitions', projectId] as const,
+  agentExecutionCapabilities: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'execution-capabilities', projectId] as const,
 }

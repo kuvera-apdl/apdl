@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.pgvector_store import PgVectorStore
 from app.readiness import capability_report
-from app.routers import approvals, custom_agents, runs, status, triggers
+from app.routers import approvals, capabilities, custom_agents, runs, status, triggers
 from app.schema import assert_schema_ready
 from app.store.approval_effects import run_approval_effect_worker_forever
 from app.store.llm_governance import (
@@ -257,6 +257,7 @@ app.add_middleware(
 # must win over the run routers' /{run_id}/... wildcards.
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(custom_agents.router, dependencies=auth_dependencies)
+app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(triggers.router, dependencies=auth_dependencies)
 app.include_router(status.router, dependencies=auth_dependencies)
 app.include_router(approvals.router, dependencies=auth_dependencies)

@@ -29,6 +29,15 @@ export const triggerResponseSchema = z
   })
   .strict()
 
+export const projectExecutionCapabilitiesSchema = z
+  .object({
+    schema_version: z.literal('agents_project_execution_capabilities@1'),
+    project_id: z.string().regex(/^[A-Za-z0-9]{1,64}$/),
+    autonomous_mutations_operator_enabled: z.boolean(),
+    codegen_changeset_creation: z.enum(['available', 'disabled', 'unavailable']),
+  })
+  .strict()
+
 // Run lifecycle vocabularies (supervisor.py); status/phase are plain strings
 // in the server model, so the response schema stays string-typed and the UI
 // maps known values.

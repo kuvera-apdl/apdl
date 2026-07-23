@@ -92,6 +92,14 @@ const server = setupServer(
   http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
     HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
   ),
+  http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+    HttpResponse.json({
+      schema_version: 'agents_project_execution_capabilities@1',
+      project_id: 'demo',
+      autonomous_mutations_operator_enabled: false,
+      codegen_changeset_creation: 'disabled',
+    }),
+  ),
   http.post('*/api/projects/demo/agents/v1/agents/trigger', async ({ request }) => {
     requests.push({ path: 'trigger', body: await request.json() })
     return HttpResponse.json({ run_id: 'run-abc-123', status: 'started' })
@@ -211,6 +219,9 @@ describe('gating matrix (must match framework/gating.py)', () => {
     expect(gateOutcome(4, 'high')).toBe('deploy')
     // Feature proposals always gate, regardless of level.
     expect(gateOutcome(4, 'low', true)).toBe('approve')
+    // The operator switch takes precedence over requested L3/L4 autonomy.
+    expect(gateOutcome(3, 'low', false, false)).toBe('approve')
+    expect(gateOutcome(4, 'high', false, false)).toBe('approve')
   })
 })
 
@@ -259,6 +270,11 @@ describe('TriggerPage', () => {
       '/agents/trigger',
     )
     expect(await screen.findByText('Produces insights.')).toBeInTheDocument()
+    expect(
+      await screen.findByText(/autonomous mutations are not operator-enabled/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /L3/i })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: /L4/i })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
 
     // Navigates to the new run — no client-side run tracking (the server
@@ -276,6 +292,71 @@ describe('TriggerPage', () => {
       time_range_days: 7,
       autonomy_level: 2,
     })
+  })
+
+  test('offers L3/L4 only after exact operator enablement and submits the selected level', async () => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+      http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+        HttpResponse.json({
+          schema_version: 'agents_project_execution_capabilities@1',
+          project_id: 'demo',
+          autonomous_mutations_operator_enabled: true,
+          codegen_changeset_creation: 'available',
+        }),
+      ),
+    )
+    renderWithProviders(
+      <Routes>
+        <Route path="/agents/trigger" element={<TriggerPage />} />
+        <Route path="/agents/runs/:runId" element={<div>monitor page</div>} />
+      </Routes>,
+      '/agents/trigger',
+    )
+
+    const l4 = await screen.findByRole('radio', { name: /L4/i })
+    await waitFor(() => expect(l4).toBeEnabled())
+    await userEvent.click(l4)
+    await userEvent.click(screen.getByRole('button', { name: 'Start run' }))
+
+    expect(await screen.findByText('monitor page')).toBeInTheDocument()
+    expect(requests.find((entry) => entry.path === 'trigger')?.body).toMatchObject({
+      autonomy_level: 4,
+    })
+  })
+
+  test.each([
+    {
+      name: 'an unavailable capability endpoint',
+      response: HttpResponse.json({ detail: 'Unavailable' }, { status: 503 }),
+    },
+    {
+      name: 'a cross-project capability response',
+      response: HttpResponse.json({
+        schema_version: 'agents_project_execution_capabilities@1',
+        project_id: 'other',
+        autonomous_mutations_operator_enabled: true,
+        codegen_changeset_creation: 'available',
+      }),
+    },
+  ])('keeps L3/L4 unavailable for $name', async ({ response }) => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
+        HttpResponse.json(EXECUTABLE_DEFINITIONS),
+      ),
+      http.get('*/api/projects/demo/agents/v1/agents/capabilities/execution', () =>
+        response.clone(),
+      ),
+    )
+    renderWithProviders(<TriggerPage />, '/agents/trigger')
+
+    expect(
+      await screen.findByText(/autonomous mutation capability is unavailable/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /L3/i })).toBeDisabled()
+    expect(screen.getByRole('radio', { name: /L4/i })).toBeDisabled()
   })
 
   test.each([

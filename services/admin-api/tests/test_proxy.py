@@ -492,6 +492,33 @@ async def test_self_registered_project_cannot_mint_agents_execution_credential(
 
 
 @pytest.mark.asyncio
+async def test_agents_execution_capability_requires_run_role_at_proxy(
+    admin_session: AdminSession,
+) -> None:
+    read_only = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"agents:read"})},
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(upstream), read_only) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/capabilities/execution"
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Insufficient role"}
+    assert not called
+
+
+@pytest.mark.asyncio
 async def test_proxy_does_not_expose_global_repository_onboarding(
     admin_session: AdminSession,
 ) -> None:

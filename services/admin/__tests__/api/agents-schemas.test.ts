@@ -6,6 +6,7 @@ import {
   approvalRequestSchema,
   approvalResponseSchema,
   customAgentSpecSchema,
+  projectExecutionCapabilitiesSchema,
   triggerResponseSchema,
 } from '../../src/api/schemas/agents'
 
@@ -41,6 +42,29 @@ describe('agent capability schemas', () => {
       agentDefinitionsResponseSchema.safeParse({
         agents: [definition, { ...definition, display_name: 'Duplicate' }],
         tool_catalog: [],
+      }).success,
+    ).toBe(false)
+  })
+
+  test('requires the strict project execution capability contract', () => {
+    const capability = {
+      schema_version: 'agents_project_execution_capabilities@1',
+      project_id: 'demo',
+      autonomous_mutations_operator_enabled: false,
+      codegen_changeset_creation: 'unavailable',
+    }
+    expect(projectExecutionCapabilitiesSchema.safeParse(capability).success).toBe(true)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({ ...capability, project_id: 'other/project' })
+        .success,
+    ).toBe(false)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({ ...capability, inferred: true }).success,
+    ).toBe(false)
+    expect(
+      projectExecutionCapabilitiesSchema.safeParse({
+        ...capability,
+        codegen_changeset_creation: 'tenant_scoped',
       }).success,
     ).toBe(false)
   })

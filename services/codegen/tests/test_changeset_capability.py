@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
 from app import capabilities
+from app.auth import Principal, authenticate_request
 from app.evaluations.models import RolloutStage
 from app.main import app
 from tests.fakes import FakePool
@@ -160,6 +162,41 @@ async def test_capability_rejects_cross_project_credentials(
         )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_capability_rejects_project_without_operator_execution_authority(
+    executable_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del executable_runtime
+
+    async def unauthorized(request: Request) -> Principal:
+        principal = Principal(
+            credential_id="test-credential",
+            project_id="demo",
+            roles=frozenset({"agents:manage"}),
+            execution_authorized=False,
+        )
+        request.state.principal = principal
+        return principal
+
+    monkeypatch.setitem(app.dependency_overrides, authenticate_request, unauthorized)
+    app.state.pg_pool = FakePool()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/v1/capabilities/changeset-creation",
+            params={"project_id": "demo"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Codegen execution requires operator project authorization"
+    }
 
 
 @pytest.mark.parametrize(

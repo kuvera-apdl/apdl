@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -62,6 +64,33 @@ async def test_capability_report_separates_configuration_and_reachability(
 
 
 @pytest.mark.asyncio
+async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+
+    async def reachable(*_args, **_kwargs):
+        return True
+
+    async def tenant_scoped(*_args, **_kwargs):
+        return {
+            "configured": True,
+            "reachable": True,
+            "changeset_creation": "tenant_scoped",
+        }
+
+    monkeypatch.setattr(readiness, "_probe_endpoint", reachable)
+    monkeypatch.setattr(readiness, "_probe_codegen_readiness", tenant_scoped)
+
+    report = await readiness.capability_report()
+
+    assert report["status"] == "available"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code, expected", [(200, True), (503, False)])
 async def test_endpoint_probe_requires_success_status(status_code, expected) -> None:
     transport = httpx.MockTransport(
@@ -118,3 +147,21 @@ async def test_codegen_probe_distinguishes_disabled_from_unavailable() -> None:
         "reachable": False,
         "changeset_creation": "unavailable",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["timeout", "invalid_state"])
+async def test_project_codegen_capability_fails_closed(
+    failure: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(readiness, "_PROBE_TIMEOUT_SECONDS", 0.001)
+
+    async def probe(_project_id: str) -> str:
+        if failure == "timeout":
+            await asyncio.sleep(1)
+        return "tenant_scoped"
+
+    monkeypatch.setattr(readiness, "get_changeset_creation_capability", probe)
+
+    assert await readiness.codegen_changeset_capability("demo") == "unavailable"
