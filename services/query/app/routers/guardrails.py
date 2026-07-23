@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -11,6 +12,7 @@ from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import build_feature_flag_frontend_error_guardrail_query
 from app.models.schemas import (
     GuardrailConfig,
+    GuardrailEvidence,
     GuardrailEvaluateRequest,
     GuardrailEvaluateResponse,
     GuardrailMetric,
@@ -19,9 +21,31 @@ from app.models.schemas import (
 
 router = APIRouter(prefix="/v1/query/guardrails", tags=["guardrails"])
 
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
 
 def _get_client(request: Request) -> ClickHouseClient:
     return request.app.state.ch_client
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _datetime64_boundary_milliseconds(value: datetime) -> int:
+    """Map an instant onto the first DateTime64(3) value at or after it."""
+    utc_value = value.astimezone(timezone.utc)
+    delta = utc_value - _UNIX_EPOCH
+    total_microseconds = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000
+        + delta.microseconds
+    )
+    return -(-total_microseconds // 1_000)
+
+
+def _millisecond_boundary_isoformat(value_ms: int) -> str:
+    value = _UNIX_EPOCH + timedelta(milliseconds=value_ms)
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @router.post("/evaluate", response_model=GuardrailEvaluateResponse)
@@ -51,6 +75,8 @@ async def evaluate_guardrail(
     guardrail: GuardrailConfig,
 ) -> GuardrailEvaluateResponse:
     """Evaluate a frontend health guardrail against ClickHouse data."""
+    window_end_ms = _datetime64_boundary_milliseconds(_utc_now())
+    window_start_ms = window_end_ms - guardrail.window_minutes * 60_000
     page_scope = _page_scope(guardrail.scope)
     exposure_scope_filter = ""
     health_scope_filter = ""
@@ -58,11 +84,12 @@ async def evaluate_guardrail(
         "project_id": project_id,
         "flag_key": flag_key,
         "default_variant": default_variant,
-        "window_minutes": guardrail.window_minutes,
+        "window_start_ms": window_start_ms,
+        "window_end_ms": window_end_ms,
     }
 
     if page_scope is not None:
-        exposure_scope_filter = "AND page = %(page_scope)s"
+        exposure_scope_filter = "AND exposure.page = %(page_scope)s"
         health_scope_filter = "AND f.page = %(page_scope)s"
         params["page_scope"] = page_scope
 
@@ -86,6 +113,8 @@ async def evaluate_guardrail(
         default_variant=default_variant,
         tripped_result=tripped_result,
         variant_results=variant_results,
+        window_start=_millisecond_boundary_isoformat(window_start_ms),
+        window_end=_millisecond_boundary_isoformat(window_end_ms),
     )
 
     return GuardrailEvaluateResponse(
@@ -189,12 +218,16 @@ def _guardrail_evidence(
     default_variant: str,
     tripped_result: dict[str, Any] | None,
     variant_results: list[dict[str, Any]],
-) -> dict[str, Any]:
+    window_start: str,
+    window_end: str,
+) -> GuardrailEvidence:
     evidence: dict[str, Any] = {
         "metric": guardrail.metric.value,
         "threshold": guardrail.threshold.value,
         "scope": guardrail.scope,
         "window_minutes": guardrail.window_minutes,
+        "window_start": window_start,
+        "window_end": window_end,
         "minimum_exposures": guardrail.minimum_exposures,
         "variant": tripped_result["variant"] if tripped_result else None,
         "default_variant": default_variant,
@@ -202,7 +235,7 @@ def _guardrail_evidence(
     }
     if tripped_result is not None:
         evidence.update(tripped_result)
-    return evidence
+    return GuardrailEvidence.model_validate(evidence)
 
 
 def _page_scope(scope: str) -> str | None:

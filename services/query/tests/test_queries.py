@@ -409,15 +409,36 @@ class TestQueryBuilders:
 
     def test_guardrail_query_compares_variants_against_default(self):
         sql = build_feature_flag_frontend_error_guardrail_query(
-            exposure_scope_filter="AND page = %(page_scope)s",
+            exposure_scope_filter="AND exposure.page = %(page_scope)s",
             health_scope_filter="AND f.page = %(page_scope)s",
         )
 
         assert "FROM feature_flag_exposures" in sql
+        assert "fromUnixTimestamp64Milli(%(window_start_ms)s, 'UTC')" in sql
+        assert "fromUnixTimestamp64Milli(%(window_end_ms)s, 'UTC')" in sql
+        assert "exposure.first_exposure >= window_start" in sql
+        assert "exposure.first_exposure < window_end" in sql
+        assert "f.timestamp >= window_start" in sql
+        assert "f.timestamp < window_end" in sql
+        assert (
+            sql.count(
+                "event_date BETWEEN toDate(window_start) AND toDate(window_end)"
+            )
+            == 2
+        )
+        assert "exposure.page = %(page_scope)s" in sql
+        assert "f.page = %(page_scope)s" in sql
+        assert "now()" not in sql
+        assert "%(window_minutes)s" not in sql
         assert "v.variant AS variant" in sql
         assert "%(default_variant)s AS default_variant" in sql
         assert "WHERE variant = %(default_variant)s" in sql
         assert "JSONExtractString(f.active_flags, %(flag_key)s) = e.variant" in sql
+        health_cte, join_clause = sql.split("    exposure_failures AS (", 1)
+        assert "f.event_name = '$frontend_error'" in health_cte
+        assert "JSONHas(f.active_flags, %(flag_key)s)" in health_cte
+        assert "f.event_name = '$frontend_error'" not in join_clause
+        assert "JSONHas(f.active_flags, %(flag_key)s)" not in join_clause
         assert "JSONExtractBool(f.active_flags, %(flag_key)s)" not in sql
         assert " e.value" not in sql
         assert " value" not in sql

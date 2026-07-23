@@ -16,8 +16,9 @@ from app.main import app
 from app.models.schemas import (
     ExperimentAnalysisDecisionSnapshot,
     ExperimentArmResult,
+    GuardrailEvaluateResponse,
 )
-from app.routers import experiments
+from app.routers import experiments, guardrails
 
 PROJECT_ID = "apiasport"
 PROJECT_API_KEY = "proj_apiasport_0123456789abcdef"
@@ -40,6 +41,16 @@ def test_decision_snapshot_schema_requires_zero_unknown_variant_actors():
     schema = ExperimentAnalysisDecisionSnapshot.model_json_schema()
 
     assert schema["properties"]["unknown_variant_actors"]["const"] == 0
+
+
+def test_guardrail_response_schema_requires_canonical_window_boundaries():
+    schema = GuardrailEvaluateResponse.model_json_schema()
+    evidence_schema = schema["$defs"]["GuardrailEvidence"]
+
+    assert "window_start" in evidence_schema["required"]
+    assert "window_end" in evidence_schema["required"]
+    assert evidence_schema["properties"]["window_start"]["pattern"].endswith("Z$")
+    assert evidence_schema["properties"]["window_end"]["pattern"].endswith("Z$")
 
 
 def _guardrail_request(flag_key: str, guardrail: dict) -> dict:
@@ -343,6 +354,43 @@ async def test_guardrail_query_requires_active_flag_snapshot(client):
     assert "JSONExtractString(f.active_flags, %(flag_key)s) = e.variant" in query
     assert "JSONExtractBool(f.active_flags, %(flag_key)s)" not in query
     assert " value" not in query
+
+
+@pytest.mark.asyncio
+async def test_guardrail_uses_one_strict_epoch_millisecond_window(
+    client,
+    monkeypatch,
+):
+    fixed_now = datetime(2025, 1, 1, 0, 0, 0, 123_456, tzinfo=UTC)
+    monkeypatch.setattr(guardrails, "_utc_now", lambda: fixed_now)
+    app.state.ch_client.execute = AsyncMock(return_value=[])
+
+    resp = await client.post(
+        "/v1/query/guardrails/evaluate",
+        json=_guardrail_request(
+            "checkout-gate",
+            {
+                "metric": "frontend_error_count",
+                "threshold": "at_least_one",
+                "scope": "page:/checkout",
+                "window_minutes": 10,
+            },
+        ),
+    )
+
+    assert resp.status_code == 200
+    call = app.state.ch_client.execute.await_args
+    assert call.args[1] == {
+        "project_id": PROJECT_ID,
+        "flag_key": "checkout-gate",
+        "default_variant": "control",
+        "window_start_ms": 1_735_689_000_124,
+        "window_end_ms": 1_735_689_600_124,
+        "page_scope": "/checkout",
+    }
+    evidence = resp.json()["evidence"]
+    assert evidence["window_start"] == "2024-12-31T23:50:00.124Z"
+    assert evidence["window_end"] == "2025-01-01T00:00:00.124Z"
 
 
 @pytest.mark.asyncio

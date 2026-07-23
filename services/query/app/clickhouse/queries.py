@@ -589,6 +589,8 @@ ORDER BY assigned_variant
 
 FEATURE_FLAG_FRONTEND_ERROR_GUARDRAIL_QUERY = """
 WITH
+    fromUnixTimestamp64Milli(%(window_start_ms)s, 'UTC') AS window_start,
+    fromUnixTimestamp64Milli(%(window_end_ms)s, 'UTC') AS window_end,
     exposures AS (
         SELECT
             if(
@@ -606,8 +608,9 @@ WITH
         WHERE exposure.project_id = %(project_id)s
           AND exposure.flag_key = %(flag_key)s
           AND exposure.variant != ''
-          AND exposure.first_exposure >= subtractMinutes(now(), %(window_minutes)s)
-          AND exposure.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
+          AND exposure.first_exposure >= window_start
+          AND exposure.first_exposure < window_end
+          AND exposure.event_date BETWEEN toDate(window_start) AND toDate(window_end)
           AND (exposure.session_id != '' OR {exposure_actor} != '')
           {exposure_scope_filter}
         GROUP BY assignment_id
@@ -620,12 +623,16 @@ WITH
                 {health_actor}
             ) AS assignment_id,
             f.timestamp,
-            f.event_date,
-            f.event_name,
             f.active_flags
         FROM frontend_health_events AS f FINAL
         {health_identity_join}
         WHERE f.project_id = %(project_id)s
+          AND f.event_date BETWEEN toDate(window_start) AND toDate(window_end)
+          AND f.timestamp >= window_start
+          AND f.timestamp < window_end
+          AND f.event_name = '$frontend_error'
+          AND JSONHas(f.active_flags, %(flag_key)s)
+          AND (f.session_id != '' OR {health_actor} != '')
           {health_scope_filter}
     ),
     exposure_failures AS (
@@ -634,14 +641,10 @@ WITH
             e.variant AS variant,
             countIf(
                 f.timestamp >= e.exposure_time
-                AND f.timestamp >= subtractMinutes(now(), %(window_minutes)s)
-                AND f.event_date >= toDate(subtractMinutes(now(), %(window_minutes)s))
             ) AS failure_count
         FROM exposures e
         LEFT JOIN health_events AS f
             ON f.assignment_id = e.assignment_id
-           AND f.event_name = '$frontend_error'
-           AND JSONHas(f.active_flags, %(flag_key)s)
            AND JSONExtractString(f.active_flags, %(flag_key)s) = e.variant
         GROUP BY e.assignment_id, e.variant
     ),

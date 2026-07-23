@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 import math
 import re
@@ -545,6 +545,56 @@ class GuardrailEvaluateRequest(GuardrailVariantContext):
     guardrail: GuardrailConfig
 
 
+class GuardrailVariantEvidence(StrictModel):
+    variant: str = Field(..., min_length=1, max_length=128)
+    default_variant: str = Field(..., min_length=1, max_length=128)
+    variant_sessions: int = Field(..., ge=0)
+    default_sessions: int = Field(..., ge=0)
+    variant_failure_sessions: int = Field(..., ge=0)
+    default_failure_sessions: int = Field(..., ge=0)
+    variant_failures: int = Field(..., ge=0)
+    default_failures: int = Field(..., ge=0)
+    variant_error_rate: float = Field(..., ge=0.0, le=1.0)
+    default_error_rate: float = Field(..., ge=0.0, le=1.0)
+    tripped: bool
+
+
+class GuardrailEvidence(StrictModel):
+    metric: GuardrailMetric
+    threshold: GuardrailThreshold
+    scope: str = Field(..., max_length=512)
+    window_minutes: int = Field(..., ge=1, le=129_600)
+    window_start: str = Field(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
+    )
+    window_end: str = Field(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$",
+    )
+    minimum_exposures: int = Field(..., ge=0)
+    variant: str | None = Field(default=None, min_length=1, max_length=128)
+    default_variant: str = Field(..., min_length=1, max_length=128)
+    variant_results: list[GuardrailVariantEvidence] = Field(..., max_length=10)
+    variant_sessions: int | None = Field(default=None, ge=0)
+    default_sessions: int | None = Field(default=None, ge=0)
+    variant_failure_sessions: int | None = Field(default=None, ge=0)
+    default_failure_sessions: int | None = Field(default=None, ge=0)
+    variant_failures: int | None = Field(default=None, ge=0)
+    default_failures: int | None = Field(default=None, ge=0)
+    variant_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    default_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    tripped: bool | None = None
+
+    @model_validator(mode="after")
+    def check_evaluated_window(self) -> "GuardrailEvidence":
+        window_start = datetime.fromisoformat(self.window_start.replace("Z", "+00:00"))
+        window_end = datetime.fromisoformat(self.window_end.replace("Z", "+00:00"))
+        if window_start >= window_end:
+            raise ValueError("window_start must be before window_end")
+        return self
+
+
 class GuardrailEvaluateResponse(BaseModel):
     flag_key: str
     metric: str
@@ -552,7 +602,7 @@ class GuardrailEvaluateResponse(BaseModel):
     scope: str
     window_minutes: int
     tripped: bool
-    evidence: dict[str, Any]
+    evidence: GuardrailEvidence
 
 
 # ---------------------------------------------------------------------------
