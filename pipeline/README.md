@@ -140,6 +140,12 @@ key. Migrations 006 and 007 then rebuild their derived projections from
 `events FINAL`. Stop the writer and Query service while applying an upgrade so
 no process observes the short projection-rebuild window.
 
+Migration 016 gives every personally attributable base and derived analytics
+table the same 12-month server-receipt retention boundary and removes the
+irreversible identity aggregate. The supported, fenced project/user purge
+workflow and its append-only completion evidence are documented in
+[Analytics data retention and deletion](../docs/data-retention.md).
+
 ### Canonical developer-preview event contract
 
 The release has one event contract and one analytical source of truth:
@@ -169,12 +175,10 @@ schemas remain outside the developer-preview contract.
   evaluation results projected from events
 - `frontend_health_events` (007, ReplacingMergeTree) — idempotent frontend
   errors and web-vitals projected from events
-- `identity_alias_assertions` (011, ReplacingMergeTree) — durable tenant-bound,
+- `identity_alias_assertions` (011/016, ReplacingMergeTree) — retained
+  tenant-bound,
   append-only `identify` assertions keyed by the complete claim; exact retries
   collapse, but reusing a message ID cannot retract an accepted identity command
-- `identity_alias_resolution_state` (011, AggregatingMergeTree) — compact
-  min/max claim state per project and anonymous ID; matching extrema resolve an
-  alias and differing extrema record a conflict
 
 **Materialized views**
 
@@ -182,16 +186,14 @@ schemas remain outside the developer-preview contract.
 - `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
 - `identity_alias_assertions_mv` (011) — projects only `identify` events that
   contain both canonical identity fields
-- `identity_alias_resolution_state_mv` (011) — folds assertions into the
-  constant-size conflict-aware resolution state
 
 `resolved_identity_aliases` resolves only when the minimum and maximum claimed
 user IDs match. Conflicting claims stay visible with an empty resolved user and
-Query leaves those actors separate. Accepted assertions are irreversible; an
-operator must rebuild the assertion and resolution tables to remove a bad
-claim. The alias becomes visible after writer durability and applies
-retroactively across retained event history. A user-only `identify` is a trait
-update, not an alias assertion.
+Query leaves those actors separate. Migration 016 computes resolution directly
+from retained assertions, so TTL or the supported deletion workflow cannot
+leave irreversible aggregate state behind. The alias becomes visible after
+writer durability and applies retroactively across retained event history. A
+user-only `identify` is a trait update, not an alias assertion.
 
 Historical recovery lives in `pipeline/clickhouse/backfills/`, outside the
 replayed schema migrations. The initializer records each backfill's name and
