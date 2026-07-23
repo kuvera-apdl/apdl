@@ -22,9 +22,15 @@ _MAX_TRACKED_ALERT_STREAMS = 10_000
 _last_alert_log: dict[tuple[str, str], float] = {}
 CLAIM_TIMEOUT_SECONDS = 60
 MAX_BACKOFF_SECONDS = 60
+MAX_DELIVERY_ATTEMPTS = 8
+READINESS_MAX_PENDING_AGE_SECONDS = 300.0
+READINESS_MAX_QUARANTINED_ROWS = 0
+FAILURE_EVIDENCE_MAX_CHARS = 2000
 
 if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
     raise RuntimeError("Event stream alert threshold must be below capacity")
+if MAX_DELIVERY_ATTEMPTS < 1:
+    raise RuntimeError("Config outbox delivery attempts must be positive")
 
 _BOUNDED_XADD_LUA = """
 local count = tonumber(ARGV[1])
@@ -55,10 +61,28 @@ class EventStreamOverloaded(RuntimeError):
         )
 
 
+class PermanentDeliveryError(ValueError):
+    """A persisted row cannot succeed without changing its canonical payload."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 def _payload(value) -> dict:
-    if isinstance(value, str):
-        return json.loads(value)
-    return dict(value)
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox payload is not valid JSON",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox payload must be an object",
+        )
+    return dict(parsed)
 
 
 async def claim_next(pool) -> dict | None:
@@ -71,6 +95,8 @@ async def claim_next(pool) -> dict | None:
                     SELECT pending.id
                     FROM config_outbox AS pending
                     WHERE pending.processed_at IS NULL
+                      AND pending.quarantined_at IS NULL
+                      AND pending.attempts < {MAX_DELIVERY_ATTEMPTS}
                       AND pending.available_at <= now()
                       AND (
                           pending.claimed_at IS NULL
@@ -81,6 +107,7 @@ async def claim_next(pool) -> dict | None:
                           FROM config_outbox AS earlier
                           WHERE earlier.project_id = pending.project_id
                             AND earlier.processed_at IS NULL
+                            AND earlier.quarantined_at IS NULL
                             AND earlier.id < pending.id
                             AND (
                                 (
@@ -115,7 +142,7 @@ async def claim_next(pool) -> dict | None:
         "id": row["id"],
         "project_id": row["project_id"],
         "kind": row["kind"],
-        "payload": _payload(row["payload"]),
+        "payload": row["payload"],
         "attempts": row["attempts"],
     }
 
@@ -125,7 +152,7 @@ async def mark_processed(pool, row_id: int) -> None:
         """
         UPDATE config_outbox
         SET processed_at = now(), claimed_at = NULL, last_error = ''
-        WHERE id = $1 AND processed_at IS NULL
+        WHERE id = $1 AND processed_at IS NULL AND quarantined_at IS NULL
         """,
         row_id,
     )
@@ -140,43 +167,214 @@ async def mark_failed(pool, row_id: int, attempts: int, error: str) -> None:
             available_at = now() + ($2 * interval '1 second'),
             last_error = $3
         WHERE id = $1 AND processed_at IS NULL
+          AND quarantined_at IS NULL AND attempts < $4
         """,
         row_id,
         backoff,
-        error[:2000],
+        error[:FAILURE_EVIDENCE_MAX_CHARS],
+        MAX_DELIVERY_ATTEMPTS,
     )
+
+
+async def mark_quarantined(
+    pool,
+    row_id: int,
+    *,
+    failure_class: str,
+    failure_code: str,
+    error: str,
+) -> None:
+    await pool.execute(
+        """
+        UPDATE config_outbox
+        SET quarantined_at = now(),
+            claimed_at = NULL,
+            failure_class = $2,
+            failure_code = $3,
+            last_error = $4
+        WHERE id = $1 AND processed_at IS NULL AND quarantined_at IS NULL
+        """,
+        row_id,
+        failure_class,
+        failure_code,
+        error[:FAILURE_EVIDENCE_MAX_CHARS],
+    )
+
+
+async def quarantine_exhausted(pool) -> int:
+    """Terminalize capped rows, including a final attempt abandoned by a crash."""
+    result = await pool.execute(
+        """
+        UPDATE config_outbox
+        SET quarantined_at = now(),
+            claimed_at = NULL,
+            failure_class = 'attempts_exhausted',
+            failure_code = 'delivery_attempts_exhausted',
+            last_error = CASE
+                WHEN last_error = '' THEN 'Delivery attempt limit reached'
+                ELSE last_error
+            END
+        WHERE processed_at IS NULL
+          AND quarantined_at IS NULL
+          AND attempts >= $1
+          AND (
+              claimed_at IS NULL
+              OR claimed_at < now() - ($2 * interval '1 second')
+          )
+        """,
+        MAX_DELIVERY_ATTEMPTS,
+        CLAIM_TIMEOUT_SECONDS,
+    )
+    try:
+        return int(result.rsplit(" ", 1)[-1])
+    except (AttributeError, ValueError):
+        return 0
+
+
+def _exact_payload_keys(payload: dict, expected: set[str]) -> None:
+    if set(payload) != expected:
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox payload has noncanonical fields",
+        )
+
+
+def _config_delivery_payload(
+    raw_payload,
+    *,
+    expected_event_type: str,
+) -> tuple[dict, int, str]:
+    payload = _payload(raw_payload)
+    _exact_payload_keys(payload, {"event_type", "project_version", "data"})
+    if payload["event_type"] != expected_event_type:
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox payload has an invalid event_type",
+        )
+    if not isinstance(payload["data"], dict):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox data must be an object",
+        )
+    try:
+        data_json = json.dumps(
+            payload["data"],
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config outbox data is not canonical JSON",
+        ) from exc
+    return payload, _project_version(payload), data_json
+
+
+def _exposure_delivery_payload(raw_payload, project_id: str) -> tuple[str, str]:
+    payload = _payload(raw_payload)
+    _exact_payload_keys(payload, {"stream_key", "event"})
+    stream_key = payload["stream_key"]
+    if stream_key != f"events:raw:{project_id}":
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure stream does not match its project",
+        )
+    event = payload["event"]
+    if not isinstance(event, dict):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure event must be an object",
+        )
+    required_event_fields = {
+        "event",
+        "type",
+        "timestamp",
+        "message_id",
+        "session_id",
+        "context",
+        "properties",
+    }
+    optional_event_fields = {"user_id", "anonymous_id"}
+    if not required_event_fields.issubset(event) or not set(event).issubset(
+        required_event_fields | optional_event_fields
+    ):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure event has noncanonical fields",
+        )
+    if event["event"] != "$feature_flag_exposure" or event["type"] != "track":
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure event has an invalid type",
+        )
+    for field in ("timestamp", "message_id", "session_id"):
+        if not isinstance(event[field], str) or not event[field]:
+            raise PermanentDeliveryError(
+                "invalid_payload",
+                f"Config exposure event has an invalid {field}",
+            )
+    if not isinstance(event["context"], dict) or not isinstance(
+        event["properties"], dict
+    ):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure context and properties must be objects",
+        )
+    identities = [event.get("user_id"), event.get("anonymous_id")]
+    if not any(isinstance(value, str) and value for value in identities):
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure event requires an identity",
+        )
+    try:
+        event_json = json.dumps(
+            event,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PermanentDeliveryError(
+            "invalid_payload",
+            "Config exposure event is not canonical JSON",
+        ) from exc
+    return stream_key, event_json
 
 
 async def deliver(row: dict, redis, broadcaster) -> None:
     kind = row["kind"]
     project_id = row["project_id"]
-    payload = row["payload"]
     if kind == "flag_change":
-        project_version = _project_version(payload)
+        payload, project_version, data_json = _config_delivery_payload(
+            row["payload"],
+            expected_event_type="flag_update",
+        )
         await redis_cache.invalidate_flags(redis, project_id, project_version)
         await broadcaster.broadcast(
             project_id,
             payload["event_type"],
-            json.dumps(payload["data"], separators=(",", ":")),
+            data_json,
             project_version=project_version,
         )
         return
     if kind == "experiment_change":
+        payload, project_version, data_json = _config_delivery_payload(
+            row["payload"],
+            expected_event_type="experiment_update",
+        )
         await redis_cache.invalidate_experiments(redis, project_id)
         await broadcaster.broadcast(
             project_id,
             payload["event_type"],
-            json.dumps(payload["data"], separators=(",", ":")),
-            project_version=_project_version(payload),
+            data_json,
+            project_version=project_version,
         )
         return
     if kind == "exposure":
-        stream_key = payload["stream_key"]
-        event_json = json.dumps(
-            payload["event"],
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
+        stream_key, event_json = _exposure_delivery_payload(
+            row["payload"],
+            project_id,
         )
         result = await redis.eval(
             _BOUNDED_XADD_LUA,
@@ -230,7 +428,10 @@ async def deliver(row: dict, redis, broadcaster) -> None:
                 extra=log_context,
             )
         return
-    raise ValueError(f"Unsupported Config outbox kind: {kind}")
+    raise PermanentDeliveryError(
+        "unsupported_kind",
+        f"Unsupported Config outbox kind: {kind}",
+    )
 
 
 def _project_version(payload: dict) -> int:
@@ -240,7 +441,10 @@ def _project_version(payload: dict) -> int:
         or not isinstance(project_version, int)
         or project_version < 1
     ):
-        raise ValueError("Config outbox payload has an invalid project_version")
+        raise PermanentDeliveryError(
+            "invalid_project_version",
+            "Config outbox payload has an invalid project_version",
+        )
     return project_version
 
 
@@ -260,21 +464,154 @@ def _should_log_alert(event: str, stream_key: str) -> bool:
     return True
 
 
+def empty_metrics() -> dict:
+    return {
+        "pending_count": 0,
+        "quarantined_count": 0,
+        "max_pending_attempts": 0,
+        "oldest_pending_age_seconds": 0.0,
+        "oldest_quarantined_age_seconds": 0.0,
+    }
+
+
+async def metrics_snapshot(conn) -> dict:
+    """Return bounded, low-cardinality delivery lag and quarantine metrics."""
+    row = await conn.fetchrow(
+        """
+        SELECT
+            count(*) FILTER (
+                WHERE processed_at IS NULL AND quarantined_at IS NULL
+            ) AS pending_count,
+            count(*) FILTER (
+                WHERE quarantined_at IS NOT NULL
+            ) AS quarantined_count,
+            COALESCE(max(attempts) FILTER (
+                WHERE processed_at IS NULL AND quarantined_at IS NULL
+            ), 0) AS max_pending_attempts,
+            COALESCE(EXTRACT(EPOCH FROM (
+                now() - (
+                    min(created_at) FILTER (
+                        WHERE processed_at IS NULL AND quarantined_at IS NULL
+                    )
+                )
+            )), 0) AS oldest_pending_age_seconds,
+            COALESCE(EXTRACT(EPOCH FROM (
+                now() - (
+                    min(quarantined_at) FILTER (
+                        WHERE quarantined_at IS NOT NULL
+                    )
+                )
+            )), 0) AS oldest_quarantined_age_seconds
+        FROM config_outbox
+        """
+    )
+    return {
+        "pending_count": int(row["pending_count"]),
+        "quarantined_count": int(row["quarantined_count"]),
+        "max_pending_attempts": int(row["max_pending_attempts"]),
+        "oldest_pending_age_seconds": max(
+            float(row["oldest_pending_age_seconds"]),
+            0.0,
+        ),
+        "oldest_quarantined_age_seconds": max(
+            float(row["oldest_quarantined_age_seconds"]),
+            0.0,
+        ),
+    }
+
+
+def readiness_snapshot(metrics: dict) -> dict:
+    reasons: list[str] = []
+    if (
+        metrics["oldest_pending_age_seconds"]
+        > READINESS_MAX_PENDING_AGE_SECONDS
+    ):
+        reasons.append("oldest_pending_age_exceeded")
+    if metrics["quarantined_count"] > READINESS_MAX_QUARANTINED_ROWS:
+        reasons.append("quarantined_rows_exceeded")
+    return {
+        **metrics,
+        "status": "degraded" if reasons else "ready",
+        "degraded_reasons": reasons,
+        "thresholds": {
+            "max_pending_age_seconds": READINESS_MAX_PENDING_AGE_SECONDS,
+            "max_quarantined_rows": READINESS_MAX_QUARANTINED_ROWS,
+        },
+    }
+
+
+def _error_evidence(exc: BaseException) -> str:
+    message = str(exc).strip() or type(exc).__name__
+    return message[:FAILURE_EVIDENCE_MAX_CHARS]
+
+
 async def drain_once(pool, redis, broadcaster) -> bool:
     """Deliver at most one row. Returns whether a row was claimed."""
+    await quarantine_exhausted(pool)
     row = await claim_next(pool)
     if row is None:
         return False
     try:
         await deliver(row, redis, broadcaster)
-    except Exception as exc:
-        await mark_failed(pool, row["id"], row["attempts"], str(exc))
-        logger.warning(
-            "Config outbox delivery %s failed (attempt %s): %s",
+    except PermanentDeliveryError as exc:
+        await mark_quarantined(
+            pool,
             row["id"],
-            row["attempts"],
-            exc,
+            failure_class="permanent",
+            failure_code=exc.code,
+            error=_error_evidence(exc),
         )
+        logger.error(
+            "Config outbox delivery %s quarantined permanently: %s",
+            row["id"],
+            exc,
+            extra={
+                "event": "config_outbox_quarantined",
+                "outbox_id": row["id"],
+                "project_id": row["project_id"],
+                "kind": row["kind"],
+                "attempts": row["attempts"],
+                "failure_class": "permanent",
+                "failure_code": exc.code,
+            },
+        )
+    except Exception as exc:
+        if row["attempts"] >= MAX_DELIVERY_ATTEMPTS:
+            await mark_quarantined(
+                pool,
+                row["id"],
+                failure_class="attempts_exhausted",
+                failure_code="delivery_attempts_exhausted",
+                error=_error_evidence(exc),
+            )
+            logger.error(
+                "Config outbox delivery %s exhausted %s attempts: %s",
+                row["id"],
+                row["attempts"],
+                exc,
+                extra={
+                    "event": "config_outbox_quarantined",
+                    "outbox_id": row["id"],
+                    "project_id": row["project_id"],
+                    "kind": row["kind"],
+                    "attempts": row["attempts"],
+                    "failure_class": "attempts_exhausted",
+                    "failure_code": "delivery_attempts_exhausted",
+                },
+            )
+        else:
+            await mark_failed(
+                pool,
+                row["id"],
+                row["attempts"],
+                _error_evidence(exc),
+            )
+            logger.warning(
+                "Config outbox delivery %s failed (attempt %s): %s",
+                row["id"],
+                row["attempts"],
+                exc,
+            )
     else:
         await mark_processed(pool, row["id"])
     return True

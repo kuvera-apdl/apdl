@@ -53,7 +53,16 @@ def exposure_row(*, attempts: int) -> dict:
         "attempts": attempts,
         "payload": {
             "stream_key": "events:raw:apdl",
-            "event": {"message_id": "srv-1", "event": "$feature_flag_exposure"},
+            "event": {
+                "event": "$feature_flag_exposure",
+                "type": "track",
+                "timestamp": "2026-07-22T10:00:00Z",
+                "message_id": "eval-1",
+                "session_id": "server:eval-1",
+                "user_id": "user-1",
+                "context": {"library": {"name": "apdl-config"}},
+                "properties": {"flag_key": "checkout"},
+            },
         },
     }
 
@@ -68,6 +77,7 @@ async def test_redis_failure_is_recorded_then_same_outbox_row_retries(
     monkeypatch.setattr(outbox, "claim_next", claim)
     monkeypatch.setattr(outbox, "mark_failed", failed)
     monkeypatch.setattr(outbox, "mark_processed", processed)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
 
     redis = AsyncMock()
     redis.eval = AsyncMock(
@@ -123,6 +133,7 @@ async def test_stream_overload_keeps_outbox_row_pending_for_retry(
     monkeypatch.setattr(outbox, "claim_next", claim)
     monkeypatch.setattr(outbox, "mark_failed", failed)
     monkeypatch.setattr(outbox, "mark_processed", processed)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
     redis = AsyncMock()
     redis.eval.return_value = [0, outbox.EVENT_STREAM_MAX_ENTRIES]
 
@@ -183,6 +194,9 @@ async def test_failed_head_preserves_global_config_order_per_project():
     assert "pending.kind = 'exposure'" in sql
     assert "earlier.kind = 'exposure'" in sql
     assert "earlier.processed_at IS NULL" in sql
+    assert "earlier.quarantined_at IS NULL" in sql
+    assert "pending.quarantined_at IS NULL" in sql
+    assert f"pending.attempts < {outbox.MAX_DELIVERY_ATTEMPTS}" in sql
     assert "earlier.id < pending.id" in sql
     # A failed config head blocks later flag and experiment rows for only that
     # project. Exposure durability remains independent from config delivery.
@@ -239,6 +253,7 @@ async def test_config_change_with_invalid_project_version_fails_closed(monkeypat
 @pytest.mark.asyncio
 async def test_no_due_outbox_row_is_idle(monkeypatch):
     monkeypatch.setattr(outbox, "claim_next", AsyncMock(return_value=None))
+    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
 
     assert await outbox.drain_once(object(), object(), object()) is False
 
@@ -251,3 +266,125 @@ async def test_unknown_outbox_kind_fails_closed():
             object(),
             object(),
         )
+
+
+@pytest.mark.asyncio
+async def test_malformed_payload_is_quarantined_as_permanent(monkeypatch):
+    row = exposure_row(attempts=1)
+    row["payload"] = {"event": {}}
+    pool = object()
+    quarantine = AsyncMock()
+    failed = AsyncMock()
+    processed = AsyncMock()
+    monkeypatch.setattr(outbox, "claim_next", AsyncMock(return_value=row))
+    monkeypatch.setattr(outbox, "mark_quarantined", quarantine)
+    monkeypatch.setattr(outbox, "mark_failed", failed)
+    monkeypatch.setattr(outbox, "mark_processed", processed)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
+
+    assert await outbox.drain_once(pool, object(), object()) is True
+
+    quarantine.assert_awaited_once_with(
+        pool,
+        41,
+        failure_class="permanent",
+        failure_code="invalid_payload",
+        error="Config outbox payload has noncanonical fields",
+    )
+    failed.assert_not_awaited()
+    processed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retryable_failure_at_attempt_cap_is_quarantined(monkeypatch):
+    row = exposure_row(attempts=outbox.MAX_DELIVERY_ATTEMPTS)
+    pool = object()
+    redis = AsyncMock()
+    redis.eval.side_effect = RuntimeError("redis unavailable")
+    quarantine = AsyncMock()
+    monkeypatch.setattr(outbox, "claim_next", AsyncMock(return_value=row))
+    monkeypatch.setattr(outbox, "mark_quarantined", quarantine)
+    monkeypatch.setattr(outbox, "mark_failed", AsyncMock())
+    monkeypatch.setattr(outbox, "mark_processed", AsyncMock())
+    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
+
+    assert await outbox.drain_once(pool, redis, AsyncMock()) is True
+
+    quarantine.assert_awaited_once_with(
+        pool,
+        41,
+        failure_class="attempts_exhausted",
+        failure_code="delivery_attempts_exhausted",
+        error="redis unavailable",
+    )
+
+
+@pytest.mark.asyncio
+async def test_abandoned_final_attempt_is_terminalized_after_claim_timeout():
+    pool = AsyncMock()
+    pool.execute.return_value = "UPDATE 1"
+
+    assert await outbox.quarantine_exhausted(pool) == 1
+
+    sql = pool.execute.await_args.args[0]
+    assert "attempts >= $1" in sql
+    assert "failure_class = 'attempts_exhausted'" in sql
+    assert "failure_code = 'delivery_attempts_exhausted'" in sql
+    assert pool.execute.await_args.args[1:] == (
+        outbox.MAX_DELIVERY_ATTEMPTS,
+        outbox.CLAIM_TIMEOUT_SECONDS,
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
+    conn = AsyncMock()
+    conn.fetchrow.return_value = {
+        "pending_count": 4,
+        "quarantined_count": 1,
+        "max_pending_attempts": 3,
+        "oldest_pending_age_seconds": 45.5,
+        "oldest_quarantined_age_seconds": 12.25,
+    }
+
+    metrics = await outbox.metrics_snapshot(conn)
+
+    assert metrics == {
+        "pending_count": 4,
+        "quarantined_count": 1,
+        "max_pending_attempts": 3,
+        "oldest_pending_age_seconds": 45.5,
+        "oldest_quarantined_age_seconds": 12.25,
+    }
+    sql = conn.fetchrow.await_args.args[0]
+    assert "FROM config_outbox" in sql
+    assert "quarantined_at IS NULL" in sql
+
+
+@pytest.mark.parametrize(
+    ("metrics_update", "reason"),
+    [
+        (
+            {
+                "oldest_pending_age_seconds": (
+                    outbox.READINESS_MAX_PENDING_AGE_SECONDS + 1
+                )
+            },
+            "oldest_pending_age_exceeded",
+        ),
+        (
+            {"quarantined_count": outbox.READINESS_MAX_QUARANTINED_ROWS + 1},
+            "quarantined_rows_exceeded",
+        ),
+    ],
+)
+def test_outbox_readiness_degrades_past_delivery_thresholds(
+    metrics_update,
+    reason,
+):
+    metrics = {**outbox.empty_metrics(), **metrics_update}
+
+    readiness = outbox.readiness_snapshot(metrics)
+
+    assert readiness["status"] == "degraded"
+    assert readiness["degraded_reasons"] == [reason]

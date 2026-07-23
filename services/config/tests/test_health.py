@@ -6,24 +6,38 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import outbox
 from app.main import app
 
 
 class ReadyConnection:
+    def __init__(self, metrics: dict | None = None):
+        self.metrics = metrics or outbox.empty_metrics()
+
     async def fetchval(self, sql):
         assert sql == "SELECT 1"
         return 1
 
+    async def fetchrow(self, sql):
+        assert "FROM config_outbox" in sql
+        return self.metrics
+
 
 class Pool:
-    def __init__(self, error: Exception | None = None):
+    def __init__(
+        self,
+        error: Exception | None = None,
+        *,
+        metrics: dict | None = None,
+    ):
         self.error = error
+        self.metrics = metrics
 
     @asynccontextmanager
     async def acquire(self):
         if self.error is not None:
             raise self.error
-        yield ReadyConnection()
+        yield ReadyConnection(self.metrics)
 
 
 @pytest.fixture
@@ -77,7 +91,13 @@ async def test_readiness_returns_200_when_dependencies_are_ready(health_state):
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ready"
-    assert payload["checks"] == {"postgres": "ready", "redis": "ready"}
+    assert payload["checks"] == {
+        "postgres": "ready",
+        "redis": "ready",
+        "outbox": "ready",
+    }
+    assert payload["outbox"]["pending_count"] == 0
+    assert payload["outbox"]["status"] == "ready"
     assert payload["sse"]["active_connections"] == 0
 
 
@@ -103,3 +123,43 @@ async def test_readiness_returns_503_without_leaking_dependency_errors(
     assert response.json()["status"] == "not_ready"
     assert response.json()["checks"][dependency] == "not_ready"
     assert secret not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metrics_update", "reason"),
+    [
+        (
+            {
+                "oldest_pending_age_seconds": (
+                    outbox.READINESS_MAX_PENDING_AGE_SECONDS + 1
+                )
+            },
+            "oldest_pending_age_exceeded",
+        ),
+        (
+            {"quarantined_count": outbox.READINESS_MAX_QUARANTINED_ROWS + 1},
+            "quarantined_rows_exceeded",
+        ),
+    ],
+)
+async def test_readiness_degrades_when_outbox_crosses_threshold(
+    health_state,
+    metrics_update,
+    reason,
+):
+    metrics = {**outbox.empty_metrics(), **metrics_update}
+    app.state.pg_pool = Pool(metrics=metrics)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/ready")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "not_ready"
+    assert payload["checks"]["postgres"] == "ready"
+    assert payload["checks"]["outbox"] == "degraded"
+    assert payload["outbox"]["degraded_reasons"] == [reason]

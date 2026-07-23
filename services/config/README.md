@@ -18,6 +18,10 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
   snapshot after overflow, send timeout, or their hard lifetime. Established
   streams revalidate credential activity, project ownership, expiry, and
   `config:read` every five seconds; revoked credentials close fail-closed.
+  Malformed rows are quarantined immediately; dependency failures retry at
+  most eight times before quarantine. Terminal rows retain their payload,
+  failure class/code, attempt count, bounded error evidence, and timestamps in
+  `config_outbox`, and no longer block later rows in their tenant lane.
 - Evaluates `server`/`both`-mode gates on behalf of trusted backends
   (`POST /v1/evaluate`), durably enqueueing `$feature_flag_exposure` events
   through the same bounded, non-trimming Redis admission policy as Ingestion;
@@ -51,7 +55,7 @@ never from query parameters. See
 | `POST /v1/evaluate` | Trusted server-side gate evaluation with optional exposure logging |
 | `GET /v1/experiments/{key}/analysis` | Tenant-scoped authoritative experiment metadata delegated by Query (`query:read`) |
 | `GET /health` | Process liveness probe; does not touch dependencies |
-| `GET /ready` | Dependency readiness probe; returns 503 unless PostgreSQL and Redis are ready, and includes low-cardinality SSE metrics |
+| `GET /ready` | Dependency and delivery readiness; includes outbox backlog age/attempt/quarantine plus low-cardinality SSE metrics, and returns 503 when the oldest pending row exceeds 300 seconds or any row is quarantined |
 
 ### Admin (`/v1/admin`)
 
