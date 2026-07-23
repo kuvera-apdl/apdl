@@ -114,6 +114,7 @@ export class OfflineStorage {
   private fallbackQueue: StoredOfflineEvent[] = [];
   private fallbackNextId = Number.MAX_SAFE_INTEGER;
   private dbPromise: Promise<IDBDatabase | null> | null = null;
+  private readyDb: IDBDatabase | null = null;
   private useMemory = false;
 
   constructor(scope: OfflineStorageScope) {
@@ -179,7 +180,13 @@ export class OfflineStorage {
             return;
           }
           settled = true;
-          db.onversionchange = () => db.close();
+          this.readyDb = db;
+          db.onversionchange = () => {
+            if (this.readyDb === db) {
+              this.readyDb = null;
+            }
+            db.close();
+          };
           resolve(db);
         };
 
@@ -209,6 +216,7 @@ export class OfflineStorage {
 
   private async getDB(): Promise<IDBDatabase | null> {
     if (this.useMemory) return null;
+    if (this.readyDb !== null) return this.readyDb;
 
     try {
       const db = await this.dbPromise;
@@ -239,11 +247,26 @@ export class OfflineStorage {
       return freezeStoreResult({ stored: [], evicted: [], rejected });
     }
 
+    // Once IndexedDB is open, create the transaction before this async method
+    // yields. Lifecycle drains rely on that synchronous hand-off so the browser
+    // can finish a queued durable write while the document is terminating.
+    if (this.readyDb !== null) {
+      return this.storeInDatabase(this.readyDb, candidates, rejected);
+    }
+
     const db = await this.getDB();
     if (!db) {
       return this.storeInFallback(candidates, rejected);
     }
 
+    return this.storeInDatabase(db, candidates, rejected);
+  }
+
+  private storeInDatabase(
+    db: IDBDatabase,
+    candidates: StoreCandidate[],
+    rejected: OfflineRejectedEvent[]
+  ): Promise<OfflineStoreResult> {
     return new Promise<OfflineStoreResult>((resolve) => {
       let settled = false;
       let scanFinished = false;
@@ -422,9 +445,25 @@ export class OfflineStorage {
 
     const now = Date.now();
     const fallbackAcknowledged = this.acknowledgeFallback(ids, now);
+    if (this.readyDb !== null) {
+      return this.acknowledgeInDatabase(
+        this.readyDb,
+        ids,
+        now,
+        fallbackAcknowledged
+      );
+    }
     const db = await this.getDB();
     if (!db) return fallbackAcknowledged;
+    return this.acknowledgeInDatabase(db, ids, now, fallbackAcknowledged);
+  }
 
+  private acknowledgeInDatabase(
+    db: IDBDatabase,
+    ids: readonly number[],
+    now: number,
+    fallbackAcknowledged: number
+  ): Promise<number> {
     return new Promise<number>((resolve) => {
       let settled = false;
       let databaseAcknowledged = 0;
@@ -467,6 +506,81 @@ export class OfflineStorage {
     });
   }
 
+  /**
+   * Best-effort acknowledgement for records written immediately before a
+   * lifecycle request.
+   *
+   * Lifecycle persistence starts before transport and therefore does not have
+   * leased record IDs. The canonical message ID is the stable event identity
+   * used to remove only this deployment/project's matching stored copies after
+   * the server accepts or permanently disposes the request.
+   */
+  async acknowledgeStored(messageIds: readonly string[]): Promise<number> {
+    const ids = normalizeMessageIds(messageIds);
+    if (ids.size === 0) return 0;
+
+    const previousFallbackLength = this.fallbackQueue.length;
+    this.fallbackQueue = this.fallbackQueue.filter(
+      (record) => !ids.has(record.data.messageId)
+    );
+    const fallbackAcknowledged =
+      previousFallbackLength - this.fallbackQueue.length;
+
+    // Preserve lifecycle ordering: when IndexedDB is ready, create the delete
+    // transaction before this async method yields.
+    if (this.readyDb !== null) {
+      return fallbackAcknowledged +
+        await this.acknowledgeStoredInDatabase(this.readyDb, ids);
+    }
+
+    const db = await this.getDB();
+    if (!db) return fallbackAcknowledged;
+    return fallbackAcknowledged +
+      await this.acknowledgeStoredInDatabase(db, ids);
+  }
+
+  private acknowledgeStoredInDatabase(
+    db: IDBDatabase,
+    messageIds: ReadonlySet<string>
+  ): Promise<number> {
+    const now = Date.now();
+    return new Promise<number>((resolve) => {
+      let settled = false;
+      let acknowledged = 0;
+      const finish = (includeCount: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(includeCount ? acknowledged : 0);
+      };
+
+      try {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const cursorRequest = store.openCursor();
+        cursorRequest.onsuccess = () => {
+          const cursor = cursorRequest.result;
+          if (!cursor) return;
+          const value: unknown = cursor.value;
+          if (
+            isStoredOfflineEvent(value) &&
+            this.classifyRecord(value, now) === 'current' &&
+            messageIds.has(value.data.messageId)
+          ) {
+            cursor.delete();
+            acknowledged += 1;
+          }
+          cursor.continue();
+        };
+        cursorRequest.onerror = () => finish(false);
+        tx.oncomplete = () => finish(true);
+        tx.onerror = () => finish(false);
+        tx.onabort = () => finish(false);
+      } catch {
+        finish(false);
+      }
+    });
+  }
+
   /** Releases this client's records for immediate recovery by another tab. */
   async release(recordIds: readonly number[]): Promise<number> {
     const ids = normalizeRecordIds(recordIds);
@@ -474,9 +588,25 @@ export class OfflineStorage {
 
     const now = Date.now();
     const fallbackReleased = this.releaseFallback(ids, now);
+    if (this.readyDb !== null) {
+      return this.releaseInDatabase(
+        this.readyDb,
+        ids,
+        now,
+        fallbackReleased
+      );
+    }
     const db = await this.getDB();
     if (!db) return fallbackReleased;
+    return this.releaseInDatabase(db, ids, now, fallbackReleased);
+  }
 
+  private releaseInDatabase(
+    db: IDBDatabase,
+    ids: readonly number[],
+    now: number,
+    fallbackReleased: number
+  ): Promise<number> {
     return new Promise<number>((resolve) => {
       let settled = false;
       let databaseReleased = 0;
@@ -1009,6 +1139,18 @@ function normalizeRecordIds(recordIds: readonly number[]): number[] {
     throw new Error('APDL: offline record IDs must be positive safe integers');
   }
   return ids;
+}
+
+function normalizeMessageIds(messageIds: readonly string[]): ReadonlySet<string> {
+  if (
+    messageIds.some(
+      (messageId) =>
+        typeof messageId !== 'string' || messageId.trim().length === 0
+    )
+  ) {
+    throw new Error('APDL: stored message IDs must be non-empty strings');
+  }
+  return new Set(messageIds);
 }
 
 function isTrackEvent(value: unknown): value is TrackEvent {

@@ -6,7 +6,10 @@ import type {
   TrackEvent,
 } from './types';
 import { Transport } from './transport';
-import { OfflineStorage } from './storage';
+import {
+  OfflineStorage,
+  type OfflineStoreResult,
+} from './storage';
 import type { Scrubber } from '../privacy/scrubber';
 import type { ConsentManager } from '../privacy/consent';
 import { sanitizeAutoCaptureEvent } from '../privacy/auto-capture-safety';
@@ -14,6 +17,7 @@ import {
   assertSerializedEventSize,
   canonicalizeTrackEvent,
   MAX_EVENTS_PER_BATCH,
+  MAX_KEEPALIVE_REQUEST_BYTES,
   MAX_SERIALIZED_REQUEST_BYTES,
   serializedJsonBytes,
 } from './event-validation';
@@ -58,6 +62,24 @@ interface BatchDelivery {
   retryableEvents: PendingEvent[];
 }
 
+interface ActiveDelivery {
+  controller: AbortController;
+  ownedEvents: PendingEvent[];
+  mode: 'normal' | 'lifecycle';
+  takenOver: boolean;
+  pendingPersistence?: PendingPersistence;
+}
+
+interface PendingPersistence {
+  candidates: PendingEvent[];
+  result: Promise<OfflineStoreResult>;
+}
+
+interface LifecyclePersistence {
+  candidates: PendingEvent[];
+  result: Promise<OfflineStoreResult | null> | null;
+}
+
 const FEATURE_FLAG_EXPOSURE_EVENT = '$feature_flag_exposure';
 
 /**
@@ -75,6 +97,7 @@ export class EventQueue {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private visibilityHandler: (() => void) | null = null;
   private unloadHandler: (() => void) | null = null;
+  private resumeHandler: (() => void) | null = null;
   private started = false;
   private ingestionUrl: string;
   private accepting = true;
@@ -82,7 +105,10 @@ export class EventQueue {
   private startPromise: Promise<void> | null = null;
   private startComplete = false;
   private shutdownPromise: Promise<DeliveryReport> | null = null;
-  private activeDeliveryController: AbortController | null = null;
+  private activeDelivery: ActiveDelivery | null = null;
+  private unloadPromise: Promise<DeliveryReport> | null = null;
+  private unloadRequested = false;
+  private resumeBarrier: Promise<void> | null = null;
   private inFlightEventCount = 0;
   private consentEpoch = 0;
   private consentFence: Promise<void> = Promise.resolve();
@@ -111,6 +137,11 @@ export class EventQueue {
   enqueue(event: TrackEvent): void {
     if (!this.accepting) {
       throw new Error('APDL: client is shut down');
+    }
+    if (this.unloadRequested) {
+      throw new Error(
+        'APDL: cannot enqueue while the document lifecycle is suspended'
+      );
     }
 
     // Check consent for analytics
@@ -176,12 +207,22 @@ export class EventQueue {
    * On failure, persists events to offline storage.
    */
   flush(): Promise<DeliveryReport> {
-    return this.startDrain(false);
+    return this.startDrain();
   }
 
   /** Sends a keepalive request for reliable delivery during page unload. */
   flushOnUnload(): Promise<DeliveryReport> {
-    return this.startDrain(true);
+    // Retain the first lifecycle promise until the document genuinely resumes.
+    // Browsers commonly emit visibilitychange, pagehide, and beforeunload for
+    // one transition; only the first signal may start a keepalive attempt.
+    if (this.unloadPromise !== null) return this.unloadPromise;
+
+    this.unloadRequested = true;
+    const inheritedPersistence = this.takeOverActiveNormalDelivery();
+
+    const drain = this.drainLifecycleQueue(inheritedPersistence);
+    this.unloadPromise = drain;
+    return this.unloadPromise;
   }
 
   /**
@@ -203,17 +244,25 @@ export class EventQueue {
       this.visibilityHandler = () => {
         if (document.visibilityState === 'hidden') {
           void this.flushOnUnload();
+        } else if (document.visibilityState === 'visible') {
+          this.resumeLifecycleDelivery();
         }
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
     }
 
-    // Register beforeunload handler
+    // Register navigation lifecycle handlers. pagehide covers bfcache and
+    // mobile navigation paths where beforeunload is skipped.
     if (typeof window !== 'undefined') {
       this.unloadHandler = () => {
         void this.flushOnUnload();
       };
+      window.addEventListener('pagehide', this.unloadHandler);
       window.addEventListener('beforeunload', this.unloadHandler);
+      this.resumeHandler = () => {
+        this.resumeLifecycleDelivery();
+      };
+      window.addEventListener('pageshow', this.resumeHandler);
     }
 
     this.startPromise = this.restoreOfflineEvents();
@@ -337,7 +386,7 @@ export class EventQueue {
     this.consentEpoch += 1;
     this.consentDiscardedSinceReport += this.queue.length;
     this.queue.splice(0);
-    this.activeDeliveryController?.abort();
+    this.activeDelivery?.controller.abort();
 
     const clear = async () => {
       await this.storage.clear();
@@ -362,7 +411,7 @@ export class EventQueue {
     );
     this.consentDiscardedSinceReport += this.queue.length - retained.length;
     this.queue = retained;
-    this.activeDeliveryController?.abort();
+    this.activeDelivery?.controller.abort();
 
     // IndexedDB uses the canonical event envelope and has no purpose index.
     // Clearing this project's offline queue is the only fail-closed way to
@@ -414,8 +463,13 @@ export class EventQueue {
     }
 
     if (typeof window !== 'undefined' && this.unloadHandler) {
+      window.removeEventListener('pagehide', this.unloadHandler);
       window.removeEventListener('beforeunload', this.unloadHandler);
       this.unloadHandler = null;
+    }
+    if (typeof window !== 'undefined' && this.resumeHandler) {
+      window.removeEventListener('pageshow', this.resumeHandler);
+      this.resumeHandler = null;
     }
   }
 
@@ -433,18 +487,65 @@ export class EventQueue {
     return this.queue.length;
   }
 
-  private startDrain(useKeepalive: boolean): Promise<DeliveryReport> {
+  private startDrain(): Promise<DeliveryReport> {
     if (this.flushPromise !== null) return this.flushPromise;
 
-    const drain = this.drainQueue(useKeepalive);
+    const drain = this.drainNormalQueue();
     this.flushPromise = drain.finally(() => {
-      this.activeDeliveryController = null;
       this.flushPromise = null;
     });
     return this.flushPromise;
   }
 
-  private async drainQueue(useKeepalive: boolean): Promise<DeliveryReport> {
+  private resumeLifecycleDelivery(): void {
+    if (!this.unloadRequested) return;
+
+    const active = this.activeDelivery;
+    if (active?.mode === 'lifecycle') {
+      active.controller.abort();
+    }
+    const priorLifecycle = this.unloadPromise;
+    this.unloadRequested = false;
+    this.unloadPromise = null;
+    if (priorLifecycle !== null) {
+      const barrier = priorLifecycle.then(
+        () => undefined,
+        () => undefined
+      );
+      this.resumeBarrier = barrier;
+      void barrier.finally(() => {
+        if (this.resumeBarrier === barrier) {
+          this.resumeBarrier = null;
+        }
+      });
+    }
+  }
+
+  private takeOverActiveNormalDelivery(): PendingPersistence | null {
+    const active = this.activeDelivery;
+    if (
+      active === null ||
+      active.mode !== 'normal' ||
+      active.takenOver
+    ) {
+      return null;
+    }
+
+    active.takenOver = true;
+    const pendingPersistence = active.pendingPersistence ?? null;
+    if (active.ownedEvents.length > 0) {
+      this.queue.unshift(...active.ownedEvents);
+      active.ownedEvents = [];
+    }
+    this.inFlightEventCount = 0;
+    active.controller.abort();
+    if (this.activeDelivery === active) {
+      this.activeDelivery = null;
+    }
+    return pendingPersistence;
+  }
+
+  private async drainNormalQueue(): Promise<DeliveryReport> {
     const report: DeliveryAccumulator = {
       delivered: 0,
       persisted: 0,
@@ -453,26 +554,35 @@ export class EventQueue {
       dropped: [],
       volatilePending: [],
     };
+    if (this.resumeBarrier !== null) {
+      await this.resumeBarrier;
+    }
     if (this.startPromise !== null && !this.startComplete) {
       await this.startPromise;
     }
+    if (this.unloadRequested) {
+      return this.immutableReport(report);
+    }
 
-    let stopAfterRetryableFailure = false;
     while (true) {
+      if (this.unloadRequested) break;
       if (this.queue.length === 0) {
         if (
-          !stopAfterRetryableFailure &&
           (this.startPromise !== null ||
-            this.config.persistence !== 'memory') &&
-          (await this.claimOfflineEvents()) > 0
+            this.config.persistence !== 'memory')
         ) {
-          continue;
+          const claimed = await this.claimOfflineEvents();
+          if (this.unloadRequested) break;
+          if (claimed > 0) continue;
         }
         break;
       }
 
       if (this.consentFencePending) {
         await this.consentFence;
+        // pagehide may have started while the consent fence was pending.
+        // Leave the untouched queue to the lifecycle drain.
+        if (this.unloadRequested) break;
       }
       if (!this.consentManager.isGranted('analytics')) {
         report.discardedForConsent += this.queue.length;
@@ -482,12 +592,37 @@ export class EventQueue {
 
       const epoch = this.consentEpoch;
       const localDispositionIds: number[] = [];
-      const prepared = this.dequeueBatch(localDispositionIds);
+      const prepared = this.dequeueBatch(
+        localDispositionIds,
+        MAX_SERIALIZED_REQUEST_BYTES
+      );
       this.inFlightEventCount = prepared?.events.length ?? 0;
+
+      // A dequeued batch is takeover-visible before any asynchronous local
+      // disposition. pagehide can therefore reclaim it even when an
+      // acknowledgement is blocked.
+      const active: ActiveDelivery | null = prepared === null
+        ? null
+        : {
+            controller: new AbortController(),
+            ownedEvents: [...prepared.events],
+            mode: 'normal',
+            takenOver: false,
+          };
+      if (active !== null) {
+        this.activeDelivery = active;
+      }
+
       if (localDispositionIds.length > 0) {
         await this.storage.acknowledge(localDispositionIds);
       }
-      if (prepared === null) continue;
+      if (active?.takenOver || this.unloadRequested) {
+        this.clearActiveDelivery(active);
+        break;
+      }
+      if (prepared === null) {
+        continue;
+      }
 
       // There is no await between this final consent check and fetch creation,
       // so revocation cannot cross the send boundary without aborting it.
@@ -497,17 +632,16 @@ export class EventQueue {
       ) {
         report.discardedForConsent += prepared.events.length;
         this.inFlightEventCount = 0;
+        active!.ownedEvents = [];
+        this.clearActiveDelivery(active);
         continue;
       }
 
-      const controller = new AbortController();
-      this.activeDeliveryController = controller;
       let delivery: BatchDelivery;
       try {
         delivery = await this.deliverPreparedBatch(
           prepared,
-          useKeepalive,
-          controller.signal
+          active!.controller.signal
         );
       } catch (err) {
         if (this.config.debug) {
@@ -518,10 +652,10 @@ export class EventQueue {
           permanentRejections: [],
           retryableEvents: prepared.events,
         };
-      } finally {
-        if (this.activeDeliveryController === controller) {
-          this.activeDeliveryController = null;
-        }
+      }
+      if (active!.takenOver) {
+        this.clearActiveDelivery(active);
+        break;
       }
 
       if (
@@ -530,8 +664,27 @@ export class EventQueue {
       ) {
         report.discardedForConsent += prepared.events.length;
         this.inFlightEventCount = 0;
+        active!.ownedEvents = [];
+        this.clearActiveDelivery(active);
         continue;
       }
+
+      // Once transport returns, only retryable records remain SDK-owned.
+      // Requeue them synchronously before any durable acknowledgement or
+      // release can yield to pagehide.
+      active!.ownedEvents = [...delivery.retryableEvents];
+      if (delivery.retryableEvents.length > 0) {
+        this.queue.unshift(...delivery.retryableEvents);
+        active!.ownedEvents = [];
+        this.inFlightEventCount = 0;
+      } else {
+        active!.ownedEvents = [];
+      }
+
+      report.delivered += delivery.delivered.length;
+      report.permanentRejections.push(
+        ...delivery.permanentRejections.map((pending) => pending.event)
+      );
 
       const finalDurableRecordIds = [
         ...delivery.delivered,
@@ -546,10 +699,19 @@ export class EventQueue {
         await this.storage.acknowledge(finalDurableRecordIds);
       }
 
-      report.delivered += delivery.delivered.length;
-      report.permanentRejections.push(
-        ...delivery.permanentRejections.map((pending) => pending.event)
-      );
+      if (active!.takenOver || this.unloadRequested) {
+        this.clearActiveDelivery(active);
+        break;
+      }
+      if (
+        epoch !== this.consentEpoch ||
+        !this.consentManager.isGranted('analytics')
+      ) {
+        await this.storage.clear();
+        this.inFlightEventCount = 0;
+        this.clearActiveDelivery(active);
+        continue;
+      }
 
       if (delivery.permanentRejections.length > 0 && this.config.debug) {
         console.warn(
@@ -558,7 +720,6 @@ export class EventQueue {
       }
 
       if (delivery.retryableEvents.length > 0) {
-        stopAfterRetryableFailure = true;
         const durableRetryable = delivery.retryableEvents.filter(
           (pending) => pending.durableRecordId !== undefined
         );
@@ -570,28 +731,32 @@ export class EventQueue {
             durableRetryable.map((pending) => pending.durableRecordId!)
           );
         }
+        if (active!.takenOver || this.unloadRequested) {
+          this.clearActiveDelivery(active);
+          break;
+        }
         if (
           epoch !== this.consentEpoch ||
           !this.consentManager.isGranted('analytics')
         ) {
           await this.storage.clear();
-          report.discardedForConsent += delivery.retryableEvents.length;
           this.inFlightEventCount = 0;
+          this.clearActiveDelivery(active);
           continue;
         }
 
-        if (
-          this.config.persistence === 'memory' &&
-          volatileRetryable.length > 0
-        ) {
+        if (this.config.persistence === 'memory') {
           // Memory mode has no durable retry store. Keep ownership in the
           // public pending queue so callers can retry or inspect every event.
-          if (this.config.debug) {
+          if (volatileRetryable.length > 0 && this.config.debug) {
             console.warn('APDL: Retryable event send failure remains pending');
           }
           report.persisted += durableRetryable.length;
-          this.queue.unshift(...volatileRetryable);
+          this.removeQueuedMessageIds(
+            durableRetryable.map(({ event }) => event.messageId)
+          );
           this.inFlightEventCount = 0;
+          this.clearActiveDelivery(active);
           break;
         }
         if (volatileRetryable.length > 0 && this.config.debug) {
@@ -600,15 +765,24 @@ export class EventQueue {
           );
         }
         try {
-          const storageResult = await this.storage.store(
-            volatileRetryable.map((pending) => pending.event)
-          );
+          const pendingPersistence: PendingPersistence = {
+            candidates: [...volatileRetryable],
+            result: this.storage.store(
+              volatileRetryable.map((pending) => pending.event)
+            ),
+          };
+          active!.pendingPersistence = pendingPersistence;
+          const storageResult = await pendingPersistence.result;
+          delete active!.pendingPersistence;
+          if (active!.takenOver || this.unloadRequested) {
+            this.clearActiveDelivery(active);
+            break;
+          }
           if (
             epoch !== this.consentEpoch ||
             !this.consentManager.isGranted('analytics')
           ) {
             await this.storage.clear();
-            report.discardedForConsent += delivery.retryableEvents.length;
           } else {
             const evictedMessageIds = new Set(
               storageResult.evicted.map(({ event }) => event.messageId)
@@ -632,11 +806,20 @@ export class EventQueue {
               }))
             );
 
-            const storageFailurePending: PendingEvent[] = [];
+            const finalizedMessageIds = new Set(
+              durableRetryable.map(({ event }) => event.messageId)
+            );
+            for (const stored of storageResult.stored) {
+              finalizedMessageIds.add(stored.event.messageId);
+            }
+            for (const eviction of storageResult.evicted) {
+              finalizedMessageIds.add(eviction.event.messageId);
+            }
             for (const rejection of storageResult.rejected) {
               if (rejection.reason === 'offline_storage_failure') {
-                storageFailurePending.push({ event: rejection.event });
+                continue;
               } else {
+                finalizedMessageIds.add(rejection.event.messageId);
                 report.dropped.push({
                   category: 'rejected',
                   reason: rejection.reason,
@@ -644,14 +827,15 @@ export class EventQueue {
                 });
               }
             }
-            if (storageFailurePending.length > 0) {
-              this.queue.unshift(...storageFailurePending);
-              this.inFlightEventCount = 0;
-              break;
-            }
+            this.removeQueuedMessageIds(finalizedMessageIds);
           }
           this.inFlightEventCount = 0;
         } catch (err) {
+          delete active!.pendingPersistence;
+          if (active!.takenOver || this.unloadRequested) {
+            this.clearActiveDelivery(active);
+            break;
+          }
           if (this.config.debug) {
             console.error('APDL: Failed to persist retryable event batch:', err);
           }
@@ -659,23 +843,23 @@ export class EventQueue {
             epoch !== this.consentEpoch ||
             !this.consentManager.isGranted('analytics')
           ) {
-            report.discardedForConsent += delivery.retryableEvents.length;
             this.inFlightEventCount = 0;
           } else {
             report.persisted += durableRetryable.length;
-            // Keep ownership in memory and stop this drain. Continuing would
-            // immediately retry the same failed batch forever.
-            this.queue.unshift(...volatileRetryable);
+            this.removeQueuedMessageIds(
+              durableRetryable.map(({ event }) => event.messageId)
+            );
             this.inFlightEventCount = 0;
-            break;
           }
         }
         // A retryable transport outcome ends this drain. Events accepted
         // behind the failed batch remain visibly pending, and a later flush
         // receives a fresh, exact storage disposition for them.
+        this.clearActiveDelivery(active);
         break;
       } else {
         this.inFlightEventCount = 0;
+        this.clearActiveDelivery(active);
       }
     }
 
@@ -685,7 +869,352 @@ export class EventQueue {
   }
 
   /**
-   * Delivers a bounded batch, isolating validation/size failures by bisection.
+   * Performs one lifecycle-safe delivery attempt.
+   *
+   * This path never invokes recursive payload isolation: the browser receives
+   * at most one keepalive request, and a payload rejection retains the entire
+   * batch for a later normal drain.
+   */
+  private async drainLifecycleQueue(
+    inheritedPersistence: PendingPersistence | null
+  ): Promise<DeliveryReport> {
+    const report: DeliveryAccumulator = {
+      delivered: 0,
+      persisted: 0,
+      permanentRejections: [],
+      discardedForConsent: 0,
+      dropped: [],
+      volatilePending: [],
+    };
+
+    if (this.consentFencePending) {
+      await this.consentFence;
+    }
+    if (!this.consentManager.isGranted('analytics')) {
+      report.discardedForConsent += this.queue.length;
+      this.queue.splice(0);
+      return this.finishReport(report);
+    }
+
+    const epoch = this.consentEpoch;
+    const localDispositionIds: number[] = [];
+    const prepared = this.dequeueBatch(
+      localDispositionIds,
+      MAX_KEEPALIVE_REQUEST_BYTES
+    );
+    this.inFlightEventCount = prepared?.events.length ?? 0;
+
+    const active: ActiveDelivery | null = prepared === null
+      ? null
+      : {
+          controller: new AbortController(),
+          ownedEvents: [...prepared.events],
+          mode: 'lifecycle',
+          takenOver: false,
+        };
+    if (active !== null) {
+      this.activeDelivery = active;
+    }
+
+    // Start ownership for both the selected batch and overflow before any
+    // transport await. OfflineStorage creates an IndexedDB transaction
+    // synchronously here whenever its database is already open.
+    const persistence = this.beginLifecyclePersistence(
+      prepared,
+      inheritedPersistence
+    );
+    if (localDispositionIds.length > 0) {
+      void this.storage.acknowledge(localDispositionIds);
+    }
+
+    if (prepared === null) {
+      await this.settleLifecycleOwnership(
+        persistence,
+        new Set(),
+        report,
+        epoch
+      );
+      return this.finishReport(report);
+    }
+
+    if (
+      epoch !== this.consentEpoch ||
+      !this.consentManager.isGranted('analytics')
+    ) {
+      report.discardedForConsent += prepared.events.length;
+      active!.ownedEvents = [];
+      this.inFlightEventCount = 0;
+      this.clearActiveDelivery(active);
+      await this.storage.clear();
+      return this.finishReport(report);
+    }
+
+    let outcome: TransportOutcome;
+    try {
+      outcome = await this.sendPreparedBatch(
+        prepared,
+        true,
+        active!.controller.signal
+      );
+    } catch (err) {
+      if (this.config.debug) {
+        console.error('APDL: Unexpected error during lifecycle flush:', err);
+      }
+      outcome = 'retryable';
+    }
+
+    if (
+      epoch !== this.consentEpoch ||
+      !this.consentManager.isGranted('analytics')
+    ) {
+      report.discardedForConsent += prepared.events.length;
+      active!.ownedEvents = [];
+      this.inFlightEventCount = 0;
+      this.clearActiveDelivery(active);
+      await this.storage.clear();
+      return this.finishReport(report);
+    }
+
+    const finalMessageIds = new Set<string>();
+    if (outcome === 'accepted') {
+      report.delivered += prepared.events.length;
+      for (const pending of prepared.events) {
+        finalMessageIds.add(pending.event.messageId);
+      }
+    } else if (outcome === 'permanent_rejection') {
+      report.permanentRejections.push(
+        ...prepared.events.map((pending) => pending.event)
+      );
+      for (const pending of prepared.events) {
+        finalMessageIds.add(pending.event.messageId);
+      }
+    } else {
+      // payload_rejected is intentionally retryable in lifecycle mode. Normal
+      // delivery can later isolate the poison event without issuing additional
+      // keepalive requests during the terminating document's lifetime.
+      this.queue.unshift(...prepared.events);
+    }
+    active!.ownedEvents = [];
+    this.inFlightEventCount = 0;
+
+    await this.settleLifecycleOwnership(
+      persistence,
+      finalMessageIds,
+      report,
+      epoch
+    );
+    this.clearActiveDelivery(active);
+    return this.finishReport(report);
+  }
+
+  private beginLifecyclePersistence(
+    prepared: PreparedBatch | null,
+    inheritedPersistence: PendingPersistence | null
+  ): LifecyclePersistence {
+    const selected = prepared?.events ?? [];
+    const candidates = [...selected, ...this.queue];
+    const volatileCandidates = candidates.filter(
+      (pending) => pending.durableRecordId === undefined
+    );
+    const results: Array<Promise<OfflineStoreResult | null>> = [];
+    const inheritedMessageIds = new Set<string>();
+    if (inheritedPersistence !== null) {
+      for (const pending of inheritedPersistence.candidates) {
+        inheritedMessageIds.add(pending.event.messageId);
+      }
+      results.push(
+        this.catchLifecyclePersistenceFailure(inheritedPersistence.result)
+      );
+    }
+
+    const uncoveredVolatileCandidates = volatileCandidates.filter(
+      (pending) => !inheritedMessageIds.has(pending.event.messageId)
+    );
+    if (
+      this.config.persistence !== 'memory' &&
+      uncoveredVolatileCandidates.length > 0
+    ) {
+      results.push(
+        this.catchLifecyclePersistenceFailure(
+          this.storage.store(
+            uncoveredVolatileCandidates.map((pending) => pending.event)
+          )
+        )
+      );
+    }
+
+    const result = results.length === 0
+      ? null
+      : Promise.all(results).then(mergeOfflineStoreResults);
+    return {
+      candidates,
+      result,
+    };
+  }
+
+  private catchLifecyclePersistenceFailure(
+    result: Promise<OfflineStoreResult>
+  ): Promise<OfflineStoreResult | null> {
+    return result.catch((err: unknown) => {
+      if (this.config.debug) {
+        console.error('APDL: Failed to persist lifecycle events:', err);
+      }
+      return null;
+    });
+  }
+
+  private async settleLifecycleOwnership(
+    persistence: LifecyclePersistence,
+    finalMessageIds: ReadonlySet<string>,
+    report: DeliveryAccumulator,
+    epoch: number
+  ): Promise<void> {
+    const existingDurableFinal = persistence.candidates.filter(
+      (pending) =>
+        pending.durableRecordId !== undefined &&
+        finalMessageIds.has(pending.event.messageId)
+    );
+    const existingDurableUnsent = persistence.candidates.filter(
+      (pending) =>
+        pending.durableRecordId !== undefined &&
+        !finalMessageIds.has(pending.event.messageId)
+    );
+    if (existingDurableFinal.length > 0) {
+      void this.storage.acknowledge(
+        existingDurableFinal.map((pending) => pending.durableRecordId!)
+      );
+    }
+    if (existingDurableUnsent.length > 0) {
+      void this.storage.release(
+        existingDurableUnsent.map((pending) => pending.durableRecordId!)
+      );
+    }
+
+    const storageResult = persistence.result === null
+      ? null
+      : await persistence.result;
+    if (
+      epoch !== this.consentEpoch ||
+      !this.consentManager.isGranted('analytics')
+    ) {
+      await this.storage.clear();
+      return;
+    }
+
+    const finalizedMessageIds = new Set(finalMessageIds);
+    const retainedMessageIds = new Set<string>();
+    const persistedMessageIds = new Set<string>();
+    const volatilePendingMessageIds = new Set<string>();
+    const droppedMessageIds = new Set<string>();
+    const evictedMessageIds = new Set(
+      storageResult?.evicted.map(({ event }) => event.messageId) ?? []
+    );
+    const storedMessageIds = new Set(
+      storageResult?.stored.map(({ event }) => event.messageId) ?? []
+    );
+
+    for (const pending of existingDurableUnsent) {
+      const messageId = pending.event.messageId;
+      finalizedMessageIds.add(messageId);
+      if (
+        !evictedMessageIds.has(messageId) ||
+        storedMessageIds.has(messageId)
+      ) {
+        retainedMessageIds.add(messageId);
+        persistedMessageIds.add(messageId);
+      }
+    }
+
+    if (storageResult !== null) {
+      for (const stored of storageResult.stored) {
+        const messageId = stored.event.messageId;
+        finalizedMessageIds.add(messageId);
+        retainedMessageIds.add(messageId);
+        if (
+          !finalMessageIds.has(messageId) &&
+          stored.durability === 'durable'
+        ) {
+          persistedMessageIds.add(messageId);
+        } else if (
+          !finalMessageIds.has(messageId) &&
+          !volatilePendingMessageIds.has(messageId)
+        ) {
+          volatilePendingMessageIds.add(messageId);
+          report.volatilePending.push(stored.event);
+        }
+      }
+      for (const eviction of storageResult.evicted) {
+        const messageId = eviction.event.messageId;
+        finalizedMessageIds.add(messageId);
+        if (
+          !finalMessageIds.has(messageId) &&
+          !retainedMessageIds.has(messageId) &&
+          !droppedMessageIds.has(messageId)
+        ) {
+          droppedMessageIds.add(messageId);
+          report.dropped.push({
+            category: 'evicted',
+            reason: eviction.reason,
+            event: eviction.event,
+          });
+        }
+      }
+      for (const rejection of storageResult.rejected) {
+        const messageId = rejection.event.messageId;
+        if (
+          finalMessageIds.has(messageId) ||
+          retainedMessageIds.has(messageId)
+        ) {
+          finalizedMessageIds.add(messageId);
+        } else if (
+          rejection.reason !== 'offline_storage_failure' &&
+          !droppedMessageIds.has(messageId)
+        ) {
+          droppedMessageIds.add(messageId);
+          finalizedMessageIds.add(messageId);
+          report.dropped.push({
+            category: 'rejected',
+            reason: rejection.reason,
+            event: rejection.event,
+          });
+        }
+      }
+    }
+
+    report.persisted += persistedMessageIds.size;
+    if (finalMessageIds.size > 0) {
+      // This transaction is deliberately created after any inherited
+      // persistence and earlier normal-drain release. Message identity is the
+      // only stable handle once release has cleared a claimed record's owner.
+      void this.storage.acknowledgeStored([...finalMessageIds]);
+    }
+    this.removeQueuedMessageIds(finalizedMessageIds);
+  }
+
+  private clearActiveDelivery(active: ActiveDelivery | null): void {
+    if (active !== null && this.activeDelivery === active) {
+      this.activeDelivery = null;
+    }
+  }
+
+  private removeQueuedMessageIds(messageIds: Iterable<string>): void {
+    const ids = messageIds instanceof Set
+      ? messageIds
+      : new Set(messageIds);
+    if (ids.size === 0) return;
+    this.queue = this.queue.filter(
+      (pending) => !ids.has(pending.event.messageId)
+    );
+  }
+
+  private finishReport(report: DeliveryAccumulator): DeliveryReport {
+    report.discardedForConsent += this.consentDiscardedSinceReport;
+    this.consentDiscardedSinceReport = 0;
+    return this.immutableReport(report);
+  }
+
+  /**
+   * Delivers a normal bounded batch, isolating payload failures by bisection.
    *
    * Only the transport's explicit payload rejection can recurse. Authentication,
    * routing, and other permanent failures apply to the whole request. If a
@@ -694,10 +1223,9 @@ export class EventQueue {
    */
   private async deliverPreparedBatch(
     prepared: PreparedBatch,
-    useKeepalive: boolean,
     signal: AbortSignal
   ): Promise<BatchDelivery> {
-    const outcome = await this.sendPreparedBatch(prepared, useKeepalive, signal);
+    const outcome = await this.sendPreparedBatch(prepared, false, signal);
     if (outcome === 'accepted') {
       return {
         delivered: prepared.events,
@@ -725,7 +1253,6 @@ export class EventQueue {
     const right = this.slicePreparedBatch(prepared, midpoint);
     const leftDelivery = await this.deliverPreparedBatch(
       left,
-      useKeepalive,
       signal
     );
     if (leftDelivery.retryableEvents.length > 0) {
@@ -738,7 +1265,6 @@ export class EventQueue {
 
     const rightDelivery = await this.deliverPreparedBatch(
       right,
-      useKeepalive,
       signal
     );
     return {
@@ -854,7 +1380,8 @@ export class EventQueue {
    * cannot mutate an already-queued event into a permanent poison record.
    */
   private dequeueBatch(
-    permanentDispositionIds: number[]
+    permanentDispositionIds: number[],
+    maxRequestBytes: number
   ): PreparedBatch | null {
     const events: PendingEvent[] = [];
     const ingestionEvents: IngestionEvent[] = [];
@@ -891,8 +1418,20 @@ export class EventQueue {
       const candidatePayload = {
         events: [...ingestionEvents, ingestionEvent],
       };
-      if (serializedJsonBytes(candidatePayload) > MAX_SERIALIZED_REQUEST_BYTES) {
+      if (serializedJsonBytes(candidatePayload) > maxRequestBytes) {
         if (events.length === 0) {
+          if (maxRequestBytes < MAX_SERIALIZED_REQUEST_BYTES) {
+            // A valid event can exceed the conservative unload budget. Keep
+            // ownership in the queue for best-effort durable persistence or a
+            // later normal flush; never discard it as an unload side effect.
+            this.queue.unshift({
+              event: canonical,
+              ...(queued.durableRecordId === undefined
+                ? {}
+                : { durableRecordId: queued.durableRecordId }),
+            });
+            break;
+          }
           // This should be unreachable because a single event is capped at 64
           // KiB, but fail closed rather than create an unsendable queue head.
           if (this.config.debug) {
@@ -940,4 +1479,18 @@ function deepFreeze<T>(value: T): T {
     Object.freeze(value);
   }
   return value;
+}
+
+function mergeOfflineStoreResults(
+  results: Array<OfflineStoreResult | null>
+): OfflineStoreResult | null {
+  const completed = results.filter(
+    (result): result is OfflineStoreResult => result !== null
+  );
+  if (completed.length === 0) return null;
+  return {
+    stored: completed.flatMap((result) => [...result.stored]),
+    evicted: completed.flatMap((result) => [...result.evicted]),
+    rejected: completed.flatMap((result) => [...result.rejected]),
+  };
 }

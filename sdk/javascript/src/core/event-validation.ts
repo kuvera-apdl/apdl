@@ -5,6 +5,9 @@ export const MAX_JSON_CONTAINER_ENTRIES = 100;
 export const MAX_JSON_NODES_PER_EVENT = 1_000;
 export const MAX_SERIALIZED_EVENT_BYTES = 64 * 1024;
 export const MAX_SERIALIZED_REQUEST_BYTES = 512 * 1024;
+// Browsers share an implementation-defined keepalive quota across outstanding
+// requests (commonly 64 KiB). Keep unload payloads below that ceiling.
+export const MAX_KEEPALIVE_REQUEST_BYTES = 48 * 1024;
 export const MAX_EVENTS_PER_BATCH = 100;
 export const MAX_EVENT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_EVENT_FUTURE_SKEW_MS = 5 * 60 * 1000;

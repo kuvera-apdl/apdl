@@ -182,6 +182,37 @@ describe('OfflineStorage', () => {
     expect(await claimAndAcknowledge(storage)).toEqual([event]);
   });
 
+  it('starts a durable transaction synchronously once IndexedDB is ready', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const db = await databaseFor(storage);
+    const transaction = vi.spyOn(db, 'transaction');
+    const event = createEvent('synchronous_lifecycle_handoff');
+
+    const store = storage.store([event]);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    await expect(store).resolves.toMatchObject({
+      stored: [{ event, durability: 'durable' }],
+      evicted: [],
+      rejected: [],
+    });
+  });
+
+  it('best-effort acknowledges lifecycle writes by canonical message ID', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const accepted = createEvent('accepted_lifecycle_event');
+    const pending = createEvent('pending_lifecycle_event');
+    await storage.store([accepted, pending]);
+    const db = await databaseFor(storage);
+    const transaction = vi.spyOn(db, 'transaction');
+
+    const acknowledge = storage.acknowledgeStored([accepted.messageId]);
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    await expect(acknowledge).resolves.toBe(1);
+    expect(await claimAndAcknowledge(storage)).toEqual([pending]);
+  });
+
   it('isolates offline events for same-origin clients with different project keys', async () => {
     const projectA = storageForKey(PROJECT_A_KEY);
     const projectB = storageForKey(PROJECT_B_KEY);

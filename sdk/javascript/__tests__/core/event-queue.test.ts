@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 import { EventQueue } from '../../src/core/event-queue';
 import { Transport } from '../../src/core/transport';
 import {
+  MAX_OFFLINE_EVENTS_PER_PROJECT,
   OfflineStorage,
   type OfflineStoreResult,
 } from '../../src/core/storage';
@@ -9,7 +11,10 @@ import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
 import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
 import type { TrackEvent } from '../../src/core/types';
-import { MAX_SERIALIZED_REQUEST_BYTES } from '../../src/core/event-validation';
+import {
+  MAX_KEEPALIVE_REQUEST_BYTES,
+  MAX_SERIALIZED_REQUEST_BYTES,
+} from '../../src/core/event-validation';
 import { CLIENT_KEY, ENDPOINT } from '../helpers';
 
 const FIXED_NOW = new Date('2026-07-13T12:00:00.000Z');
@@ -77,6 +82,34 @@ function durableStoreResult(events: TrackEvent[]): OfflineStoreResult {
   };
 }
 
+function prependPendingEvent(
+  eventQueue: EventQueue,
+  event: TrackEvent,
+  durableRecordId?: number
+): void {
+  const internals = eventQueue as unknown as {
+    queue: Array<{ event: TrackEvent; durableRecordId?: number }>;
+  };
+  internals.queue.unshift({
+    event,
+    ...(durableRecordId === undefined ? {} : { durableRecordId }),
+  });
+}
+
+function installConsentFence(
+  eventQueue: EventQueue,
+  promise: Promise<void>
+): void {
+  const internals = eventQueue as unknown as {
+    consentFence: Promise<void>;
+    consentFencePending: boolean;
+  };
+  internals.consentFencePending = true;
+  internals.consentFence = promise.finally(() => {
+    internals.consentFencePending = false;
+  });
+}
+
 describe('EventQueue', () => {
   let config: ResolvedConfig;
   let transport: Transport;
@@ -108,6 +141,7 @@ describe('EventQueue', () => {
   afterEach(() => {
     queue.stop();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   describe('enqueue()', () => {
@@ -1295,6 +1329,678 @@ describe('EventQueue', () => {
       expect(queue.length).toBe(0);
     });
 
+    it('should send at most one conservatively bounded keepalive batch', async () => {
+      const boundedQueue = new EventQueue(
+        createConfig({ batchSize: 100 }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      for (let index = 0; index < 3; index += 1) {
+        boundedQueue.enqueue(createEvent({
+          event: `keepalive_${index}`,
+          messageId: `keepalive-msg-${index}`,
+          properties: { value: { payload: 'x'.repeat(20_000) } },
+        }));
+      }
+
+      const report = await boundedQueue.flushOnUnload();
+
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      const payload = keepaliveSpy.mock.calls[0][1];
+      expect(new TextEncoder().encode(JSON.stringify(payload)).byteLength)
+        .toBeLessThanOrEqual(MAX_KEEPALIVE_REQUEST_BYTES);
+      expect(report.delivered).toBe(2);
+      expect(report.pending.map((event) => event.messageId)).toEqual([
+        'keepalive-msg-2',
+      ]);
+      boundedQueue.stop();
+    });
+
+    it('should latch sequential lifecycle signals to one keepalive attempt', async () => {
+      const boundedQueue = new EventQueue(
+        createConfig({ batchSize: 100 }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      const normalSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('accepted');
+      const visibilityStateSpy = vi
+        .spyOn(document, 'visibilityState', 'get')
+        .mockReturnValue('hidden');
+      await boundedQueue.start();
+      for (let index = 0; index < 3; index += 1) {
+        boundedQueue.enqueue(createEvent({
+          event: `sequential_lifecycle_${index}`,
+          messageId: `sequential-lifecycle-msg-${index}`,
+          properties: { value: { payload: 'x'.repeat(20_000) } },
+        }));
+      }
+
+      document.dispatchEvent(new Event('visibilitychange'));
+      const firstLifecycleReport = await boundedQueue.flushOnUnload();
+
+      expect(firstLifecycleReport.delivered).toBe(2);
+      expect(boundedQueue.length).toBe(1);
+      window.dispatchEvent(new Event('pagehide'));
+      window.dispatchEvent(new Event('beforeunload'));
+      await Promise.resolve();
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+
+      const hiddenReport = await boundedQueue.flush();
+
+      expect(normalSpy).not.toHaveBeenCalled();
+      expect(hiddenReport.delivered).toBe(0);
+      expect(hiddenReport.pending).toHaveLength(1);
+      visibilityStateSpy.mockReturnValue('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      const normalReport = await boundedQueue.flush();
+      expect(normalSpy).toHaveBeenCalledTimes(1);
+      expect(normalReport.delivered).toBe(1);
+      expect(normalReport.pending).toEqual([]);
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      visibilityStateSpy.mockRestore();
+      boundedQueue.stop();
+    });
+
+    it('should stay lifecycle-armed until a BFCache resume and then re-arm', async () => {
+      const boundedQueue = new EventQueue(
+        createConfig({ batchSize: 100 }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      const normalSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('accepted');
+      await boundedQueue.start();
+      for (let index = 0; index < 3; index += 1) {
+        boundedQueue.enqueue(createEvent({
+          event: `bfcache_cycle_${index}`,
+          messageId: `bfcache-cycle-msg-${index}`,
+          properties: { value: { payload: 'x'.repeat(20_000) } },
+        }));
+      }
+
+      window.dispatchEvent(new Event('pagehide'));
+      const firstLifecycleReport = await boundedQueue.flushOnUnload();
+
+      expect(firstLifecycleReport.delivered).toBe(2);
+      await expect(boundedQueue.flush()).resolves.toMatchObject({
+        delivered: 0,
+      });
+      expect(normalSpy).not.toHaveBeenCalled();
+      expect(() => boundedQueue.enqueue(createEvent({
+        event: 'rejected_while_suspended',
+      }))).toThrow(
+        'APDL: cannot enqueue while the document lifecycle is suspended'
+      );
+
+      const pageShow = new Event('pageshow');
+      Object.defineProperty(pageShow, 'persisted', { value: true });
+      window.dispatchEvent(pageShow);
+
+      const resumedReport = await boundedQueue.flush();
+      expect(resumedReport.delivered).toBe(1);
+      boundedQueue.enqueue(createEvent({
+        event: 'accepted_after_bfcache_resume',
+        messageId: 'accepted-after-bfcache-resume',
+      }));
+      window.dispatchEvent(new Event('pagehide'));
+      const secondLifecycleReport = await boundedQueue.flushOnUnload();
+
+      expect(secondLifecycleReport.delivered).toBe(1);
+      expect(keepaliveSpy).toHaveBeenCalledTimes(2);
+      boundedQueue.stop();
+    });
+
+    it('should synchronously reject a later pagehide listener enqueue', async () => {
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
+      let observedError: unknown;
+      const laterPagehideListener = () => {
+        try {
+          queue.enqueue(createEvent({
+            event: 'too_late_for_lifecycle_snapshot',
+            messageId: 'too-late-for-lifecycle-snapshot',
+          }));
+        } catch (error) {
+          observedError = error;
+        }
+      };
+      window.addEventListener('pagehide', laterPagehideListener);
+
+      window.dispatchEvent(new Event('pagehide'));
+      await queue.flushOnUnload();
+
+      expect(observedError).toBeInstanceOf(Error);
+      expect((observedError as Error).message).toBe(
+        'APDL: cannot enqueue while the document lifecycle is suspended'
+      );
+      expect(queue.length).toBe(0);
+      window.removeEventListener('pagehide', laterPagehideListener);
+    });
+
+    it('should retain a valid event that exceeds only the keepalive budget', async () => {
+      const boundedQueue = new EventQueue(
+        createConfig({ batchSize: 100 }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      boundedQueue.enqueue(createEvent({
+        event: 'larger_than_keepalive',
+        messageId: 'larger-than-keepalive',
+        properties: { value: { payload: 'x'.repeat(50_000) } },
+      }));
+
+      const report = await boundedQueue.flushOnUnload();
+
+      expect(keepaliveSpy).not.toHaveBeenCalled();
+      expect(report.delivered).toBe(0);
+      expect(report.dropped).toEqual([]);
+      expect(report.pending.map((event) => event.messageId)).toEqual([
+        'larger-than-keepalive',
+      ]);
+      boundedQueue.stop();
+    });
+
+    it('should start durable batch and overflow ownership before awaiting keepalive', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ batchSize: 100, persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const callOrder: string[] = [];
+      const acknowledgeStoredSpy = vi
+        .spyOn(storage, 'acknowledgeStored')
+        .mockResolvedValue(2);
+      const storeSpy = vi.spyOn(storage, 'store').mockImplementation(
+        async (events) => {
+          callOrder.push('store');
+          return durableStoreResult(events);
+        }
+      );
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockImplementation(async () => {
+          callOrder.push('keepalive');
+          return 'accepted';
+        });
+      for (let index = 0; index < 3; index += 1) {
+        persistentQueue.enqueue(createEvent({
+          event: `durable_overflow_${index}`,
+          messageId: `durable-overflow-msg-${index}`,
+          properties: { value: { payload: 'x'.repeat(20_000) } },
+        }));
+      }
+
+      const drain = persistentQueue.flushOnUnload();
+
+      expect(callOrder).toEqual(['store', 'keepalive']);
+      const report = await drain;
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(storeSpy.mock.calls[0][0].map((event) => event.messageId)).toEqual([
+        'durable-overflow-msg-0',
+        'durable-overflow-msg-1',
+        'durable-overflow-msg-2',
+      ]);
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      expect(acknowledgeStoredSpy).toHaveBeenCalledWith([
+        'durable-overflow-msg-0',
+        'durable-overflow-msg-1',
+      ]);
+      expect(report).toMatchObject({
+        delivered: 2,
+        persisted: 1,
+        pending: [],
+        dropped: [],
+      });
+      persistentQueue.stop();
+    });
+
+    it('should report exact unload-overflow storage dispositions', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ batchSize: 100, persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      vi.spyOn(transport, 'sendKeepalive').mockResolvedValue('accepted');
+      vi.spyOn(storage, 'store').mockImplementation(async (events) => ({
+        stored: [
+          { event: events[0], durability: 'durable' },
+          { event: events[1], durability: 'durable' },
+        ],
+        evicted: [{
+          event: events[2],
+          reason: 'offline_count_limit',
+        }],
+        rejected: [{
+          event: events[3],
+          reason: 'offline_storage_failure',
+        }],
+      }));
+      for (let index = 0; index < 4; index += 1) {
+        persistentQueue.enqueue(createEvent({
+          event: `overflow_disposition_${index}`,
+          messageId: `overflow-disposition-msg-${index}`,
+          properties: { value: { payload: 'x'.repeat(20_000) } },
+        }));
+      }
+
+      const report = await persistentQueue.flushOnUnload();
+
+      expect(report.delivered).toBe(2);
+      expect(report.persisted).toBe(0);
+      expect(report.pending.map((event) => event.messageId)).toEqual([
+        'overflow-disposition-msg-3',
+      ]);
+      expect(report.dropped).toEqual([
+        {
+          category: 'evicted',
+          reason: 'offline_count_limit',
+          event: expect.objectContaining({
+            messageId: 'overflow-disposition-msg-2',
+          }),
+        },
+      ]);
+      persistentQueue.stop();
+    });
+
+    it('should take over an active normal request in the same lifecycle task', async () => {
+      const takeoverQueue = new EventQueue(
+        createConfig({ batchSize: 100 }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      let normalSignal: AbortSignal | undefined;
+      const sendSpy = vi.spyOn(transport, 'send').mockImplementation(
+        (_url, _payload, signal) => new Promise((resolve) => {
+          normalSignal = signal;
+          signal?.addEventListener('abort', () => resolve('retryable'), {
+            once: true,
+          });
+        })
+      );
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      takeoverQueue.enqueue(createEvent({
+        event: 'navigation_takeover',
+        messageId: 'navigation-takeover',
+      }));
+      const normalDrain = takeoverQueue.flush();
+      await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledTimes(1));
+
+      const unloadDrain = takeoverQueue.flushOnUnload();
+
+      expect(normalSignal?.aborted).toBe(true);
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      const unloadReport = await unloadDrain;
+      const normalReport = await normalDrain;
+      expect(unloadReport).toMatchObject({
+        delivered: 1,
+        persisted: 0,
+        pending: [],
+      });
+      expect(normalReport.delivered).toBe(0);
+      const payload = keepaliveSpy.mock.calls[0][1] as {
+        events: Array<{ message_id: string }>;
+      };
+      expect(payload.events.map((event) => event.message_id)).toEqual([
+        'navigation-takeover',
+      ]);
+      expect(takeoverQueue.length).toBe(0);
+      takeoverQueue.stop();
+    });
+
+    it('should let pagehide win while a normal drain awaits the consent fence', async () => {
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
+      queue.enqueue(createEvent({
+        event: 'blocked_consent_fence',
+        messageId: 'blocked-consent-fence',
+      }));
+      let releaseFence!: () => void;
+      installConsentFence(queue, new Promise<void>((resolve) => {
+        releaseFence = resolve;
+      }));
+      const normalSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('accepted');
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+
+      const normalDrain = queue.flush();
+      await Promise.resolve();
+      window.dispatchEvent(new Event('pagehide'));
+      const lifecycleDrain = queue.flushOnUnload();
+
+      expect(normalSpy).not.toHaveBeenCalled();
+      expect(keepaliveSpy).not.toHaveBeenCalled();
+      releaseFence();
+      await vi.waitFor(() => expect(keepaliveSpy).toHaveBeenCalledTimes(1));
+      const [normalReport, lifecycleReport] = await Promise.all([
+        normalDrain,
+        lifecycleDrain,
+      ]);
+      expect(normalSpy).not.toHaveBeenCalled();
+      expect(normalReport.delivered).toBe(0);
+      expect(lifecycleReport.delivered).toBe(1);
+    });
+
+    it('should expose a prepared batch to pagehide while local ACK is blocked', async () => {
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
+      queue.enqueue(createEvent({
+        event: 'valid_after_local_ack',
+        messageId: 'valid-after-local-ack',
+      }));
+      const invalidDurable = createEvent({
+        event: 'invalid_durable_before_ack',
+        messageId: 'invalid-durable-before-ack',
+      });
+      invalidDurable.properties = { poison: BigInt(1) };
+      prependPendingEvent(queue, invalidDurable, 41);
+
+      let releaseAcknowledge!: () => void;
+      const acknowledgeSpy = vi.spyOn(storage, 'acknowledge')
+        .mockImplementationOnce(
+          () => new Promise<number>((resolve) => {
+            releaseAcknowledge = () => resolve(1);
+          })
+        )
+        .mockResolvedValue(1);
+      const normalSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('accepted');
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+
+      const normalDrain = queue.flush();
+      await vi.waitFor(() => expect(acknowledgeSpy).toHaveBeenCalledWith([41]));
+      window.dispatchEvent(new Event('pagehide'));
+      const lifecycleDrain = queue.flushOnUnload();
+
+      expect(normalSpy).not.toHaveBeenCalled();
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      releaseAcknowledge();
+      const [normalReport, lifecycleReport] = await Promise.all([
+        normalDrain,
+        lifecycleDrain,
+      ]);
+      expect(normalReport.delivered).toBe(0);
+      expect(lifecycleReport.delivered).toBe(1);
+      expect(queue.length).toBe(0);
+    });
+
+    it('should preserve mixed retryables for pagehide while release is blocked', async () => {
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
+      const durable = createEvent({
+        event: 'durable_retryable',
+        messageId: 'durable-retryable',
+      });
+      prependPendingEvent(queue, durable, 73);
+      queue.enqueue(createEvent({
+        event: 'volatile_retryable',
+        messageId: 'volatile-retryable',
+      }));
+
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      let releaseDurable!: () => void;
+      const releaseSpy = vi.spyOn(storage, 'release').mockImplementation(
+        () => new Promise<number>((resolve) => {
+          releaseDurable = () => resolve(1);
+        })
+      );
+      vi.spyOn(storage, 'acknowledge').mockResolvedValue(1);
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+
+      const normalDrain = queue.flush();
+      await vi.waitFor(() => expect(releaseSpy).toHaveBeenCalledWith([73]));
+      expect(queue.getQueue().map((event) => event.messageId)).toEqual([
+        'durable-retryable',
+        'volatile-retryable',
+      ]);
+
+      window.dispatchEvent(new Event('pagehide'));
+      const lifecycleDrain = queue.flushOnUnload();
+
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      const payload = keepaliveSpy.mock.calls[0][1] as {
+        events: Array<{ message_id: string }>;
+      };
+      expect(payload.events.map((event) => event.message_id)).toEqual([
+        'durable-retryable',
+        'volatile-retryable',
+      ]);
+      releaseDurable();
+      const [normalReport, lifecycleReport] = await Promise.all([
+        normalDrain,
+        lifecycleDrain,
+      ]);
+      expect(normalReport.delivered).toBe(0);
+      expect(lifecycleReport.delivered).toBe(2);
+      expect(queue.length).toBe(0);
+    });
+
+    it('should remove an accepted durable record after a pending release', async () => {
+      vi.useRealTimers();
+      vi.stubGlobal('indexedDB', new IDBFactory());
+      const raceConfig = createConfig({
+        endpoint: 'https://h04-release-race.test',
+        persistence: 'localStorage',
+      });
+      const raceStorage = new OfflineStorage({
+        deploymentOrigin: raceConfig.endpoint,
+        projectId: raceConfig.projectId,
+        persistence: 'localStorage',
+      });
+      const raceQueue = new EventQueue(
+        raceConfig,
+        transport,
+        raceStorage,
+        scrubber,
+        consentManager
+      );
+      const durable = createEvent({
+        event: 'accepted_during_pending_release',
+        messageId: 'accepted-during-pending-release',
+      });
+      await raceStorage.store([durable]);
+      const [claim] = await raceStorage.claim(1);
+      if (claim === undefined) throw new Error('expected one durable claim');
+      prependPendingEvent(raceQueue, durable, claim.id);
+
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      vi.spyOn(transport, 'sendKeepalive').mockResolvedValue('accepted');
+      const originalRelease = raceStorage.release.bind(raceStorage);
+      let releaseGate!: () => void;
+      const waitForRelease = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const releaseSpy = vi.spyOn(raceStorage, 'release').mockImplementation(
+        (ids) => {
+          const release = originalRelease(ids);
+          return release.then(async (count) => {
+            await waitForRelease;
+            return count;
+          });
+        }
+      );
+
+      const normalDrain = raceQueue.flush();
+      await vi.waitFor(() => expect(releaseSpy).toHaveBeenCalledWith([claim.id]));
+      const lifecycleDrain = raceQueue.flushOnUnload();
+      const lifecycleReport = await lifecycleDrain;
+
+      expect(lifecycleReport.delivered).toBe(1);
+      await vi.waitFor(async () => {
+        expect(await raceStorage.count()).toBe(0);
+      });
+      releaseGate();
+      await normalDrain;
+      expect(await raceStorage.claim(1)).toEqual([]);
+      raceQueue.stop();
+    });
+
+    it('should inherit a pending store and report real bound eviction exactly once', async () => {
+      vi.useRealTimers();
+      vi.stubGlobal('indexedDB', new IDBFactory());
+      const boundConfig = createConfig({
+        endpoint: 'https://h04-pending-store-bound.test',
+        persistence: 'localStorage',
+      });
+      const boundStorage = new OfflineStorage({
+        deploymentOrigin: boundConfig.endpoint,
+        projectId: boundConfig.projectId,
+        persistence: 'localStorage',
+      });
+      const boundQueue = new EventQueue(
+        boundConfig,
+        transport,
+        boundStorage,
+        scrubber,
+        consentManager
+      );
+      const backlog = Array.from(
+        { length: MAX_OFFLINE_EVENTS_PER_PROJECT },
+        (_, index) => createEvent({
+          event: `pending_store_backlog_${index}`,
+          messageId: `pending-store-backlog-${index}`,
+        })
+      );
+      await boundStorage.store(backlog);
+      const [oldestClaim] = await boundStorage.claim(1);
+      if (oldestClaim === undefined) {
+        throw new Error('expected the oldest bounded durable claim');
+      }
+      expect(oldestClaim.event.messageId).toBe('pending-store-backlog-0');
+      prependPendingEvent(
+        boundQueue,
+        oldestClaim.event,
+        oldestClaim.id
+      );
+      const volatile = createEvent({
+        event: 'pending_store_volatile',
+        messageId: 'pending-store-volatile',
+      });
+      boundQueue.enqueue(volatile);
+
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      vi.spyOn(transport, 'sendKeepalive').mockResolvedValue('retryable');
+      const originalStore = boundStorage.store.bind(boundStorage);
+      let storeGate!: () => void;
+      const waitForStore = new Promise<void>((resolve) => {
+        storeGate = resolve;
+      });
+      const storeSpy = vi.spyOn(boundStorage, 'store').mockImplementation(
+        (events) => {
+          const store = originalStore(events);
+          return store.then(async (result) => {
+            await waitForStore;
+            return result;
+          });
+        }
+      );
+
+      const normalDrain = boundQueue.flush();
+      await vi.waitFor(() => expect(storeSpy).toHaveBeenCalledTimes(1));
+      const lifecycleDrain = boundQueue.flushOnUnload();
+
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      storeGate();
+      const [normalReport, lifecycleReport] = await Promise.all([
+        normalDrain,
+        lifecycleDrain,
+      ]);
+
+      expect(normalReport.delivered).toBe(0);
+      expect(storeSpy).toHaveBeenCalledTimes(1);
+      expect(lifecycleReport.persisted).toBe(1);
+      expect(lifecycleReport.dropped).toEqual([
+        {
+          category: 'evicted',
+          reason: 'offline_count_limit',
+          event: expect.objectContaining({
+            messageId: 'pending-store-backlog-0',
+          }),
+        },
+      ]);
+      expect(lifecycleReport.pending).toEqual([]);
+      expect(await boundStorage.count()).toBe(
+        MAX_OFFLINE_EVENTS_PER_PROJECT
+      );
+      const retained = await boundStorage.claim(
+        MAX_OFFLINE_EVENTS_PER_PROJECT
+      );
+      expect(
+        retained.filter(
+          ({ event }) => event.messageId === volatile.messageId
+        )
+      ).toHaveLength(1);
+      expect(
+        retained.some(
+          ({ event }) => event.messageId === oldestClaim.event.messageId
+        )
+      ).toBe(false);
+      await boundStorage.acknowledge(retained.map(({ id }) => id));
+      boundQueue.stop();
+    });
+
+    it('should not await an unfinished offline restore before keepalive starts', async () => {
+      vi.spyOn(storage, 'claim').mockImplementation(
+        () => new Promise(() => undefined)
+      );
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      void queue.start();
+      queue.enqueue(createEvent({
+        event: 'restore_independent',
+        messageId: 'restore-independent',
+      }));
+
+      const drain = queue.flushOnUnload();
+
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      await expect(drain).resolves.toMatchObject({
+        delivered: 1,
+        pending: [],
+      });
+    });
+
     it('should try offline storage if the keepalive request fails', async () => {
       const persistentQueue = new EventQueue(
         createConfig({ persistence: 'localStorage' }),
@@ -1315,27 +2021,50 @@ describe('EventQueue', () => {
       persistentQueue.stop();
     });
 
-    it('should isolate a keepalive payload rejection', async () => {
+    it('should preserve a lifecycle payload rejection for one later normal drain', async () => {
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
       const keepaliveSpy = vi
         .spyOn(transport, 'sendKeepalive')
-        .mockImplementation(async (_url, payload) => {
-          const events = (payload as {
-            events: Array<{ event: string }>;
-          }).events;
-          return events.some((item) => item.event === 'invalid')
-            ? 'payload_rejected'
-            : 'accepted';
-        });
+        .mockResolvedValue('payload_rejected');
       queue.enqueue(createEvent({ event: 'valid', messageId: 'msg-valid' }));
       queue.enqueue(createEvent({ event: 'invalid', messageId: 'msg-invalid' }));
 
       const report = await queue.flushOnUnload();
 
-      expect(keepaliveSpy).toHaveBeenCalledTimes(3);
-      expect(report.delivered).toBe(1);
-      expect(report.permanentRejections.map((item) => item.messageId)).toEqual([
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      expect(report.delivered).toBe(0);
+      expect(report.permanentRejections).toEqual([]);
+      expect(report.pending.map((item) => item.messageId)).toEqual([
+        'msg-valid',
         'msg-invalid',
       ]);
+
+      window.dispatchEvent(new Event('pageshow'));
+      const normalSpy = vi
+        .spyOn(transport, 'send')
+        .mockResolvedValue('accepted');
+      const normalReport = await queue.flush();
+      expect(normalSpy).toHaveBeenCalledTimes(1);
+      expect(normalReport.delivered).toBe(2);
+      expect(normalReport.pending).toEqual([]);
+    });
+
+    it('should flush synchronously when a real pagehide event is dispatched', async () => {
+      const keepaliveSpy = vi
+        .spyOn(transport, 'sendKeepalive')
+        .mockResolvedValue('accepted');
+      vi.spyOn(storage, 'claim').mockResolvedValue([]);
+      await queue.start();
+      queue.enqueue(createEvent({
+        event: 'pagehide_event',
+        messageId: 'pagehide-event',
+      }));
+
+      window.dispatchEvent(new Event('pagehide'));
+
+      expect(keepaliveSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(queue.length).toBe(0));
     });
   });
 
