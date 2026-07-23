@@ -217,7 +217,9 @@ errors, HTTP 408/425/429, and 5xx retain the same stable
 message IDs for retry; other non-2xx responses are permanent and cannot poison
 later queue entries. If both a retryable send and offline persistence fail, the
 batch is requeued once in memory and returned in the drain's `pending` report;
-the SDK does not spin or silently discard it.
+the SDK does not spin or silently discard it. IndexedDB overflow is also
+explicit: each count/byte eviction is returned in `DeliveryReport.dropped`
+with the evicted event and one canonical reason.
 
 ## User Identification
 
@@ -364,8 +366,10 @@ project's records on the same origin, and current analytics consent is checked
 again before any retained event is restored. Legacy, invalid, and expired
 records are discarded. Each project retains at most the newest 1,000 events and
 5 MiB of UTF-8 JSON event payloads; older records are evicted deterministically
-without counting or deleting another project's records. A single oversized or
-non-JSON-serializable event is not retained.
+without counting or deleting another project's records. Active leases are
+never evicted. Every overflow or invalid-storage rejection is returned in the
+immutable delivery report rather than counted as persisted. A single oversized
+or non-JSON-serializable event is not retained.
 
 ## Local UI Renderer (No 0.3.0 Backend Delivery)
 
@@ -398,6 +402,7 @@ const report = await apdl.debug.flush();
 
 console.log(report.delivered, report.persisted);
 console.log(report.permanentRejections, report.pending);
+console.log(report.dropped);
 
 const finalReport = await apdl.shutdown();
 ```
@@ -405,7 +410,11 @@ const finalReport = await apdl.shutdown();
 `flush()` drains all currently owned in-memory events, and concurrent flushes
 join the same operation. Its frozen `DeliveryReport` distinguishes delivered,
 offline-persisted, permanently rejected, consent-discarded, and still-pending
-events. `shutdown()` stops accepting tracking immediately, joins concurrent
+events. Its `dropped` entries separately identify offline evictions and invalid
+storage rejections by stable event `messageId`; `persisted` counts only records
+that survived in durable IndexedDB. The exact eviction reasons are
+`offline_count_limit` and `offline_byte_limit`; an invalid storage candidate is
+reported as `offline_invalid_event`. `shutdown()` stops accepting tracking immediately, joins concurrent
 callers, tears down capture and SSE, and returns the final drain report. Calls
 to `track`, `identify`, `group`, `page`, or `reset` after shutdown throw.
 

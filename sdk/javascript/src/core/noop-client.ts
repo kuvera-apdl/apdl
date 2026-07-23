@@ -33,6 +33,7 @@ const emptyDeliveryReport = (): DeliveryReport => Object.freeze({
   permanentRejections: Object.freeze([]),
   discardedForConsent: 0,
   pending: Object.freeze([]),
+  dropped: Object.freeze([]),
 });
 
 /**

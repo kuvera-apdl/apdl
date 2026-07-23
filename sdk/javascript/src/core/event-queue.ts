@@ -1,5 +1,10 @@
 import type { ResolvedConfig } from './config';
-import type { DeliveryReport, EventContext, TrackEvent } from './types';
+import type {
+  DeliveryReport,
+  DroppedEvent,
+  EventContext,
+  TrackEvent,
+} from './types';
 import { Transport } from './transport';
 import { OfflineStorage } from './storage';
 import type { Scrubber } from '../privacy/scrubber';
@@ -33,6 +38,8 @@ interface DeliveryAccumulator {
   persisted: number;
   permanentRejections: TrackEvent[];
   discardedForConsent: number;
+  dropped: DroppedEvent[];
+  volatilePending: TrackEvent[];
 }
 
 interface PendingEvent {
@@ -443,6 +450,8 @@ export class EventQueue {
       persisted: 0,
       permanentRejections: [],
       discardedForConsent: 0,
+      dropped: [],
+      volatilePending: [],
     };
     if (this.startPromise !== null && !this.startComplete) {
       await this.startPromise;
@@ -453,7 +462,8 @@ export class EventQueue {
       if (this.queue.length === 0) {
         if (
           !stopAfterRetryableFailure &&
-          this.startPromise !== null &&
+          (this.startPromise !== null ||
+            this.config.persistence !== 'memory') &&
           (await this.claimOfflineEvents()) > 0
         ) {
           continue;
@@ -590,7 +600,7 @@ export class EventQueue {
           );
         }
         try {
-          await this.storage.store(
+          const storageResult = await this.storage.store(
             volatileRetryable.map((pending) => pending.event)
           );
           if (
@@ -600,8 +610,45 @@ export class EventQueue {
             await this.storage.clear();
             report.discardedForConsent += delivery.retryableEvents.length;
           } else {
-            report.persisted +=
-              durableRetryable.length + volatileRetryable.length;
+            const evictedMessageIds = new Set(
+              storageResult.evicted.map(({ event }) => event.messageId)
+            );
+            report.persisted += durableRetryable.filter(
+              ({ event }) => !evictedMessageIds.has(event.messageId)
+            ).length;
+            report.persisted += storageResult.stored.filter(
+              ({ durability }) => durability === 'durable'
+            ).length;
+            report.volatilePending.push(
+              ...storageResult.stored
+                .filter(({ durability }) => durability === 'memory')
+                .map(({ event }) => event)
+            );
+            report.dropped.push(
+              ...storageResult.evicted.map(({ event, reason }) => ({
+                category: 'evicted' as const,
+                reason,
+                event,
+              }))
+            );
+
+            const storageFailurePending: PendingEvent[] = [];
+            for (const rejection of storageResult.rejected) {
+              if (rejection.reason === 'offline_storage_failure') {
+                storageFailurePending.push({ event: rejection.event });
+              } else {
+                report.dropped.push({
+                  category: 'rejected',
+                  reason: rejection.reason,
+                  event: rejection.event,
+                });
+              }
+            }
+            if (storageFailurePending.length > 0) {
+              this.queue.unshift(...storageFailurePending);
+              this.inFlightEventCount = 0;
+              break;
+            }
           }
           this.inFlightEventCount = 0;
         } catch (err) {
@@ -623,6 +670,10 @@ export class EventQueue {
             break;
           }
         }
+        // A retryable transport outcome ends this drain. Events accepted
+        // behind the failed batch remain visibly pending, and a later flush
+        // receives a fresh, exact storage disposition for them.
+        break;
       } else {
         this.inFlightEventCount = 0;
       }
@@ -740,9 +791,17 @@ export class EventQueue {
     const permanentRejections = report.permanentRejections.map((event) =>
       deepFreeze(canonicalizeTrackEvent(event))
     );
-    const pending = this.queue.map((item) =>
-      deepFreeze(canonicalizeTrackEvent(item.event))
-    );
+    const pending = [
+      ...report.volatilePending,
+      ...this.queue.map((item) => item.event),
+    ].map((event) => deepFreeze(canonicalizeTrackEvent(event)));
+    const dropped = report.dropped.map((item) =>
+      deepFreeze({
+        category: item.category,
+        reason: item.reason,
+        event: canonicalizeTrackEvent(item.event),
+      })
+    ) as DroppedEvent[];
 
     return Object.freeze({
       delivered: report.delivered,
@@ -750,6 +809,7 @@ export class EventQueue {
       permanentRejections: Object.freeze(permanentRejections),
       discardedForConsent: report.discardedForConsent,
       pending: Object.freeze(pending),
+      dropped: Object.freeze(dropped),
     });
   }
 

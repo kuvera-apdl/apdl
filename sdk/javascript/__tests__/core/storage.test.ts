@@ -73,6 +73,16 @@ async function readRawRecords(): Promise<Array<Record<string, unknown>>> {
   });
 }
 
+async function databaseFor(storage: OfflineStorage): Promise<IDBDatabase> {
+  const db = await (
+    storage as unknown as {
+      dbPromise: Promise<IDBDatabase | null>;
+    }
+  ).dbPromise;
+  if (db === null) throw new Error('expected IndexedDB storage');
+  return db;
+}
+
 async function addRawRecord(record: Record<string, unknown>): Promise<void> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
@@ -157,9 +167,17 @@ describe('OfflineStorage', () => {
     });
     const event = createEvent('memory_only_event');
 
-    await storage.store([event]);
+    const result = await storage.store([event]);
 
     expect(open).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      stored: [{ event, durability: 'memory' }],
+      evicted: [],
+      rejected: [],
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.stored)).toBe(true);
+    expect(Object.isFrozen(result.stored[0])).toBe(true);
     expect(await storage.count()).toBe(1);
     expect(await claimAndAcknowledge(storage)).toEqual([event]);
   });
@@ -309,9 +327,21 @@ describe('OfflineStorage', () => {
     );
 
     await projectB.store([projectBEvent]);
-    await projectA.store(projectAEvents);
+    const result = await projectA.store(projectAEvents);
 
     const retained = await claimAndAcknowledge(projectA);
+    expect(result.stored).toHaveLength(MAX_OFFLINE_EVENTS_PER_PROJECT);
+    expect(result.evicted).toEqual([
+      {
+        event: projectAEvents[0],
+        reason: 'offline_count_limit',
+      },
+      {
+        event: projectAEvents[1],
+        reason: 'offline_count_limit',
+      },
+    ]);
+    expect(result.rejected).toEqual([]);
     expect(retained).toHaveLength(MAX_OFFLINE_EVENTS_PER_PROJECT);
     expect(retained[0].event).toBe('bounded_2');
     expect(retained.at(-1)?.event).toBe(
@@ -330,9 +360,18 @@ describe('OfflineStorage', () => {
       MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
     );
 
-    await storage.store(events);
+    const result = await storage.store(events);
 
     const retained = await claimAndAcknowledge(storage);
+    expect(result.stored).toHaveLength(retained.length);
+    expect(result.stored.every(({ durability }) => durability === 'durable'))
+      .toBe(true);
+    expect(result.evicted).toHaveLength(events.length - retained.length);
+    expect(
+      result.evicted.every(
+        ({ reason }) => reason === 'offline_byte_limit'
+      )
+    ).toBe(true);
     expect(retained.length).toBeLessThan(events.length);
     expect(retained.reduce((total, event) => total + serializedBytes(event), 0)).toBeLessThanOrEqual(
       MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
@@ -340,13 +379,47 @@ describe('OfflineStorage', () => {
     expect(retained.at(-1)?.event).toBe('large_event_89');
     expect(retained[0].event).toBe(`large_event_${events.length - retained.length}`);
 
-    await storage.store([
-      createLargeEvent(
-        'single_oversized_event',
-        MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
-      ),
-    ]);
+    const oversized = createLargeEvent(
+      'single_oversized_event',
+      MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
+    );
+    const oversizedResult = await storage.store([oversized]);
+    expect(oversizedResult).toEqual({
+      stored: [],
+      evicted: [],
+      rejected: [
+        {
+          event: oversized,
+          reason: 'offline_invalid_event',
+        },
+      ],
+    });
     expect(await storage.count()).toBe(0);
+  });
+
+  it('never evicts an active lease while reporting displaced new records', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const leasedEvent = createEvent('actively_leased');
+    await storage.store([leasedEvent]);
+    const [lease] = await storage.claim(1);
+    const newEvents = Array.from(
+      { length: MAX_OFFLINE_EVENTS_PER_PROJECT + 1 },
+      (_, index) => createEvent(`lease_pressure_${index}`)
+    );
+
+    const result = await storage.store(newEvents);
+
+    expect(result.evicted).toContainEqual({
+      event: newEvents[0],
+      reason: 'offline_count_limit',
+    });
+    expect(result.evicted.map(({ event }) => event.messageId))
+      .not.toContain(leasedEvent.messageId);
+    expect(await storage.count()).toBe(
+      MAX_OFFLINE_EVENTS_PER_PROJECT + 1
+    );
+    expect(await storage.acknowledge([lease.id])).toBe(1);
+    expect(await storage.count()).toBe(MAX_OFFLINE_EVENTS_PER_PROJECT);
   });
 
   it('enforces count and byte bounds in the memory fallback', async () => {
@@ -357,8 +430,22 @@ describe('OfflineStorage', () => {
       (_, index) => createEvent(`memory_count_${index}`)
     );
 
-    await countStorage.store(countEvents);
+    const countResult = await countStorage.store(countEvents);
     const countRetained = await claimAndAcknowledge(countStorage);
+    expect(countResult.stored).toHaveLength(
+      MAX_OFFLINE_EVENTS_PER_PROJECT
+    );
+    expect(
+      countResult.stored.every(
+        ({ durability }) => durability === 'memory'
+      )
+    ).toBe(true);
+    expect(countResult.evicted).toEqual([
+      {
+        event: countEvents[0],
+        reason: 'offline_count_limit',
+      },
+    ]);
     expect(countRetained).toHaveLength(MAX_OFFLINE_EVENTS_PER_PROJECT);
     expect(countRetained[0].event).toBe('memory_count_1');
 
@@ -368,9 +455,15 @@ describe('OfflineStorage', () => {
       (_, index) => createLargeEvent(`memory_large_${index}`, 60_000)
     );
 
-    await byteStorage.store(byteEvents);
+    const byteResult = await byteStorage.store(byteEvents);
 
     const byteRetained = await claimAndAcknowledge(byteStorage);
+    expect(byteResult.stored).toHaveLength(byteRetained.length);
+    expect(
+      byteResult.evicted.every(
+        ({ reason }) => reason === 'offline_byte_limit'
+      )
+    ).toBe(true);
     expect(byteRetained.length).toBeLessThan(byteEvents.length);
     expect(byteRetained.reduce((total, event) => total + serializedBytes(event), 0)).toBeLessThanOrEqual(
       MAX_OFFLINE_SERIALIZED_BYTES_PER_PROJECT
@@ -384,12 +477,58 @@ describe('OfflineStorage', () => {
     circularProperties.self = circularProperties;
     const serializableEvent = createEvent('serializable_event');
 
-    await storage.store([
-      createEvent('circular_event', circularProperties),
-      serializableEvent,
-    ]);
+    const circularEvent = createEvent('circular_event', circularProperties);
+    const result = await storage.store([circularEvent, serializableEvent]);
 
+    expect(result.stored).toEqual([
+      { event: serializableEvent, durability: 'durable' },
+    ]);
+    expect(result.evicted).toEqual([]);
+    expect(result.rejected).toEqual([
+      {
+        event: circularEvent,
+        reason: 'offline_invalid_event',
+      },
+    ]);
     expect(await claimAndAcknowledge(storage)).toEqual([serializableEvent]);
+  });
+
+  it('falls back atomically when a partial IndexedDB batch setup fails', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const db = await databaseFor(storage);
+    const probeTransaction = db.transaction('events', 'readonly');
+    const objectStorePrototype = Object.getPrototypeOf(
+      probeTransaction.objectStore('events')
+    ) as { add: IDBObjectStore['add'] };
+    const originalAdd = objectStorePrototype.add;
+    let addCount = 0;
+    vi.spyOn(objectStorePrototype, 'add').mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      key?: IDBValidKey
+    ) {
+      addCount += 1;
+      if (addCount === 2) {
+        throw new Error('simulated partial batch setup failure');
+      }
+      return key === undefined
+        ? originalAdd.call(this, value)
+        : originalAdd.call(this, value, key);
+    });
+    const events = [
+      createEvent('partial_failure_first'),
+      createEvent('partial_failure_second'),
+    ];
+
+    const result = await storage.store(events);
+
+    expect(result).toEqual({
+      stored: events.map((event) => ({ event, durability: 'memory' })),
+      evicted: [],
+      rejected: [],
+    });
+    expect(await readRawRecords()).toEqual([]);
+    expect(await claimAndAcknowledge(storage)).toEqual(events);
   });
 
   it('purges invalid and expired records without returning them', async () => {

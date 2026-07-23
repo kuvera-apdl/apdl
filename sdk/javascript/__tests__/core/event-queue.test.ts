@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventQueue } from '../../src/core/event-queue';
 import { Transport } from '../../src/core/transport';
-import { OfflineStorage } from '../../src/core/storage';
+import {
+  OfflineStorage,
+  type OfflineStoreResult,
+} from '../../src/core/storage';
 import { Scrubber } from '../../src/privacy/scrubber';
 import { ConsentManager } from '../../src/privacy/consent';
 import { resolveConfig, type ResolvedConfig } from '../../src/core/config';
@@ -63,6 +66,14 @@ function createEvent(overrides?: Partial<TrackEvent>): TrackEvent {
     messageId: `msg-${Math.random()}`,
     sessionId: 'sess-1',
     ...overrides,
+  };
+}
+
+function durableStoreResult(events: TrackEvent[]): OfflineStoreResult {
+  return {
+    stored: events.map((event) => ({ event, durability: 'durable' })),
+    evicted: [],
+    rejected: [],
   };
 }
 
@@ -729,7 +740,9 @@ describe('EventQueue', () => {
         consentManager
       );
       const sendSpy = vi.spyOn(transport, 'send').mockResolvedValue('retryable');
-      const storeSpy = vi.spyOn(storage, 'store').mockResolvedValue();
+      const storeSpy = vi
+        .spyOn(storage, 'store')
+        .mockImplementation(async (events) => durableStoreResult(events));
 
       persistentQueue.enqueue(createEvent({
         event: '$click',
@@ -843,7 +856,9 @@ describe('EventQueue', () => {
       const sendSpy = vi.spyOn(transport, 'send')
         .mockReturnValueOnce(firstOutcome)
         .mockResolvedValueOnce('accepted');
-      const storeSpy = vi.spyOn(storage, 'store').mockResolvedValue();
+      const storeSpy = vi
+        .spyOn(storage, 'store')
+        .mockResolvedValue(durableStoreResult([]));
 
       queue.enqueue(createEvent({ event: 'permanently_rejected', messageId: 'msg-rejected' }));
       const firstFlush = queue.flush();
@@ -1074,7 +1089,7 @@ describe('EventQueue', () => {
       vi.spyOn(transport, 'send').mockResolvedValue('retryable');
       const storeSpy = vi
         .spyOn(storage, 'store')
-        .mockResolvedValue(undefined);
+        .mockImplementation(async (events) => durableStoreResult(events));
 
       persistentQueue.enqueue(createEvent());
       persistentQueue.enqueue(createEvent({ messageId: 'retry-message-2' }));
@@ -1084,6 +1099,126 @@ describe('EventQueue', () => {
       const storedEvents = storeSpy.mock.calls[0][0] as TrackEvent[];
       expect(storedEvents).toHaveLength(2);
       expect(storedEvents[1].messageId).toBe('retry-message-2');
+      persistentQueue.stop();
+    });
+
+    it('reports exact stored, evicted, and rejected offline dispositions', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const countEvicted = createEvent({
+        event: 'count_evicted',
+        messageId: 'count-evicted',
+      });
+      const invalidRejected = createEvent({
+        event: 'invalid_rejected',
+        messageId: 'invalid-rejected',
+      });
+      const durable = createEvent({
+        event: 'durable_survivor',
+        messageId: 'durable-survivor',
+      });
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      vi.spyOn(storage, 'store').mockResolvedValue({
+        stored: [{ event: durable, durability: 'durable' }],
+        evicted: [
+          { event: countEvicted, reason: 'offline_count_limit' },
+        ],
+        rejected: [
+          { event: invalidRejected, reason: 'offline_invalid_event' },
+        ],
+      });
+      persistentQueue.enqueue(countEvicted);
+      persistentQueue.enqueue(invalidRejected);
+      persistentQueue.enqueue(durable);
+
+      const report = await persistentQueue.flush();
+
+      expect(report.persisted).toBe(1);
+      expect(report.pending).toEqual([]);
+      expect(report.dropped).toEqual([
+        {
+          category: 'evicted',
+          reason: 'offline_count_limit',
+          event: countEvicted,
+        },
+        {
+          category: 'rejected',
+          reason: 'offline_invalid_event',
+          event: invalidRejected,
+        },
+      ]);
+      expect(Object.isFrozen(report.dropped)).toBe(true);
+      expect(Object.isFrozen(report.dropped[0])).toBe(true);
+      expect(Object.isFrozen(report.dropped[0].event)).toBe(true);
+      persistentQueue.stop();
+    });
+
+    it('keeps storage failures pending instead of reporting them as persisted or dropped', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const event = createEvent({
+        event: 'storage_failure_pending',
+        messageId: 'storage-failure-pending',
+      });
+      vi.spyOn(transport, 'send').mockResolvedValue('retryable');
+      vi.spyOn(storage, 'store').mockResolvedValue({
+        stored: [],
+        evicted: [],
+        rejected: [
+          { event, reason: 'offline_storage_failure' },
+        ],
+      });
+      persistentQueue.enqueue(event);
+
+      const report = await persistentQueue.flush();
+
+      expect(report.persisted).toBe(0);
+      expect(report.dropped).toEqual([]);
+      expect(report.pending).toEqual([event]);
+      expect(persistentQueue.getQueue()).toEqual([event]);
+      persistentQueue.stop();
+    });
+
+    it('reports degraded memory storage as pending and retries it on the next flush', async () => {
+      const persistentQueue = new EventQueue(
+        createConfig({ persistence: 'localStorage' }),
+        transport,
+        storage,
+        scrubber,
+        consentManager
+      );
+      const event = createEvent({
+        event: 'memory_fallback_pending',
+        messageId: 'memory-fallback-pending',
+      });
+      const sendSpy = vi.spyOn(transport, 'send')
+        .mockResolvedValueOnce('retryable')
+        .mockResolvedValue('accepted');
+      persistentQueue.enqueue(event);
+
+      const firstReport = await persistentQueue.flush();
+
+      expect(firstReport.persisted).toBe(0);
+      expect(firstReport.pending).toEqual([event]);
+      expect(firstReport.dropped).toEqual([]);
+      expect(await storage.count()).toBe(1);
+
+      const secondReport = await persistentQueue.flush();
+
+      expect(secondReport.delivered).toBe(1);
+      expect(secondReport.pending).toEqual([]);
+      expect(await storage.count()).toBe(0);
+      expect(sendSpy).toHaveBeenCalledTimes(2);
       persistentQueue.stop();
     });
 
@@ -1171,7 +1306,7 @@ describe('EventQueue', () => {
       vi.spyOn(transport, 'sendKeepalive').mockResolvedValue('retryable');
       const storeSpy = vi
         .spyOn(storage, 'store')
-        .mockResolvedValue(undefined);
+        .mockImplementation(async (events) => durableStoreResult(events));
 
       persistentQueue.enqueue(createEvent());
       await persistentQueue.flushOnUnload();

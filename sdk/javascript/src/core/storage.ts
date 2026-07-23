@@ -1,4 +1,9 @@
-import { generateId, type TrackEvent } from './types';
+import {
+  generateId,
+  type OfflineEvictionReason,
+  type OfflineRejectionReason,
+  type TrackEvent,
+} from './types';
 import type { PersistenceMode } from './config';
 import {
   assertDeploymentStorageScope,
@@ -65,6 +70,33 @@ type RecordDisposition = 'current' | 'mismatched' | 'stale';
 export interface ClaimedOfflineEvent {
   id: number;
   event: TrackEvent;
+}
+
+export interface OfflineStoredEvent {
+  readonly event: TrackEvent;
+  readonly durability: 'durable' | 'memory';
+}
+
+export interface OfflineEvictedEvent {
+  readonly event: TrackEvent;
+  readonly reason: OfflineEvictionReason;
+}
+
+export interface OfflineRejectedEvent {
+  readonly event: TrackEvent;
+  readonly reason: OfflineRejectionReason;
+}
+
+export interface OfflineStoreResult {
+  readonly stored: readonly OfflineStoredEvent[];
+  readonly evicted: readonly OfflineEvictedEvent[];
+  readonly rejected: readonly OfflineRejectedEvent[];
+}
+
+interface StoreCandidate {
+  event: TrackEvent;
+  record: StoredOfflineEvent;
+  id?: number;
 }
 
 /**
@@ -187,46 +219,118 @@ export class OfflineStorage {
     }
   }
 
-  async store(events: TrackEvent[]): Promise<void> {
-    if (events.length === 0) return;
+  async store(events: TrackEvent[]): Promise<OfflineStoreResult> {
+    if (events.length === 0) return emptyStoreResult();
 
-    const records = events
-      .map((event) => this.createRecord(event))
-      .filter((record): record is StoredOfflineEvent => record !== null);
-    if (records.length === 0) return;
+    const candidates: StoreCandidate[] = [];
+    const rejected: OfflineRejectedEvent[] = [];
+    for (const event of events) {
+      const record = this.createRecord(event);
+      if (record === null) {
+        rejected.push({
+          event,
+          reason: 'offline_invalid_event',
+        });
+      } else {
+        candidates.push({ event: record.data, record });
+      }
+    }
+    if (candidates.length === 0) {
+      return freezeStoreResult({ stored: [], evicted: [], rejected });
+    }
 
     const db = await this.getDB();
     if (!db) {
-      this.appendFallback(records);
-      this.enforceFallbackBounds(Date.now());
-      return;
+      return this.storeInFallback(candidates, rejected);
     }
 
-    return new Promise<void>((resolve) => {
-      let fellBack = false;
-      const preserveInMemory = () => {
-        if (!fellBack) {
-          fellBack = true;
-          this.appendFallback(records);
-          this.enforceFallbackBounds(Date.now());
-        }
-        resolve();
+    return new Promise<OfflineStoreResult>((resolve) => {
+      let settled = false;
+      let scanFinished = false;
+      const evicted: OfflineEvictedEvent[] = [];
+      const evictedIds = new Set<number>();
+      const finishFallback = () => {
+        if (settled) return;
+        settled = true;
+        resolve(this.storeInFallback(candidates, rejected));
+      };
+      const finishDurable = () => {
+        if (settled) return;
+        settled = true;
+        const stored = candidates
+          .filter(
+            (candidate) =>
+              candidate.id !== undefined && !evictedIds.has(candidate.id)
+          )
+          .map(({ event }) => ({
+            event,
+            durability: 'durable' as const,
+          }));
+        const missing = candidates
+          .filter((candidate) => candidate.id === undefined)
+          .map(({ event }) => ({
+            event,
+            reason: 'offline_storage_failure' as const,
+          }));
+        resolve(
+          freezeStoreResult({
+            stored,
+            evicted: [...evicted].reverse(),
+            rejected: [...rejected, ...missing],
+          })
+        );
       };
 
+      let tx: IDBTransaction | null = null;
       try {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        const store = tx.objectStore(STORE_NAME);
+        const activeTx = db.transaction(STORE_NAME, 'readwrite');
+        tx = activeTx;
+        const store = activeTx.objectStore(STORE_NAME);
+        activeTx.oncomplete = () => {
+          if (scanFinished) {
+            finishDurable();
+          } else {
+            finishFallback();
+          }
+        };
+        activeTx.onerror = finishFallback;
+        activeTx.onabort = finishFallback;
 
-        for (const record of records) {
-          store.add(record);
+        for (const candidate of candidates) {
+          const request = store.add(candidate.record);
+          request.onsuccess = () => {
+            const id = request.result;
+            if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
+              candidate.id = id;
+            } else {
+              try {
+                activeTx.abort();
+              } catch {
+                // Another failed request may already have aborted the write.
+              }
+            }
+          };
         }
-        this.enforceIndexedDBBounds(store, tx, Date.now());
-
-        tx.oncomplete = () => resolve();
-        tx.onerror = preserveInMemory;
-        tx.onabort = preserveInMemory;
+        this.enforceIndexedDBBounds(
+          store,
+          activeTx,
+          Date.now(),
+          evicted,
+          evictedIds,
+          () => {
+            scanFinished = true;
+          }
+        );
       } catch {
-        preserveInMemory();
+        if (tx === null) {
+          finishFallback();
+        } else {
+          try {
+            tx.abort();
+          } catch {
+            finishFallback();
+          }
+        }
       }
     });
   }
@@ -527,7 +631,10 @@ export class OfflineStorage {
   private enforceIndexedDBBounds(
     store: IDBObjectStore,
     tx: IDBTransaction,
-    now: number
+    now: number,
+    evicted: OfflineEvictedEvent[],
+    evictedIds: Set<number>,
+    onComplete: () => void
   ): void {
     let retainedCount = 0;
     let retainedBytes = 0;
@@ -535,7 +642,10 @@ export class OfflineStorage {
 
     cursorRequest.onsuccess = () => {
       const cursor = cursorRequest.result;
-      if (!cursor) return;
+      if (!cursor) {
+        onComplete();
+        return;
+      }
 
       const disposition = this.classifyRecord(cursor.value, now);
       if (disposition === 'stale') {
@@ -551,6 +661,16 @@ export class OfflineStorage {
           record.claim_expires_at !== null &&
           record.claim_expires_at > now;
         if ((exceedsCount || exceedsBytes) && !hasActiveLease) {
+          const id = readCursorId(cursor);
+          if (id !== null) {
+            evictedIds.add(id);
+          }
+          evicted.push({
+            event: record.data,
+            reason: exceedsCount
+              ? 'offline_count_limit'
+              : 'offline_byte_limit',
+          });
           // Descending key order makes this a deterministic oldest-first
           // eviction policy: retain the newest bounded set for this project.
           cursor.delete();
@@ -588,12 +708,55 @@ export class OfflineStorage {
       : 'mismatched';
   }
 
-  private appendFallback(records: StoredOfflineEvent[]): void {
-    for (const record of records) {
-      this.fallbackQueue.push({
-        ...record,
-        id: this.fallbackNextId,
+  private storeInFallback(
+    candidates: StoreCandidate[],
+    rejected: OfflineRejectedEvent[]
+  ): OfflineStoreResult {
+    const previousQueue = [...this.fallbackQueue];
+    const previousNextId = this.fallbackNextId;
+    try {
+      this.appendFallback(candidates);
+      const evicted = this.enforceFallbackBounds(Date.now());
+      const retainedIds = new Set(
+        this.fallbackQueue
+          .map((record) => record.id)
+          .filter((id): id is number => id !== undefined)
+      );
+      const stored = candidates
+        .filter(
+          (candidate) =>
+            candidate.id !== undefined && retainedIds.has(candidate.id)
+        )
+        .map(({ event }) => ({
+          event,
+          durability: 'memory' as const,
+        }));
+      return freezeStoreResult({ stored, evicted, rejected });
+    } catch {
+      this.fallbackQueue = previousQueue;
+      this.fallbackNextId = previousNextId;
+      return freezeStoreResult({
+        stored: [],
+        evicted: [],
+        rejected: [
+          ...rejected,
+          ...candidates.map(({ event }) => ({
+            event,
+            reason: 'offline_storage_failure' as const,
+          })),
+        ],
       });
+    }
+  }
+
+  private appendFallback(candidates: StoreCandidate[]): void {
+    for (const candidate of candidates) {
+      const storedRecord: StoredOfflineEvent = {
+        ...candidate.record,
+        id: this.fallbackNextId,
+      };
+      candidate.id = storedRecord.id;
+      this.fallbackQueue.push(storedRecord);
       this.fallbackNextId -= 1;
     }
   }
@@ -668,8 +831,9 @@ export class OfflineStorage {
     );
   }
 
-  private enforceFallbackBounds(now: number): void {
+  private enforceFallbackBounds(now: number): OfflineEvictedEvent[] {
     const retainedNewestFirst: StoredOfflineEvent[] = [];
+    const evicted: OfflineEvictedEvent[] = [];
     let retainedCount = 0;
     let retainedBytes = 0;
 
@@ -694,10 +858,18 @@ export class OfflineStorage {
         retainedNewestFirst.push(record);
         retainedCount += 1;
         retainedBytes += record.serialized_bytes;
+      } else {
+        evicted.push({
+          event: record.data,
+          reason: exceedsCount
+            ? 'offline_count_limit'
+            : 'offline_byte_limit',
+        });
       }
     }
 
     this.fallbackQueue = retainedNewestFirst.reverse();
+    return evicted.reverse();
   }
 }
 
@@ -861,4 +1033,27 @@ function serializedEventBytes(event: TrackEvent): number | null {
     // cannot be safely retained for a later transport attempt either.
     return null;
   }
+}
+
+function emptyStoreResult(): OfflineStoreResult {
+  return freezeStoreResult({ stored: [], evicted: [], rejected: [] });
+}
+
+function freezeStoreResult(result: {
+  stored: OfflineStoredEvent[];
+  evicted: OfflineEvictedEvent[];
+  rejected: OfflineRejectedEvent[];
+}): OfflineStoreResult {
+  for (const outcome of [
+    ...result.stored,
+    ...result.evicted,
+    ...result.rejected,
+  ]) {
+    Object.freeze(outcome);
+  }
+  return Object.freeze({
+    stored: Object.freeze(result.stored),
+    evicted: Object.freeze(result.evicted),
+    rejected: Object.freeze(result.rejected),
+  });
 }
