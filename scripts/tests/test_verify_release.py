@@ -227,9 +227,11 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertIn("name: published-image-${{ matrix.name }}", workflow)
         self.assertIn("release-artifacts/container-images.json", workflow)
         self.assertIn("sha256sum container-images.json >> SHA256SUMS", workflow)
-        self.assertIn("smoke-published-core:", workflow)
-        self.assertIn("      - smoke-published-core", workflow)
-        self.assertIn("name: tested-container-image-index", workflow)
+        self.assertIn("smoke-published-images:", workflow)
+        self.assertIn("      - smoke-published-images", workflow)
+        self.assertIn("runner: ubuntu-24.04-arm", workflow)
+        self.assertIn("APDL_SMOKE_ALL_IMAGES=true make smoke-fresh", workflow)
+        self.assertIn("name: published-image-smoke-${{ matrix.arch }}", workflow)
 
 
 if __name__ == "__main__":
