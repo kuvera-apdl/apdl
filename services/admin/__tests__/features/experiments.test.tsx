@@ -350,9 +350,27 @@ describe('experiment form model', () => {
     const draftValues = entryToFormValues(draft)
     draftValues.description = 'Changed'
     draftValues.start_date = '2026-06-01'
+    draftValues.traffic_percentage = 50
+    draftValues.targetingRulesJson = JSON.stringify([
+      {
+        id: 'rule-pro',
+        name: 'Pro users',
+        conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
+        rollout: { percentage: 100, bucket_by: 'user_id' },
+      },
+    ])
     expect(buildUpdate(draftValues, draft, 7)).toEqual({
       version: 7,
       description: 'Changed',
+      traffic_percentage: 50,
+      targeting_rules: [
+        {
+          id: 'rule-pro',
+          name: 'Pro users',
+          conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
+          rollout: { percentage: 100, bucket_by: 'user_id' },
+        },
+      ],
       start_date: '2026-06-01T00:00:00Z',
     })
 
@@ -368,6 +386,15 @@ describe('experiment form model', () => {
     stoppedValues.variants[1]!.weight = 2
     stoppedValues.default_variant = 'treatment'
     stoppedValues.metricEvent = 'checkout_completed'
+    stoppedValues.traffic_percentage = 25
+    stoppedValues.targetingRulesJson = JSON.stringify([
+      {
+        id: 'rule-pro',
+        name: 'Pro users',
+        conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
+        rollout: { percentage: 100, bucket_by: 'user_id' },
+      },
+    ])
 
     expect(buildUpdate(stoppedValues, running)).toEqual({ version: 2, status: 'stopped' })
   })
@@ -482,6 +509,8 @@ describe('ExperimentDetailPage', () => {
     )
 
     await screen.findByDisplayValue('CTA experiment')
+    expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: 'Targeting rules JSON' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Control variant' })).toHaveValue('control')
     expect(
       screen.getByText(

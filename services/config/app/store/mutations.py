@@ -71,6 +71,8 @@ class ImmutableExperimentError(MutationError):
 
 _FROZEN_EXPERIMENT_FIELDS = {
     "default_variant": "default_variant",
+    "traffic_percentage": "traffic_percentage",
+    "targeting_rules_json": "targeting_rules",
     "variants_json": "variants",
     "primary_metric_json": "primary_metric",
     "statistical_plan": "statistical_plan",

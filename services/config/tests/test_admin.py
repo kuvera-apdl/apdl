@@ -656,6 +656,26 @@ async def test_update_experiment_honors_explicit_nullable_clears(monkeypatch):
     "field,value",
     [
         ("default_variant", "treatment"),
+        ("traffic_percentage", 50.0),
+        (
+            "targeting_rules",
+            [
+                {
+                    "id": "paid-plan",
+                    "conditions": [
+                        {
+                            "attribute": "plan",
+                            "operator": "equals",
+                            "value": "paid",
+                        }
+                    ],
+                    "rollout": {
+                        "percentage": 100.0,
+                        "bucket_by": "user_id",
+                    },
+                }
+            ],
+        ),
         (
             "variants",
             [
