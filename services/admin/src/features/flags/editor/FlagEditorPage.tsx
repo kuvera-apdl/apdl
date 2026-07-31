@@ -16,6 +16,7 @@ import { EmptyState, ErrorState } from '@/components/shared/PanelStates'
 import { TagInput } from '@/components/shared/TagInput'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Disclosure } from '@/components/ui/disclosure'
 import {
   Dialog,
   DialogContent,
@@ -49,6 +50,14 @@ import { ReviewSheet } from './ReviewSheet'
 import { RolloutFields } from './RolloutFields'
 import { RuleBuilder } from './RuleBuilder'
 import { VariantsEditor } from './VariantsEditor'
+
+const ADVANCED_FORM_FIELDS = new Set<keyof FlagFormValues>([
+  'rules',
+  'fallthrough',
+  'evaluation_mode',
+  'auto_disable',
+  'guardrails',
+])
 
 const WRITABLE_STATES = [
   { value: 'draft', label: 'Draft', hint: 'not served — safe to iterate' },
@@ -100,6 +109,7 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
 
   // The version the form was loaded against — never silently re-synced.
   const baseRef = useRef<FlagConfig | null>(null)
+  const advancedSettingsRef = useRef<HTMLDivElement>(null)
   const [serverMoved, setServerMoved] = useState(false)
   const leavingRef = useRef(false)
 
@@ -139,6 +149,23 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
     } else {
       const payload = formToCreatePayload(values)
       setReview({ payload, curl: createFlagCurl(conn, payload) })
+    }
+  }
+
+  const openAdvancedSettings = () => {
+    const disclosure = advancedSettingsRef.current?.querySelector('details')
+    if (disclosure) disclosure.open = true
+  }
+
+  const revealAdvancedValidationErrors = (
+    errors: typeof formState.errors,
+  ) => {
+    if (
+      Array.from(ADVANCED_FORM_FIELDS).some(
+        (field) => errors[field] !== undefined,
+      )
+    ) {
+      openAdvancedSettings()
     }
   }
 
@@ -199,6 +226,15 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
   const openSimulator = async () => {
     const valid = await form.trigger()
     if (!valid) {
+      const parsed = flagFormSchema.safeParse(form.getValues())
+      if (
+        !parsed.success &&
+        parsed.error.issues.some((issue) =>
+          ADVANCED_FORM_FIELDS.has(issue.path[0] as keyof FlagFormValues),
+        )
+      ) {
+        openAdvancedSettings()
+      }
       toast.error('Fix validation errors before simulating')
       return
     }
@@ -265,7 +301,10 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
                 <FlaskConical />
                 Simulate
               </Button>
-              <Button type="button" onClick={handleSubmit(prepareReview)}>
+              <Button
+                type="button"
+                onClick={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+              >
                 Review & save
               </Button>
             </>
@@ -284,7 +323,11 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
           </div>
         ) : null}
 
-        <form className="space-y-4" onSubmit={handleSubmit(prepareReview)} noValidate>
+        <form
+          className="space-y-4"
+          onSubmit={handleSubmit(prepareReview, revealAdvancedValidationErrors)}
+          noValidate
+        >
           <Section title="Identity">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -391,31 +434,74 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
             <VariantsEditor />
           </Section>
 
-          <Section title="Targeting rules" description="Evaluated top-down; first full match wins.">
-            <RuleBuilder />
-          </Section>
+          <div ref={advancedSettingsRef}>
+            <Disclosure
+              summary={
+                <span>
+                  <span className="block font-medium">Advanced Settings</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Targeting, evaluation mode, and diagnostic guardrails.
+                  </span>
+                </span>
+              }
+            >
+              <div className="space-y-4">
+                <Section
+                  title="Targeting"
+                  description="Set the default rollout first, then add optional first-match rules."
+                >
+                  <div className="space-y-5">
+                    <div className="space-y-2">
+                      <RolloutFields
+                        pathPrefix="fallthrough.rollout"
+                        percentageLabel="Initial rollout %"
+                        bucketByLabel="Initial rollout bucket identity"
+                        percentageError={
+                          formState.errors.fallthrough?.rollout?.percentage?.message
+                        }
+                        bucketByError={
+                          formState.errors.fallthrough?.rollout?.bucket_by?.message
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Initial rollout applies when no rule matches, and therefore
+                        applies to everyone when this flag has no rules.
+                      </p>
+                    </div>
+                    <div className="border-t pt-4">
+                      <RuleBuilder />
+                    </div>
+                  </div>
+                </Section>
 
-          <Section title="Fallthrough" description="Applies to users who miss every rule.">
-            <RolloutFields
-              pathPrefix="fallthrough.rollout"
-              percentageError={formState.errors.fallthrough?.rollout?.percentage?.message}
-              bucketByError={formState.errors.fallthrough?.rollout?.bucket_by?.message}
-            />
-          </Section>
-
-          <Section title="Safety">
-            <div className="space-y-5">
-              <div className="max-w-xs space-y-1.5">
-                <Label>Evaluation mode</Label>
-                <Select {...register('evaluation_mode')}>
-                  <option value="client">client — SSE-distributed to browsers</option>
-                  <option value="server">server — evaluated via /v1/evaluate only</option>
-                  <option value="both">both — distributed and server-evaluable</option>
-                </Select>
+                <Section
+                  title="Safety"
+                  description="Choose where evaluation runs and configure diagnostic-only guardrails."
+                >
+                  <div className="space-y-5">
+                    <div className="max-w-xs space-y-1.5">
+                      <Label>Evaluation mode</Label>
+                      <Select
+                        {...register('evaluation_mode')}
+                        aria-label="Evaluation mode"
+                      >
+                        <option value="client">
+                          client — SSE-distributed to browsers
+                        </option>
+                        <option value="server">
+                          server — evaluated via /v1/evaluate only
+                        </option>
+                        <option value="both">
+                          both — distributed and server-evaluable
+                        </option>
+                      </Select>
+                    </div>
+                    <GuardrailsEditor />
+                  </div>
+                </Section>
               </div>
-              <GuardrailsEditor />
-            </div>
-          </Section>
+            </Disclosure>
+          </div>
         </form>
 
         <ReviewSheet

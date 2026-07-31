@@ -310,8 +310,11 @@ def test_pr_runtime_preflight_rejects_mismatched_image_revision(monkeypatch):
 
 
 def test_secrets_are_passed_by_name_not_value(monkeypatch):
+    private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
+    encoded_private_key = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
+    decoded_private_key = "github-app-private-key-sentinel"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secretvalue")
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")
+    monkeypatch.setenv(private_key_setting, encoded_private_key)
     editor = ContainerAiderEditor()
     argv = editor._docker_argv(_req())
     joined = " ".join(argv)
@@ -322,19 +325,26 @@ def test_secrets_are_passed_by_name_not_value(monkeypatch):
     assert "ghs_secrettoken" not in joined
     assert "sk-ant-secretvalue" not in joined
     # The App private key is never forwarded at all.
-    assert "GITHUB_APP_PRIVATE_KEY" not in argv
+    assert private_key_setting not in argv
+    assert encoded_private_key not in joined
+    assert decoded_private_key not in joined
 
 
 def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
     monkeypatch,
 ):
+    private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
+    encoded_private_key = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
+    decoded_private_key = "github-app-private-key-sentinel"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secretvalue")
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "pem")
+    monkeypatch.setenv(private_key_setting, encoded_private_key)
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     env = ContainerAiderEditor()._docker_env(_req())
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-secretvalue"
     assert "GH_TOKEN" not in env
-    assert "GITHUB_APP_PRIVATE_KEY" not in env
+    assert private_key_setting not in env
+    assert encoded_private_key not in env.values()
+    assert decoded_private_key not in env.values()
     assert "APDL_INTERNAL_TOKEN" not in env
 
 

@@ -43,6 +43,9 @@ from app.requirements import compile_requirement_ledger, map_implementation_evid
 
 _INVOCATION_ID = "eval_inv_" + "a" * 32
 _PINNED_IMAGE = "apdl-codegen-evaluator@sha256:" + "b" * 64
+_PRIVATE_KEY_SETTING = "GITHUB_APP_PRIVATE_KEY_BASE64"
+_PRIVATE_KEY_ENCODED_SENTINEL = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
+_PRIVATE_KEY_DECODED_SENTINEL = "github-app-private-key-sentinel"
 _PROVIDER_SECRET = "provider-secret-material"
 
 
@@ -170,7 +173,7 @@ async def test_evaluate_candidate_edits_real_fixture_with_keyless_injected_edito
         "GEMINI_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
-        "GITHUB_APP_PRIVATE_KEY",
+        _PRIVATE_KEY_SETTING,
         "POSTGRES_URL",
         "DATABASE_URL",
         "REDIS_URL",
@@ -298,7 +301,7 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
         "GROQ_API_KEY": "unselected-provider-secret",
         "GITHUB_TOKEN": "github-write-token",
         "GH_TOKEN": "gh-write-token",
-        "GITHUB_APP_PRIVATE_KEY": "private-key",
+        _PRIVATE_KEY_SETTING: _PRIVATE_KEY_ENCODED_SENTINEL,
         "POSTGRES_URL": "postgresql://secret",
         "DATABASE_URL": "postgresql://secret",
         "REDIS_URL": "redis://secret",
@@ -355,7 +358,7 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     for forbidden in (
         "GITHUB_TOKEN",
         "GH_TOKEN",
-        "GITHUB_APP_PRIVATE_KEY",
+        _PRIVATE_KEY_SETTING,
         "POSTGRES_URL",
         "DATABASE_URL",
         "REDIS_URL",
@@ -364,6 +367,7 @@ def test_docker_evaluator_argv_and_environment_are_credential_minimal(
     ):
         assert forbidden not in environment
         assert source_environment[forbidden] not in rendered
+    assert _PRIVATE_KEY_DECODED_SENTINEL not in rendered
 
 
 def test_docker_evaluator_requires_an_immutable_image_reference():

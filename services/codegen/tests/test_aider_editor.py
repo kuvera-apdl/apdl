@@ -197,9 +197,12 @@ def test_basic_auth_header_encodes_x_access_token():
 def test_agent_env_forwards_llm_keys_but_not_github_or_apdl_secrets(
     monkeypatch, tmp_path
 ):
+    private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
+    encoded_private_key = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
+    decoded_private_key = "github-app-private-key-sentinel"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xyz")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-xyz")
-    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY", "-----BEGIN PRIVATE KEY-----")
+    monkeypatch.setenv(private_key_setting, encoded_private_key)
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     monkeypatch.setenv("POSTGRES_URL", "postgresql://nope")
 
@@ -207,7 +210,9 @@ def test_agent_env_forwards_llm_keys_but_not_github_or_apdl_secrets(
 
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-xyz"
     assert "OPENAI_API_KEY" not in env
-    assert "GITHUB_APP_PRIVATE_KEY" not in env
+    assert private_key_setting not in env
+    assert encoded_private_key not in env.values()
+    assert decoded_private_key not in env.values()
     assert "APDL_INTERNAL_TOKEN" not in env
     assert "POSTGRES_URL" not in env
     assert env["HOME"] == str(tmp_path / "agent-home")

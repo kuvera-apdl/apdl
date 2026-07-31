@@ -2,7 +2,7 @@
 // An experiment owns a backing flag, so variants/default_variant/traffic map to
 // the flag and status drives flag serving through lifecycle-aware transitions.
 import { Plus, Trash2 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { z } from 'zod'
 
 import {
@@ -373,6 +373,7 @@ export function ExperimentForm({
 }: ExperimentFormProps) {
   const [errors, setErrors] = useState<ExperimentFormErrors>({})
   const advancedSettingsRef = useRef<HTMLDivElement>(null)
+  const variantFieldsId = useId()
   const set = (patch: Partial<ExperimentFormValues>) => onChange({ ...values, ...patch })
 
   const setVariant = (index: number, patch: Partial<ExperimentVariantRow>) =>
@@ -393,6 +394,8 @@ export function ExperimentForm({
     if (Object.keys(nextErrors).length > 0) {
       if (
         nextErrors.flagKey ||
+        nextErrors.bucket_by ||
+        nextErrors.default_variant ||
         nextErrors.targeting ||
         nextErrors.dates ||
         nextErrors.metric ||
@@ -432,46 +435,124 @@ export function ExperimentForm({
         </div>
       </div>
 
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label>Status</Label>
+          <Select
+            value={values.status}
+            onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
+            disabled={terminal}
+            aria-label="Status"
+          >
+            {statusOptions.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {terminal
+              ? 'This experiment has ended — status is terminal.'
+              : 'Defaults to draft. Running enables the backing flag.'}
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <Label>Traffic %</Label>
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step="any"
+            value={values.traffic_percentage}
+            onChange={(event) =>
+              set({
+                traffic_percentage: Math.min(
+                  100,
+                  Math.max(0, Number(event.target.value) || 0),
+                ),
+              })
+            }
+            disabled={analysisFieldsLocked}
+            aria-label="Traffic percentage"
+            className="tabular-nums"
+          />
+          <p className="text-xs text-muted-foreground">
+            Defaults to all eligible actors.
+          </p>
+        </div>
+      </div>
+
       <div className="space-y-2">
         <Label>Variants</Label>
         <div className="space-y-2">
+          <div
+            className="hidden gap-2 sm:grid sm:grid-cols-[10rem_9rem_minmax(11rem,1fr)_2.25rem]"
+            data-testid="variant-column-headings"
+          >
+            <span className="text-sm font-medium leading-none">Key</span>
+            <span className="text-sm font-medium leading-none">User proportion</span>
+            <span className="text-sm font-medium leading-none">Comment</span>
+            <span aria-hidden="true" />
+          </div>
           {values.variants.map((variant, index) => (
-            <div key={index} className="flex flex-wrap items-start gap-2">
-              <Input
-                value={variant.key}
-                onChange={(event) => setVariant(index, { key: event.target.value })}
-                placeholder="key"
-                aria-label={`Variant ${index + 1} key`}
-                className="w-40 font-mono text-xs"
-              />
-              <Input
-                type="number"
-                min={1}
-                step={1}
-                value={variant.weight}
-                onChange={(event) =>
-                  setVariant(index, { weight: Math.max(1, Math.floor(Number(event.target.value) || 1)) })
-                }
-                aria-label={`Variant ${index + 1} weight`}
-                className="w-24 tabular-nums"
-              />
-              <Input
-                value={variant.description}
-                onChange={(event) => setVariant(index, { description: event.target.value })}
-                placeholder="description (optional)"
-                aria-label={`Variant ${index + 1} description`}
-                className="min-w-44 flex-1"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => removeVariant(index)}
-                aria-label={`Remove variant ${index + 1}`}
-                disabled={values.variants.length <= 2}
-              >
-                <Trash2 />
-              </Button>
+            <div
+              key={index}
+              className="grid gap-2 sm:grid-cols-[10rem_9rem_minmax(11rem,1fr)_2.25rem] sm:items-end"
+            >
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-key`} className="sm:sr-only">
+                  <span aria-hidden="true">Key</span>
+                  <span className="sr-only">Key for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-key`}
+                  value={variant.key}
+                  onChange={(event) => setVariant(index, { key: event.target.value })}
+                  placeholder="key"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-weight`} className="sm:sr-only">
+                  <span aria-hidden="true">User proportion</span>
+                  <span className="sr-only">User proportion for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-weight`}
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={variant.weight}
+                  onChange={(event) =>
+                    setVariant(index, { weight: Math.max(1, Math.floor(Number(event.target.value) || 1)) })
+                  }
+                  className="tabular-nums"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-description`} className="sm:sr-only">
+                  <span aria-hidden="true">Comment</span>
+                  <span className="sr-only">Comment for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-description`}
+                  value={variant.description}
+                  onChange={(event) => setVariant(index, { description: event.target.value })}
+                  placeholder="description (optional)"
+                />
+              </div>
+              <div className="sm:self-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => removeVariant(index)}
+                  aria-label={`Remove variant ${index + 1}`}
+                  disabled={values.variants.length <= 2}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -487,53 +568,8 @@ export function ExperimentForm({
         </Button>
         {errors.variants ? <p className="text-xs text-destructive">{errors.variants}</p> : null}
         <p className="text-xs text-muted-foreground">
-          Weights set the split. Traffic defaults to 100% and can be changed in Advanced Settings.
+          Weights set the relative split among variants.
         </p>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label>Control variant</Label>
-          <Select
-            value={values.default_variant}
-            onChange={(event) => set({ default_variant: event.target.value })}
-            aria-label="Control variant"
-          >
-            {variantKeys.length === 0 ? <option value="">—</option> : null}
-            {variantKeys.map((key) => (
-              <option key={key} value={key}>
-                {key}
-              </option>
-            ))}
-          </Select>
-          {errors.default_variant ? (
-            <p className="text-xs text-destructive">{errors.default_variant}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Statistical control for every comparison and the backing flag&apos;s fallback variant.
-            </p>
-          )}
-        </div>
-        <div className="space-y-1.5">
-          <Label>Bucketing identity</Label>
-          <Select
-            value={values.bucket_by}
-            onChange={(event) => set({ bucket_by: event.target.value as ExperimentBucketBy })}
-            disabled={analysisFieldsLocked}
-            aria-label="Bucketing identity"
-          >
-            <option value="anonymous_id">Anonymous visitor</option>
-            <option value="user_id">Authenticated user</option>
-          </Select>
-          {errors.bucket_by ? (
-            <p className="text-xs text-destructive">{errors.bucket_by}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Immutable after draft. Use anonymous visitors for browser experiments that start
-              before sign-in.
-            </p>
-          )}
-        </div>
       </div>
 
       <div ref={advancedSettingsRef}>
@@ -542,7 +578,7 @@ export function ExperimentForm({
             <span>
               <span className="block font-medium">Advanced Settings</span>
               <span className="block text-xs text-muted-foreground">
-                Optional launch, allocation, analysis, and targeting controls.
+                Enrollment, flag, scheduling, analysis, and targeting controls.
               </span>
             </span>
           }
@@ -551,48 +587,47 @@ export function ExperimentForm({
           <div className="space-y-5">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label>Status</Label>
+                <Label>Control variant</Label>
                 <Select
-                  value={values.status}
-                  onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
-                  disabled={terminal}
-                  aria-label="Status"
+                  value={values.default_variant}
+                  onChange={(event) => set({ default_variant: event.target.value })}
+                  disabled={analysisFieldsLocked}
+                  aria-label="Control variant"
                 >
-                  {statusOptions.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
+                  {variantKeys.length === 0 ? <option value="">—</option> : null}
+                  {variantKeys.map((key) => (
+                    <option key={key} value={key}>
+                      {key}
                     </option>
                   ))}
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {terminal
-                    ? 'This experiment has ended — status is terminal.'
-                    : 'Defaults to draft. Running enables the backing flag.'}
-                </p>
+                {errors.default_variant ? (
+                  <p className="text-xs text-destructive">{errors.default_variant}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Statistical control for every comparison and the backing flag&apos;s fallback variant.
+                  </p>
+                )}
               </div>
               <div className="space-y-1.5">
-                <Label>Traffic %</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="any"
-                  value={values.traffic_percentage}
-                  onChange={(event) =>
-                    set({
-                      traffic_percentage: Math.min(
-                        100,
-                        Math.max(0, Number(event.target.value) || 0),
-                      ),
-                    })
-                  }
+                <Label>Bucketing identity</Label>
+                <Select
+                  value={values.bucket_by}
+                  onChange={(event) => set({ bucket_by: event.target.value as ExperimentBucketBy })}
                   disabled={analysisFieldsLocked}
-                  aria-label="Traffic percentage"
-                  className="tabular-nums"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Defaults to all eligible actors.
-                </p>
+                  aria-label="Bucketing identity"
+                >
+                  <option value="anonymous_id">Anonymous visitor</option>
+                  <option value="user_id">Authenticated user</option>
+                </Select>
+                {errors.bucket_by ? (
+                  <p className="text-xs text-destructive">{errors.bucket_by}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Immutable after draft. Use anonymous visitors for browser experiments that start
+                    before sign-in.
+                  </p>
+                )}
               </div>
             </div>
 

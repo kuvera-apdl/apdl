@@ -213,7 +213,7 @@ export function emptyFormValues(): FlagFormValues {
       { key: 'treatment', weight: 1 },
     ],
     rules: [],
-    fallthrough: { rollout: { percentage: 0, bucket_by: 'user_id' } },
+    fallthrough: { rollout: { percentage: 100, bucket_by: 'user_id' } },
     evaluation_mode: 'client',
     auto_disable: false,
     guardrails: [],

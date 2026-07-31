@@ -317,7 +317,7 @@ export function ExperimentCreatePage() {
       <PageHeader
         backTo={{ to: '/experiments', label: 'Experiments' }}
         title="Create experiment"
-        description="Start with the essentials and save a draft. Launch, allocation, analysis, and targeting controls are available under Advanced Settings."
+        description="Set the experiment status and traffic, then configure enrollment, scheduling, analysis, and targeting under Advanced Settings."
       />
       <ExperimentForm
         values={values}

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 from collections.abc import Callable
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
@@ -16,6 +19,15 @@ from app.editor.environment import MODEL_PROVIDER_ENV
 from app.evaluations.models import RolloutStage
 from app.main import app
 from tests.fakes import FakePool
+
+
+def _rsa_private_pem() -> str:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
 
 
 def _runtime_dependencies() -> dict[str, object]:
@@ -30,6 +42,30 @@ def _runtime_dependencies() -> dict[str, object]:
         "close_pr": object(),
         "publication_gate": object(),
     }
+
+
+def test_github_app_capability_uses_decoded_base64_key(monkeypatch) -> None:
+    private_key = _rsa_private_pem()
+    monkeypatch.setenv("GITHUB_APP_ID", "123456")
+    monkeypatch.setenv(
+        "GITHUB_APP_PRIVATE_KEY_BASE64",
+        base64.b64encode(private_key.encode()).decode(),
+    )
+
+    assert capabilities._github_app_configured() is True
+
+
+def test_github_app_capability_rejects_invalid_base64_without_leaking_it(
+    monkeypatch,
+    caplog,
+) -> None:
+    invalid_key = "not%%%base64%%%secret-sentinel"
+    monkeypatch.setenv("GITHUB_APP_ID", "123456")
+    monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_BASE64", invalid_key)
+
+    assert capabilities._github_app_configured() is False
+    assert "GITHUB_APP_PRIVATE_KEY_BASE64" in caplog.text
+    assert invalid_key not in caplog.text
 
 
 @pytest.fixture

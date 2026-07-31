@@ -185,7 +185,7 @@ export function RuleBuilder() {
       </datalist>
       {fields.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No targeting rules — all traffic goes straight to fallthrough.
+          No targeting rules — Initial rollout applies to everyone.
         </p>
       ) : (
         fields.map((field, index) => (

@@ -4,12 +4,13 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { EventsExplorerPage } from '../../src/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '../../src/features/analytics/FunnelsPage'
+import { CohortsPage } from '../../src/features/analytics/CohortsPage'
 import { RetentionPage } from '../../src/features/analytics/RetentionPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
@@ -108,7 +109,7 @@ beforeEach(() => {
 
 function renderPage(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  return render(
     <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
@@ -120,21 +121,41 @@ function renderPage(ui: React.ReactElement) {
 }
 
 describe('EventsExplorerPage', () => {
-  test('loads the event catalog within the query service date-range limit', async () => {
-    renderPage(<EventsExplorerPage />)
+  test('loads the event catalog through the current UTC date', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    try {
+      renderPage(<EventsExplorerPage />)
 
-    await waitFor(() => expect(catalogRequests).toHaveLength(1))
-    const body = catalogRequests[0] as {
-      project_id: string
-      start_date: string
-      end_date: string
-      limit: number
+      await waitFor(() => expect(catalogRequests).toHaveLength(1))
+      expect(catalogRequests[0]).toEqual({
+        project_id: 'demo',
+        start_date: '2026-05-02',
+        end_date: '2026-07-30',
+        limit: 1000,
+      })
+    } finally {
+      vi.useRealTimers()
     }
-    const rangeDays =
-      (Date.parse(body.end_date) - Date.parse(body.start_date)) / (24 * 60 * 60 * 1000)
+  })
 
-    expect(body).toMatchObject({ project_id: 'demo', limit: 1000 })
-    expect(rangeDays).toBe(89)
+  test.each([
+    ['Events Explorer', <EventsExplorerPage />, '2026-07-24'],
+    ['Funnels', <FunnelsPage />, '2026-07-24'],
+    ['Cohorts', <CohortsPage />, '2026-07-01'],
+    ['Retention', <RetentionPage />, '2026-07-01'],
+  ])('%s defaults to an inclusive UTC range', (_name, page, startDate) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    try {
+      const view = renderPage(page)
+      expect(screen.getByLabelText('Start date (UTC)')).toHaveValue(startDate)
+      expect(screen.getByLabelText('End date (UTC)')).toHaveValue('2026-07-30')
+      expect(screen.getByText('UTC')).toBeVisible()
+      view.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('runs a counts query with project_id and renders the result table', async () => {

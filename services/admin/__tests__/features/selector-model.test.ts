@@ -56,10 +56,37 @@ describe('selectorToWire', () => {
 })
 
 describe('lastDays', () => {
-  test('returns an inclusive range ending today', () => {
-    const range = lastDays(7)
-    expect(range.start_date <= range.end_date).toBe(true)
-    expect(range.start_date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  test('uses the UTC date west of UTC after local midnight divergence', () => {
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    expect(lastDays(7)).toEqual({
+      start_date: '2026-07-24',
+      end_date: '2026-07-30',
+    })
+  })
+
+  test('uses the UTC date east of UTC without including a future day', () => {
+    vi.setSystemTime(new Date('2026-07-29T10:00:00Z'))
+    expect(lastDays(1)).toEqual({
+      start_date: '2026-07-29',
+      end_date: '2026-07-29',
+    })
+  })
+
+  test.each([
+    ['leap day', '2024-03-01T00:30:00Z', 2, '2024-02-29', '2024-03-01'],
+    ['year boundary', '2026-01-01T12:00:00Z', 2, '2025-12-31', '2026-01-01'],
+    ['daylight-saving boundary', '2026-03-09T03:00:00Z', 3, '2026-03-07', '2026-03-09'],
+  ])('keeps inclusive UTC arithmetic across a %s', (_label, now, days, start, end) => {
+    vi.setSystemTime(new Date(now))
+    expect(lastDays(days)).toEqual({ start_date: start, end_date: end })
+  })
+
+  test('rejects non-positive or fractional day counts', () => {
+    expect(() => lastDays(0)).toThrow('days must be a positive integer')
+    expect(() => lastDays(1.5)).toThrow('days must be a positive integer')
   })
 })
 

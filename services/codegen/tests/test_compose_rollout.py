@@ -63,6 +63,27 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
     assert "VERTEXAI_LOCATION" not in codegen_environment
 
 
+def test_base_compose_forwards_only_the_canonical_github_app_key() -> None:
+    private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
+    legacy_inline = "GITHUB_APP_" + "PRIVATE_KEY"
+    legacy_path = legacy_inline + "_PATH"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            private_key_setting: "Y2Fub25pY2Fs",
+            legacy_inline: "legacy-inline",
+            legacy_path: "/tmp/legacy.pem",
+        }
+    )
+
+    config = _compose_config(BASE_COMPOSE, environment=environment)
+    codegen_environment = config["services"]["codegen"]["environment"]
+
+    assert codegen_environment[private_key_setting] == "Y2Fub25pY2Fs"
+    assert legacy_inline not in codegen_environment
+    assert legacy_path not in codegen_environment
+
+
 def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
     environment = os.environ.copy()
     environment.update(

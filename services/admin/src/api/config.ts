@@ -245,7 +245,7 @@ export function createFlagExampleCurl(conn: ServiceConnection): CurlSpec {
         { key: 'control', weight: 1 },
         { key: 'treatment', weight: 1 },
       ],
-      fallthrough: { rollout: { percentage: 0, bucket_by: 'user_id' } },
+      fallthrough: { rollout: { percentage: 100, bucket_by: 'user_id' } },
     },
   }
 }

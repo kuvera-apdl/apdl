@@ -94,14 +94,6 @@ export function selectorSummary(selector: SelectorFormValues): string {
   return `${name} · ${selector.filters.length} filter${selector.filters.length === 1 ? '' : 's'}`
 }
 
-/** Today in local time as YYYY-MM-DD. */
-export function todayIso(): string {
-  const now = new Date()
-  const month = String(now.getMonth() + 1).padStart(2, '0')
-  const day = String(now.getDate()).padStart(2, '0')
-  return `${now.getFullYear()}-${month}-${day}`
-}
-
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
 
 export const dateRangeSchema = z
@@ -117,22 +109,27 @@ export const dateRangeSchema = z
 
 export type DateRange = z.infer<typeof dateRangeSchema>
 
-/** Last N days, inclusive of today. */
-export function lastDays(days: number): DateRange {
-  const end = new Date()
-  const start = new Date()
-  start.setDate(start.getDate() - (days - 1))
-  const iso = (date: Date) =>
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-  return { start_date: iso(start), end_date: iso(end) }
-}
-
 const pad2 = (value: number): string => String(value).padStart(2, '0')
+
+function utcDateIso(date: Date): string {
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
+}
 
 /** Today in UTC as YYYY-MM-DD — the timezone the analytics pipeline buckets in. */
 export function todayUtcIso(): string {
+  return utcDateIso(new Date())
+}
+
+/** Last N UTC calendar dates, inclusive of the current UTC date. */
+export function lastDays(days: number): DateRange {
+  if (!Number.isInteger(days) || days < 1) {
+    throw new RangeError('days must be a positive integer')
+  }
   const now = new Date()
-  return `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  const start = new Date(end)
+  start.setUTCDate(start.getUTCDate() - (days - 1))
+  return { start_date: utcDateIso(start), end_date: utcDateIso(end) }
 }
 
 /**
@@ -145,9 +142,5 @@ export function utcDateRangeForLastHours(hours: number): DateRange {
   const now = new Date()
   const endMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours())
   const startMs = endMs - (hours - 1) * 3_600_000
-  const isoUtc = (ms: number) => {
-    const date = new Date(ms)
-    return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
-  }
-  return { start_date: isoUtc(startMs), end_date: isoUtc(endMs) }
+  return { start_date: utcDateIso(new Date(startMs)), end_date: utcDateIso(new Date(endMs)) }
 }

@@ -28,8 +28,13 @@ describe('formToCreatePayload', () => {
     const payload = formToCreatePayload(baseValues())
     expect(payload.enabled).toBe(false)
     expect(payload.state).toBe('draft')
+    expect(payload.rules).toEqual([])
+    expect(payload.fallthrough).toEqual({
+      rollout: { percentage: 100, bucket_by: 'user_id' },
+    })
     expect(payload.auto_disable).toBe(false)
     expect('review_by' in payload).toBe(false)
+    expect('initial_rollout' in payload).toBe(false)
     expect(flagCreateSchema.safeParse(payload).success).toBe(true)
   })
 
@@ -86,6 +91,20 @@ describe('formToCreatePayload', () => {
 })
 
 describe('formToUpdatePlan', () => {
+  test('preserves an existing zero-percent fallthrough without migration', () => {
+    const flag = makeFlag({
+      rules: [],
+      fallthrough: { rollout: { percentage: 0, bucket_by: 'anonymous_id' } },
+    })
+    const values = flagToFormValues(flag)
+
+    expect(values.fallthrough).toEqual(flag.fallthrough)
+    expect(formToUpdatePlan(values, flag, flag.version)).toEqual({
+      payload: { version: flag.version },
+      changedFields: [],
+    })
+  })
+
   test('an untouched form produces no changes (existence conditions included)', () => {
     const flag = makeFlag()
     const plan = formToUpdatePlan(flagToFormValues(flag), flag, flag.version)

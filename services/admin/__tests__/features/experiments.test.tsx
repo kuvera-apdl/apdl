@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
+import { useState } from 'react'
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -507,6 +508,7 @@ describe('experiment form model', () => {
     const draftValues = entryToFormValues(draft)
     draftValues.description = 'Changed'
     draftValues.bucket_by = 'user_id'
+    draftValues.default_variant = 'treatment'
     draftValues.start_date = '2026-06-01'
     draftValues.traffic_percentage = 50
     draftValues.targetingRules = [
@@ -528,6 +530,7 @@ describe('experiment form model', () => {
       version: 7,
       description: 'Changed',
       bucket_by: 'user_id',
+      default_variant: 'treatment',
       traffic_percentage: 50,
       targeting_rules: [
         {
@@ -648,7 +651,51 @@ describe('experiment form model', () => {
 })
 
 describe('ExperimentForm layout', () => {
-  test('keeps essential create inputs visible and starts Advanced Settings collapsed', async () => {
+  test('labels variant columns and keeps row-specific field names while adding and removing rows', async () => {
+    function FormHarness() {
+      const [values, setValues] = useState({
+        ...emptyExperimentValues(),
+        key: 'checkout-test',
+      })
+
+      return (
+        <ExperimentForm
+          values={values}
+          onChange={setValues}
+          isCreate
+          onSubmit={vi.fn()}
+          submitting={false}
+        />
+      )
+    }
+
+    render(<FormHarness />)
+
+    const headings = within(screen.getByTestId('variant-column-headings'))
+    expect(headings.getByText('Key')).toBeInTheDocument()
+    expect(headings.getByText('User proportion')).toBeInTheDocument()
+    expect(headings.getByText('Comment')).toBeInTheDocument()
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 1' })).toHaveValue('control')
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 1' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 1' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 1' })).toBeDisabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add variant' }))
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 3' })).toBeVisible()
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 3' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 3' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 3' })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove variant 2' }))
+
+    expect(screen.queryByRole('textbox', { name: 'Key for variant 3' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Key for variant 2' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 2' })).toBeDisabled()
+  })
+
+  test('keeps primary create inputs visible and starts Advanced Settings collapsed', async () => {
     render(
       <ExperimentForm
         values={{ ...emptyExperimentValues(), key: 'checkout-test' }}
@@ -666,16 +713,176 @@ describe('ExperimentForm layout', () => {
 
     expect(screen.getByPlaceholderText('checkout-redesign')).toBeVisible()
     expect(screen.getByPlaceholderText('What this experiment tests')).toBeVisible()
-    expect(screen.getByRole('combobox', { name: 'Control variant' })).toBeVisible()
-    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeVisible()
-    expect(screen.getByRole('combobox', { name: 'Status' })).not.toBeVisible()
-    expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).not.toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).not.toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).not.toBeVisible()
+    const status = screen.getByRole('combobox', { name: 'Status' })
+    const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    expect(status).toBeVisible()
+    expect(status).toHaveValue('draft')
+    expect(within(status).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'draft',
+      'scheduled',
+      'running',
+    ])
+    expect(traffic).toBeVisible()
+    expect(traffic).toHaveValue(100)
+    expect(traffic).toHaveAttribute('min', '0')
+    expect(traffic).toHaveAttribute('max', '100')
+    expect(screen.getAllByRole('combobox', { name: 'Status' })).toHaveLength(1)
+    expect(screen.getAllByRole('spinbutton', { name: 'Traffic percentage' })).toHaveLength(1)
+    expect(screen.getByText('Weights set the relative split among variants.')).toBeVisible()
+    expect(
+      screen.getByText('Enrollment, flag, scheduling, analysis, and targeting controls.'),
+    ).toBeVisible()
 
     await userEvent.click(summaryText.closest('summary')!)
 
     expect(disclosure).toHaveAttribute('open')
-    expect(screen.getByRole('combobox', { name: 'Status' })).toBeVisible()
-    expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeVisible()
+    expect(
+      screen.getByText(
+        "Statistical control for every comparison and the backing flag's fallback variant.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Immutable after draft. Use anonymous visitors for browser experiments that start before sign-in.',
+      ),
+    ).toBeVisible()
+    expect(screen.getAllByRole('combobox', { name: 'Control variant' })).toHaveLength(1)
+    expect(screen.getAllByRole('combobox', { name: 'Bucketing identity' })).toHaveLength(1)
+    expect(within(disclosure!).queryByRole('combobox', { name: 'Status' })).not.toBeInTheDocument()
+    expect(
+      within(disclosure!).queryByRole('spinbutton', { name: 'Traffic percentage' }),
+    ).not.toBeInTheDocument()
+  })
+
+  test('keeps edit controls visible when collapsed and preserves lifecycle locks', async () => {
+    const runningValues = { ...emptyExperimentValues(), status: 'running' as const }
+    const { rerender } = render(
+      <ExperimentForm
+        values={runningValues}
+        onChange={vi.fn()}
+        isCreate={false}
+        currentStatus="running"
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const runningStatus = screen.getByRole('combobox', { name: 'Status' })
+    expect(runningStatus).toBeEnabled()
+    expect(within(runningStatus).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'running',
+      'completed',
+      'stopped',
+    ])
+    const runningTraffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    expect(runningTraffic).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
+
+    const disclosure = screen.getByText('Advanced Settings').closest('details')
+    expect(disclosure).toHaveAttribute('open')
+    await userEvent.click(screen.getByText('Advanced Settings').closest('summary')!)
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(runningStatus).toBeVisible()
+    expect(runningTraffic).toBeVisible()
+
+    rerender(
+      <ExperimentForm
+        values={{ ...runningValues, status: 'stopped' }}
+        onChange={vi.fn()}
+        isCreate={false}
+        currentStatus="stopped"
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const stoppedStatus = screen.getByRole('combobox', { name: 'Status' })
+    expect(stoppedStatus).toBeDisabled()
+    expect(within(stoppedStatus).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'stopped',
+    ])
+    expect(screen.getByText('This experiment has ended — status is terminal.')).toBeVisible()
+  })
+
+  test('updates control options from variant keys and keeps strict bucketing options', async () => {
+    function SelectorHarness() {
+      const [values, setValues] = useState({
+        ...emptyExperimentValues(),
+        key: 'checkout-test',
+      })
+
+      return (
+        <ExperimentForm
+          values={values}
+          onChange={setValues}
+          isCreate
+          onSubmit={vi.fn()}
+          submitting={false}
+        />
+      )
+    }
+
+    render(<SelectorHarness />)
+    await userEvent.click(screen.getByText('Advanced Settings').closest('summary')!)
+
+    const control = screen.getByRole('combobox', { name: 'Control variant' })
+    expect(within(control).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'control',
+      'treatment',
+    ])
+
+    const bucketing = screen.getByRole('combobox', { name: 'Bucketing identity' })
+    expect(
+      within(bucketing).getAllByRole('option').map((option) => ({
+        label: option.textContent,
+        value: (option as HTMLOptionElement).value,
+      })),
+    ).toEqual([
+      { label: 'Anonymous visitor', value: 'anonymous_id' },
+      { label: 'Authenticated user', value: 'user_id' },
+    ])
+
+    const treatmentKey = screen.getByRole('textbox', { name: 'Key for variant 2' })
+    await userEvent.clear(treatmentKey)
+    await userEvent.type(treatmentKey, 'challenger')
+
+    expect(within(control).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'control',
+      'challenger',
+    ])
+  })
+
+  test('opens Advanced Settings for hidden enrollment validation errors', async () => {
+    render(
+      <ExperimentForm
+        values={{
+          ...emptyExperimentValues(),
+          key: 'checkout-test',
+          default_variant: 'missing',
+          bucket_by: 'account_id' as ExperimentFormValues['bucket_by'],
+        }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const disclosure = screen.getByText('Advanced Settings').closest('details')
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create experiment' }))
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(
+      screen.getByText('Choose a control variant that matches a variant key'),
+    ).toBeVisible()
+    expect(screen.getByText('Choose anonymous_id or user_id')).toBeVisible()
   })
 
   test('opens Advanced Settings when a hidden launch requirement fails validation', async () => {

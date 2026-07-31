@@ -182,9 +182,7 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 ```
 POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl
 GITHUB_APP_ID=
-GITHUB_APP_PRIVATE_KEY=            # PEM inline (escaped \n accepted), or…
-GITHUB_APP_PRIVATE_KEY_BASE64=     # …base64 of the .pem (easiest in Docker), or…
-GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the .pem file (~ expanded)
+GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
 CODEGEN_MODEL=claude-opus-4-8      # canonical supported provider/model ID; see below
@@ -209,6 +207,19 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
+
+Generate the canonical private-key value as one unwrapped line:
+
+```bash
+openssl base64 -A -in path/to/github-app.private-key.pem
+```
+
+Paste that output directly after `GITHUB_APP_PRIVATE_KEY_BASE64=` in the
+untracked `.env` file. Base64 is transport encoding, not encryption: restrict
+access to `.env` like the original PEM and never commit either one. This is a
+breaking configuration change; deployments that previously supplied an inline
+PEM or a PEM file path must encode the file and migrate to the single setting
+above.
 
 The secure worker does not accept arbitrary LiteLLM provider prefixes. The
 canonical resolver accepts `anthropic`, `azure`, `cohere`, `deepseek`,
@@ -641,7 +652,7 @@ The autonomous loop runs once these external pieces are set up:
    or merge. Existing installations must approve the added permission before
    runtime evidence can be collected; until then it remains explicitly
    unverified. Set
-   `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY`. Customers install it on their
+   `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY_BASE64`. Customers install it on their
    repos; a trusted operator then binds each exact repository with
    `make grant-codegen-repository` as described in
    [Repository authority](#repository-authority). Never provision a repository

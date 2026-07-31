@@ -96,9 +96,44 @@ function renderEditor(initialPath: string) {
 }
 
 describe('FlagEditorPage — create', () => {
+  test('consolidates targeting and safety in collapsed Advanced Settings', async () => {
+    renderEditor('/flags/new')
+
+    const summary = await screen.findByText('Advanced Settings')
+    const disclosure = summary.closest('details')
+    expect(disclosure).not.toBeNull()
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(screen.getByText('Targeting')).not.toBeVisible()
+    expect(screen.getByText('Safety')).not.toBeVisible()
+    expect(screen.queryByText('Targeting rules', { exact: true })).not.toBeInTheDocument()
+    expect(screen.queryByText('Fallthrough', { exact: true })).not.toBeInTheDocument()
+
+    await userEvent.click(summary.closest('summary')!)
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(screen.getByText('Targeting')).toBeVisible()
+    expect(screen.getByText('Safety')).toBeVisible()
+    expect(
+      screen.getByText(
+        'Initial rollout applies when no rule matches, and therefore applies to everyone when this flag has no rules.',
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByRole('spinbutton', { name: 'Initial rollout %' }),
+    ).toHaveValue(100)
+    expect(
+      screen.getByRole('combobox', { name: 'Initial rollout bucket identity' }),
+    ).toHaveValue('user_id')
+    expect(screen.getByRole('button', { name: 'Add rule' })).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Evaluation mode' })).toHaveValue(
+      'client',
+    )
+  })
+
   test('offers only canonical targeting operators and uses canonical decimal input', async () => {
     renderEditor('/flags/new')
 
+    await userEvent.click(await screen.findByText('Advanced Settings'))
     await userEvent.click(await screen.findByRole('button', { name: 'Add rule' }))
     await userEvent.click(screen.getByRole('button', { name: 'Add condition' }))
 
@@ -132,8 +167,85 @@ describe('FlagEditorPage — create', () => {
       state: 'draft',
       enabled: false,
       default_variant: 'control',
+      rules: [],
+      fallthrough: {
+        rollout: { percentage: 100, bucket_by: 'user_id' },
+      },
+      evaluation_mode: 'client',
       auto_disable: false,
+      guardrails: [],
     })
+    expect(postBodies[0]).not.toHaveProperty('initial_rollout')
+  })
+
+  test('simulates unchanged targeting as fully assigned traffic', async () => {
+    renderEditor('/flags/new')
+    await userEvent.type(await screen.findByPlaceholderText('checkout-cta'), 'preview')
+    await userEvent.type(
+      screen.getByPlaceholderText('Checkout CTA experiment'),
+      'Preview flag',
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Simulate' }))
+
+    expect(
+      await screen.findByText('Population simulation — unsaved config'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Fallthrough — assigned')).toBeInTheDocument()
+    expect(screen.getByText('100% · 10,000')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Fallthrough — missed rollout'),
+    ).not.toBeInTheDocument()
+  })
+
+  test('opens Advanced Settings for hidden targeting errors before review', async () => {
+    renderEditor('/flags/new')
+    await userEvent.type(await screen.findByPlaceholderText('checkout-cta'), 'invalid-rule')
+    await userEvent.type(
+      screen.getByPlaceholderText('Checkout CTA experiment'),
+      'Invalid rule',
+    )
+
+    const summary = screen.getByText('Advanced Settings')
+    const disclosure = summary.closest('details')
+    await userEvent.click(summary.closest('summary')!)
+    await userEvent.click(screen.getByRole('button', { name: 'Add rule' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Add condition' }))
+    await userEvent.click(summary.closest('summary')!)
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(await screen.findByText('Attribute is required')).toBeVisible()
+    expect(screen.queryByText('Create invalid-rule')).not.toBeInTheDocument()
+  })
+
+  test('opens Advanced Settings for hidden targeting errors before simulation', async () => {
+    renderEditor('/flags/new')
+    await userEvent.type(await screen.findByPlaceholderText('checkout-cta'), 'invalid-bucket')
+    await userEvent.type(
+      screen.getByPlaceholderText('Checkout CTA experiment'),
+      'Invalid bucket',
+    )
+
+    const summary = screen.getByText('Advanced Settings')
+    const disclosure = summary.closest('details')
+    await userEvent.click(summary.closest('summary')!)
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Initial rollout bucket identity' }),
+      'custom',
+    )
+    await userEvent.click(summary.closest('summary')!)
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Simulate' }))
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(await screen.findByText('Required')).toBeVisible()
+    expect(
+      screen.queryByText('Population simulation — unsaved config'),
+    ).not.toBeInTheDocument()
   })
 
   test('renders a duplicate-key 409 on the key field', async () => {
@@ -207,6 +319,14 @@ describe('FlagEditorPage — edit & version conflict', () => {
     await screen.findByDisplayValue('Checkout CTA experiment')
     expect(screen.getByText(/Existing flag lifecycle changes use the dedicated actions/)).toBeInTheDocument()
     expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    const summary = screen.getByText('Advanced Settings')
+    const disclosure = summary.closest('details')
+    expect(disclosure).not.toHaveAttribute('open')
+    await userEvent.click(summary.closest('summary')!)
+    expect(
+      screen.getByRole('spinbutton', { name: 'Initial rollout %' }),
+    ).toHaveValue(10)
+    await userEvent.click(summary.closest('summary')!)
     await userEvent.click(screen.getByRole('button', { name: 'Review & save' }))
     await waitFor(() => expect(screen.queryByText(/Update checkout-cta/)).not.toBeInTheDocument())
     expect(putBodies).toHaveLength(0)

@@ -83,7 +83,9 @@ from app.evaluations.subprocess_executor import (
     sanitized_evaluation_environment,
 )
 
-
+_PRIVATE_KEY_SETTING = "GITHUB_APP_PRIVATE_KEY_BASE64"
+_PRIVATE_KEY_ENCODED_SENTINEL = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
+_PRIVATE_KEY_DECODED_SENTINEL = "github-app-private-key-sentinel"
 SHA = "1" * 64
 EGRESS_POLICY_SHA = "8" * 64
 EGRESS_PROXY_IMAGE_ID = "sha256:" + "9" * 64
@@ -1137,7 +1139,7 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
         "GROQ_API_KEY": "unselected-provider-key",
         "GITHUB_TOKEN": "github-write-token",
         "GH_TOKEN": "gh-write-token",
-        "GITHUB_APP_PRIVATE_KEY": "private-key",
+        _PRIVATE_KEY_SETTING: _PRIVATE_KEY_ENCODED_SENTINEL,
         "GITHUB_APP_ID": "123",
         "APDL_INTERNAL_TOKEN": "internal-token",
         "INTERNAL_API_KEY": "internal-key",
@@ -1158,7 +1160,7 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
         for key in {
             "GITHUB_TOKEN",
             "GH_TOKEN",
-            "GITHUB_APP_PRIVATE_KEY",
+            _PRIVATE_KEY_SETTING,
             "GITHUB_APP_ID",
             "APDL_INTERNAL_TOKEN",
             "INTERNAL_API_KEY",
@@ -1169,6 +1171,8 @@ async def test_subprocess_executor_scrubs_credentials_and_sends_public_json_only
             "CUSTOM_WRITE_TOKEN",
         }
     )
+    assert _PRIVATE_KEY_ENCODED_SENTINEL not in sanitized.values()
+    assert _PRIVATE_KEY_DECODED_SENTINEL not in sanitized.values()
 
     async def shell_is_forbidden(*args, **kwargs):
         raise AssertionError("the evaluation executor must never invoke a shell")

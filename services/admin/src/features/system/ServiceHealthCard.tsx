@@ -1,7 +1,12 @@
 import { RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
-import { healthLevel, type HealthLevel, type ServiceHealth } from '@/api/health'
+import {
+  healthLevel,
+  type HealthLevel,
+  type ProbeResult,
+  type ServiceHealth,
+} from '@/api/health'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -24,16 +29,62 @@ interface ServiceHealthCardProps {
   detailed?: boolean
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function configSummary(result: ServiceHealth): string {
+  const ready = result.ready
+  if (!ready) return 'readiness: unknown'
+  if (ready.error) return `readiness error: ${ready.error}`
+  if (!isRecord(ready.body)) return 'readiness: unknown'
+
+  const checks = isRecord(ready.body.checks) ? ready.body.checks : null
+  const sse = isRecord(ready.body.sse) ? ready.body.sse : null
+  const postgres = typeof checks?.postgres === 'string' ? checks.postgres : 'unknown'
+  const redis = typeof checks?.redis === 'string' ? checks.redis : 'unknown'
+  const activeConnections =
+    typeof sse?.active_connections === 'number' &&
+    Number.isInteger(sse.active_connections) &&
+    sse.active_connections >= 0
+      ? String(sse.active_connections)
+      : 'unknown'
+  return `pg: ${postgres} · redis: ${redis} · sse: ${activeConnections}`
+}
+
 function summaryLine(result: ServiceHealth): string {
-  const body = result.health.body as Record<string, unknown> | null
-  if (result.service === 'config' && body) {
-    return `pg: ${String(body.postgres ?? '?')} · redis: ${String(body.redis ?? '?')} · sse: ${String(body.sse_connections ?? '?')}`
-  }
+  const body = isRecord(result.health.body) ? result.health.body : null
+  if (result.service === 'config') return configSummary(result)
   if (result.ready) {
-    const readyBody = result.ready.body as { status?: unknown } | null
-    return `ready: ${String(readyBody?.status ?? (result.ready.error ?? 'unknown'))}`
+    const readyBody = isRecord(result.ready.body) ? result.ready.body : null
+    const status = typeof readyBody?.status === 'string' ? readyBody.status : null
+    return `ready: ${status ?? result.ready.error ?? 'unknown'}`
   }
-  return `status: ${String(body?.status ?? (result.health.error ?? 'unknown'))}`
+  const status = typeof body?.status === 'string' ? body.status : null
+  return `status: ${status ?? result.health.error ?? 'unknown'}`
+}
+
+function ProbeDetails({ label, probe }: { label: '/health' | '/ready'; probe: ProbeResult }) {
+  const status =
+    probe.status !== null
+      ? `HTTP ${probe.status} · ${formatMs(probe.latencyMs)}`
+      : (probe.error ?? 'unreachable')
+  return (
+    <section aria-label={`${label} response`} className="space-y-1">
+      <p className="text-xs font-medium">
+        {label} <span className="font-normal text-muted-foreground">· {status}</span>
+      </p>
+      {probe.body !== null ? (
+        <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 font-mono text-xs">
+          {JSON.stringify(probe.body, null, 2)}
+        </pre>
+      ) : (
+        <p className="rounded-md bg-muted p-2 text-xs text-muted-foreground">
+          {probe.error ? `No JSON body · ${probe.error}` : 'No JSON response body'}
+        </p>
+      )}
+    </section>
+  )
 }
 
 export function ServiceHealthCard({
@@ -85,10 +136,11 @@ export function ServiceHealthCard({
             <p className="truncate text-xs text-muted-foreground" title={summaryLine(result)}>
               {summaryLine(result)}
             </p>
-            {detailed && result.health.body !== null ? (
-              <pre className="mt-2 max-h-40 overflow-auto rounded-md bg-muted p-2 font-mono text-xs">
-                {JSON.stringify(result.health.body, null, 2)}
-              </pre>
+            {detailed ? (
+              <div className="mt-2 space-y-3">
+                <ProbeDetails label="/health" probe={result.health} />
+                {result.ready ? <ProbeDetails label="/ready" probe={result.ready} /> : null}
+              </div>
             ) : null}
           </>
         ) : (

@@ -170,8 +170,8 @@ def _tail(text: str, limit: int = _ERR_TAIL) -> str:
 
 
 # Env vars forwarded to the agent subprocess. LLM access only: the
-# GitHub installation token and APDL service secrets (GITHUB_APP_PRIVATE_KEY,
-# APDL_INTERNAL_TOKEN, POSTGRES_URL, …) are deliberately NOT in this allowlist.
+# GitHub installation token, Base64 App key, and APDL service secrets are
+# deliberately NOT in this allowlist.
 _ENV_PASSTHROUGH: tuple[str, ...] = (*PROCESS_ENV,)
 
 

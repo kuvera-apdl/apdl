@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
-import { SERVICE_DESCRIPTORS } from '@/api/health'
 import { countEvents, timeseriesEvents } from '@/api/query'
 import type { FlagState } from '@/api/types/flags'
 import { CurlButton } from '@/components/shared/CurlButton'
@@ -34,34 +33,10 @@ import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
 import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 import { useFlagsQuery } from '@/features/flags/hooks'
-import { ServiceHealthCard } from '@/features/system/ServiceHealthCard'
-import { useServiceHealthQuery } from '@/features/system/hooks'
 import { useNow } from '@/lib/hooks'
 import { isPastDate, parseServerDate } from '@/lib/format'
 
 const FLAG_STATES: FlagState[] = ['draft', 'active', 'disabled', 'archived']
-
-function HealthStrip() {
-  const queries = {
-    ingestion: useServiceHealthQuery('ingestion'),
-    config: useServiceHealthQuery('config'),
-    query: useServiceHealthQuery('query'),
-    agents: useServiceHealthQuery('agents'),
-  }
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      {SERVICE_DESCRIPTORS.map(({ service, label }) => (
-        <ServiceHealthCard
-          key={service}
-          label={label}
-          result={queries[service].data}
-          isLoading={queries[service].isPending}
-          linkTo="/system/health"
-        />
-      ))}
-    </div>
-  )
-}
 
 function FlagsSummaryCard() {
   const { active } = useWorkspace()
@@ -489,9 +464,8 @@ export function OverviewPage() {
     <div className="space-y-6">
       <PageHeader
         title="Overview"
-        description="Is the Loop alive — service health, flag state, and live distribution at a glance."
+        description="Event activity, experiment state, flag delivery, and agent runs at a glance."
       />
-      <HealthStrip />
       <div className="grid items-start gap-4 lg:grid-cols-3">
         <ThroughputCard />
         <ExperimentsCard />

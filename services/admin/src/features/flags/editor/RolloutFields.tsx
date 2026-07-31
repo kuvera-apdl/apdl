@@ -11,11 +11,19 @@ const COMMON_BUCKETS = ['user_id', 'anonymous_id'] as const
 interface RolloutFieldsProps {
   /** e.g. "fallthrough.rollout" or "rules.0.rollout" */
   pathPrefix: string
+  percentageLabel?: string
+  bucketByLabel?: string
   percentageError?: string
   bucketByError?: string
 }
 
-export function RolloutFields({ pathPrefix, percentageError, bucketByError }: RolloutFieldsProps) {
+export function RolloutFields({
+  pathPrefix,
+  percentageLabel = 'Rollout %',
+  bucketByLabel = 'Bucket by',
+  percentageError,
+  bucketByError,
+}: RolloutFieldsProps) {
   const { register, watch, setValue } = useFormContext<FlagFormValues>()
   const percentagePath = `${pathPrefix}.percentage` as FieldPath<FlagFormValues>
   const bucketByPath = `${pathPrefix}.bucket_by` as FieldPath<FlagFormValues>
@@ -27,7 +35,7 @@ export function RolloutFields({ pathPrefix, percentageError, bucketByError }: Ro
   return (
     <div className="flex flex-wrap items-end gap-3">
       <div className="space-y-1.5">
-        <Label>Rollout %</Label>
+        <Label>{percentageLabel}</Label>
         <div className="flex items-center gap-2">
           <input
             type="range"
@@ -39,7 +47,7 @@ export function RolloutFields({ pathPrefix, percentageError, bucketByError }: Ro
               setValue(percentagePath, Number(event.target.value) as never, { shouldDirty: true })
             }
             className="w-36 accent-foreground"
-            aria-label="Rollout percentage slider"
+            aria-label={`${percentageLabel} slider`}
           />
           <Input
             type="number"
@@ -47,13 +55,14 @@ export function RolloutFields({ pathPrefix, percentageError, bucketByError }: Ro
             max={100}
             step="any"
             className="w-24 tabular-nums"
+            aria-label={percentageLabel}
             {...register(percentagePath, { valueAsNumber: true })}
           />
         </div>
         {percentageError ? <p className="text-xs text-destructive">{percentageError}</p> : null}
       </div>
       <div className="space-y-1.5">
-        <Label>Bucket by</Label>
+        <Label>{bucketByLabel}</Label>
         <div className="flex items-center gap-2">
           <Select
             value={isCustomBucket ? 'custom' : bucketBy}
@@ -65,7 +74,7 @@ export function RolloutFields({ pathPrefix, percentageError, bucketByError }: Ro
               })
             }}
             className="w-40"
-            aria-label="Bucket by"
+            aria-label={bucketByLabel}
           >
             <option value="user_id">user_id</option>
             <option value="anonymous_id">anonymous_id</option>
@@ -75,6 +84,7 @@ export function RolloutFields({ pathPrefix, percentageError, bucketByError }: Ro
             <Input
               placeholder="attribute name"
               className="w-40"
+              aria-label={`${bucketByLabel} attribute`}
               {...register(bucketByPath)}
             />
           ) : null}

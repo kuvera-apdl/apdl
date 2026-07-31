@@ -1,10 +1,10 @@
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
-import { lastDays, todayIso, type DateRange } from './selectorModel'
+import { lastDays, todayUtcIso, type DateRange } from './selectorModel'
 
 const PRESETS: { label: string; range: () => DateRange }[] = [
-  { label: 'Today', range: () => ({ start_date: todayIso(), end_date: todayIso() }) },
+  { label: 'Today', range: () => ({ start_date: todayUtcIso(), end_date: todayUtcIso() }) },
   { label: '7d', range: () => lastDays(7) },
   { label: '30d', range: () => lastDays(30) },
   { label: '90d', range: () => lastDays(90) },
@@ -44,7 +44,7 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
         value={value.start_date}
         onChange={(event) => onChange({ ...value, start_date: event.target.value })}
         className="w-40"
-        aria-label="Start date"
+        aria-label="Start date (UTC)"
       />
       <span className="text-muted-foreground">→</span>
       <Input
@@ -52,8 +52,9 @@ export function DateRangePicker({ value, onChange }: DateRangePickerProps) {
         value={value.end_date}
         onChange={(event) => onChange({ ...value, end_date: event.target.value })}
         className="w-40"
-        aria-label="End date"
+        aria-label="End date (UTC)"
       />
+      <span className="text-xs font-medium text-muted-foreground">UTC</span>
     </div>
   )
 }
