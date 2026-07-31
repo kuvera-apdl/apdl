@@ -11,7 +11,7 @@ import httpx
 from app.store.llm_credentials import REMOTE_PROVIDERS, RemoteProvider
 
 
-CATALOG_VERSION = "llm-provider-catalog@1"
+CATALOG_VERSION = "llm-provider-catalog@2"
 MODEL_SCHEMA_VERSION = "llm_provider_model@1"
 MAX_PROVIDER_RESPONSE_BYTES = 1_048_576
 MAX_PROVIDER_MODELS = 1_000
@@ -55,13 +55,18 @@ class ProviderModel:
     allowed_data_classifications: tuple[
         Literal["public", "internal", "confidential", "restricted"], ...
     ]
-    pricing_status: Literal["operator_review_required"]
+    endpoint_host: str
+    input_cost_per_million_tokens_usd_micros: int
+    output_cost_per_million_tokens_usd_micros: int
+    pricing_status: Literal["catalog_reviewed"]
 
 
 @dataclass(frozen=True)
 class _CatalogEntry:
     display_name: str
     supported_tiers: tuple[Literal["fast", "reasoning"], ...]
+    input_cost_per_million_tokens_usd_micros: int
+    output_cost_per_million_tokens_usd_micros: int
     data_residency: Literal["ca", "us", "eu", "global"] = "global"
     allowed_data_classifications: tuple[
         Literal["public", "internal", "confidential", "restricted"], ...
@@ -70,46 +75,111 @@ class _CatalogEntry:
 
 _CATALOG: dict[RemoteProvider, dict[str, _CatalogEntry]] = {
     "openai": {
-        "gpt-5.4-nano": _CatalogEntry("GPT-5.4 Nano", ("fast",)),
-        "gpt-5.4-mini": _CatalogEntry(
-            "GPT-5.4 Mini", ("fast", "reasoning")
+        "gpt-5.4-nano": _CatalogEntry(
+            "GPT-5.4 Nano", ("fast",), 100_000, 400_000
         ),
-        "gpt-4.1-mini": _CatalogEntry("GPT-4.1 Mini", ("fast",)),
-        "o3": _CatalogEntry("OpenAI o3", ("reasoning",)),
-        "o4-mini": _CatalogEntry("OpenAI o4-mini", ("reasoning",)),
+        "gpt-5.4-mini": _CatalogEntry(
+            "GPT-5.4 Mini", ("fast", "reasoning"), 250_000, 1_000_000
+        ),
+        "gpt-4.1-mini": _CatalogEntry(
+            "GPT-4.1 Mini", ("fast",), 400_000, 1_600_000
+        ),
+        "o3": _CatalogEntry(
+            "OpenAI o3", ("reasoning",), 2_000_000, 8_000_000
+        ),
+        "o4-mini": _CatalogEntry(
+            "OpenAI o4-mini", ("reasoning",), 1_100_000, 4_400_000
+        ),
     },
     "anthropic": {
         "claude-haiku-4-5-20251001": _CatalogEntry(
-            "Claude Haiku 4.5", ("fast",)
+            "Claude Haiku 4.5", ("fast",), 1_000_000, 5_000_000
         ),
         "claude-sonnet-4-6": _CatalogEntry(
-            "Claude Sonnet 4.6", ("fast", "reasoning")
+            "Claude Sonnet 4.6",
+            ("fast", "reasoning"),
+            3_000_000,
+            15_000_000,
         ),
-        "claude-opus-4-6": _CatalogEntry("Claude Opus 4.6", ("reasoning",)),
+        "claude-opus-4-6": _CatalogEntry(
+            "Claude Opus 4.6", ("reasoning",), 5_000_000, 25_000_000
+        ),
     },
     "google": {
         "gemini-2.5-flash-lite": _CatalogEntry(
-            "Gemini 2.5 Flash-Lite", ("fast",)
+            "Gemini 2.5 Flash-Lite", ("fast",), 100_000, 400_000
         ),
         "gemini-2.5-flash": _CatalogEntry(
-            "Gemini 2.5 Flash", ("fast", "reasoning")
+            "Gemini 2.5 Flash",
+            ("fast", "reasoning"),
+            300_000,
+            2_500_000,
         ),
-        "gemini-2.5-pro": _CatalogEntry("Gemini 2.5 Pro", ("reasoning",)),
+        "gemini-2.5-pro": _CatalogEntry(
+            "Gemini 2.5 Pro", ("reasoning",), 1_250_000, 10_000_000
+        ),
     },
     "xai": {
         "grok-4.20-0309-non-reasoning": _CatalogEntry(
-            "Grok 4.20 Non-Reasoning", ("fast",)
+            "Grok 4.20 Non-Reasoning", ("fast",), 2_000_000, 10_000_000
         ),
-        "grok-4.5": _CatalogEntry("Grok 4.5", ("reasoning",)),
+        "grok-4.5": _CatalogEntry(
+            "Grok 4.5", ("reasoning",), 3_000_000, 15_000_000
+        ),
     },
 }
 
-_ENDPOINTS: dict[RemoteProvider, str] = {
+_DISCOVERY_ENDPOINTS: dict[RemoteProvider, str] = {
     "openai": "https://api.openai.com/v1/models",
     "anthropic": "https://api.anthropic.com/v1/models",
     "google": "https://generativelanguage.googleapis.com/v1beta/models",
     "xai": "https://api.x.ai/v1/models",
 }
+
+_RUNTIME_ENDPOINTS: dict[RemoteProvider, str] = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "google": "https://generativelanguage.googleapis.com",
+    "xai": "https://api.x.ai/v1",
+}
+
+_ENDPOINT_HOSTS: dict[RemoteProvider, str] = {
+    "openai": "api.openai.com",
+    "anthropic": "api.anthropic.com",
+    "google": "generativelanguage.googleapis.com",
+    "xai": "api.x.ai",
+}
+
+
+def provider_runtime_endpoint(provider: str) -> str:
+    """Return the fixed reviewed runtime endpoint for one remote provider."""
+    return _RUNTIME_ENDPOINTS[_canonical_provider(provider)]
+
+
+def catalog_model(provider: str, model_id: str) -> ProviderModel | None:
+    """Return reviewed policy metadata for one exact canonical model."""
+    canonical_provider = _canonical_provider(provider)
+    entry = _CATALOG[canonical_provider].get(model_id)
+    if entry is None:
+        return None
+    return ProviderModel(
+        schema_version=MODEL_SCHEMA_VERSION,
+        provider=canonical_provider,
+        model_id=model_id,
+        display_name=entry.display_name,
+        supported_tiers=entry.supported_tiers,
+        catalog_version=CATALOG_VERSION,
+        data_residency=entry.data_residency,
+        allowed_data_classifications=entry.allowed_data_classifications,
+        endpoint_host=_ENDPOINT_HOSTS[canonical_provider],
+        input_cost_per_million_tokens_usd_micros=(
+            entry.input_cost_per_million_tokens_usd_micros
+        ),
+        output_cost_per_million_tokens_usd_micros=(
+            entry.output_cost_per_million_tokens_usd_micros
+        ),
+        pricing_status="catalog_reviewed",
+    )
 
 
 def _canonical_provider(provider: str) -> RemoteProvider:
@@ -165,7 +235,7 @@ async def _bounded_json(
     try:
         async with client.stream(
             "GET",
-            _ENDPOINTS[provider],
+            _DISCOVERY_ENDPOINTS[provider],
             headers=_headers(provider, api_key),
         ) as response:
             _raise_for_status(response)
@@ -254,20 +324,11 @@ def normalize_models(
     canonical_provider = _canonical_provider(provider)
     accessible = set(raw_model_ids)
     models = tuple(
-        ProviderModel(
-            schema_version=MODEL_SCHEMA_VERSION,
-            provider=canonical_provider,
-            model_id=model_id,
-            display_name=entry.display_name,
-            supported_tiers=entry.supported_tiers,
-            catalog_version=CATALOG_VERSION,
-            data_residency=entry.data_residency,
-            allowed_data_classifications=entry.allowed_data_classifications,
-            pricing_status="operator_review_required",
-        )
-        for model_id, entry in sorted(_CATALOG[canonical_provider].items())
+        catalog_model(canonical_provider, model_id)
+        for model_id in sorted(_CATALOG[canonical_provider])
         if model_id in accessible
     )
+    models = tuple(model for model in models if model is not None)
     if not models:
         raise ProviderDiscoveryError(
             "no_supported_models",

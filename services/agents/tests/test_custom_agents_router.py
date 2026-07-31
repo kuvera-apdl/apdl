@@ -160,7 +160,7 @@ async def test_create_rejects_unknown_nested_preset_fields(stubbed_store):
 
 
 @pytest.mark.asyncio
-async def test_self_registered_overprivileged_project_cannot_manage_custom_agents(
+async def test_project_without_effect_authorization_can_manage_custom_agents(
     stubbed_store,
 ):
     app.dependency_overrides[authenticate_request] = _authenticate_self_registered
@@ -171,40 +171,8 @@ async def test_self_registered_overprivileged_project_cannot_manage_custom_agent
             json=_spec(),
         )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Agents execution requires operator project authorization"
-    )
-    assert stubbed_store["created"] is None
-
-
-@pytest.mark.asyncio
-async def test_self_registered_custom_agent_test_invokes_no_tools_or_llm(monkeypatch):
-    app.dependency_overrides[authenticate_request] = _authenticate_self_registered
-    calls: list[str] = []
-
-    async def forbidden_preset(*args, **kwargs):
-        calls.append("preset")
-        raise AssertionError("preset tools must not execute")
-
-    async def forbidden_loop(*args, **kwargs):
-        calls.append("llm")
-        raise AssertionError("LLM/tool loop must not execute")
-
-    monkeypatch.setattr(router_mod, "run_preset_tools", forbidden_preset)
-    monkeypatch.setattr(router_mod, "run_tool_loop", forbidden_loop)
-
-    async with _client() as client:
-        response = await client.post(
-            "/v1/agents/custom/test",
-            json={"project_id": "demo", "definition": _spec()},
-        )
-
-    assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Agents execution requires operator project authorization"
-    )
-    assert calls == []
+    assert response.status_code == 201
+    assert stubbed_store["created"] is not None
 
 
 @pytest.mark.asyncio

@@ -365,6 +365,20 @@ def required_role(service: str, method: str, path: str) -> str | None:
     if service == "agents":
         if not path.startswith("/v1/agents"):
             return ""
+        if path == "/v1/agents/setup":
+            if method == "GET":
+                return "agents:read"
+            if method == "PUT":
+                return _LLM_CONNECTION_MANAGER
+            return ""
+        if path == "/v1/agents/setup/deactivate":
+            return (
+                _LLM_CONNECTION_MANAGER
+                if method == "POST"
+                else ""
+            )
+        if path.startswith("/v1/agents/setup"):
+            return ""
         if path.startswith("/v1/agents/llm-connections"):
             provider_path = (
                 r"/v1/agents/llm-connections/"
@@ -613,7 +627,10 @@ async def proxy_service(
     )
 
     ephemeral_credential_id: str | None = None
-    require_human_actor = service == "agents" and request.method not in _SAFE_METHODS
+    require_human_actor = service == "agents" and (
+        request.method not in _SAFE_METHODS
+        or upstream_path == "/v1/agents/setup"
+    )
     credential_roles = roles
     if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
         # Grant only the upstream read capability needed by this management

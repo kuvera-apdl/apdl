@@ -114,15 +114,14 @@ credential version, decrypts it just in time, and revalidates it at the egress
 boundary. It records provider/model, credential ID/version, prompt hash, usage,
 cost, latency, and outcome without storing prompt content or secret material.
 
-Migration 023 creates one safe default policy for every project: only the exact
-local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
-spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, Google, or xAI
-requires an operator to update `llm_project_policies` and insert the exact
-provider/model row in `llm_project_provider_policies`, including allowed data
-classifications, residency, current input/output prices, and positive
-project-daily and per-run ceilings. Each tier has one exact primary assignment;
-provider failures do not trigger an implicit same-vendor or cross-vendor
-fallback.
+Migration 051 moves every fresh or migrated project to one explicit
+`inactive` setup with no fabricated model assignment. A current human owner, or
+an active delegated member holding both `agents:manage` and
+`credentials:manage`, connects one or more reviewed providers and activates the
+project through `/v1/agents/setup`. The server derives fixed endpoints,
+residency, classifications, reviewed prices, and positive project/run ceilings
+from the catalog. Each tier has one exact primary assignment; provider failures
+do not trigger an implicit same-vendor or cross-vendor fallback.
 
 ### Connect xAI/Grok
 
@@ -130,10 +129,9 @@ fallback.
 2. Add the project's xAI connection through the authenticated
    `/v1/agents/llm-connections/xai` API. The key is validated, encrypted, and
    never returned to the browser.
-3. Run `make provision-agents-llm-policy ARGS="--help"` and provision the
-   project with `--provider xai`, the exact current token prices, residency,
-   classifications, positive spend ceilings, and exact fast/reasoning model
-   assignments.
+3. Select eligible fast and reasoning models and activate analysis through
+   `PUT /v1/agents/setup`. Pricing, residency, classifications, endpoints, and
+   budgets are server-owned and cannot be supplied by the client.
 4. Confirm the generic credential-store subsystem at
    `GET /ready/capabilities`; connection presence is visible only through the
    authenticated project API.
@@ -144,9 +142,10 @@ MCP tools are not enabled by this provider adapter.
 
 ## Approval and safety boundary
 
-These levels apply only to projects with canonical execution authority.
-Self-created projects cannot start or resume an Agents execution at any
-autonomy level unless an operator has recorded the explicit override.
+These levels apply only to projects with active Agents setup. Owner activation
+permits governed L1/L2 analysis, but it does not grant `agents:approve`,
+Codegen, repository access, L3/L4 autonomous mutation, or any external effect.
+Those capabilities retain the immutable operator execution-authority ceiling.
 
 `gate_action` (`app/framework/gating.py`) is a generic policy primitive, not a
 claim that the enabled product flow is autonomous. Experiment design invokes it
@@ -220,7 +219,6 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` | — | Required standard Base64 encoding of exactly 32 random bytes; encrypts project provider credentials inside Agents only |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names, including `LLM_FAST_XAI` (`grok-4.20-0309-non-reasoning`) and `LLM_REASONING_XAI` (`grok-4.5`); each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
 

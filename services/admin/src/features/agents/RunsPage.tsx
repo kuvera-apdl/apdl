@@ -22,12 +22,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { AgentReadOnlyNote } from '@/features/agents/AgentAccessNotice'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
+import { AgentsSetupNotice } from '@/features/agents/setup/AgentsSetupNotice'
+import { useAgentsSetup } from '@/features/agents/setup/hooks'
 
 export function RunsPage() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
   const [statusFilter, setStatusFilter] = useState('')
   const canRun = hasWorkspaceRole(active, 'agents:run')
+  const setupQuery = useAgentsSetup()
+  const canStart = canRun && setupQuery.data?.analysis_ready === true
 
   const runsQuery = useQuery<RunsListResponse>({
     queryKey: [active?.id ?? 'none', 'agent-runs-list', statusFilter],
@@ -60,7 +64,7 @@ export function RunsPage() {
                 title="List runs"
               />
             ) : null}
-            {canRun ? (
+            {canStart ? (
               <Button size="sm" asChild>
                 <Link to="/agents/trigger">
                   <Play />
@@ -72,10 +76,21 @@ export function RunsPage() {
         }
       />
 
-      {!canRun ? (
+      {setupQuery.data && !setupQuery.data.analysis_ready ? (
+        <AgentsSetupNotice setup={setupQuery.data} />
+      ) : null}
+
+      {setupQuery.isError ? (
         <AgentReadOnlyNote>
-          Run history is read-only. Starting a run requires agents:run on an
-          operator-provisioned workspace.
+          Agents setup status is unavailable. Starting a run remains disabled
+          until current admission state can be verified.
+        </AgentReadOnlyNote>
+      ) : null}
+
+      {setupQuery.data?.analysis_ready && !canRun ? (
+        <AgentReadOnlyNote>
+          Run history is read-only. Starting a run requires agents:run for this
+          project.
         </AgentReadOnlyNote>
       ) : null}
 
@@ -116,12 +131,12 @@ export function RunsPage() {
                   <EmptyState
                     title="No runs yet"
                     description={
-                      canRun
+                      canStart
                         ? 'Trigger a run to watch the autonomous loop analyze, design, and propose.'
                         : 'No run history exists for this read-only workspace.'
                     }
                   >
-                    {canRun ? (
+                    {canStart ? (
                       <Button size="sm" asChild>
                         <Link to="/agents/trigger">
                           <Play />

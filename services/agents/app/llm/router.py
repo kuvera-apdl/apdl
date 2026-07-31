@@ -26,7 +26,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -76,28 +75,6 @@ logger = logging.getLogger(__name__)
 #: provider stalls an agent run for up to 10 minutes per fallback rung.
 _REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
 
-_local_client: openai.AsyncOpenAI | None = None
-
-_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-_PROVIDERS = ("openai", "anthropic", "google", "xai", "local")
-_REMOTE_ENDPOINTS = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com",
-    "google": "https://generativelanguage.googleapis.com",
-    "xai": "https://api.x.ai/v1",
-}
-
-
-@dataclass(frozen=True)
-class ProviderRuntimeConfiguration:
-    """Operator policy inputs; remote endpoints are fixed server-side."""
-
-    provider: str
-    endpoint_url: str
-    fast_model: str
-    reasoning_model: str
-
-
 def _normalized_endpoint_url(value: str) -> str:
     raw = value.strip().rstrip("/")
     try:
@@ -115,94 +92,49 @@ def _normalized_endpoint_url(value: str) -> str:
     return str(parsed).rstrip("/")
 
 
-def _provider_endpoint_url(provider: str) -> str:
-    if provider in _REMOTE_ENDPOINTS:
-        value = _REMOTE_ENDPOINTS[provider]
-    elif provider == "local":
-        value = os.getenv("LOCAL_LLM_URL", "")
-    else:
-        raise ValueError(f"Unknown provider {provider!r}")
-    return _normalized_endpoint_url(value)
-
-
-def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguration:
-    """Resolve the exact router configuration without returning credentials."""
-    if provider not in _PROVIDERS:
-        raise ValueError(f"Unknown provider {provider!r}")
-    if provider == "local" and not os.getenv("LOCAL_LLM_URL", "").strip():
-        raise ValueError("LOCAL_LLM_URL is required for provider local")
-
-    if provider == "openai":
-        fast_model = os.getenv("LLM_FAST_PRIMARY", "gpt-5.4-nano")
-        reasoning_model = os.getenv("LLM_REASONING_PRIMARY", "gpt-5.4-mini")
-    elif provider == "anthropic":
-        fast_model = os.getenv("LLM_FAST_FALLBACK", "claude-haiku-4-5-20251001")
-        reasoning_model = os.getenv("LLM_REASONING_FALLBACK", "claude-sonnet-4-6")
-    elif provider == "google":
-        fast_model = os.getenv("LLM_FAST_GOOGLE", "gemini-2.5-flash-lite")
-        reasoning_model = os.getenv("LLM_REASONING_GOOGLE", "gemini-2.5-flash")
-    elif provider == "xai":
-        fast_model = os.getenv(
-            "LLM_FAST_XAI", "grok-4.20-0309-non-reasoning"
-        )
-        reasoning_model = os.getenv("LLM_REASONING_XAI", "grok-4.5")
-    else:
-        fast_model = reasoning_model = os.getenv("LOCAL_LLM_MODEL", "gemma4")
-
-    fast_model = fast_model.strip()
-    reasoning_model = reasoning_model.strip()
-    if _MODEL_ID.fullmatch(fast_model) is None:
-        raise ValueError("Configured fast model must be a valid model identifier")
-    if _MODEL_ID.fullmatch(reasoning_model) is None:
-        raise ValueError("Configured reasoning model must be a valid model identifier")
-    return ProviderRuntimeConfiguration(
-        provider=provider,
-        endpoint_url=_provider_endpoint_url(provider),
-        fast_model=fast_model,
-        reasoning_model=reasoning_model,
-    )
-
-
-def _get_openai(api_key: str) -> openai.AsyncOpenAI:
+def _get_openai(api_key: str, endpoint_url: str) -> openai.AsyncOpenAI:
     return openai.AsyncOpenAI(
         api_key=api_key,
-        base_url=_provider_endpoint_url("openai"),
+        base_url=_normalized_endpoint_url(endpoint_url),
         timeout=_REQUEST_TIMEOUT,
     )
 
 
-def _get_anthropic(api_key: str) -> anthropic.AsyncAnthropic:
+def _get_anthropic(
+    api_key: str,
+    endpoint_url: str,
+) -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic(
         api_key=api_key,
-        base_url=_provider_endpoint_url("anthropic"),
+        base_url=_normalized_endpoint_url(endpoint_url),
         timeout=_REQUEST_TIMEOUT,
     )
 
 
-def _get_google(api_key: str) -> genai.Client:
+def _get_google(api_key: str, endpoint_url: str) -> genai.Client:
     return genai.Client(
         api_key=api_key,
-        http_options=genai_types.HttpOptions(timeout=int(_REQUEST_TIMEOUT * 1000)),
+        http_options=genai_types.HttpOptions(
+            base_url=_normalized_endpoint_url(endpoint_url),
+            timeout=int(_REQUEST_TIMEOUT * 1000),
+        ),
     )
 
 
-def _get_xai(api_key: str) -> openai.AsyncOpenAI:
+def _get_xai(api_key: str, endpoint_url: str) -> openai.AsyncOpenAI:
     return openai.AsyncOpenAI(
         api_key=api_key,
-        base_url=_provider_endpoint_url("xai"),
+        base_url=_normalized_endpoint_url(endpoint_url),
         timeout=_REQUEST_TIMEOUT,
     )
 
 
-def _get_local() -> openai.AsyncOpenAI:
-    global _local_client
-    if _local_client is None:
-        _local_client = openai.AsyncOpenAI(
-            base_url=_provider_endpoint_url("local"),
-            api_key="local",  # local servers don't require a real key
-            timeout=_REQUEST_TIMEOUT,
-        )
-    return _local_client
+def _get_local(endpoint_url: str) -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        base_url=_normalized_endpoint_url(endpoint_url),
+        api_key="local",  # local servers don't require a real key
+        timeout=_REQUEST_TIMEOUT,
+    )
 
 
 async def _load_attempt_api_key(
@@ -313,11 +245,12 @@ async def _openai_completion(
     messages: list[dict[str, str]],
     *,
     api_key: str | None,
+    endpoint_url: str,
     **kwargs: Any,
 ) -> TextCompletion:
     if api_key is None:
         raise LlmCredentialUnavailableError("OpenAI credential is unavailable")
-    client = _get_openai(api_key)
+    client = _get_openai(api_key, endpoint_url)
     if _is_openai_reasoning_model(model):
         # Reasoning-family models 400 on `max_tokens` (they take
         # `max_completion_tokens`) and on any non-default temperature — the
@@ -341,11 +274,12 @@ async def _anthropic_completion(
     messages: list[dict[str, str]],
     *,
     api_key: str | None,
+    endpoint_url: str,
     **kwargs: Any,
 ) -> TextCompletion:
     if api_key is None:
         raise LlmCredentialUnavailableError("Anthropic credential is unavailable")
-    client = _get_anthropic(api_key)
+    client = _get_anthropic(api_key, endpoint_url)
     system_text = ""
     chat_messages: list[dict[str, str]] = []
     for msg in messages:
@@ -378,11 +312,12 @@ async def _google_completion(
     messages: list[dict[str, str]],
     *,
     api_key: str | None,
+    endpoint_url: str,
     **kwargs: Any,
 ) -> TextCompletion:
     if api_key is None:
         raise LlmCredentialUnavailableError("Google credential is unavailable")
-    client = _get_google(api_key)
+    client = _get_google(api_key, endpoint_url)
     system_instruction: str | None = None
     contents: list[dict[str, Any]] = []
     for msg in messages:
@@ -418,13 +353,14 @@ async def _xai_completion(
     messages: list[dict[str, str]],
     *,
     api_key: str | None,
+    endpoint_url: str,
     **kwargs: Any,
 ) -> TextCompletion:
     # xAI's Chat Completions endpoint implements the OpenAI wire contract,
     # including usage fields and client-side function calling.
     if api_key is None:
         raise LlmCredentialUnavailableError("xAI credential is unavailable")
-    client = _get_xai(api_key)
+    client = _get_xai(api_key, endpoint_url)
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
     )
@@ -441,13 +377,14 @@ async def _local_completion(
     messages: list[dict[str, str]],
     *,
     api_key: str | None,
+    endpoint_url: str,
     **kwargs: Any,
 ) -> TextCompletion:
     if api_key is not None:
         raise LlmCredentialUnavailableError(
             "Local provider must not receive a cloud credential"
         )
-    client = _get_local()
+    client = _get_local(endpoint_url)
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
     )
@@ -501,7 +438,8 @@ async def _route_project_assignment(
     prompt_bytes: bytes,
     operation: str,
     invoke: Callable[
-        [str, str, str | None, dict[str, Any]], Awaitable[_CompletionT]
+        [str, str, str, str | None, dict[str, Any]],
+        Awaitable[_CompletionT],
     ],
     kwargs: dict[str, Any],
 ) -> _CompletionT:
@@ -574,6 +512,11 @@ async def _route_project_assignment(
             prompt_sha256=prompt_hash,
             estimated_input_tokens=estimated_input_tokens,
             max_output_tokens=max_output_tokens,
+            model_tier=assignment.tier,
+            setup_version=assignment.setup_version,
+            connection_version=assignment.connection_version,
+            inventory_version=assignment.inventory_version,
+            model_catalog_version=assignment.model_catalog_version,
         )
     except LlmGovernanceError as exc:
         classification = _governance_error_classification(exc)
@@ -623,7 +566,13 @@ async def _route_project_assignment(
 
     started = time.monotonic()
     try:
-        result = await invoke(provider, model, api_key, dict(merged))
+        result = await invoke(
+            provider,
+            model,
+            assignment.endpoint_url,
+            api_key,
+            dict(merged),
+        )
     except asyncio.CancelledError:
         latency_ms = int((time.monotonic() - started) * 1000)
         await finish_provider_attempt(
@@ -737,6 +686,7 @@ async def chat_completion(
     async def invoke(
         provider: str,
         model: str,
+        endpoint_url: str,
         api_key: str | None,
         provider_kwargs: dict[str, Any],
     ) -> TextCompletion:
@@ -744,6 +694,7 @@ async def chat_completion(
             model,
             messages,
             api_key=api_key,
+            endpoint_url=endpoint_url,
             **provider_kwargs,
         )
 
@@ -1143,6 +1094,7 @@ async def chat_completion_with_tools(
     async def invoke(
         provider: str,
         model: str,
+        endpoint_url: str,
         api_key: str | None,
         provider_kwargs: dict[str, Any],
     ) -> ToolCompletion:
@@ -1151,29 +1103,29 @@ async def chat_completion_with_tools(
                 raise LlmCredentialUnavailableError(
                     "OpenAI credential is unavailable"
                 )
-            client = _get_openai(api_key)
+            client = _get_openai(api_key, endpoint_url)
         elif provider == "anthropic":
             if api_key is None:
                 raise LlmCredentialUnavailableError(
                     "Anthropic credential is unavailable"
                 )
-            client = _get_anthropic(api_key)
+            client = _get_anthropic(api_key, endpoint_url)
         elif provider == "google":
             if api_key is None:
                 raise LlmCredentialUnavailableError(
                     "Google credential is unavailable"
                 )
-            client = _get_google(api_key)
+            client = _get_google(api_key, endpoint_url)
         elif provider == "xai":
             if api_key is None:
                 raise LlmCredentialUnavailableError("xAI credential is unavailable")
-            client = _get_xai(api_key)
+            client = _get_xai(api_key, endpoint_url)
         else:  # local — OpenAI-compatible servers speak the tools dialect
             if api_key is not None:
                 raise LlmCredentialUnavailableError(
                     "Local provider must not receive a cloud credential"
                 )
-            client = _get_local()
+            client = _get_local(endpoint_url)
 
         if provider == "anthropic":
             return await _anthropic_completion_tools(

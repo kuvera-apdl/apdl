@@ -1,5 +1,6 @@
 import { Bot, ChevronDown, FolderKanban, KeyRound, Loader2, Plus, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
@@ -12,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
+import { AgenticRunsCard } from '@/features/agents/setup/AgenticRunsCard'
 import { ProjectCredentialsCard } from '@/features/settings/ProjectCredentialsCard'
 import { ProjectLlmConnectionsCard } from '@/features/settings/ProjectLlmConnectionsCard'
 import { ProjectMembersCard } from '@/features/settings/ProjectMembersCard'
@@ -19,7 +21,11 @@ import { ProjectMembersCard } from '@/features/settings/ProjectMembersCard'
 export function WorkspaceSettingsPage() {
   const { identity, createProject } = useAuth()
   const { active, setActive } = useWorkspace()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null)
+  const [newProjectSetupId, setNewProjectSetupId] = useState<string | null>(
+    null,
+  )
   const [projectId, setProjectId] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -42,6 +48,9 @@ export function WorkspaceSettingsPage() {
     setError(null)
     try {
       await createProject(parsed.data)
+      setActive(parsed.data)
+      setExpandedProjectId(parsed.data)
+      setNewProjectSetupId(parsed.data)
       setProjectId('')
       toast.success(`Project "${parsed.data}" created`)
     } catch (caught) {
@@ -201,6 +210,21 @@ export function WorkspaceSettingsPage() {
                         </div>
                         <ProjectCredentialsCard />
                       </section>
+                      <AgenticRunsCard
+                        autoOpen={
+                          newProjectSetupId === project.project_id ||
+                          (active?.id === project.project_id &&
+                            searchParams.get('agents_setup') === '1')
+                        }
+                        onAutoOpenHandled={() => {
+                          setNewProjectSetupId(null)
+                          if (searchParams.get('agents_setup') === '1') {
+                            const next = new URLSearchParams(searchParams)
+                            next.delete('agents_setup')
+                            setSearchParams(next, { replace: true })
+                          }
+                        }}
+                      />
                     </div>
                   ) : null}
                 </Card>

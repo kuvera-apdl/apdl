@@ -284,6 +284,25 @@ async def _assert_execution_active(conn: Any, context: LlmRequestContext) -> Non
         )
 
 
+async def _assert_project_setup_active(
+    conn: Any,
+    context: LlmRequestContext,
+) -> None:
+    active = await conn.fetchval(
+        """
+        SELECT state = 'active'
+        FROM llm_project_policies
+        WHERE project_id = $1
+        FOR SHARE
+        """,
+        context.project_id,
+    )
+    if not active:
+        raise LlmPolicyDeniedError(
+            f"Agents project setup is inactive for {context.project_id}"
+        )
+
+
 def _unavailable(
     context: LlmRequestContext, operation: str, exc: Exception
 ) -> NoReturn:
@@ -302,7 +321,7 @@ async def load_project_llm_policy(context: LlmRequestContext) -> ProjectLlmPolic
                 SELECT project_id, required_data_residency,
                        allow_cross_vendor_retry,
                        project_daily_cost_limit_usd_micros,
-                       run_cost_limit_usd_micros
+                       run_cost_limit_usd_micros, state, version
                 FROM llm_project_policies
                 WHERE project_id = $1
                 """,
@@ -311,6 +330,10 @@ async def load_project_llm_policy(context: LlmRequestContext) -> ProjectLlmPolic
             if row is None:
                 raise LlmPolicyDeniedError(
                     f"No LLM policy exists for project {context.project_id}"
+                )
+            if str(row["state"]) != "active":
+                raise LlmPolicyDeniedError(
+                    f"Agents project setup is inactive for {context.project_id}"
                 )
             provider_rows = await conn.fetch(
                 """
@@ -333,6 +356,8 @@ async def load_project_llm_policy(context: LlmRequestContext) -> ProjectLlmPolic
             ),
             run_cost_limit_usd_micros=int(row["run_cost_limit_usd_micros"]),
             providers=tuple(_provider_policy(item) for item in provider_rows),
+            state=cast(Literal["inactive", "active"], str(row["state"])),
+            version=int(row["version"]),
         )
     except LlmGovernanceError:
         raise
@@ -350,6 +375,7 @@ async def begin_llm_call(
     try:
         async with context.pool.acquire() as conn:
             async with conn.transaction():
+                await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
                 await conn.execute(
                     """
@@ -388,9 +414,43 @@ async def load_project_model_assignment(
         async with context.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT project_id, tier, provider, model, endpoint_url
-                FROM llm_project_model_assignments
-                WHERE project_id = $1 AND tier = $2
+                SELECT assignment.project_id, assignment.tier,
+                       assignment.provider, assignment.model,
+                       provider_policy.endpoint_url,
+                       policy.version AS setup_version,
+                       connection.version AS connection_version,
+                       connection.inventory_version,
+                       assignment.model_catalog_version
+                FROM llm_project_model_assignments AS assignment
+                JOIN llm_project_policies AS policy
+                  ON policy.project_id = assignment.project_id
+                 AND policy.state = 'active'
+                JOIN llm_project_provider_policies AS provider_policy
+                  ON provider_policy.project_id = assignment.project_id
+                 AND provider_policy.provider = assignment.provider
+                 AND provider_policy.model = assignment.model
+                 AND provider_policy.enabled
+                JOIN llm_project_provider_connections AS connection
+                  ON connection.project_id = assignment.project_id
+                 AND connection.provider = assignment.provider
+                 AND connection.state = 'active'
+                 AND connection.catalog_version =
+                     assignment.model_catalog_version
+                JOIN llm_project_provider_models AS model
+                  ON model.project_id = connection.project_id
+                 AND model.provider = connection.provider
+                 AND model.connection_version = connection.version
+                 AND model.inventory_version = connection.inventory_version
+                 AND model.model_id = assignment.model
+                 AND model.catalog_version =
+                     assignment.model_catalog_version
+                 AND assignment.tier = ANY(model.supported_tiers)
+                JOIN llm_project_provider_credentials AS credential
+                  ON credential.credential_id = connection.credential_id
+                 AND credential.project_id = connection.project_id
+                 AND credential.provider = connection.provider
+                 AND credential.state = 'active'
+                WHERE assignment.project_id = $1 AND assignment.tier = $2
                 """,
                 context.project_id,
                 tier,
@@ -405,6 +465,10 @@ async def load_project_model_assignment(
             provider=cast(ProviderName, str(row["provider"])),
             model=str(row["model"]),
             endpoint_url=str(row["endpoint_url"]),
+            setup_version=int(row["setup_version"]),
+            connection_version=int(row["connection_version"]),
+            inventory_version=int(row["inventory_version"]),
+            model_catalog_version=str(row["model_catalog_version"]),
         )
     except LlmGovernanceError:
         raise
@@ -423,6 +487,11 @@ async def prepare_provider_attempt(
     prompt_sha256: str,
     estimated_input_tokens: int,
     max_output_tokens: int,
+    model_tier: Literal["fast", "reasoning"],
+    setup_version: int,
+    connection_version: int,
+    inventory_version: int,
+    model_catalog_version: str,
 ) -> PreparedLlmAttempt:
     """Atomically authorize policy, reserve both budgets, and log pre-egress."""
     attempt_id = uuid4()
@@ -438,6 +507,7 @@ async def prepare_provider_attempt(
                     "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
                     f"apdl:llm-budget:run:{context.project_id}:{context.run_id}",
                 )
+                await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
 
                 call_status = await conn.fetchval(
@@ -476,11 +546,38 @@ async def prepare_provider_attempt(
                     FROM llm_project_policies AS policy
                     JOIN llm_project_provider_policies AS provider
                       ON provider.project_id = policy.project_id
-                    LEFT JOIN llm_project_provider_credentials AS credential
-                      ON credential.project_id = provider.project_id
-                     AND credential.provider = provider.provider
+                    JOIN llm_project_model_assignments AS assignment
+                      ON assignment.project_id = policy.project_id
+                     AND assignment.tier = $5
+                     AND assignment.provider = provider.provider
+                     AND assignment.model = provider.model
+                     AND assignment.model_catalog_version = $9
+                    JOIN llm_project_provider_connections AS connection
+                      ON connection.project_id = assignment.project_id
+                     AND connection.provider = assignment.provider
+                     AND connection.version = $7
+                     AND connection.inventory_version = $8
+                     AND connection.catalog_version =
+                         assignment.model_catalog_version
+                     AND connection.state = 'active'
+                    JOIN llm_project_provider_models AS inventory
+                      ON inventory.project_id = connection.project_id
+                     AND inventory.provider = connection.provider
+                     AND inventory.connection_version = connection.version
+                     AND inventory.inventory_version =
+                         connection.inventory_version
+                     AND inventory.model_id = assignment.model
+                     AND inventory.catalog_version =
+                         assignment.model_catalog_version
+                     AND assignment.tier = ANY(inventory.supported_tiers)
+                    JOIN llm_project_provider_credentials AS credential
+                      ON credential.credential_id = connection.credential_id
+                     AND credential.project_id = connection.project_id
+                     AND credential.provider = connection.provider
                      AND credential.state = 'active'
                     WHERE policy.project_id = $1
+                      AND policy.state = 'active'
+                      AND policy.version = $6
                       AND provider.provider = $2
                       AND provider.model = $3
                       AND provider.endpoint_url = $4
@@ -491,6 +588,11 @@ async def prepare_provider_attempt(
                     provider,
                     model,
                     endpoint_url,
+                    model_tier,
+                    setup_version,
+                    connection_version,
+                    inventory_version,
+                    model_catalog_version,
                 )
                 if policy_row is None:
                     raise LlmPolicyDeniedError(
@@ -602,11 +704,14 @@ async def prepare_provider_attempt(
                         execution_owner_id, provider, model, endpoint_url, prompt_sha256,
                         estimated_input_tokens, max_output_tokens,
                         reserved_cost_usd_micros, credential_id,
-                        credential_version
+                        credential_version, setup_version, model_tier,
+                        connection_version, inventory_version,
+                        model_catalog_version
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7,
-                        $8, $9, $10, $11, $12, $13, $14, $15
+                        $8, $9, $10, $11, $12, $13, $14, $15,
+                        $16, $17, $18, $19, $20
                     )
                     """,
                     attempt_id,
@@ -624,6 +729,11 @@ async def prepare_provider_attempt(
                     reserved_cost,
                     policy_row["credential_id"],
                     policy_row["credential_version"],
+                    setup_version,
+                    model_tier,
+                    connection_version,
+                    inventory_version,
+                    model_catalog_version,
                 )
                 await conn.execute(
                     """
@@ -647,6 +757,11 @@ async def prepare_provider_attempt(
                 if policy_row["credential_version"] is not None
                 else None
             ),
+            setup_version=setup_version,
+            model_tier=model_tier,
+            connection_version=connection_version,
+            inventory_version=inventory_version,
+            model_catalog_version=model_catalog_version,
         )
     except LlmGovernanceError:
         raise
@@ -663,34 +778,84 @@ async def mark_provider_egress(
     try:
         async with context.pool.acquire() as conn:
             async with conn.transaction():
+                await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
-                updated = await conn.fetchval(
+                authorized = await conn.fetchval(
                     """
-                    UPDATE llm_provider_attempts AS attempt
-                    SET status = 'in_flight', egress_started_at = now()
+                    SELECT attempt.attempt_id
+                    FROM llm_provider_attempts AS attempt
+                    JOIN llm_project_policies AS policy
+                      ON policy.project_id = attempt.project_id
+                     AND policy.state = 'active'
+                     AND policy.version = attempt.setup_version
+                    JOIN llm_project_model_assignments AS assignment
+                      ON assignment.project_id = policy.project_id
+                     AND assignment.tier = attempt.model_tier
+                     AND assignment.provider = attempt.provider
+                     AND assignment.model = attempt.model
+                     AND assignment.model_catalog_version =
+                         attempt.model_catalog_version
+                    JOIN llm_project_provider_policies AS provider_policy
+                      ON provider_policy.project_id = assignment.project_id
+                     AND provider_policy.provider = assignment.provider
+                     AND provider_policy.model = assignment.model
+                     AND provider_policy.endpoint_url = attempt.endpoint_url
+                     AND provider_policy.enabled
+                    JOIN llm_project_provider_connections AS connection
+                      ON connection.project_id = assignment.project_id
+                     AND connection.provider = assignment.provider
+                     AND connection.version = attempt.connection_version
+                     AND connection.inventory_version =
+                         attempt.inventory_version
+                     AND connection.catalog_version =
+                         attempt.model_catalog_version
+                     AND connection.state = 'active'
+                    JOIN llm_project_provider_models AS inventory
+                      ON inventory.project_id = connection.project_id
+                     AND inventory.provider = connection.provider
+                     AND inventory.connection_version = connection.version
+                     AND inventory.inventory_version =
+                         connection.inventory_version
+                     AND inventory.model_id = assignment.model
+                     AND inventory.catalog_version =
+                         assignment.model_catalog_version
+                     AND assignment.tier = ANY(inventory.supported_tiers)
+                    JOIN llm_project_provider_credentials AS credential
+                      ON credential.credential_id = connection.credential_id
+                     AND credential.credential_id = attempt.credential_id
+                     AND credential.project_id = attempt.project_id
+                     AND credential.provider = attempt.provider
+                     AND credential.credential_version =
+                         attempt.credential_version
+                     AND credential.state = 'active'
                     WHERE attempt.attempt_id = $1
                       AND attempt.project_id = $2
                       AND attempt.run_id = $3
                       AND attempt.execution_owner_id = $4
                       AND attempt.status = 'prepared'
-                      AND (
-                          (
-                              attempt.provider = 'local'
-                              AND attempt.credential_id IS NULL
-                          )
-                          OR EXISTS (
-                              SELECT 1
-                              FROM llm_project_provider_credentials AS credential
-                              WHERE credential.credential_id =
-                                    attempt.credential_id
-                                AND credential.project_id = attempt.project_id
-                                AND credential.provider = attempt.provider
-                                AND credential.credential_version =
-                                    attempt.credential_version
-                                AND credential.state = 'active'
-                          )
-                      )
-                    RETURNING attempt.attempt_id
+                    FOR UPDATE OF attempt
+                    FOR SHARE OF policy, assignment, provider_policy,
+                                 connection, inventory, credential
+                    """,
+                    attempt_id,
+                    context.project_id,
+                    context.run_id,
+                    context.execution_owner_id,
+                )
+                if authorized is None:
+                    raise LlmCredentialUnavailableError(
+                        f"Provider attempt {attempt_id} lost credential authority"
+                    )
+                updated = await conn.fetchval(
+                    """
+                    UPDATE llm_provider_attempts
+                    SET status = 'in_flight', egress_started_at = now()
+                    WHERE attempt_id = $1
+                      AND project_id = $2
+                      AND run_id = $3
+                      AND execution_owner_id = $4
+                      AND status = 'prepared'
+                    RETURNING attempt_id
                     """,
                     attempt_id,
                     context.project_id,

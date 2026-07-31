@@ -39,6 +39,7 @@ interface AuthContextValue {
   acceptInvitation: (token: string) => Promise<void>
   registerInvitation: (token: string, password: string) => Promise<void>
   createProject: (projectId: string) => Promise<void>
+  refreshIdentity: () => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -68,6 +69,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [queryClient],
   )
 
+  const refreshIdentity = useCallback(async () => {
+    const session = await getAdminSession()
+    queryClient.clear()
+    setIdentity(session)
+    setLogoutReason(null)
+  }, [queryClient])
+
   useEffect(() => {
     purgeLegacyCredentials()
     let active = true
@@ -95,13 +103,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true
     const refreshProjectAccess = () => {
-      void getAdminSession()
-        .then((session) => {
-          if (!active) return
-          queryClient.clear()
-          setIdentity(session)
-          setLogoutReason(null)
-        })
+      void refreshIdentity()
+        .then(() => undefined)
         .catch(() => {
           if (active) endSession('unauthorized')
         })
@@ -111,7 +114,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       active = false
       window.removeEventListener(PROJECT_ACCESS_REVOKED_EVENT, refreshProjectAccess)
     }
-  }, [endSession, queryClient])
+  }, [endSession, refreshIdentity])
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -148,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         queryClient.clear()
         setIdentity(next)
       },
+      refreshIdentity,
       logout: async () => {
         try {
           await logoutAdmin()
@@ -159,7 +163,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         endSession(null)
       },
     }),
-    [endSession, identity, initializing, logoutReason, queryClient],
+    [
+      endSession,
+      identity,
+      initializing,
+      logoutReason,
+      queryClient,
+      refreshIdentity,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

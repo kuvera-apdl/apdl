@@ -14,7 +14,11 @@ import { WorkspaceProvider, type Workspace } from '../../src/core/workspace'
 import { CustomAgentsPage } from '../../src/features/agents/custom/CustomAgentsPage'
 import { CustomAgentWizardPage } from '../../src/features/agents/custom/CustomAgentWizardPage'
 import { TriggerPage } from '../../src/features/agents/TriggerPage'
-import { makeReadOnlyAgentWorkspace, seedWorkspace } from '../helpers/fixtures'
+import {
+  makeAgentsSetup,
+  makeReadOnlyAgentWorkspace,
+  seedWorkspace,
+} from '../helpers/fixtures'
 
 const BASE = '*/api/projects/demo/agents'
 const QUERY_BASE = '*/api/projects/demo/query'
@@ -90,6 +94,9 @@ const requests: { path: string; method: string; body: unknown }[] = []
 let customAgents: CustomAgent[] = []
 
 const server = setupServer(
+  http.get(`${BASE}/v1/agents/setup`, () =>
+    HttpResponse.json(makeAgentsSetup()),
+  ),
   // Event catalog behind the preset-query event pickers (EventCombobox).
   http.post(`${QUERY_BASE}/v1/query/events/names`, () =>
     HttpResponse.json({

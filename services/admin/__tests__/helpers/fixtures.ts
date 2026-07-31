@@ -1,6 +1,7 @@
 // Canonical fixtures matching serialize_flag() / the audit store exactly —
 // these are what the live API returns (Strict Schema Rule test material).
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
+import type { AgentsSetup } from '../../src/api/types/agents-setup'
 import type {
   ChangesetObservationHistory,
   PublicationAuthorization,
@@ -522,6 +523,99 @@ export function makeReadOnlyAgentWorkspace(
     ],
     ...overrides,
   })
+}
+
+export function makeAgentsSetup(
+  overrides: Partial<AgentsSetup> = {},
+): AgentsSetup {
+  return {
+    schema_version: 'agents_project_setup@1',
+    project_id: 'demo',
+    state: 'active',
+    version: 1,
+    caller_capabilities: {
+      can_read: true,
+      can_manage: true,
+      can_activate: false,
+      can_deactivate: true,
+      management_authority: 'owner',
+    },
+    assignments: [
+      {
+        tier: 'fast',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        connection_version: 1,
+        inventory_version: 1,
+        model_catalog_version: 'llm-provider-catalog@2',
+        display_name: 'GPT-5.4 Mini',
+        endpoint_url: 'https://api.openai.com/v1',
+        endpoint_host: 'api.openai.com',
+        data_residency: 'global',
+        allowed_data_classifications: [
+          'public',
+          'internal',
+          'confidential',
+          'restricted',
+        ],
+        input_cost_per_million_tokens_usd_micros: 250_000,
+        output_cost_per_million_tokens_usd_micros: 1_000_000,
+        current: true,
+        assigned_at: '2026-07-30T12:00:00+00:00',
+        updated_at: '2026-07-30T12:00:00+00:00',
+      },
+      {
+        tier: 'reasoning',
+        provider: 'openai',
+        model: 'o4-mini',
+        connection_version: 1,
+        inventory_version: 1,
+        model_catalog_version: 'llm-provider-catalog@2',
+        display_name: 'OpenAI o4-mini',
+        endpoint_url: 'https://api.openai.com/v1',
+        endpoint_host: 'api.openai.com',
+        data_residency: 'global',
+        allowed_data_classifications: [
+          'public',
+          'internal',
+          'confidential',
+          'restricted',
+        ],
+        input_cost_per_million_tokens_usd_micros: 1_100_000,
+        output_cost_per_million_tokens_usd_micros: 4_400_000,
+        current: true,
+        assigned_at: '2026-07-30T12:00:00+00:00',
+        updated_at: '2026-07-30T12:00:00+00:00',
+      },
+    ],
+    connections: [
+      {
+        provider: 'openai',
+        connection_version: 1,
+        inventory_version: 1,
+        state: 'active',
+        catalog_version: 'llm-provider-catalog@2',
+        current: true,
+        validated_at: '2026-07-30T12:00:00+00:00',
+      },
+    ],
+    blockers: [],
+    analysis_ready: true,
+    policy: {
+      required_data_residency: 'global',
+      allow_cross_vendor_retry: false,
+      project_daily_cost_limit_usd_micros: 20_000_000,
+      run_cost_limit_usd_micros: 2_000_000,
+    },
+    effectful_execution: {
+      authorized: false,
+      authorization_source: null,
+    },
+    activated_at: '2026-07-30T12:00:00+00:00',
+    deactivated_at: null,
+    deactivation_reason: null,
+    ...overrides,
+  } as AgentsSetup
 }
 
 export function seedWorkspace(workspace: Workspace = makeWorkspace()): Workspace {

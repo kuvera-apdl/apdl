@@ -19,9 +19,7 @@ _DUMMY_KEY_HASH = "0" * 64
 
 logger = logging.getLogger(__name__)
 
-_SELF_REGISTERED_DENIED_ROLES = frozenset(
-    {"agents:run", "agents:manage", "agents:approve"}
-)
+_OPERATOR_AUTHORIZED_EFFECT_ROLES = frozenset({"agents:approve"})
 
 
 @dataclass(frozen=True)
@@ -126,10 +124,13 @@ async def authenticate_request(request: Request) -> Principal:
 
 def require_role(request: Request, role: str) -> Principal:
     principal: Principal = request.state.principal
-    if not principal.execution_authorized and role in _SELF_REGISTERED_DENIED_ROLES:
+    if (
+        not principal.execution_authorized
+        and role in _OPERATOR_AUTHORIZED_EFFECT_ROLES
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agents execution requires operator project authorization",
+            detail="Agents approval and effects require operator project authorization",
         )
     if role not in principal.roles:
         raise HTTPException(

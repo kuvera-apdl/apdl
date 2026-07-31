@@ -30,6 +30,7 @@ import type {
   TestRunResponse,
   ToolCatalogEntry,
 } from '@/api/types/agents'
+import type { AgentsSetup } from '@/api/types/agents-setup'
 import { CurlButton } from '@/components/shared/CurlButton'
 import { JsonView } from '@/components/shared/JsonView'
 import { PageHeader } from '@/components/shared/PageHeader'
@@ -44,6 +45,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { queryKeys } from '@/core/queryClient'
 import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { AgentRoleUnavailable } from '@/features/agents/AgentAccessNotice'
+import { AgentsSetupNotice } from '@/features/agents/setup/AgentsSetupNotice'
+import { useAgentsSetup } from '@/features/agents/setup/hooks'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
@@ -209,6 +212,7 @@ function CustomAgentWizard() {
   const { active, projectId } = useWorkspace()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const setupQuery = useAgentsSetup()
 
   const [step, setStep] = useState(0)
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
@@ -290,12 +294,16 @@ function CustomAgentWizard() {
   })
 
   const testMutation = useMutation({
-    mutationFn: () =>
-      testCustomAgent(conn!, {
+    mutationFn: () => {
+      if (!setupQuery.data?.analysis_ready) {
+        throw new Error('Agentic runs setup is not ready')
+      }
+      return testCustomAgent(conn!, {
         project_id: projectId!,
         time_range_days: 7,
         definition: toSpec(form, toolCatalog),
-      }),
+      })
+    },
     onSuccess: (result) => setTestResult(result),
     onError: (error) => {
       setTestResult(null)
@@ -386,6 +394,9 @@ function CustomAgentWizard() {
           testing={testMutation.isPending}
           onTest={() => testMutation.mutate()}
           allProblems={allProblems}
+          setup={setupQuery.data}
+          setupPending={setupQuery.isPending}
+          setupError={setupQuery.isError}
         />
       ) : null}
 
@@ -852,15 +863,28 @@ function TestStep({
   testing,
   onTest,
   allProblems,
+  setup,
+  setupPending,
+  setupError,
 }: {
   form: FormState
   result: TestRunResponse | null
   testing: boolean
   onTest: () => void
   allProblems: string[]
+  setup: AgentsSetup | undefined
+  setupPending: boolean
+  setupError: boolean
 }) {
+  const canTest = setup?.analysis_ready === true
   return (
     <div className="space-y-4">
+      {setup && !setup.analysis_ready ? (
+        <AgentsSetupNotice
+          setup={setup}
+          title="Activate Agentic runs before testing"
+        />
+      ) : null}
       <Card>
         <CardHeader>
           <CardTitle>Test run</CardTitle>
@@ -881,7 +905,18 @@ function TestStep({
               </ul>
             </div>
           ) : null}
-          <Button onClick={onTest} disabled={testing || allProblems.length > 0} variant="secondary">
+          {setupPending || setupError ? (
+            <p className="text-sm text-muted-foreground">
+              {setupPending
+                ? 'Verifying Agents setup…'
+                : 'Agents setup could not be verified. Test execution remains disabled.'}
+            </p>
+          ) : null}
+          <Button
+            onClick={onTest}
+            disabled={testing || allProblems.length > 0 || !canTest}
+            variant="secondary"
+          >
             <FlaskConical />
             {testing ? 'Running…' : 'Run test'}
           </Button>

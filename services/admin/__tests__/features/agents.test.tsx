@@ -17,7 +17,11 @@ import { DecidePage } from '../../src/features/loop/DecidePage'
 import { SteerPage } from '../../src/features/loop/SteerPage'
 import { WatchPage } from '../../src/features/loop/WatchPage'
 import type { Workspace } from '../../src/core/workspace'
-import { makeReadOnlyAgentWorkspace, seedWorkspace } from '../helpers/fixtures'
+import {
+  makeAgentsSetup,
+  makeReadOnlyAgentWorkspace,
+  seedWorkspace,
+} from '../helpers/fixtures'
 
 const requests: { path: string; body: unknown }[] = []
 let monitorStatus = 'waiting_approval'
@@ -89,6 +93,9 @@ function queuedApproval(runId: string) {
 }
 
 const server = setupServer(
+  http.get('*/api/projects/demo/agents/v1/agents/setup', () =>
+    HttpResponse.json(makeAgentsSetup()),
+  ),
   http.get('*/api/projects/demo/agents/v1/agents/definitions', () =>
     HttpResponse.json({ detail: 'Definitions unavailable' }, { status: 404 }),
   ),
@@ -243,17 +250,62 @@ describe('runStatusSchema', () => {
 })
 
 describe('TriggerPage', () => {
-  test('fails closed on a direct trigger URL without agents:run', () => {
+  test('fails closed on a direct trigger URL without agents:run', async () => {
     renderWithProviders(
       <TriggerPage />,
       '/agents/trigger',
       seedWorkspace(makeReadOnlyAgentWorkspace()),
     )
 
-    expect(screen.getByText('Agent execution unavailable')).toBeInTheDocument()
+    expect(
+      await screen.findByText('Agent execution unavailable'),
+    ).toBeInTheDocument()
     expect(screen.getByText(/does not grant agents:run/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Start run' })).not.toBeInTheDocument()
     expect(requests.some((entry) => entry.path === 'trigger')).toBe(false)
+  })
+
+  test('routes an inactive owner to guided setup instead of the trigger form', async () => {
+    server.use(
+      http.get('*/api/projects/demo/agents/v1/agents/setup', () =>
+        HttpResponse.json(
+          makeAgentsSetup({
+            state: 'inactive',
+            version: 0,
+            caller_capabilities: {
+              can_read: true,
+              can_manage: true,
+              can_activate: true,
+              can_deactivate: false,
+              management_authority: 'owner',
+            },
+            assignments: [],
+            blockers: [
+              'fast_model_required',
+              'project_inactive',
+              'reasoning_model_required',
+            ],
+            analysis_ready: false,
+            activated_at: null,
+          }),
+        ),
+      ),
+    )
+    renderWithProviders(
+      <TriggerPage />,
+      '/agents/trigger',
+      seedWorkspace(makeReadOnlyAgentWorkspace()),
+    )
+
+    expect(
+      await screen.findByText('Agentic runs are not active'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'Set up Agentic runs' }),
+    ).toHaveAttribute('href', '/settings/workspace?agents_setup=1')
+    expect(
+      screen.queryByRole('button', { name: 'Start run' }),
+    ).not.toBeInTheDocument()
   })
 
   test('posts the manual trigger and navigates to the run', async () => {

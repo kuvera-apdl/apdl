@@ -70,11 +70,8 @@ def test_compose_forwards_only_platform_key_not_cloud_keys_to_agents() -> None:
     assert "ANTHROPIC_API_KEY:" not in agents_service
     assert "GOOGLE_API_KEY:" not in agents_service
     assert "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:" in agents_service
-    assert (
-        "LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}"
-        in agents_service
-    )
-    assert "LLM_REASONING_XAI: ${LLM_REASONING_XAI:-grok-4.5}" in agents_service
     assert "\nXAI_API_KEY=\n" in env_example
-    assert "\nLLM_FAST_XAI=grok-4.20-0309-non-reasoning\n" in env_example
-    assert "\nLLM_REASONING_XAI=grok-4.5\n" in env_example
+    assert "LLM_FAST_" not in agents_service
+    assert "LLM_REASONING_" not in agents_service
+    assert "LLM_FAST_" not in env_example
+    assert "LLM_REASONING_" not in env_example

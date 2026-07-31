@@ -171,13 +171,8 @@ export function createRouter() {
               ),
             },
             {
-              element: <RequireWorkspaceRole role="agents:run" />,
-              children: [
-                {
-                  path: '/agents/trigger',
-                  lazy: lazyRoute(() => import('@/features/agents/TriggerPage'), 'TriggerPage'),
-                },
-              ],
+              path: '/agents/trigger',
+              lazy: lazyRoute(() => import('@/features/agents/TriggerPage'), 'TriggerPage'),
             },
             {
               element: <RequireWorkspaceRole role="agents:manage" />,

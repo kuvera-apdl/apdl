@@ -204,8 +204,6 @@ services:
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
-      LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}
-      LLM_REASONING_XAI: ${LLM_REASONING_XAI:-grok-4.5}
       LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}
     healthcheck:
       test:

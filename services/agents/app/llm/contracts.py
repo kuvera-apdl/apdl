@@ -133,6 +133,10 @@ class ProjectModelAssignment:
     provider: ProviderName
     model: str
     endpoint_url: str
+    setup_version: int
+    connection_version: int
+    inventory_version: int
+    model_catalog_version: str
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,8 @@ class ProjectLlmPolicy:
     project_daily_cost_limit_usd_micros: int
     run_cost_limit_usd_micros: int
     providers: tuple[ProviderPolicy, ...]
+    state: Literal["inactive", "active"]
+    version: int
 
     def provider_policy(
         self,
@@ -173,8 +179,13 @@ class PreparedLlmAttempt:
     attempt_id: UUID
     reserved_cost_usd_micros: int
     provider_policy: ProviderPolicy
-    credential_id: UUID | None = None
-    credential_version: int | None = None
+    credential_id: UUID | None
+    credential_version: int | None
+    setup_version: int
+    model_tier: ModelTier
+    connection_version: int
+    inventory_version: int
+    model_catalog_version: str
 
 
 @dataclass(frozen=True)

@@ -135,7 +135,7 @@ async def test_trigger_requires_agents_run_role():
 
 
 @pytest.mark.asyncio
-async def test_self_registered_overprivileged_project_cannot_start_run():
+async def test_project_without_effect_authorization_can_start_analysis_run():
     async def authenticate_self_registered(request: Request):
         principal = Principal(
             credential_id="self-registered",
@@ -158,11 +158,8 @@ async def test_self_registered_overprivileged_project_cannot_start_run():
             json={"project_id": "demo", "trigger_type": "manual"},
         )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Agents execution requires operator project authorization"
-    )
-    assert pool.conn.executed == []
+    assert response.status_code == 200
+    assert any("INSERT INTO agent_runs" in query for query, _ in pool.conn.executed)
 
 
 @pytest.mark.asyncio

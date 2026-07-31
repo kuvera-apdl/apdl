@@ -28,14 +28,17 @@ def _model(provider: str = "openai") -> ProviderModel:
         model_id="gpt-5.4-mini",
         display_name="GPT-5.4 Mini",
         supported_tiers=("fast", "reasoning"),
-        catalog_version="llm-provider-catalog@1",
+        catalog_version="llm-provider-catalog@2",
         data_residency="global",
         allowed_data_classifications=(
             "public",
             "internal",
             "confidential",
         ),
-        pricing_status="operator_review_required",
+        endpoint_host="api.openai.com",
+        input_cost_per_million_tokens_usd_micros=250_000,
+        output_cost_per_million_tokens_usd_micros=1_000_000,
+        pricing_status="catalog_reviewed",
     )
 
 
@@ -50,9 +53,10 @@ def _connection(
         project_id="demo",
         provider="openai",
         version=version,
+        inventory_version=1,
         state=state,
         credential_id=uuid4(),
-        catalog_version="llm-provider-catalog@1",
+        catalog_version="llm-provider-catalog@2",
         validated_at=now,
         created_at=now,
         updated_at=now,

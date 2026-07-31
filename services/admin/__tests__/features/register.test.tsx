@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -10,6 +10,7 @@ import { AuthProvider } from '../../src/core/auth'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { RegisterPage } from '../../src/features/auth/RegisterPage'
 import { WorkspaceSettingsPage } from '../../src/features/settings/WorkspaceSettingsPage'
+import { makeAgentsSetup } from '../helpers/fixtures'
 
 const IDENTITY = {
   user_id: '30000000-0000-4000-8000-000000000003',
@@ -256,6 +257,40 @@ test('creates a project and opens its grouped project-management sections', asyn
     ),
     http.get('*/api/projects/firstproject/members/audit', () => HttpResponse.json([])),
     http.get('*/api/projects/firstproject/ownership/audit', () => HttpResponse.json([])),
+    http.get('*/api/projects/firstproject/agents/v1/agents/setup', () =>
+      HttpResponse.json(
+        makeAgentsSetup({
+          project_id: 'firstproject',
+          state: 'inactive',
+          version: 0,
+          caller_capabilities: {
+            can_read: true,
+            can_manage: true,
+            can_activate: true,
+            can_deactivate: false,
+            management_authority: 'owner',
+          },
+          assignments: [],
+          connections: [],
+          blockers: [
+            'fast_model_required',
+            'project_inactive',
+            'reasoning_model_required',
+          ],
+          analysis_ready: false,
+          activated_at: null,
+        }),
+      ),
+    ),
+    http.get(
+      '*/api/projects/firstproject/agents/v1/agents/llm-connections',
+      () =>
+        HttpResponse.json({
+          schema_version: 'llm_provider_connection_list@1',
+          project_id: 'firstproject',
+          connections: [],
+        }),
+    ),
   )
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -276,7 +311,10 @@ test('creates a project and opens its grouped project-management sections', asyn
   await userEvent.type(screen.getByLabelText('Project ID'), 'firstproject')
   await userEvent.click(screen.getByRole('button', { name: 'Create project' }))
 
-  const projectPanel = await screen.findByRole('button', { expanded: true })
+  const projectPanel = await screen.findByRole('button', {
+    expanded: true,
+    hidden: true,
+  })
   expect(projectPanel).toHaveAttribute('aria-expanded', 'true')
   expect(projectPanel).toHaveTextContent('firstproject')
   expect(projectPanel).toHaveTextContent('8 permissions · new-admin@example.com')
@@ -289,6 +327,26 @@ test('creates a project and opens its grouped project-management sections', asyn
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })
   expect(csrfHeader).toBe('project-csrf')
+
+  const setupDialog = await screen.findByRole('dialog')
+  expect(
+    within(setupDialog).getByRole('heading', {
+      name: 'Set up Agentic runs',
+    }),
+  ).toBeInTheDocument()
+  expect(setupDialog).toHaveTextContent(
+    'Current owner: new-admin@example.com',
+  )
+  await userEvent.click(
+    within(setupDialog).getByRole('button', { name: 'Set up later' }),
+  )
+  await waitFor(() =>
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+  )
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Set up Agentic runs' }),
+  )
+  expect(await screen.findByRole('dialog')).toBeInTheDocument()
 })
 
 test('reports the canonical project quota error in project management', async () => {

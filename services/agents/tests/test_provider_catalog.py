@@ -82,7 +82,10 @@ async def test_discovery_uses_fixed_auth_and_allowlisted_intersection(
     assert [model.model_id for model in models] == [expected_model]
     assert models[0].provider == provider
     assert models[0].catalog_version == CATALOG_VERSION
-    assert models[0].pricing_status == "operator_review_required"
+    assert models[0].pricing_status == "catalog_reviewed"
+    assert models[0].endpoint_host
+    assert models[0].input_cost_per_million_tokens_usd_micros >= 0
+    assert models[0].output_cost_per_million_tokens_usd_micros >= 0
 
 
 @pytest.mark.asyncio

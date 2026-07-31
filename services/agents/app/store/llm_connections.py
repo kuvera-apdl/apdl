@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from app.llm.provider_catalog import CATALOG_VERSION, ProviderModel
+from app.llm.provider_catalog import CATALOG_VERSION, ProviderModel, catalog_model
 from app.store.llm_credentials import (
     DecryptedCredential,
     ProjectCredentialStore,
@@ -44,6 +44,7 @@ class ConnectionMetadata:
     project_id: str
     provider: RemoteProvider
     version: int
+    inventory_version: int
     state: ConnectionState
     credential_id: UUID
     catalog_version: str
@@ -65,6 +66,7 @@ def _connection(row: Any) -> ConnectionMetadata:
         project_id=str(row["project_id"]),
         provider=cast(RemoteProvider, str(row["provider"])),
         version=int(row["version"]),
+        inventory_version=int(row["inventory_version"]),
         state=cast(ConnectionState, str(row["state"])),
         credential_id=UUID(str(row["credential_id"])),
         catalog_version=str(row["catalog_version"]),
@@ -192,7 +194,16 @@ class ProjectConnectionStore:
             for row in assignments
             if str(row["model"]) not in discovered
         ]
-        if missing:
+        state = await conn.fetchval(
+            """
+            SELECT state
+            FROM llm_project_policies
+            WHERE project_id = $1
+            FOR SHARE
+            """,
+            project_id,
+        )
+        if missing and state == "active":
             raise LlmConnectionAssignmentConflictError(
                 "Discovered inventory omits assigned model(s): "
                 + ", ".join(sorted(missing))
@@ -204,24 +215,27 @@ class ProjectConnectionStore:
         *,
         project_id: str,
         provider: RemoteProvider,
-        version: int,
+        connection_version: int,
+        inventory_version: int,
         models: tuple[ProviderModel, ...],
     ) -> None:
         for model in models:
             await conn.execute(
                 """
                 INSERT INTO llm_project_provider_models (
-                    project_id, provider, connection_version, schema_version,
-                    model_id, display_name, supported_tiers, catalog_version,
-                    data_residency, allowed_data_classifications,
-                    pricing_status, discovered_at
+                    project_id, provider, connection_version,
+                    inventory_version, schema_version, model_id, display_name,
+                    supported_tiers, catalog_version, data_residency,
+                    allowed_data_classifications, pricing_status, discovered_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                    NOW()
                 )
                 """,
                 project_id,
                 provider,
-                version,
+                connection_version,
+                inventory_version,
                 model.schema_version,
                 model.model_id,
                 model.display_name,
@@ -287,6 +301,9 @@ class ProjectConnectionStore:
                     canonical_provider,
                 )
                 current_version = int(current["version"]) if current else 0
+                current_inventory_version = (
+                    int(current["inventory_version"]) if current else 0
+                )
                 if current_version != expected_version:
                     raise LlmConnectionConflictError(
                         "The provider connection version changed"
@@ -320,19 +337,22 @@ class ProjectConnectionStore:
                     )
                     action = "connect"
                 next_version = current_version + 1
+                next_inventory_version = current_inventory_version + 1
                 if current is None:
                     await conn.execute(
                         """
                         INSERT INTO llm_project_provider_connections (
-                            project_id, provider, version, state, credential_id,
-                            catalog_version, validated_at, validated_by_actor
+                            project_id, provider, version, inventory_version,
+                            state, credential_id, catalog_version, validated_at,
+                            validated_by_actor
                         ) VALUES (
-                            $1, $2, $3, 'active', $4, $5, NOW(), $6
+                            $1, $2, $3, $4, 'active', $5, $6, NOW(), $7
                         )
                         """,
                         project_id,
                         canonical_provider,
                         next_version,
+                        next_inventory_version,
                         credential.credential_id,
                         CATALOG_VERSION,
                         actor,
@@ -349,15 +369,17 @@ class ProjectConnectionStore:
                     await conn.execute(
                         """
                         UPDATE llm_project_provider_connections
-                        SET version = $3, state = 'active', credential_id = $4,
-                            catalog_version = $5, validated_at = NOW(),
-                            validated_by_actor = $6, updated_at = NOW(),
+                        SET version = $3, inventory_version = $4,
+                            state = 'active', credential_id = $5,
+                            catalog_version = $6, validated_at = NOW(),
+                            validated_by_actor = $7, updated_at = NOW(),
                             revoked_at = NULL
                         WHERE project_id = $1 AND provider = $2
                         """,
                         project_id,
                         canonical_provider,
                         next_version,
+                        next_inventory_version,
                         credential.credential_id,
                         CATALOG_VERSION,
                         actor,
@@ -366,7 +388,8 @@ class ProjectConnectionStore:
                     conn,
                     project_id=project_id,
                     provider=canonical_provider,
-                    version=next_version,
+                    connection_version=next_version,
+                    inventory_version=next_inventory_version,
                     models=models,
                 )
                 await self._append_audit(
@@ -478,6 +501,7 @@ class ProjectConnectionStore:
                     models,
                 )
                 next_version = expected_version + 1
+                next_inventory_version = int(current["inventory_version"]) + 1
                 await conn.execute(
                     """
                     DELETE FROM llm_project_provider_models
@@ -489,14 +513,16 @@ class ProjectConnectionStore:
                 await conn.execute(
                     """
                     UPDATE llm_project_provider_connections
-                    SET version = $3, catalog_version = $4,
-                        validated_at = NOW(), validated_by_actor = $5,
+                    SET version = $3, inventory_version = $4,
+                        catalog_version = $5,
+                        validated_at = NOW(), validated_by_actor = $6,
                         updated_at = NOW()
                     WHERE project_id = $1 AND provider = $2
                     """,
                     project_id,
                     canonical_provider,
                     next_version,
+                    next_inventory_version,
                     CATALOG_VERSION,
                     actor,
                 )
@@ -504,7 +530,8 @@ class ProjectConnectionStore:
                     conn,
                     project_id=project_id,
                     provider=canonical_provider,
-                    version=next_version,
+                    connection_version=next_version,
+                    inventory_version=next_inventory_version,
                     models=models,
                 )
                 await self._append_audit(
@@ -660,22 +687,17 @@ class ProjectConnectionStore:
 
     @staticmethod
     def _models(rows: list[Any]) -> tuple[ProviderModel, ...]:
-        return tuple(
-            ProviderModel(
-                schema_version="llm_provider_model@1",
-                provider=cast(RemoteProvider, str(row["provider"])),
-                model_id=str(row["model_id"]),
-                display_name=str(row["display_name"]),
-                supported_tiers=tuple(row["supported_tiers"]),
-                catalog_version=str(row["catalog_version"]),
-                data_residency=row["data_residency"],
-                allowed_data_classifications=tuple(
-                    row["allowed_data_classifications"]
-                ),
-                pricing_status="operator_review_required",
-            )
-            for row in rows
-        )
+        models: list[ProviderModel] = []
+        for row in rows:
+            model = catalog_model(str(row["provider"]), str(row["model_id"]))
+            if model is None or model.catalog_version != str(
+                row["catalog_version"]
+            ):
+                raise LlmConnectionConflictError(
+                    "Provider model inventory uses a stale catalog"
+                )
+            models.append(model)
+        return tuple(models)
 
     async def get_active_with_models(
         self,
@@ -706,11 +728,13 @@ class ProjectConnectionStore:
                     FROM llm_project_provider_models AS model
                     WHERE model.project_id = $1 AND model.provider = $2
                       AND model.connection_version = $3
+                      AND model.inventory_version = $4
                     ORDER BY model.model_id
                     """,
                     project_id,
                     canonical_provider,
                     int(connection_row["version"]),
+                    int(connection_row["inventory_version"]),
                 )
                 if not rows:
                     raise LlmConnectionConflictError(

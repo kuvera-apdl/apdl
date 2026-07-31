@@ -109,8 +109,22 @@ def _request_for(principal: Principal):
     return SimpleNamespace(state=SimpleNamespace(principal=principal))
 
 
-@pytest.mark.parametrize("role", ["agents:run", "agents:manage", "agents:approve"])
-def test_project_without_execution_authorization_cannot_use_execution_roles(role):
+@pytest.mark.parametrize("role", ["agents:run", "agents:manage"])
+def test_project_without_effect_authorization_can_use_analysis_roles(role):
+    principal = Principal(
+        credential_id="overprivileged",
+        project_id="verifiedproject",
+        roles=frozenset(
+            {"agents:read", "agents:run", "agents:manage", "agents:approve"}
+        ),
+        self_registered_project=True,
+        execution_authorized=False,
+    )
+
+    assert require_role(_request_for(principal), role) is principal
+
+
+def test_project_without_effect_authorization_cannot_approve_effects():
     principal = Principal(
         credential_id="overprivileged",
         project_id="verifiedproject",
@@ -122,11 +136,11 @@ def test_project_without_execution_authorization_cannot_use_execution_roles(role
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        require_role(_request_for(principal), role)
+        require_role(_request_for(principal), "agents:approve")
 
     assert exc_info.value.status_code == 403
     assert exc_info.value.detail == (
-        "Agents execution requires operator project authorization"
+        "Agents approval and effects require operator project authorization"
     )
 
 

@@ -22,7 +22,7 @@ export function AgentRoleUnavailable({
     <EmptyState
       icon={<ShieldAlert className="h-8 w-8" />}
       title={title}
-      description={`This workspace does not grant ${role}, which is required to ${ROLE_LABELS[role]}. Existing definitions, runs, results, and audit history remain read-only.`}
+      description={`This project does not grant ${role}, which is required to ${ROLE_LABELS[role]}. Existing definitions, runs, results, and audit history remain read-only.`}
     />
   )
 }

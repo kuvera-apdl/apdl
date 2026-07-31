@@ -23,6 +23,7 @@ from app.llm.contracts import (
 )
 from app.store.llm_governance import (
     begin_llm_call,
+    mark_provider_egress,
     prepare_provider_attempt,
     reconcile_orphaned_llm_attempts,
 )
@@ -76,6 +77,8 @@ def _policy(
         project_daily_cost_limit_usd_micros=1_000_000,
         run_cost_limit_usd_micros=1_000_000,
         providers=providers,
+        state="active",
+        version=7,
     )
 
 
@@ -111,6 +114,10 @@ class _GovernanceRecorder:
                 provider=selected.provider,
                 model=selected.model,
                 endpoint_url=selected.endpoint_url,
+                setup_version=self.policy.version,
+                connection_version=3,
+                inventory_version=5,
+                model_catalog_version="llm-provider-catalog@2",
             )
 
         async def prepare(
@@ -124,6 +131,11 @@ class _GovernanceRecorder:
             prompt_sha256,
             estimated_input_tokens,
             max_output_tokens,
+            model_tier,
+            setup_version,
+            connection_version,
+            inventory_version,
+            model_catalog_version,
         ):
             del prompt_sha256, estimated_input_tokens, max_output_tokens
             assert call_id == expected_call_id
@@ -138,6 +150,11 @@ class _GovernanceRecorder:
                 provider_policy=policy,
                 credential_id=uuid4() if provider != "local" else None,
                 credential_version=1 if provider != "local" else None,
+                setup_version=setup_version,
+                model_tier=model_tier,
+                connection_version=connection_version,
+                inventory_version=inventory_version,
+                model_catalog_version=model_catalog_version,
             )
 
         async def load_key(context, prepared):
@@ -280,7 +297,13 @@ async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch)
             )()
         },
     )()
-    monkeypatch.setattr(router, "_get_xai", lambda _api_key: client)
+    endpoints: list[str] = []
+
+    def get_xai(_api_key: str, endpoint_url: str):
+        endpoints.append(endpoint_url)
+        return client
+
+    monkeypatch.setattr(router, "_get_xai", get_xai)
 
     answer = await router.chat_completion("reasoning", _MESSAGES, context=_context())
 
@@ -289,6 +312,7 @@ async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch)
     assert recorder.attempt_finishes[0]["input_tokens"] == 13
     assert recorder.attempt_finishes[0]["output_tokens"] == 5
     assert recorder.call_finishes[-1]["status"] == "succeeded"
+    assert endpoints == ["https://xai.example/v1"]
 
 
 @pytest.mark.asyncio
@@ -414,6 +438,10 @@ async def test_provider_policy_is_bound_to_exact_endpoint_before_egress(monkeypa
             provider="openai",
             model="model-a",
             endpoint_url="https://unapproved.example/v1",
+            setup_version=7,
+            connection_version=3,
+            inventory_version=5,
+            model_catalog_version="llm-provider-catalog@2",
         )
 
     monkeypatch.setattr(
@@ -529,7 +557,11 @@ async def test_tool_completion_uses_the_same_governance_path(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(router, "_get_openai", lambda _api_key: object())
+    monkeypatch.setattr(
+        router,
+        "_get_openai",
+        lambda _api_key, _endpoint_url: object(),
+    )
 
     async def tool_invoke(*args, **kwargs):
         return router.ToolCompletion("tool answer", input_tokens=9, output_tokens=4)
@@ -603,6 +635,9 @@ class _BudgetConn:
         raise AssertionError(query)
 
     async def fetchval(self, query: str, *args: Any):
+        if "SELECT state = 'active'" in query:
+            assert args == ("projectA",)
+            return True
         if "SELECT status" in query and "FROM llm_calls" in query:
             return self.backend.calls.get(args[0])
         if "SELECT COALESCE(sum" in query:
@@ -670,6 +705,11 @@ async def test_concurrent_replicas_cannot_race_past_shared_cost_ceiling():
             prompt_sha256="a" * 64,
             estimated_input_tokens=10,
             max_output_tokens=1,
+            model_tier="fast",
+            setup_version=7,
+            connection_version=3,
+            inventory_version=5,
+            model_catalog_version="llm-provider-catalog@2",
         )
 
     results = await asyncio.gather(
@@ -689,6 +729,62 @@ class _ReconcileTransaction:
 
     async def __aexit__(self, *exc):
         return False
+
+
+class _EgressAuthorityConn:
+    def __init__(self, *, authorized: bool = True) -> None:
+        self.authorized = authorized
+        self.queries: list[str] = []
+
+    def transaction(self) -> _ReconcileTransaction:
+        return _ReconcileTransaction()
+
+    async def fetchrow(self, query: str, *args: Any):
+        self.queries.append(query)
+        assert "FROM agent_runs" in query
+        return {"active": 1}
+
+    async def fetchval(self, query: str, *args: Any):
+        self.queries.append(query)
+        if "SELECT state = 'active'" in query:
+            return True
+        if "SELECT attempt.attempt_id" in query:
+            assert "FOR UPDATE OF attempt" in query
+            assert "FOR SHARE OF policy, assignment, provider_policy" in query
+            return args[0] if self.authorized else None
+        if "UPDATE llm_provider_attempts" in query:
+            return args[0]
+        raise AssertionError(query)
+
+
+@pytest.mark.asyncio
+async def test_provider_egress_locks_exact_setup_and_credential_authority():
+    attempt_id = uuid4()
+    conn = _EgressAuthorityConn()
+
+    await mark_provider_egress(
+        _context(pool=_ReconcilePool(conn)),
+        attempt_id=attempt_id,
+    )
+
+    assert any("UPDATE llm_provider_attempts" in query for query in conn.queries)
+
+
+@pytest.mark.asyncio
+async def test_provider_egress_stops_when_exact_authority_was_replaced():
+    attempt_id = uuid4()
+    conn = _EgressAuthorityConn(authorized=False)
+
+    with pytest.raises(
+        LlmCredentialUnavailableError,
+        match="lost credential authority",
+    ):
+        await mark_provider_egress(
+            _context(pool=_ReconcilePool(conn)),
+            attempt_id=attempt_id,
+        )
+
+    assert not any("UPDATE llm_provider_attempts" in query for query in conn.queries)
 
 
 class _ReconcileConn:
@@ -733,6 +829,11 @@ class _ReconcilePool:
 class _InactiveOwnerConn:
     def transaction(self):
         return _ReconcileTransaction()
+
+    async def fetchval(self, query: str, *args: Any):
+        assert "SELECT state = 'active'" in query
+        assert args == ("projectA",)
+        return True
 
     async def fetchrow(self, query: str, *args: Any):
         assert "lease_owner_id = $3" in query

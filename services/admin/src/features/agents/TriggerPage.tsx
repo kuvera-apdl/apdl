@@ -13,14 +13,18 @@ import {
 } from '@/api/agents'
 import { ApiError } from '@/api/http'
 import { CurlButton } from '@/components/shared/CurlButton'
+import { ErrorState } from '@/components/shared/PanelStates'
 import { Badge } from '@/components/ui/badge'
 import { PageHeader } from '@/components/shared/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import { queryKeys } from '@/core/queryClient'
 import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { AgentRoleUnavailable } from '@/features/agents/AgentAccessNotice'
+import { AgentsSetupNotice } from '@/features/agents/setup/AgentsSetupNotice'
+import { useAgentsSetup } from '@/features/agents/setup/hooks'
 import { AUTONOMY_LEVELS, MATRIX_ROWS, type GateOutcome } from '@/features/agents/gatingMatrix'
 import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
@@ -44,13 +48,53 @@ const OUTCOME_STYLES: Record<GateOutcome, string> = {
 
 export function TriggerPage() {
   const { active } = useWorkspace()
+  const setupQuery = useAgentsSetup()
+  if (setupQuery.isPending) {
+    return (
+      <div className="max-w-3xl space-y-5">
+        <PageHeader
+          backTo={{ to: '/agents', label: 'Agent runs' }}
+          title="Trigger agent run"
+          description="Verifying project admission state."
+        />
+        <Skeleton className="h-40 w-full" />
+      </div>
+    )
+  }
+  if (setupQuery.isError) {
+    return (
+      <div className="max-w-3xl space-y-5">
+        <PageHeader
+          backTo={{ to: '/agents', label: 'Agent runs' }}
+          title="Trigger agent run"
+          description="Project admission state could not be verified."
+        />
+        <ErrorState
+          error={setupQuery.error}
+          onRetry={() => void setupQuery.refetch()}
+        />
+      </div>
+    )
+  }
+  if (!setupQuery.data.analysis_ready) {
+    return (
+      <div className="max-w-3xl space-y-5">
+        <PageHeader
+          backTo={{ to: '/agents', label: 'Agent runs' }}
+          title="Trigger agent run"
+          description="Activate Agentic runs before launching analysis."
+        />
+        <AgentsSetupNotice setup={setupQuery.data} />
+      </div>
+    )
+  }
   if (!hasWorkspaceRole(active, 'agents:run')) {
     return (
       <div className="max-w-3xl space-y-5">
         <PageHeader
           backTo={{ to: '/agents', label: 'Agent runs' }}
           title="Trigger agent run"
-          description="Agent execution is restricted to operator-provisioned workspaces."
+          description="Agent execution requires project-scoped run authority."
         />
         <AgentRoleUnavailable role="agents:run" title="Agent execution unavailable" />
       </div>

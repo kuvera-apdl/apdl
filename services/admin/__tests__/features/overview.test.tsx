@@ -10,13 +10,16 @@ import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { OverviewPage } from '../../src/features/overview/OverviewPage'
 import { HealthPage } from '../../src/features/system/HealthPage'
-import { seedWorkspace } from '../helpers/fixtures'
+import { makeAgentsSetup, seedWorkspace } from '../helpers/fixtures'
 
 const healthRequests: string[] = []
 const readyRequests: string[] = []
 const analyticsRequests: { path: string; body: unknown }[] = []
 
 const server = setupServer(
+  http.get('*/api/projects/demo/agents/v1/agents/setup', () =>
+    HttpResponse.json(makeAgentsSetup()),
+  ),
   http.get('*/api/projects/demo/config/v1/admin/flags', () =>
     HttpResponse.json({ flags: [], count: 0 }),
   ),
@@ -97,6 +100,35 @@ describe('OverviewPage', () => {
     for (const service of ['Ingestion', 'Config', 'Query']) {
       expect(screen.queryByText(service)).not.toBeInTheDocument()
     }
+  })
+
+  test('distinguishes setup authorization failures from temporary unavailability', async () => {
+    server.use(
+      http.get(
+        '*/api/projects/demo/agents/v1/agents/setup',
+        () => HttpResponse.json({ detail: 'Forbidden' }, { status: 403 }),
+      ),
+    )
+    const authorized = renderPage(<OverviewPage />)
+    expect(
+      await screen.findByText('Agents setup access is not authorized.'),
+    ).toBeVisible()
+    authorized.unmount()
+
+    server.use(
+      http.get(
+        '*/api/projects/demo/agents/v1/agents/setup',
+        () =>
+          HttpResponse.json(
+            { detail: 'Service unavailable' },
+            { status: 503 },
+          ),
+      ),
+    )
+    renderPage(<OverviewPage />)
+    expect(
+      await screen.findByText('Agents setup is temporarily unavailable.'),
+    ).toBeVisible()
   })
 
   test('uses UTC calendar ranges for week and month throughput', async () => {

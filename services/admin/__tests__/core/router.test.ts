@@ -36,7 +36,7 @@ test('keeps auth and layout eager while resolving every screen through a lazy ro
   }
 })
 
-test('places every direct mutation screen behind its exact workspace role', () => {
+test('places static mutation screens behind their exact workspace role', () => {
   window.history.replaceState(null, '', '/not-found')
   const router = createRouter()
 
@@ -57,10 +57,15 @@ test('places every direct mutation screen behind its exact workspace role', () =
       ['/flags/new', 'config:write'],
       ['/flags/:key/edit', 'config:write'],
       ['/experiments/new', 'config:write'],
-      ['/agents/trigger', 'agents:run'],
       ['/agents/custom/new', 'agents:manage'],
       ['/agents/custom/:agentId/edit', 'agents:manage'],
     ]))
+    // TriggerPage gates first on the live Agents setup response and then on
+    // agents:run. Keeping the route reachable lets an inactive owner without
+    // the newly granted run role reach the guided activation CTA.
+    expect(
+      appRoutes.find((route) => route.path === '/agents/trigger')?.lazy,
+    ).toBeTypeOf('function')
   } finally {
     router.dispose()
   }

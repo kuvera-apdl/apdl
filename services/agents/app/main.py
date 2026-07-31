@@ -22,6 +22,7 @@ from app.routers import (
     custom_agents,
     llm_connections,
     runs,
+    setup,
     status,
     triggers,
 )
@@ -33,6 +34,7 @@ from app.store.llm_governance import (
 )
 from app.store.llm_connections import ProjectConnectionStore
 from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
+from app.store.llm_setup import AgentsSetupStore
 from app.store.run_leases import (
     requeue_expired_runs,
     requeue_expired_runs_forever,
@@ -176,6 +178,7 @@ async def lifespan(application: FastAPI):
             pool,
             application.state.llm_credential_store,
         )
+        application.state.agents_setup_store = AgentsSetupStore(pool)
         maintenance_connection = await pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
             maintenance_connection
@@ -280,6 +283,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(custom_agents.router, dependencies=auth_dependencies)
 app.include_router(llm_connections.router, dependencies=auth_dependencies)
+app.include_router(setup.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(triggers.router, dependencies=auth_dependencies)
 app.include_router(status.router, dependencies=auth_dependencies)
@@ -307,6 +311,7 @@ async def readiness_check(request: Request):
             "vector_store",
             "llm_credential_store",
             "llm_connection_store",
+            "agents_setup_store",
         )
     )
     runtime_tasks = (

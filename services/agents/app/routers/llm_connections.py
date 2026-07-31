@@ -84,7 +84,10 @@ class ProviderModelResponse(BaseModel):
     allowed_data_classifications: list[
         Literal["public", "internal", "confidential", "restricted"]
     ]
-    pricing_status: Literal["operator_review_required"]
+    endpoint_host: str
+    input_cost_per_million_tokens_usd_micros: int = Field(ge=0)
+    output_cost_per_million_tokens_usd_micros: int = Field(ge=0)
+    pricing_status: Literal["catalog_reviewed"]
 
 
 class ConnectionSummaryResponse(BaseModel):
@@ -96,6 +99,7 @@ class ConnectionSummaryResponse(BaseModel):
     project_id: str = Field(pattern=PROJECT_PATTERN)
     provider: ProviderPath
     version: int = Field(ge=1)
+    inventory_version: int = Field(ge=1)
     state: Literal["active", "revoked"]
     catalog_version: str
     validated_at: datetime
@@ -128,6 +132,7 @@ class ModelInventoryResponse(BaseModel):
     project_id: str = Field(pattern=PROJECT_PATTERN)
     provider: ProviderPath
     connection_version: int = Field(ge=1)
+    inventory_version: int = Field(ge=1)
     models: list[ProviderModelResponse]
 
 
@@ -136,6 +141,7 @@ def _summary(connection: ConnectionMetadata) -> ConnectionSummaryResponse:
         project_id=connection.project_id,
         provider=connection.provider,
         version=connection.version,
+        inventory_version=connection.inventory_version,
         state=connection.state,
         catalog_version=connection.catalog_version,
         validated_at=connection.validated_at,
@@ -156,6 +162,13 @@ def _model(model: ProviderModel) -> ProviderModelResponse:
         catalog_version=model.catalog_version,
         data_residency=model.data_residency,
         allowed_data_classifications=list(model.allowed_data_classifications),
+        endpoint_host=model.endpoint_host,
+        input_cost_per_million_tokens_usd_micros=(
+            model.input_cost_per_million_tokens_usd_micros
+        ),
+        output_cost_per_million_tokens_usd_micros=(
+            model.output_cost_per_million_tokens_usd_micros
+        ),
         pricing_status=model.pricing_status,
     )
 
@@ -295,6 +308,7 @@ async def get_models(
         project_id=project_id,
         provider=provider,
         connection_version=connection.version,
+        inventory_version=connection.inventory_version,
         models=[_model(model) for model in models],
     )
 

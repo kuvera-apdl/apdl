@@ -428,6 +428,173 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
     )
 
 
+def test_agents_setup_proxy_routes_are_strictly_mapped() -> None:
+    assert (
+        proxy.required_role("agents", "GET", "/v1/agents/setup")
+        == "agents:read"
+    )
+    assert (
+        proxy.required_role("agents", "PUT", "/v1/agents/setup")
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "POST",
+            "/v1/agents/setup/deactivate",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role("agents", "POST", "/v1/agents/setup") == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "PUT",
+            "/v1/agents/setup/deactivate",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "GET",
+            "/v1/agents/setup/unknown",
+        )
+        == ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_agents_setup_status_uses_human_bound_ephemeral_credential(
+    admin_session: AdminSession,
+) -> None:
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "agents_project_setup@1",
+                "project_id": "demo",
+                "state": "inactive",
+                "version": 0,
+            },
+        )
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        admin_session,
+    ) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/setup?project_id=demo"
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_key != TEST_API_KEY
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    credential_removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1"
+        in statement[0]
+    )
+    assert credential_removal[1] == (credential_insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    seen_body: object = None
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_body
+        seen_body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "agents_project_setup@1",
+                "project_id": "demo",
+                "state": "active",
+                "version": 1,
+            },
+        )
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        session,
+    ) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.put(
+            "/api/projects/demo/agents/v1/agents/setup",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={
+                "project_id": "demo",
+                "fast_model": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "connection_version": 1,
+                    "inventory_version": 1,
+                },
+                "reasoning_model": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-6",
+                    "connection_version": 2,
+                    "inventory_version": 3,
+                },
+                "version": 0,
+            },
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_body == {
+        "project_id": "demo",
+        "fast_model": {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "connection_version": 1,
+            "inventory_version": 1,
+        },
+        "reasoning_model": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "connection_version": 2,
+            "inventory_version": 3,
+        },
+        "version": 0,
+    }
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+
+
 @pytest.mark.asyncio
 async def test_codegen_proxy_uses_project_scoped_service_key(
     admin_session: AdminSession,

@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 50
-MIGRATION_NAME = "050_llm_provider_connections.sql"
+MIGRATION_VERSION = 51
+MIGRATION_NAME = "051_agents_project_setup.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -114,6 +114,13 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_project_policies", "allow_cross_vendor_retry"),
         ("llm_project_policies", "project_daily_cost_limit_usd_micros"),
         ("llm_project_policies", "run_cost_limit_usd_micros"),
+        ("llm_project_policies", "state"),
+        ("llm_project_policies", "version"),
+        ("llm_project_policies", "activated_by_actor_user_id"),
+        ("llm_project_policies", "activated_at"),
+        ("llm_project_policies", "deactivated_by_actor_user_id"),
+        ("llm_project_policies", "deactivation_reason"),
+        ("llm_project_policies", "deactivated_at"),
         ("llm_project_provider_policies", "project_id"),
         ("llm_project_provider_policies", "provider"),
         ("llm_project_provider_policies", "model"),
@@ -163,11 +170,19 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_provider_attempts", "credential_id"),
         ("llm_provider_attempts", "credential_version"),
         ("llm_provider_attempts", "legacy_unbound_credential"),
+        ("llm_provider_attempts", "setup_version"),
+        ("llm_provider_attempts", "model_tier"),
+        ("llm_provider_attempts", "connection_version"),
+        ("llm_provider_attempts", "inventory_version"),
+        ("llm_provider_attempts", "model_catalog_version"),
+        ("llm_provider_attempts", "legacy_unbound_setup"),
         ("llm_project_model_assignments", "project_id"),
         ("llm_project_model_assignments", "tier"),
         ("llm_project_model_assignments", "provider"),
         ("llm_project_model_assignments", "model"),
-        ("llm_project_model_assignments", "endpoint_url"),
+        ("llm_project_model_assignments", "model_catalog_version"),
+        ("llm_project_model_assignments", "assigned_at"),
+        ("llm_project_model_assignments", "updated_at"),
         ("llm_project_provider_credentials", "credential_id"),
         ("llm_project_provider_credentials", "project_id"),
         ("llm_project_provider_credentials", "provider"),
@@ -189,6 +204,7 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_project_provider_connections", "project_id"),
         ("llm_project_provider_connections", "provider"),
         ("llm_project_provider_connections", "version"),
+        ("llm_project_provider_connections", "inventory_version"),
         ("llm_project_provider_connections", "state"),
         ("llm_project_provider_connections", "credential_id"),
         ("llm_project_provider_connections", "catalog_version"),
@@ -196,6 +212,7 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_project_provider_models", "project_id"),
         ("llm_project_provider_models", "provider"),
         ("llm_project_provider_models", "connection_version"),
+        ("llm_project_provider_models", "inventory_version"),
         ("llm_project_provider_models", "schema_version"),
         ("llm_project_provider_models", "model_id"),
         ("llm_project_provider_models", "supported_tiers"),
@@ -204,6 +221,13 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_project_provider_connection_audit", "provider"),
         ("llm_project_provider_connection_audit", "action"),
         ("llm_project_provider_connection_audit", "actor_user_id"),
+        ("llm_project_setup_audit", "audit_id"),
+        ("llm_project_setup_audit", "project_id"),
+        ("llm_project_setup_audit", "action"),
+        ("llm_project_setup_audit", "actor_user_id"),
+        ("llm_project_setup_audit", "setup_version"),
+        ("llm_project_setup_audit", "previous_setup"),
+        ("llm_project_setup_audit", "next_setup"),
         ("agent_mutation_quota_reservations", "project_id"),
         ("agent_mutation_quota_reservations", "action_type"),
         ("agent_mutation_quota_reservations", "idempotency_key"),

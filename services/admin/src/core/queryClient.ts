@@ -56,4 +56,27 @@ export const queryKeys = {
   llmConnections: (wsId: string) => [wsId, 'agents', 'llm-connections'] as const,
   llmModels: (wsId: string, provider: string) =>
     [wsId, 'agents', 'llm-connections', provider, 'models'] as const,
+  agentsSetup: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'setup', projectId] as const,
+  agentsConnectionsPrefix: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'llm-connections', projectId] as const,
+  agentsConnections: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'llm-connections', projectId, 'list'] as const,
+  agentsModels: (
+    wsId: string,
+    projectId: string,
+    provider: string,
+    connectionVersion: number,
+    inventoryVersion: number,
+  ) =>
+    [
+      wsId,
+      'agents',
+      'llm-connections',
+      projectId,
+      'models',
+      provider,
+      connectionVersion,
+      inventoryVersion,
+    ] as const,
 }
