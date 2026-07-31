@@ -216,52 +216,34 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
+| `LLM_VAULT_URL` | `http://localhost:8086` | Private project LLM credential vault |
+| `LLM_VAULT_AGENTS_TOKEN` | — | Agents-only workload token for exact just-in-time credential access |
+| `LLM_VAULT_PROJECTION_TOKEN` | — | Private token used by the vault to request Agents model projections |
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
-| `AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` | — | Required standard Base64 encoding of exactly 32 random bytes; encrypts project provider credentials inside Agents only |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
 
-Each remote provider key is stored through the project connection API; Agents
-does not read cloud-provider API keys from its environment. A run requires one
-exact policy-authorized model assignment backed by that project's active
-provider connection. `/ready/capabilities` reports only the generic encrypted
-credential-store subsystem and service dependencies, never tenant connection
+Remote provider keys are created in the project settings UI and held only by
+the private LLM Vault. Agents stores non-secret connection, inventory, policy,
+and assignment projections. Immediately before provider egress it requests the
+exact credential ID and version selected by the attempt, with an execution ID
+and purpose; the vault checks the explicit `agents` grant and records an
+immutable issuance audit. Agents never receives the vault encryption key and
+does not read ambient cloud-provider keys. `/ready/capabilities` reports only
+the generic vault subsystem and service dependencies, never tenant connection
 presence.
-
-Generate the credential-encryption key offline and place the single-line value
-in the Agents deployment secret store:
-
-```bash
-openssl rand -base64 32
-```
-
-There is no development default. Base64 is transport encoding, not encryption;
-restrict access to the decoded platform key. To rotate it, stop every Agents
-replica, set `AGENTS_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64` and
-`AGENTS_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64`, then run:
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/rotate_llm_credential_key.py \
-  --actor operator@example.com
-```
-
-The command takes the same exclusive maintenance barrier used by PostgreSQL
-migrations, verifies every active credential before mutation, commits the full
-re-encryption atomically, and prints counts and audit IDs only. Deploy
-`AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` with the new value after the
-command succeeds, then restart Agents. Keep the old key until the new deployment
-has passed readiness checks.
 
 ## Running locally
 
 ```bash
 make dev          # start Redis, ClickHouse, PostgreSQL
+make run-llm-vault
 make run-agents   # uvicorn with hot-reload → localhost:8083
 ```
 
-Set the credential-encryption key in `.env` (created by `make setup`), then add
-project provider connections through the authenticated Agents API.
+Set the vault secrets in `.env` (created by `make setup`), then add project
+provider connections from Project settings in the Admin console.
 
 ## Tests
 

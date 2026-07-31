@@ -1237,7 +1237,7 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
 
     assert response.status_code == 415
     assert response.json() == {
-        "detail": "Codegen request bodies must use application/json"
+            "detail": "Upstream request bodies must use application/json"
     }
     assert not called
 

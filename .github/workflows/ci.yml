@@ -188,6 +188,66 @@ jobs:
         working-directory: services/query
       - run: make test-query-clickhouse
 
+  llm-vault-service:
+    name: Project LLM Credential Vault
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb
+        env:
+          POSTGRES_DB: apdl
+          POSTGRES_USER: apdl
+          POSTGRES_PASSWORD: apdl_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apdl -d apdl"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
+      LLM_VAULT_TEST_OWNER_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
+      LLM_VAULT_TEST_POSTGRES_URL: postgresql://apdl_llm_vault:apdl_llm_vault_ci_test@localhost:5432/apdl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Bootstrap dedicated PostgreSQL roles
+        run: |
+          docker run --rm --network host \
+            --entrypoint bash \
+            -e PGHOST=127.0.0.1 \
+            -e PGPORT=5432 \
+            -e POSTGRES_USER=apdl \
+            -e POSTGRES_PASSWORD=apdl_dev \
+            -e POSTGRES_DB=apdl \
+            -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
+            -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
+            pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
+            /tmp/init-apdl-roles.sh
+      - name: Apply the canonical PostgreSQL migration sequence
+        run: |
+          docker build --tag apdl-postgres-migrate-vault-ci pipeline/postgres
+          docker run --rm --network host \
+            -e PGHOST=127.0.0.1 \
+            -e PGPORT=5432 \
+            -e PGUSER=apdl \
+            -e PGPASSWORD=apdl_dev \
+            -e PGDATABASE=apdl \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
+            apdl-postgres-migrate-vault-ci
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+        working-directory: services/llm-vault
+      - run: .venv/bin/ruff check app/ tests/
+        working-directory: services/llm-vault
+      - run: .venv/bin/python -m pytest -q
+        working-directory: services/llm-vault
+
   agents-service:
     name: Agents Service
     runs-on: ubuntu-latest
@@ -208,6 +268,7 @@ jobs:
     env:
       APDL_AGENTS_LANE_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
       APDL_RUNTIME_TEST_POSTGRES_URL: postgresql://apdl_runtime@127.0.0.1:5432/apdl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -225,6 +286,7 @@ jobs:
             -e POSTGRES_PASSWORD=apdl_dev \
             -e POSTGRES_DB=apdl \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
             /tmp/init-apdl-roles.sh
@@ -237,6 +299,7 @@ jobs:
             -e PGUSER=apdl \
             -e PGPASSWORD=apdl_dev \
             -e PGDATABASE=apdl \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             apdl-postgres-migrate-ci
       - name: Prove PostgreSQL runtime/operator privilege separation
         run: |
@@ -282,6 +345,7 @@ jobs:
     env:
       CODEGEN_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -298,6 +362,7 @@ jobs:
             -e POSTGRES_PASSWORD=apdl_dev \
             -e POSTGRES_DB=apdl \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
             /tmp/init-apdl-roles.sh
@@ -310,6 +375,7 @@ jobs:
             -e PGUSER=apdl \
             -e PGPASSWORD=apdl_dev \
             -e PGDATABASE=apdl \
+            -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             apdl-postgres-migrate-codegen-ci
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
         working-directory: services/codegen
@@ -372,6 +438,7 @@ jobs:
             services/config/requirements.lock \
             services/query/requirements.lock \
             services/agents/requirements.lock \
+            services/llm-vault/requirements.lock \
             services/admin-api/requirements.lock \
             services/codegen/requirements.lock \
             pipeline/redis/requirements.lock

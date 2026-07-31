@@ -36,7 +36,8 @@ if [[ ${#py_files[@]} -gt 0 ]]; then
     "$repo_root/services/ingestion/.venv/bin/ruff" \
     "$repo_root/services/config/.venv/bin/ruff" \
     "$repo_root/services/query/.venv/bin/ruff" \
-    "$repo_root/services/agents/.venv/bin/ruff"; do
+    "$repo_root/services/agents/.venv/bin/ruff" \
+    "$repo_root/services/llm-vault/.venv/bin/ruff"; do
     [[ -x "$candidate" ]] && ruff_bin="$candidate" && break
   done
   [[ -z "$ruff_bin" ]] && ruff_bin=$(command -v ruff || true)

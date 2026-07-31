@@ -20,6 +20,8 @@ async def test_capability_report_separates_configuration_and_reachability(
     monkeypatch.setenv("QUERY_SERVICE_URL", "http://query.test:8082")
     monkeypatch.setenv("CONFIG_SERVICE_URL", "http://config.test:8081")
     monkeypatch.setenv("CODEGEN_SERVICE_URL", "http://codegen.test:8084")
+    monkeypatch.setenv("LLM_VAULT_URL", "http://vault.test:8086")
+    monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "v" * 32)
 
     probed_urls = []
 
@@ -56,7 +58,7 @@ async def test_capability_report_separates_configuration_and_reachability(
         "reachable": True,
         "changeset_creation": "tenant_scoped",
     }
-    assert len(probed_urls) == 3
+    assert len(probed_urls) == 4
     assert "openai-secret" not in str(report)
 
 
@@ -69,6 +71,8 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setenv("LLM_VAULT_URL", "http://vault.test:8086")
+    monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "v" * 32)
 
     async def reachable(*_args, **_kwargs):
         return True
@@ -100,6 +104,8 @@ async def test_generic_readiness_never_probes_or_reports_tenant_provider_keys(
     monkeypatch.setenv("QUERY_SERVICE_URL", "")
     monkeypatch.setenv("CONFIG_SERVICE_URL", "")
     monkeypatch.setenv("CODEGEN_SERVICE_URL", "")
+    monkeypatch.setenv("LLM_VAULT_URL", "")
+    monkeypatch.delenv("LLM_VAULT_AGENTS_TOKEN", raising=False)
 
     probes: list[tuple[str, dict[str, str]]] = []
 
@@ -114,7 +120,7 @@ async def test_generic_readiness_never_probes_or_reports_tenant_provider_keys(
 
     assert probes == []
     assert report["capabilities"]["llm"] == {
-        "credential_store": {"configured": True, "operational": True},
+        "credential_store": {"configured": False, "operational": False},
         "project_credentials": "tenant_scoped",
     }
     assert "xai-secret" not in str(report)
@@ -141,7 +147,10 @@ async def test_codegen_probe_distinguishes_disabled_from_unavailable() -> None:
             json={
                 "status": "ready",
                 "service": "apdl-codegen",
-                "capabilities": {"changeset_creation": "disabled"},
+                "capabilities": {
+                    "changeset_creation": "disabled",
+                    "credential_store": "ready",
+                },
             },
         )
 

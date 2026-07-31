@@ -12,7 +12,13 @@ import type { ServiceConnection } from '@/api/http'
 import type { AdminRole, AuthIdentity } from '@/api/auth'
 import { useOptionalAuth } from '@/core/auth'
 
-export type ServiceName = 'ingestion' | 'config' | 'query' | 'agents' | 'codegen'
+export type ServiceName =
+  | 'ingestion'
+  | 'config'
+  | 'query'
+  | 'agents'
+  | 'codegen'
+  | 'llm-vault'
 
 export interface Workspace {
   id: string

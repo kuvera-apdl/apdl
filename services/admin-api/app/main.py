@@ -28,6 +28,7 @@ _CORE_UPSTREAMS = {
 _CAPABILITY_UPSTREAMS = {
     "agents": ("/ready", "ready"),
     "codegen": ("/ready", "ready"),
+    "llm-vault": ("/ready", "ready"),
 }
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084

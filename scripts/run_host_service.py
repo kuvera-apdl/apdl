@@ -17,16 +17,27 @@ SERVICES = (
     "config",
     "query",
     "agents",
+    "llm-vault",
     "codegen",
     "pipeline",
 )
 
-AGENTS_PLATFORM_KEY = "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64"
-CODEGEN_PLATFORM_KEY = "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64"
-PLATFORM_KEY_OWNER = {
-    AGENTS_PLATFORM_KEY: "agents",
-    CODEGEN_PLATFORM_KEY: "codegen",
+SCOPED_SECRETS = {
+    "LLM_VAULT_ENCRYPTION_KEY_BASE64": frozenset({"llm-vault"}),
+    "LLM_VAULT_ADMIN_TOKEN": frozenset({"llm-vault", "admin-api"}),
+    "LLM_VAULT_AGENTS_TOKEN": frozenset({"llm-vault", "agents"}),
+    "LLM_VAULT_CODEGEN_TOKEN": frozenset({"llm-vault", "codegen"}),
+    "LLM_VAULT_PROJECTION_TOKEN": frozenset(
+        {"llm-vault", "agents", "codegen"}
+    ),
+    "APDL_LLM_VAULT_POSTGRES_PASSWORD": frozenset({"llm-vault"}),
 }
+LEGACY_LLM_PLATFORM_KEYS = frozenset(
+    {
+        "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
+        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
+    }
+)
 
 CODEGEN_GITHUB_SECRETS = frozenset(
     {
@@ -159,9 +170,11 @@ def load_environment_file(path: Path) -> dict[str, str]:
 
 
 def _permitted(service: str, name: str) -> bool:
-    platform_owner = PLATFORM_KEY_OWNER.get(name)
-    if platform_owner is not None:
-        return service == platform_owner
+    secret_consumers = SCOPED_SECRETS.get(name)
+    if secret_consumers is not None:
+        return service in secret_consumers
+    if name in LEGACY_LLM_PLATFORM_KEYS:
+        return False
     if name in CODEGEN_GITHUB_SECRETS:
         return service == "codegen"
     if name in AMBIENT_PROVIDER_KEYS:

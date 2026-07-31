@@ -50,7 +50,6 @@ def test_compose_healthcheck_uses_core_readiness_only() -> None:
     agents_service = compose.split("\n  agents:\n", 1)[1].split(
         "\n  # Codegen", 1
     )[0]
-
     assert "http://localhost:8083/ready" in agents_service
     assert "['status'] == 'ready'" in agents_service
     assert "/ready/capabilities" not in agents_service
@@ -63,13 +62,19 @@ def test_compose_forwards_only_platform_key_not_cloud_keys_to_agents() -> None:
     agents_service = compose.split("\n  agents:\n", 1)[1].split(
         "\n  # Codegen", 1
     )[0]
+    vault_service = compose.split("\n  llm-vault:\n", 1)[1].split(
+        "\n  agents:\n", 1
+    )[0]
     env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "XAI_API_KEY:" not in agents_service
     assert "OPENAI_API_KEY:" not in agents_service
     assert "ANTHROPIC_API_KEY:" not in agents_service
     assert "GOOGLE_API_KEY:" not in agents_service
-    assert "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:" in agents_service
+    assert "LLM_VAULT_URL:" in agents_service
+    assert "LLM_VAULT_AGENTS_TOKEN:" in agents_service
+    assert "LLM_VAULT_ENCRYPTION_KEY_BASE64:" not in agents_service
+    assert "LLM_VAULT_ENCRYPTION_KEY_BASE64:" in vault_service
     for provider_key in (
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",

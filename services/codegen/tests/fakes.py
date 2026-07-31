@@ -8,8 +8,6 @@ it does not preserve the removed CI-as-lifecycle columns or statuses.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,14 +22,6 @@ from app.llm.provider_catalog import CATALOG_VERSION, catalog_model
 from app.safety.policy import TenantCodegenConnectionPolicy
 
 _T0 = datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc)
-_TEST_LLM_CREDENTIAL_KEY = bytes(range(32))
-TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64 = base64.b64encode(
-    _TEST_LLM_CREDENTIAL_KEY
-).decode("ascii")
-TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID = (
-    "sha256:"
-    + hashlib.sha256(_TEST_LLM_CREDENTIAL_KEY).hexdigest()[:32]
-)
 _UNSET = object()
 
 
@@ -86,7 +76,6 @@ class FakeConn:
         project_id: str,
         *,
         include_model_metadata: bool,
-        encryption_key_id: object = _UNSET,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for role in ("editor", "helper"):
@@ -115,10 +104,10 @@ class FakeConn:
                 or credential["project_id"] != project_id
                 or credential["provider"] != provider
                 or credential["state"] != "active"
-                or (
-                    encryption_key_id is not _UNSET
-                    and credential.get("encryption_key_id") != encryption_key_id
-                )
+            ):
+                continue
+            if (credential["connection_id"], "codegen") not in self._rows(
+                "llm_connection_consumers"
             ):
                 continue
             model = self._rows("llm_models").get(
@@ -898,7 +887,6 @@ class FakeConn:
             return self._active_llm_assignment_rows(
                 args[0],
                 include_model_metadata="assignment.assignment_version" in query,
-                encryption_key_id=(args[1] if len(args) > 1 else _UNSET),
             )
         if "UPDATE github_repository_grants" in query:
             project_id = args[0]
@@ -1067,6 +1055,7 @@ class FakePool:
             "connections",
             "llm_credentials",
             "llm_connections",
+            "llm_connection_consumers",
             "llm_models",
             "llm_assignments",
             "llm_attempts",
@@ -1112,11 +1101,15 @@ class FakePool:
         )
         self.store["llm_credentials"][credential_id] = {
             "credential_id": credential_id,
+            "connection_id": credential_id,
             "project_id": project_id,
             "provider": provider,
             "credential_version": 1,
             "state": "active",
-            "encryption_key_id": TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID,
+        }
+        self.store["llm_connection_consumers"][(credential_id, "codegen")] = {
+            "connection_id": credential_id,
+            "consumer": "codegen",
         }
         self.store["llm_connections"][(project_id, provider)] = {
             "project_id": project_id,

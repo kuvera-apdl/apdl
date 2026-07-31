@@ -39,6 +39,7 @@ PACKAGES=(
   "config|services/config|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "query|services/query|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "agents|services/agents|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
+  "llm-vault|services/llm-vault|.venv/bin/ruff check app/ tests/|.venv/bin/python -m pytest -q"
   "codegen|services/codegen|.venv/bin/ruff check app/ tests/|.venv/bin/python -m pytest -q"
   "writer|pipeline/redis|.venv/bin/ruff check clickhouse_writer.py tests/|.venv/bin/python -m pytest -q"
 )

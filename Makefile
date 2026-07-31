@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -79,6 +79,8 @@ deps:
 	cd services/query && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Agents service"
 	cd services/agents && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up LLM Vault service"
+	cd services/llm-vault && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Codegen service"
 	cd services/codegen && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Pipeline"
@@ -88,9 +90,9 @@ deps:
 
 build: build-sdk build-admin
 
-test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-codegen test-writer test-admin-api test-admin
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api test-admin
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-codegen lint-writer lint-admin-api lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api lint-admin
 
 clean: clean-sdk clean-admin
 
@@ -240,6 +242,22 @@ run-agents:
 	$(HOST_SERVICE_RUNNER) --service agents $(HOST_SERVICE_ENV_FILE) \
 		--working-directory services/agents -- \
 		.venv/bin/python -m uvicorn app.main:app --reload --port 8083
+
+# ─── Project LLM Credential Vault (Python) ──────────────────
+
+test-llm-vault:
+	cd services/llm-vault && .venv/bin/python -m pytest -v
+
+lint-llm-vault:
+	cd services/llm-vault && .venv/bin/ruff check app/ tests/
+
+run-llm-vault:
+	$(HOST_SERVICE_RUNNER) --service llm-vault $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/llm-vault -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8086
+
+rotate-llm-vault-key:
+	cd services/llm-vault && .venv/bin/python -m app.rotate_key_cli $(ARGS)
 
 # ─── Codegen Service (Python) ────────────────────────────────
 
@@ -404,7 +422,7 @@ dev:
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(DEPS_COMPOSE_FILE)
 	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(DEPS_COMPOSE_FILE)
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
-	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
+	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-llm-vault, make run-agents, make run-codegen, make run-pipeline"
 
 dev-core:
 	$(COMPOSE) --profile agents --profile codegen stop -t 30 \

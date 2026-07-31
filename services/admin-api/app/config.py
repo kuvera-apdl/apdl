@@ -17,7 +17,9 @@ PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 API_KEY_PATTERN = re.compile(
     r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
 )
-SERVICE_NAMES = frozenset({"ingestion", "config", "query", "agents", "codegen"})
+SERVICE_NAMES = frozenset(
+    {"ingestion", "config", "query", "agents", "codegen", "llm-vault"}
+)
 LOCAL_LOGIN_RISK_HMAC_KEY = "local-admin-login-risk-key-change-me"
 
 
@@ -136,6 +138,7 @@ class Settings:
     postgres_url: str
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
+    llm_vault_admin_token: str
     allowed_origins: frozenset[str]
     registration_enabled: bool
     max_accounts: int
@@ -170,6 +173,7 @@ class Settings:
             "query": os.getenv("QUERY_SERVICE_URL", "http://localhost:8082"),
             "agents": os.getenv("AGENTS_SERVICE_URL", "http://localhost:8083"),
             "codegen": os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084"),
+            "llm-vault": os.getenv("LLM_VAULT_URL", "http://localhost:8086"),
         }
         for name, url in service_urls.items():
             parsed = urlparse(url)
@@ -182,6 +186,10 @@ class Settings:
             ),
             service_urls=service_urls,
             service_api_keys=_service_keys(),
+            llm_vault_admin_token=_secret(
+                "LLM_VAULT_ADMIN_TOKEN",
+                "local-llm-vault-admin-token-change-me",
+            ),
             allowed_origins=_json_origins(
                 os.getenv(
                     "APDL_ADMIN_ALLOWED_ORIGINS",

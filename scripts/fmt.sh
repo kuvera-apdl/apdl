@@ -24,6 +24,8 @@ PY_PACKAGES=(
   "services/config|app/ tests/"
   "services/query|app/ tests/"
   "services/agents|app/ tests/"
+  "services/llm-vault|app/ tests/"
+  "services/codegen|app/ tests/ scripts/"
   "services/admin-api|app/ scripts/ tests/"
 )
 

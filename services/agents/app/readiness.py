@@ -15,11 +15,6 @@ from typing import Any, Literal
 import httpx
 
 from app.tools.code import get_changeset_creation_capability
-from app.store.llm_credentials import (
-    CredentialCipher,
-    CredentialConfigurationError,
-    ENCRYPTION_KEY_ENV,
-)
 
 _PROBE_TIMEOUT_SECONDS = 2.0
 
@@ -102,8 +97,9 @@ async def _probe_codegen_readiness(
         body.get("status") != "ready"
         or body.get("service") != "apdl-codegen"
         or not isinstance(capabilities, dict)
-        or set(capabilities) != {"changeset_creation"}
+        or set(capabilities) != {"changeset_creation", "credential_store"}
         or capabilities.get("changeset_creation") not in {"tenant_scoped", "disabled"}
+        or capabilities.get("credential_store") != "ready"
     ):
         return {
             "configured": True,
@@ -122,6 +118,7 @@ def _service_probes() -> dict[str, dict[str, Any]]:
         "query": os.getenv("QUERY_SERVICE_URL", "http://localhost:8082"),
         "config": os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081"),
         "codegen": os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084"),
+        "llm_vault": os.getenv("LLM_VAULT_URL", "http://localhost:8086"),
     }
     return {
         name: {
@@ -137,7 +134,7 @@ async def capability_report() -> dict[str, Any]:
     """Report optional workflow capabilities without affecting core readiness."""
     service_probes = _service_probes()
     generic_service_probes = {
-        name: service_probes[name] for name in ("query", "config")
+        name: service_probes[name] for name in ("query", "config", "llm_vault")
     }
     generic_probes = generic_service_probes
     codegen_probe = service_probes["codegen"]
@@ -163,18 +160,15 @@ async def capability_report() -> dict[str, Any]:
 
     *generic_results, codegen = results
     reachability = dict(zip(generic_probes, generic_results, strict=True))
-    encryption_configured = bool(os.getenv(ENCRYPTION_KEY_ENV, "").strip())
-    encryption_operational = False
-    if encryption_configured:
-        try:
-            CredentialCipher.from_environment()
-            encryption_operational = True
-        except CredentialConfigurationError:
-            pass
+    vault_configured = (
+        service_probes["llm_vault"]["configured"]
+        and len(os.getenv("LLM_VAULT_AGENTS_TOKEN", "").encode("utf-8")) >= 32
+    )
+    vault_operational = vault_configured and reachability["llm_vault"]
     llm = {
         "credential_store": {
-            "configured": encryption_configured,
-            "operational": encryption_operational,
+            "configured": vault_configured,
+            "operational": vault_operational,
         },
         "project_credentials": "tenant_scoped",
     }
@@ -188,7 +182,7 @@ async def capability_report() -> dict[str, Any]:
     services["codegen"] = codegen
     capabilities = {"llm": llm, **services}
     fully_available = (
-        encryption_operational
+        vault_operational
         and
         all(
             capability["configured"] and capability["reachable"]

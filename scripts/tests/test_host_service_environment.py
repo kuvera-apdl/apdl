@@ -22,16 +22,27 @@ SERVICES = (
     "config",
     "query",
     "agents",
+    "llm-vault",
     "codegen",
     "pipeline",
 )
-AGENTS_KEY = "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64"
-CODEGEN_KEY = "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64"
+VAULT_KEY = "LLM_VAULT_ENCRYPTION_KEY_BASE64"
+VAULT_ADMIN_TOKEN = "LLM_VAULT_ADMIN_TOKEN"
+VAULT_AGENTS_TOKEN = "LLM_VAULT_AGENTS_TOKEN"
+VAULT_CODEGEN_TOKEN = "LLM_VAULT_CODEGEN_TOKEN"
+VAULT_PROJECTION_TOKEN = "LLM_VAULT_PROJECTION_TOKEN"
+VAULT_DB_PASSWORD = "APDL_LLM_VAULT_POSTGRES_PASSWORD"
 GITHUB_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY_BASE64"
 GITHUB_WEBHOOK_SECRET = "GITHUB_WEBHOOK_SECRET"
 
 FILE_SECRETS = {
-    AGENTS_KEY: "file-agents-platform-secret-sentinel",
+    VAULT_KEY: "file-vault-platform-secret-sentinel",
+    VAULT_ADMIN_TOKEN: "file-vault-admin-token-sentinel",
+    VAULT_AGENTS_TOKEN: "file-vault-agents-token-sentinel",
+    VAULT_PROJECTION_TOKEN: "file-vault-projection-token-sentinel",
+    "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64": (
+        "file-retired-agents-platform-secret-sentinel"
+    ),
     "CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64": (
         "file-codegen-old-platform-secret-sentinel"
     ),
@@ -46,7 +57,11 @@ FILE_SECRETS = {
     GITHUB_PRIVATE_KEY: "file-github-private-secret-sentinel",
 }
 INHERITED_SECRETS = {
-    CODEGEN_KEY: "inherited-codegen-platform-secret-sentinel",
+    VAULT_CODEGEN_TOKEN: "inherited-vault-codegen-token-sentinel",
+    VAULT_DB_PASSWORD: "inherited-vault-db-password-sentinel",
+    "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64": (
+        "inherited-retired-codegen-platform-secret-sentinel"
+    ),
     "AGENTS_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64": (
         "inherited-agents-new-platform-secret-sentinel"
     ),
@@ -67,6 +82,8 @@ interesting = sorted(
     if (
         name.endswith("_API_KEY")
         or "LLM_CREDENTIAL" in name
+        or name.startswith("LLM_VAULT_")
+        or name == "APDL_LLM_VAULT_POSTGRES_PASSWORD"
         or name in {"GITHUB_APP_PRIVATE_KEY_BASE64", "GITHUB_WEBHOOK_SECRET"}
     )
 )
@@ -112,11 +129,21 @@ class HostServiceEnvironmentTests(unittest.TestCase):
             service: set()
             for service in SERVICES
         }
-        expected["agents"] = {AGENTS_KEY}
+        expected["admin-api"] = {VAULT_ADMIN_TOKEN}
+        expected["agents"] = {VAULT_AGENTS_TOKEN, VAULT_PROJECTION_TOKEN}
         expected["codegen"] = {
-            CODEGEN_KEY,
+            VAULT_CODEGEN_TOKEN,
+            VAULT_PROJECTION_TOKEN,
             GITHUB_PRIVATE_KEY,
             GITHUB_WEBHOOK_SECRET,
+        }
+        expected["llm-vault"] = {
+            VAULT_KEY,
+            VAULT_ADMIN_TOKEN,
+            VAULT_AGENTS_TOKEN,
+            VAULT_CODEGEN_TOKEN,
+            VAULT_PROJECTION_TOKEN,
+            VAULT_DB_PASSWORD,
         }
 
         with tempfile.TemporaryDirectory() as temporary:

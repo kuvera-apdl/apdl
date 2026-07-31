@@ -117,7 +117,8 @@ To work on one service with hot-reload, start the deps and run it directly:
 ```bash
 make dev            # infra deps only
 make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
-                    #          run-agents :8083, run-pipeline)
+                    #          run-llm-vault :8086, run-agents :8083,
+                    #          run-codegen :8084, run-pipeline)
 ```
 
 ## Using the SDKs
@@ -193,6 +194,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `agents` | 8083 | Operator preview | Opt-in LLM workflows; self-registered projects are read-only | [README](services/agents/README.md) |
 | `codegen` | 8084 (internal) | Offline preview | Source-only; publication is disabled | [README](services/codegen/README.md) |
 | `admin-api` | 8085 (internal) | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `llm-vault` | 8086 (internal) | Core | Shared project LLM credential custody and audited JIT access | [README](services/llm-vault/README.md) |
 | `admin` | 5173 | Core | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
 | `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
@@ -211,6 +213,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
 | Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, xAI via the OpenAI-compatible API, pgvector |
+| LLM Credential Vault | Python 3.12, FastAPI, asyncpg, AES-256-GCM |
 | Event Pipeline | Redis Streams writer |
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |
@@ -233,6 +236,7 @@ apdl/
 │   ├── config/              # Flags & experiments CRUD, Redis cache, SSE
 │   ├── query/               # Funnels, cohorts, retention, experiment stats
 │   ├── agents/              # Agent graphs, LLM router, memory, tools, safety
+│   ├── llm-vault/           # Shared encrypted project LLM credential custody
 │   └── codegen/             # Offline source preview; publication disabled
 │
 ├── pipeline/

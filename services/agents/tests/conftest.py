@@ -1,5 +1,3 @@
-import base64
-
 import pytest
 from fastapi import Request
 
@@ -9,10 +7,8 @@ from app.main import app
 
 @pytest.fixture(autouse=True)
 def authenticated_request_context(monkeypatch):
-    monkeypatch.setenv(
-        "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
-        base64.b64encode(b"test-only-agents-credential-key!").decode("ascii"),
-    )
+    monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault.test:8086")
+    monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "agents-test-token-" * 3)
     monkeypatch.setenv(
         "APDL_SERVICE_API_KEYS",
         '{"apdl":"proj_apdl_0123456789abcdef0123456789abcdef",'

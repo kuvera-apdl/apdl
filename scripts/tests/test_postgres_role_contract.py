@@ -26,6 +26,7 @@ SERVICE_DATABASE_SOURCES = [
     ROOT / "services/codegen/app/config.py",
     ROOT / "services/admin-api/app/config.py",
 ]
+VAULT_DATABASE_SOURCE = ROOT / "services/llm-vault/app/config.py"
 
 
 class PostgresRoleContractTests(unittest.TestCase):
@@ -39,6 +40,11 @@ class PostgresRoleContractTests(unittest.TestCase):
             self.assertIn(
                 "APDL_RUNTIME_POSTGRES_PASSWORD: "
                 "${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}",
+                compose,
+            )
+            self.assertIn(
+                "APDL_LLM_VAULT_POSTGRES_PASSWORD: "
+                "${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}",
                 compose,
             )
             self.assertIn("PGUSER: apdl", compose)
@@ -55,6 +61,12 @@ class PostgresRoleContractTests(unittest.TestCase):
             "POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl",
             FULL_COMPOSE,
         )
+        vault_url = (
+            "POSTGRES_URL: postgresql://apdl_llm_vault:"
+            "${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}"
+            "@postgres:5432/apdl"
+        )
+        self.assertEqual(FULL_COMPOSE.count(vault_url), 1)
 
     def test_service_fallbacks_cannot_select_the_migration_owner(self) -> None:
         runtime_url = (
@@ -69,17 +81,28 @@ class PostgresRoleContractTests(unittest.TestCase):
                 source,
                 path,
             )
+        vault_source = VAULT_DATABASE_SOURCE.read_text()
+        self.assertIn(
+            "postgresql://apdl_llm_vault:apdl_llm_vault_dev@localhost:5432/apdl",
+            vault_source,
+        )
+        self.assertNotIn(
+            "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
+            vault_source,
+        )
 
     def test_bootstrap_roles_are_fixed_and_unprivileged(self) -> None:
         for role in (
             "apdl_runtime",
+            "apdl_llm_vault",
             "apdl_audit_operator",
             "apdl_audit_purge_definer",
         ):
             self.assertIn(role, BOOTSTRAP)
         self.assertIn("ALTER ROLE apdl_runtime WITH\n    LOGIN", BOOTSTRAP)
+        self.assertIn("ALTER ROLE apdl_llm_vault WITH\n    LOGIN", BOOTSTRAP)
         self.assertGreaterEqual(BOOTSTRAP.count("NOLOGIN"), 2)
-        self.assertGreaterEqual(BOOTSTRAP.count("NOSUPERUSER"), 3)
+        self.assertGreaterEqual(BOOTSTRAP.count("NOSUPERUSER"), 4)
         self.assertIn("BEGIN;", BOOTSTRAP)
         self.assertIn("COMMIT;", BOOTSTRAP)
         self.assertIn("pg_catalog.pg_auth_members", BOOTSTRAP)

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,10 +21,6 @@ from app.models.execution import PublicationStage
 from app.github.app_auth import build_app_jwt
 from app.safety.killswitch import automation_enabled
 from app.store import connections as connections_store
-from app.store.llm_credentials import (
-    CredentialCipher,
-    CredentialConfigurationError,
-)
 
 CapabilityState = Literal["available", "disabled"]
 CheckState = Literal["ready", "blocked"]
@@ -132,25 +130,19 @@ class _RuntimeProbeState:
 
 
 def _provider_configured() -> bool:
-    try:
-        CredentialCipher.from_environment()
-    except CredentialConfigurationError:
-        return False
-    return True
-
-
-def _provider_encryption_key_id() -> str | None:
-    """Return the non-secret identity of the active credential key."""
-    try:
-        return CredentialCipher.from_environment().key_id
-    except CredentialConfigurationError:
-        return None
+    parsed = urlparse(os.getenv("LLM_VAULT_URL", ""))
+    token = os.getenv("LLM_VAULT_CODEGEN_TOKEN", "")
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.netloc)
+        and token == token.strip()
+        and len(token.encode("utf-8")) >= 32
+    )
 
 
 async def _project_llm_assignments(
     pool: Any,
     project_id: str,
-    encryption_key_id: str | None,
 ) -> list[ProjectLlmAssignmentCapability]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -173,17 +165,20 @@ async def _project_llm_assignments(
              AND model.inventory_version = connection.inventory_version
              AND model.catalog_version = connection.catalog_version
              AND assignment.role = ANY(model.supported_roles)
-            JOIN codegen_project_provider_credentials AS credential
+            JOIN llm_vault_provider_credentials AS credential
               ON credential.credential_id = connection.credential_id
              AND credential.project_id = connection.project_id
              AND credential.provider = connection.provider
              AND credential.state = 'active'
-             AND credential.encryption_key_id = $2
+            JOIN llm_vault_connection_consumers AS consumer
+              ON consumer.connection_id = credential.connection_id
+             AND consumer.project_id = credential.project_id
+             AND consumer.provider = credential.provider
+             AND consumer.consumer = 'codegen'
             WHERE assignment.project_id = $1
             ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
             """,
             project_id,
-            encryption_key_id,
         )
     return [
         ProjectLlmAssignmentCapability(
@@ -328,14 +323,10 @@ async def evaluate_changeset_creation(
     automation_ready = automation_enabled(project_id)
     connection = await connections_store.get_connection(pool, project_id)
     github_ready = _github_app_configured()
-    encryption_key_id = _provider_encryption_key_id()
-    credential_store_ready = (
-        _provider_configured() and encryption_key_id is not None
-    )
+    credential_store_ready = _provider_configured()
     assignments = await _project_llm_assignments(
         pool,
         project_id,
-        encryption_key_id,
     )
     assignments_ready = [item.role for item in assignments] == [
         "editor",

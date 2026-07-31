@@ -17,10 +17,7 @@ from app.runtime.models import RuntimeAcceptancePlan
 from app.routers import changesets as changesets_router
 from app.safety.policy import TenantCodegenConnectionPolicy
 from app.store.runtime_evidence import apply_runtime_evidence_observation
-from tests.fakes import (
-    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    FakePool,
-)
+from tests.fakes import FakePool
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +25,8 @@ def executable_changeset_runtime(monkeypatch):
     """Give lifecycle tests an executable runtime without external Docker/GitHub."""
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
     monkeypatch.setenv("CODEGEN_REVISION", "local-development")
-    monkeypatch.setenv(
-        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
-        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    )
+    monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault:8086")
+    monkeypatch.setenv("LLM_VAULT_CODEGEN_TOKEN", "t" * 32)
     app.state.codegen_rollout_stage = PublicationStage.development_pr
     app.state.job_deps = {
         "editor": object(),

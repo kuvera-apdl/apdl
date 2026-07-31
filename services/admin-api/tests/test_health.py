@@ -47,6 +47,7 @@ def expected_payload(
     default_capabilities = {
         "agents": "ready",
         "codegen": "ready",
+        "llm-vault": "ready",
     }
     return {
         "status": status,
@@ -65,6 +66,7 @@ def upstream_response(request: httpx.Request) -> httpx.Response:
         "http://query.test/ready": "ready",
         "http://agents.test/ready": "ready",
         "http://codegen.test/ready": "ready",
+        "http://llm-vault.test/ready": "ready",
     }
     return httpx.Response(200, json={"status": statuses[str(request.url)]})
 
@@ -107,7 +109,7 @@ async def test_readiness_reports_ready_core_and_capabilities_concurrently() -> N
     response = await readiness_response(concurrent_upstream)
 
     assert response == expected_payload()
-    assert sorted(read_timeouts) == [2.0] * 5
+    assert sorted(read_timeouts) == [2.0] * 6
     assert peak_probes > 1
 
 
@@ -125,6 +127,7 @@ async def test_optional_capability_failure_is_http_200_degraded() -> None:
         capabilities={
             "agents": "not_ready",
             "codegen": "not_ready",
+            "llm-vault": "ready",
         },
     )
 

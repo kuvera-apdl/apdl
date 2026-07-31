@@ -19,6 +19,7 @@ from typing import Callable, Iterable, Iterator
 
 
 MIGRATION_NAME = re.compile(r"^(?P<version>[0-9]{3})_[a-z0-9_]+\.sql$")
+ROLE_PASSWORD = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 LEDGER_TABLE = "apdl_schema_migrations"
 ADVISORY_LOCK_ID = 4_158_044_082
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
@@ -683,6 +684,41 @@ COMMIT;
     )
 
 
+def _ensure_llm_vault_role(fence: MaintenanceFence) -> None:
+    """Provision the vault login on both fresh and existing PostgreSQL volumes."""
+    password = os.environ.get("APDL_LLM_VAULT_POSTGRES_PASSWORD")
+    if password is None:
+        # Migration/unit-test environments may validate the schema without
+        # running the service. Migration 056 creates a fixed NOLOGIN role so
+        # grants remain deterministic in that mode.
+        return
+    if ROLE_PASSWORD.fullmatch(password) is None:
+        raise MigrationError(
+            "APDL_LLM_VAULT_POSTGRES_PASSWORD must be 16-128 "
+            "URI-unreserved characters"
+        )
+    _psql(
+        """
+BEGIN;
+SELECT format(
+    'CREATE ROLE apdl_llm_vault LOGIN PASSWORD %L',
+    :'llm_vault_password'
+)
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'apdl_llm_vault'
+)
+\gexec
+ALTER ROLE apdl_llm_vault WITH
+    LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+    NOREPLICATION NOBYPASSRLS PASSWORD :'llm_vault_password';
+REVOKE CREATE ON SCHEMA public FROM apdl_llm_vault;
+COMMIT;
+""",
+        fence,
+        variables={"llm_vault_password": password},
+    )
+
+
 def _read_ledger(fence: MaintenanceFence) -> tuple[AppliedMigration, ...]:
     output = _psql(
         f"""
@@ -819,6 +855,7 @@ def migrate(directory: Path) -> tuple[Migration, ...]:
     _wait_for_postgres()
     with _maintenance_fence() as fence:
         _ensure_ledger(fence)
+        _ensure_llm_vault_role(fence)
         applied = _read_ledger(fence)
         _assert_fresh_database_for_empty_ledger(applied, fence)
         pending = plan_migrations(migrations, applied)

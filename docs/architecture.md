@@ -29,6 +29,7 @@ feedback cycle remains a product direction rather than a current capability.
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | Operator preview, opt-in | [README](../services/agents/README.md) |
 | Codegen API/control plane | FastAPI, GitHub App | 8084 (internal) | Source-only offline preview; editor/worker unsupported | [README](../services/codegen/README.md) |
 | Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | Core, source-built | [README](../services/admin-api/README.md) |
+| LLM Credential Vault | FastAPI, asyncpg, AES-256-GCM | 8086 (internal) | Core, private | [README](../services/llm-vault/README.md) |
 | Admin Console | React, Vite, nginx | 5173 | Core, source-built | [README](../services/admin/README.md) |
 | Redis-to-ClickHouse writer | Python, clickhouse-driver | — | Core, source-built | [README](../pipeline/README.md) |
 

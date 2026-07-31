@@ -65,10 +65,7 @@ from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.store import pr_publication as publication_store
 from app.verification import build_verification_plan, evaluate_verification_coverage
-from tests.fakes import (
-    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    FakePool,
-)
+from tests.fakes import FakePool
 from tests.publisher_fakes import FakeBranchPublisher
 from tests.publication_fakes import (
     allowing_publication_gate,
@@ -88,10 +85,8 @@ def tenant_publication_environment(monkeypatch):
     """Capture tenant-draft execution snapshots unless a test opts out."""
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "tenant_draft_pr")
     monkeypatch.setenv("CODEGEN_REVISION", "test-revision")
-    monkeypatch.setenv(
-        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
-        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    )
+    monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault:8086")
+    monkeypatch.setenv("LLM_VAULT_CODEGEN_TOKEN", "t" * 32)
 
 
 async def run_changeset_job(*args, publication_gate=None, **kwargs):

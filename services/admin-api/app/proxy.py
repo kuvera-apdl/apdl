@@ -362,6 +362,22 @@ def required_role(service: str, method: str, path: str) -> str | None:
         return ""
     if service == "query":
         return "query:read" if path.startswith("/v1/query/") else ""
+    if service == "llm-vault":
+        connection = r"/v1/llm-connections/[0-9a-fA-F-]{36}"
+        if method == "GET" and (
+            path == "/v1/llm-connections"
+            or re.fullmatch(connection, path) is not None
+        ):
+            return _LLM_CONNECTION_READER
+        if method == "POST" and path == "/v1/llm-connections":
+            return _LLM_CONNECTION_MANAGER
+        if method == "PUT" and re.fullmatch(connection, path) is not None:
+            return _LLM_CONNECTION_MANAGER
+        if method == "POST" and re.fullmatch(
+            connection + r"/(?:refresh|revoke)", path
+        ) is not None:
+            return _LLM_CONNECTION_MANAGER
+        return ""
     if service == "agents":
         if not path.startswith("/v1/agents"):
             return ""
@@ -521,7 +537,7 @@ async def _request_body(
     if raw_body and require_json and media_type != _JSON_MEDIA_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Codegen request bodies must use application/json",
+            detail="Upstream request bodies must use application/json",
         )
     if raw_body and media_type == _JSON_MEDIA_TYPE:
         try:
@@ -645,7 +661,7 @@ async def proxy_service(
         request,
         settings,
         project_id,
-        require_json=service == "codegen",
+        require_json=service in {"codegen", "llm-vault"},
     )
 
     ephemeral_credential_id: str | None = None
@@ -662,18 +678,21 @@ async def proxy_service(
         # surface. The receiving service rechecks live authority inside
         # mutation transactions.
         credential_roles = frozenset({"agents:read"})
-    api_key, ephemeral_credential_id = await _service_credential(
-        request,
-        project_id,
-        credential_roles,
-        settings,
-        actor_user_id=(
-            session.user_id
-            if require_human_actor or elevated_llm_connection_read
-            else None
-        ),
-        force_ephemeral=require_human_actor or elevated_llm_connection_read,
-    )
+    if service == "llm-vault":
+        api_key = settings.llm_vault_admin_token
+    else:
+        api_key, ephemeral_credential_id = await _service_credential(
+            request,
+            project_id,
+            credential_roles,
+            settings,
+            actor_user_id=(
+                session.user_id
+                if require_human_actor or elevated_llm_connection_read
+                else None
+            ),
+            force_ephemeral=require_human_actor or elevated_llm_connection_read,
+        )
     try:
         if service == "codegen":
             await _require_codegen_scope(
@@ -692,7 +711,12 @@ async def proxy_service(
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
-    headers["X-API-Key"] = api_key
+    if service == "llm-vault":
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-APDL-Project-ID"] = project_id
+        headers["X-APDL-Actor-User-ID"] = session.user_id
+    else:
+        headers["X-API-Key"] = api_key
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
     upstream_request = request.app.state.http_client.build_request(

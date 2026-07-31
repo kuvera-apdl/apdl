@@ -61,10 +61,7 @@ from app.store.observations import (
     list_ci_remediation_attempts,
 )
 from app.store.runtime_evidence import apply_runtime_evidence_observation
-from tests.fakes import (
-    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    FakePool,
-)
+from tests.fakes import FakePool
 from tests.publisher_fakes import FakeBranchPublisher
 from tests.publication_fakes import (
     allowing_publication_gate,
@@ -77,10 +74,8 @@ def tenant_publication_environment(monkeypatch):
     """Capture tenant-draft execution snapshots for repair fixtures."""
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "tenant_draft_pr")
     monkeypatch.setenv("CODEGEN_REVISION", "test-revision")
-    monkeypatch.setenv(
-        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
-        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
-    )
+    monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault:8086")
+    monkeypatch.setenv("LLM_VAULT_CODEGEN_TOKEN", "t" * 32)
 
 
 async def repair_failed_ci(*args, publication_gate=None, **kwargs):

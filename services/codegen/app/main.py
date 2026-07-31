@@ -77,6 +77,7 @@ from app.routers import (
     capabilities,
     changesets,
     connections,
+    llm_vault,
     llm_connections,
     webhooks,
 )
@@ -85,7 +86,7 @@ from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 from app.store import pr_publication as publication_store
 from app.store.llm_connections import ProjectConnectionStore
-from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
+from app.store.llm_credentials import ProjectCredentialStore
 from app.strict_json import StrictConnectionJsonMiddleware
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
@@ -340,6 +341,7 @@ async def lifespan(application: FastAPI):
         max_inactive_connection_lifetime=0,
     )
     token_broker = None
+    credential_store = None
     maintenance_connection = None
     maintenance_task = None
     maintenance_listener = None
@@ -350,13 +352,9 @@ async def lifespan(application: FastAPI):
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
-        credential_store = ProjectCredentialStore(
-            pool, CredentialCipher.from_environment()
-        )
+        credential_store = ProjectCredentialStore.from_environment()
         application.state.llm_credential_store = credential_store
-        application.state.llm_connection_store = ProjectConnectionStore(
-            pool, credential_store
-        )
+        application.state.llm_connection_store = ProjectConnectionStore(pool)
         editor = ProjectRoutedEditor(
             editor,
             pool=pool,
@@ -544,6 +542,8 @@ async def lifespan(application: FastAPI):
             await asyncio.gather(*requeued_jobs, return_exceptions=True)
         if token_broker is not None:
             await token_broker.close()
+        if credential_store is not None:
+            await credential_store.aclose()
         if maintenance_task is not None:
             await _close_maintenance_monitor(
                 maintenance_connection,
@@ -602,6 +602,7 @@ async def sanitized_request_validation_error(
     )
 
 auth_dependencies = [Depends(authenticate_request)]
+app.include_router(llm_vault.router)
 app.include_router(connections.router, dependencies=auth_dependencies)
 app.include_router(llm_connections.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)

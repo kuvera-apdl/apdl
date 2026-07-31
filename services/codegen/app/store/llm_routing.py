@@ -32,10 +32,9 @@ from app.publication import (
     TenantPublicationAuthorization,
 )
 from app.store.llm_credentials import (
-    CredentialCipher,
-    CredentialConfigurationError,
     CredentialDecryptionError,
     CredentialNotFoundError,
+    CredentialStoreError,
     ProjectCredentialStore,
     validate_scope,
 )
@@ -263,7 +262,7 @@ async def _provider_authority(
     credential = await conn.fetchrow(
         """
         SELECT credential_id, credential_version, state
-        FROM codegen_project_provider_credentials
+        FROM llm_vault_provider_credentials
         WHERE credential_id = $1
           AND project_id = $2
           AND provider = $3
@@ -302,7 +301,7 @@ async def _credential_failure_classification(
             state = await conn.fetchval(
                 """
                 SELECT state
-                FROM codegen_project_provider_credentials
+                FROM llm_vault_provider_credentials
                 WHERE credential_id = $1
                   AND project_id = $2
                   AND provider = $3
@@ -350,12 +349,6 @@ async def capture_execution_snapshot(
     """Read both current assignments in the caller's admission transaction."""
     if repository_target.project_id != project_id:
         raise ValueError("LLM snapshot project does not match repository grant")
-    try:
-        encryption_key_id = CredentialCipher.from_environment().key_id
-    except CredentialConfigurationError as exc:
-        raise LlmRoutingUnavailableError(
-            "Codegen credential encryption authority is unavailable"
-        ) from exc
     rows = await conn.fetch(
         """
         SELECT assignment.role, assignment.provider, assignment.model_id,
@@ -381,18 +374,21 @@ async def capture_execution_snapshot(
          AND model.inventory_version = assignment.inventory_version
          AND model.catalog_version = assignment.catalog_version
          AND assignment.role = ANY(model.supported_roles)
-        JOIN codegen_project_provider_credentials AS credential
+        JOIN llm_vault_provider_credentials AS credential
           ON credential.credential_id = connection.credential_id
          AND credential.project_id = connection.project_id
          AND credential.provider = connection.provider
          AND credential.state = 'active'
-         AND credential.encryption_key_id = $2
+        JOIN llm_vault_connection_consumers AS consumer
+          ON consumer.connection_id = credential.connection_id
+         AND consumer.project_id = credential.project_id
+         AND consumer.provider = credential.provider
+         AND consumer.consumer = 'codegen'
         WHERE assignment.project_id = $1
         ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
-        FOR SHARE OF assignment, connection, model, credential
+        FOR SHARE OF assignment, connection, model, credential, consumer
         """,
         project_id,
-        encryption_key_id,
     )
     assignments = tuple(_assignment(row) for row in rows)
     if len(assignments) != 2 or tuple(item.role for item in assignments) != (
@@ -628,6 +624,9 @@ async def _materialize_prepared_attempt(
             snapshot.project_id,
             provider,
             credential_id=credential_id,
+            credential_version=credential_version,
+            execution_id=str(attempt_id),
+            purpose=f"codegen.{phase}",
         )
     except CredentialNotFoundError as exc:
         classification = await _credential_failure_classification(
@@ -644,7 +643,7 @@ async def _materialize_prepared_attempt(
         raise LlmAttemptConflictError(
             "Provider credential changed before execution"
         ) from exc
-    except CredentialDecryptionError as exc:
+    except (CredentialDecryptionError, CredentialStoreError) as exc:
         await block_llm_attempt(
             pool,
             attempt_id=attempt_id,
@@ -976,7 +975,7 @@ async def mark_llm_egress(
                     exact_credential_state = await conn.fetchval(
                         """
                         SELECT state
-                        FROM codegen_project_provider_credentials
+                        FROM llm_vault_provider_credentials
                         WHERE credential_id = $1
                           AND project_id = $2
                           AND provider = $3

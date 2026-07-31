@@ -193,7 +193,9 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
-CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64= # canonical Base64 of exactly 32 random bytes
+LLM_VAULT_URL=http://localhost:8086
+LLM_VAULT_CODEGEN_TOKEN=           # Codegen-only JIT credential access token
+LLM_VAULT_PROJECTION_TOKEN=        # vault-to-Codegen model projection token
 CODEGEN_LLM_BROKER_DIR=/tmp/apdl-codegen-llm-broker # absolute host-visible broker root
 CODEGEN_REVISION=                  # immutable controller/worker revision
 CODEGEN_ROLLOUT_STAGE=offline      # offline | development_pr | tenant_draft_pr
@@ -243,29 +245,28 @@ requires an explicit credential, routing, isolation, and egress contract.
 
 ### Project LLM connections and assignments
 
-Project LLM credentials are created and replaced through the
-owner-controlled Admin proxy to `PUT /v1/llm-connections/{provider}`. The
-canonical create body uses `version: 0`; a replacement uses the current
-connection version:
+Project LLM credentials are created and replaced through the owner-controlled
+Admin proxy to the shared LLM Vault. One connection can be granted to Agents,
+Codegen, or both. The canonical create body uses an explicit label, provider,
+and consumer set:
 
 ```json
 {
   "project_id": "demo",
+  "label": "Primary OpenAI",
+  "provider": "openai",
   "api_key": "provider-secret-from-your-secret-manager",
-  "version": 0
+  "consumers": ["agents", "codegen"]
 }
 ```
 
-Codegen validates the key against the provider's fixed model-list endpoint,
-keeps only compatible supported models, encrypts the credential at rest, and
-returns no credential identifiers or secret material. Use the list and
-`/{provider}/models` endpoints above to read the resulting non-secret
-inventory. Refresh and revoke mutations also require the current project owner,
-or an active delegated member holding both `agents:manage` and
-`credentials:manage`, plus the exact current connection version.
-The revoke request's required human reason is validated as request intent but is
-never logged or persisted; lifecycle storage records only the canonical
-non-secret `provider_connection_revoked` category.
+The vault validates the key against the provider's fixed model-list endpoint,
+asks Codegen to project compatible reviewed models, encrypts the key at rest,
+and atomically writes the vault record plus Codegen's non-secret projection.
+Codegen's `/v1/llm-connections` routes are read-only. Replace, refresh, and
+revoke operations remain in Project settings and require project ownership or
+both `agents:manage` and `credentials:manage`, plus the exact connection
+version.
 
 After creating the required connections, a trusted control-plane operator
 atomically assigns exactly one editor model and one helper model:
@@ -285,30 +286,14 @@ The two roles may use different providers, but each selected model must be in
 that project's active inventory and support the assigned role. New changesets
 snapshot both assignments. Each brief, edit, review, or repair phase then
 revalidates current project, repository, deployment, model, connection, and
-credential authority before decrypting only that phase's credential through
-the local broker. Replacing or revoking a credential therefore affects the next
+credential authority before requesting only that phase's exact credential from
+the vault through the local broker. Replacing or revoking a credential therefore affects the next
 phase that has not started provider egress; no global `CODEGEN_MODEL`,
 `CODEGEN_HELPER_MODEL`, or ambient provider-key setting can route tenant work.
 
-Platform-key rotation is an offline maintenance operation. Drain and stop every
-APDL runtime that holds the shared PostgreSQL maintenance locks—not only Codegen
-replicas—then supply the old and new independent 32-byte standard-Base64 keys
-only to the rotation process and run the exclusive-barrier command:
-
-```bash
-cd services/codegen
-export CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64='...'
-export CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64='...'
-.venv/bin/python -m scripts.rotate_llm_credential_key \
-  --actor operator@example.com
-unset CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64
-unset CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64
-```
-
-The command re-reads and verifies every active row before one atomic commit.
-Its output contains only the rotated count and non-secret audit IDs. Restart
-all drained APDL runtimes only after the command succeeds; every Codegen
-instance must use the new `CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64`.
+Only the LLM Vault deployment receives the platform encryption key. Codegen
+receives a scoped workload token and never receives ciphertext-table access or
+key material.
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /

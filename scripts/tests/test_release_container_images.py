@@ -136,7 +136,7 @@ class PublishedContainerImageTests(unittest.TestCase):
         tested = release_container_images.merge_smoke_evidence(evidence_paths)
 
         self.assertEqual(tested["schema_version"], 2)
-        self.assertEqual(len(tested["images"]), 11)
+        self.assertEqual(len(tested["images"]), 12)
         for image in tested["images"]:
             self.assertEqual(
                 image["tested_platforms"],

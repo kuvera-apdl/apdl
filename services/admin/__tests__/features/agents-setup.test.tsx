@@ -1,11 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -21,11 +15,7 @@ import {
 } from 'vitest'
 
 import { AuthProvider } from '../../src/core/auth'
-import { AUTH_UNAUTHORIZED_EVENT } from '../../src/core/auth-events'
-import {
-  useWorkspace,
-  WorkspaceProvider,
-} from '../../src/core/workspace'
+import { useWorkspace, WorkspaceProvider } from '../../src/core/workspace'
 import { AgenticRunsCard } from '../../src/features/agents/setup/AgenticRunsCard'
 import { LlmConnectionsManager } from '../../src/features/agents/setup/LlmConnectionsManager'
 import {
@@ -263,18 +253,6 @@ function renderConnections(queryClient: QueryClient) {
   )
 }
 
-function ProjectSwitcher() {
-  const { setActive } = useWorkspace()
-  return (
-    <>
-      <button type="button" onClick={() => setActive('other')}>
-        Switch project
-      </button>
-      <LlmConnectionsManager canManage />
-    </>
-  )
-}
-
 function RoleProbe() {
   const { active } = useWorkspace()
   return <p data-testid="active-roles">{active?.roles.join(',')}</p>
@@ -314,14 +292,21 @@ async function reachSetupReview(dialog: HTMLElement) {
   )
 }
 
-describe('LLM connection secret handling', () => {
-  test('uses an imperative request and clears the provider key after failure', async () => {
-    let submittedConnection: unknown = null
-    let adminUnauthorized = false
-    const markUnauthorized = () => {
-      adminUnauthorized = true
-    }
-    window.addEventListener(AUTH_UNAUTHORIZED_EVENT, markUnauthorized)
+describe('Agents LLM connection projections', () => {
+  test('shows vault-managed connection metadata without mutation controls', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    renderConnections(queryClient)
+
+    expect(await screen.findByText('Agents provider projections')).toBeInTheDocument()
+    expect(await screen.findByText('OpenAI')).toBeInTheDocument()
+    expect(screen.getByText(/Version 1 · 2 models/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /provider/i })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument()
+  })
+
+  test('directs credential managers to Project settings when no grant exists', async () => {
     server.use(
       http.get(
         '*/api/projects/demo/agents/v1/agents/llm-connections',
@@ -331,21 +316,6 @@ describe('LLM connection secret handling', () => {
             project_id: 'demo',
             connections: [],
           }),
-      ),
-      http.put(
-        '*/api/projects/demo/agents/v1/agents/llm-connections/openai',
-        async ({ request }) => {
-          submittedConnection = await request.json()
-          return HttpResponse.json(
-            {
-              detail: {
-                code: 'invalid_key',
-                message: 'Provider rejected the key',
-              },
-            },
-            { status: 401 },
-          )
-        },
       ),
     )
     const queryClient = new QueryClient({
@@ -353,164 +323,12 @@ describe('LLM connection secret handling', () => {
     })
     renderConnections(queryClient)
 
-    await userEvent.click(
-      await screen.findByRole('button', { name: 'Add provider' }),
-    )
-    const input = screen.getByLabelText('OpenAI API key')
-    await userEvent.type(input, 'provider-secret-value')
-    await userEvent.click(
-      screen.getByRole('button', { name: 'Validate and connect' }),
-    )
-
+    expect(await screen.findByText('No credential is granted to Agents')).toBeInTheDocument()
     expect(
-      await screen.findByText('The provider rejected this API key.'),
+      screen.getByText(
+        'Add or update a connection in Project settings, then return here to assign models.',
+      ),
     ).toBeInTheDocument()
-    expect(input).toHaveValue('')
-    expect(submittedConnection).toEqual({
-      project_id: 'demo',
-      api_key: 'provider-secret-value',
-      version: 0,
-    })
-    expect(queryClient.getMutationCache().getAll()).toHaveLength(0)
-    expect(adminUnauthorized).toBe(false)
-    window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, markUnauthorized)
-  })
-
-  test('clears a provider key on provider change, cancel, and unmount', async () => {
-    server.use(
-      http.get(
-        '*/api/projects/demo/agents/v1/agents/llm-connections',
-        () =>
-          HttpResponse.json({
-            schema_version: 'llm_provider_connection_list@1',
-            project_id: 'demo',
-            connections: [],
-          }),
-      ),
-    )
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
-    const rendered = renderConnections(queryClient)
-    await userEvent.click(
-      await screen.findByRole('button', { name: 'Add provider' }),
-    )
-    const firstInput = screen.getByLabelText('OpenAI API key')
-    await userEvent.type(firstInput, 'first-secret')
-    await userEvent.selectOptions(
-      screen.getByLabelText('Provider'),
-      'anthropic',
-    )
-    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
-
-    const secondInput = screen.getByLabelText('Anthropic API key')
-    await userEvent.type(secondInput, 'second-secret')
-    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(secondInput).toHaveValue('')
-
-    await userEvent.click(
-      screen.getByRole('button', { name: 'Add provider' }),
-    )
-    const unmountedInput = screen.getByLabelText('Anthropic API key')
-    await userEvent.type(unmountedInput, 'unmount-secret')
-    rendered.unmount()
-    expect(unmountedInput).toHaveValue('')
-  })
-
-  test('clears the key at PUT settlement and aborts a pending PUT on unmount', async () => {
-    let settleRequest: (() => void) | null = null
-    let requestAborted = false
-    server.use(
-      http.get(
-        '*/api/projects/demo/agents/v1/agents/llm-connections',
-        () =>
-          HttpResponse.json({
-            schema_version: 'llm_provider_connection_list@1',
-            project_id: 'demo',
-            connections: [],
-          }),
-      ),
-      http.put(
-        '*/api/projects/demo/agents/v1/agents/llm-connections/openai',
-        async ({ request }) => {
-          request.signal.addEventListener('abort', () => {
-            requestAborted = true
-          })
-          await new Promise<void>((resolve) => {
-            settleRequest = resolve
-          })
-          return HttpResponse.json({
-            ...CONNECTIONS.connections[0],
-            models: MODELS,
-          })
-        },
-      ),
-    )
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
-    const rendered = renderConnections(queryClient)
-    await userEvent.click(
-      await screen.findByRole('button', { name: 'Add provider' }),
-    )
-    const input = screen.getByLabelText('OpenAI API key')
-    await userEvent.type(input, 'pending-secret')
-    await userEvent.click(
-      screen.getByRole('button', { name: 'Validate and connect' }),
-    )
-    await waitFor(() => expect(settleRequest).not.toBeNull())
-    rendered.unmount()
-    expect(input).toHaveValue('')
-    await waitFor(() => expect(requestAborted).toBe(true))
-    ;(settleRequest as (() => void) | null)?.()
-  })
-
-  test('clears and closes the key form when the active project changes', async () => {
-    server.use(
-      http.get(
-        '*/api/projects/:projectId/agents/v1/agents/llm-connections',
-        ({ params }) =>
-          HttpResponse.json({
-            schema_version: 'llm_provider_connection_list@1',
-            project_id: String(params.projectId),
-            connections: [],
-          }),
-      ),
-    )
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
-    render(
-      <WorkspaceProvider
-        initialWorkspaces={[
-          seedWorkspace(),
-          {
-            ...seedWorkspace(),
-            id: 'other',
-            name: 'other',
-            projectId: 'other',
-          },
-        ]}
-      >
-        <QueryClientProvider client={queryClient}>
-          <MemoryRouter>
-            <ProjectSwitcher />
-          </MemoryRouter>
-        </QueryClientProvider>
-      </WorkspaceProvider>,
-    )
-    const switchButton = screen.getByRole('button', {
-      name: 'Switch project',
-    })
-    await userEvent.click(
-      await screen.findByRole('button', { name: 'Add provider' }),
-    )
-    const input = screen.getByLabelText('OpenAI API key')
-    await userEvent.type(input, 'project-secret')
-    fireEvent.click(switchButton)
-
-    await waitFor(() => expect(input).toHaveValue(''))
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
 

@@ -17,8 +17,7 @@ from app import capabilities
 from app.auth import Principal, authenticate_request
 from app.main import app
 from app.models.execution import PublicationStage
-from app.store.llm_credentials import ENCRYPTION_KEY_ENV
-from tests.fakes import FakePool, TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID
+from tests.fakes import FakePool
 
 
 def _rsa_private_pem() -> str:
@@ -74,11 +73,6 @@ def executable_runtime(monkeypatch):
     app.state.job_deps = _runtime_dependencies()
     monkeypatch.setattr(capabilities, "_github_app_configured", lambda: True)
     monkeypatch.setattr(capabilities, "_provider_configured", lambda: True)
-    monkeypatch.setattr(
-        capabilities,
-        "_provider_encryption_key_id",
-        lambda: TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID,
-    )
     monkeypatch.setattr(capabilities, "_assert_runtime_ready", lambda *_: None)
     monkeypatch.delenv("CODEGEN_KILL_SWITCH", raising=False)
     monkeypatch.delenv("CODEGEN_DISABLED_PROJECTS", raising=False)
@@ -466,38 +460,43 @@ async def test_capability_rejects_project_without_operator_execution_authority(
     }
 
 
-def test_provider_check_requires_codegen_credential_encryption_key(
+def test_provider_check_requires_vault_url_and_codegen_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(ENCRYPTION_KEY_ENV, raising=False)
+    monkeypatch.delenv("LLM_VAULT_URL", raising=False)
+    monkeypatch.delenv("LLM_VAULT_CODEGEN_TOKEN", raising=False)
     assert capabilities._provider_configured() is False
 
-    encoded_key = base64.b64encode(b"k" * 32).decode("ascii")
-    monkeypatch.setenv(ENCRYPTION_KEY_ENV, encoded_key)
+    monkeypatch.setenv("LLM_VAULT_URL", "http://llm-vault:8086")
+    monkeypatch.setenv("LLM_VAULT_CODEGEN_TOKEN", "t" * 32)
     assert capabilities._provider_configured() is True
 
 
 @pytest.mark.parametrize(
-    "encoded_key",
+    ("url", "token"),
     [
-        "",
-        "not-base64",
-        base64.b64encode(b"short").decode("ascii"),
-        base64.urlsafe_b64encode(b"\xfb" * 32).decode("ascii"),
+        ("", "t" * 32),
+        ("relative", "t" * 32),
+        ("ftp://vault.test", "t" * 32),
+        ("http://vault.test", "short"),
+        ("http://vault.test", " " + "t" * 32),
     ],
 )
-def test_provider_check_rejects_invalid_encryption_keys(
-    encoded_key: str,
+def test_provider_check_rejects_invalid_vault_configuration(
+    url: str,
+    token: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(ENCRYPTION_KEY_ENV, encoded_key)
+    monkeypatch.setenv("LLM_VAULT_URL", url)
+    monkeypatch.setenv("LLM_VAULT_CODEGEN_TOKEN", token)
     assert capabilities._provider_configured() is False
 
 
 def test_deployment_provider_keys_are_not_tenant_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(ENCRYPTION_KEY_ENV, raising=False)
+    monkeypatch.delenv("LLM_VAULT_URL", raising=False)
+    monkeypatch.delenv("LLM_VAULT_CODEGEN_TOKEN", raising=False)
     monkeypatch.setenv("CODEGEN_MODEL", "anthropic/claude-opus-5")
     monkeypatch.setenv("CODEGEN_HELPER_MODEL", "openai/gpt-5.4-mini")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")

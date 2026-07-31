@@ -37,11 +37,15 @@ export APDL_SMOKE_BROWSER_KEY="client_demo_0123456789abcdef0123456789abcdef"
 export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
 export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
+export APDL_LLM_VAULT_POSTGRES_PASSWORD="apdl_llm_vault_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
 # Public, disposable test-only platform keys for the isolated smoke database.
 # Compose exposes each value only to its owning controller.
-export AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
-export CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+export LLM_VAULT_ENCRYPTION_KEY_BASE64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+export LLM_VAULT_ADMIN_TOKEN="smoke-llm-vault-admin-token-change-me"
+export LLM_VAULT_AGENTS_TOKEN="smoke-llm-vault-agents-token-change-me"
+export LLM_VAULT_CODEGEN_TOKEN="smoke-llm-vault-codegen-token-change-me"
+export LLM_VAULT_PROJECTION_TOKEN="smoke-llm-vault-projection-token-change-me"
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
 
@@ -382,7 +386,7 @@ case "${APDL_SMOKE_NO_BUILD:-false}" in
         echo "==> Pulling immutable release images without registry credentials"
         published_compose_services=(
             postgres-migrate ingestion config query clickhouse-writer
-            admin-api admin
+            llm-vault admin-api admin
         )
         if [ "$smoke_all_images" = true ]; then
             published_compose_services+=(agents codegen)

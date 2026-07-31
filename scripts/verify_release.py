@@ -90,6 +90,13 @@ EXPECTED_DOCKER_IMAGES = [
         "build_args": [],
     },
     {
+        "name": "llm-vault",
+        "repository": "ghcr.io/kuvera-apdl/apdl-llm-vault",
+        "context": "services/llm-vault",
+        "dockerfile": "services/llm-vault/Dockerfile",
+        "build_args": [],
+    },
+    {
         "name": "postgres-migrate",
         "repository": "ghcr.io/kuvera-apdl/apdl-postgres-migrate",
         "context": "pipeline/postgres",

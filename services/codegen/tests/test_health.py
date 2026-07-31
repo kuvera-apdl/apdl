@@ -5,15 +5,24 @@ PostgreSQL) does not run. /health does not touch any shared resources.
 """
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, MockTransport, Request, Response
 
 from app.main import app
 from app.models.execution import PublicationStage
-from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
+from app.store.llm_credentials import ProjectCredentialStore
 
 
 def _credential_store(pool: object) -> ProjectCredentialStore:
-    return ProjectCredentialStore(pool, CredentialCipher(b"k" * 32))
+    del pool
+
+    async def unavailable(_request: Request) -> Response:
+        return Response(503)
+
+    return ProjectCredentialStore(
+        AsyncClient(transport=MockTransport(unavailable)),
+        base_url="http://vault.test",
+        token="v" * 32,
+    )
 
 
 @pytest.mark.asyncio

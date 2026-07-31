@@ -303,8 +303,13 @@ class AgentsSetupStore:
                         SELECT connection.*,
                                EXISTS (
                                    SELECT 1
-                                   FROM llm_project_provider_credentials
+                                   FROM llm_vault_provider_credentials
                                        AS credential
+                                   JOIN llm_vault_connection_consumers
+                                       AS consumer
+                                     ON consumer.connection_id =
+                                        credential.connection_id
+                                    AND consumer.consumer = 'agents'
                                    WHERE credential.credential_id =
                                          connection.credential_id
                                      AND credential.project_id =
@@ -564,17 +569,22 @@ class AgentsSetupStore:
              AND model.provider = connection.provider
              AND model.connection_version = connection.version
              AND model.inventory_version = connection.inventory_version
-            JOIN llm_project_provider_credentials AS credential
+            JOIN llm_vault_provider_credentials AS credential
               ON credential.credential_id = connection.credential_id
              AND credential.project_id = connection.project_id
              AND credential.provider = connection.provider
+            JOIN llm_vault_connection_consumers AS consumer
+              ON consumer.connection_id = credential.connection_id
+             AND consumer.project_id = credential.project_id
+             AND consumer.provider = credential.provider
+             AND consumer.consumer = 'agents'
             WHERE connection.project_id = $1
               AND connection.provider = $2
               AND connection.version = $3
               AND connection.inventory_version = $4
               AND connection.state = 'active'
               AND model.model_id = $5
-            FOR SHARE OF connection, model, credential
+            FOR SHARE OF connection, model, credential, consumer
             """,
             project_id,
             selection.provider,

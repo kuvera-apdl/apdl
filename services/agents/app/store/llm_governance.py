@@ -445,11 +445,16 @@ async def load_project_model_assignment(
                  AND model.catalog_version =
                      assignment.model_catalog_version
                  AND assignment.tier = ANY(model.supported_tiers)
-                JOIN llm_project_provider_credentials AS credential
+                JOIN llm_vault_provider_credentials AS credential
                   ON credential.credential_id = connection.credential_id
                  AND credential.project_id = connection.project_id
                  AND credential.provider = connection.provider
                  AND credential.state = 'active'
+                JOIN llm_vault_connection_consumers AS consumer
+                  ON consumer.connection_id = credential.connection_id
+                 AND consumer.project_id = credential.project_id
+                 AND consumer.provider = credential.provider
+                 AND consumer.consumer = 'agents'
                 WHERE assignment.project_id = $1 AND assignment.tier = $2
                 """,
                 context.project_id,
@@ -570,11 +575,16 @@ async def prepare_provider_attempt(
                      AND inventory.catalog_version =
                          assignment.model_catalog_version
                      AND assignment.tier = ANY(inventory.supported_tiers)
-                    JOIN llm_project_provider_credentials AS credential
+                    JOIN llm_vault_provider_credentials AS credential
                       ON credential.credential_id = connection.credential_id
                      AND credential.project_id = connection.project_id
                      AND credential.provider = connection.provider
                      AND credential.state = 'active'
+                    JOIN llm_vault_connection_consumers AS consumer
+                      ON consumer.connection_id = credential.connection_id
+                     AND consumer.project_id = credential.project_id
+                     AND consumer.provider = credential.provider
+                     AND consumer.consumer = 'agents'
                     WHERE policy.project_id = $1
                       AND policy.state = 'active'
                       AND policy.version = $6
@@ -820,7 +830,7 @@ async def mark_provider_egress(
                      AND inventory.catalog_version =
                          assignment.model_catalog_version
                      AND assignment.tier = ANY(inventory.supported_tiers)
-                    JOIN llm_project_provider_credentials AS credential
+                    JOIN llm_vault_provider_credentials AS credential
                       ON credential.credential_id = connection.credential_id
                      AND credential.credential_id = attempt.credential_id
                      AND credential.project_id = attempt.project_id
@@ -828,6 +838,11 @@ async def mark_provider_egress(
                      AND credential.credential_version =
                          attempt.credential_version
                      AND credential.state = 'active'
+                    JOIN llm_vault_connection_consumers AS consumer
+                      ON consumer.connection_id = credential.connection_id
+                     AND consumer.project_id = credential.project_id
+                     AND consumer.provider = credential.provider
+                     AND consumer.consumer = 'agents'
                     WHERE attempt.attempt_id = $1
                       AND attempt.project_id = $2
                       AND attempt.run_id = $3
@@ -835,7 +850,7 @@ async def mark_provider_egress(
                       AND attempt.status = 'prepared'
                     FOR UPDATE OF attempt
                     FOR SHARE OF policy, assignment, provider_policy,
-                                 connection, inventory, credential
+                                 connection, inventory, credential, consumer
                     """,
                     attempt_id,
                     context.project_id,

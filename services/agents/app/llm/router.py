@@ -53,7 +53,6 @@ from app.llm.contracts import (
     prompt_sha256,
 )
 from app.store.llm_credentials import (
-    CredentialCipher,
     CredentialConfigurationError,
     CredentialStoreError,
     ProjectCredentialStore,
@@ -148,17 +147,20 @@ async def _load_attempt_api_key(
     if prepared.credential_id is None or prepared.credential_version is None:
         raise LlmCredentialUnavailableError(
             "Project provider credential binding is unavailable"
-        )
+    )
     try:
-        store = ProjectCredentialStore(
-            context.pool,
-            CredentialCipher.from_environment(),
-        )
-        credential = await store.load_active(
-            context.project_id,
-            provider,
-            credential_id=prepared.credential_id,
-        )
+        store = ProjectCredentialStore.from_environment()
+        try:
+            credential = await store.load_active(
+                context.project_id,
+                provider,
+                credential_id=prepared.credential_id,
+                credential_version=prepared.credential_version,
+                execution_id=str(prepared.attempt_id),
+                purpose=context.purpose,
+            )
+        finally:
+            await store.aclose()
     except (CredentialConfigurationError, CredentialStoreError) as exc:
         raise LlmCredentialUnavailableError(
             "Project provider credential is unavailable"

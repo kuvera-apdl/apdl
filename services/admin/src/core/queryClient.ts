@@ -53,9 +53,9 @@ export const queryKeys = {
     [wsId, 'custom-agents', 'definitions', projectId] as const,
   agentExecutionCapabilities: (wsId: string, projectId: string) =>
     [wsId, 'agents', 'execution-capabilities', projectId] as const,
-  llmConnections: (wsId: string) => [wsId, 'agents', 'llm-connections'] as const,
-  llmModels: (wsId: string, provider: string) =>
-    [wsId, 'agents', 'llm-connections', provider, 'models'] as const,
+  llmConnections: (wsId: string) => [wsId, 'llm-vault', 'connections'] as const,
+  llmModels: (wsId: string, connectionId: string) =>
+    [wsId, 'llm-vault', 'connections', connectionId] as const,
   agentsSetup: (wsId: string, projectId: string) =>
     [wsId, 'agents', 'setup', projectId] as const,
   agentsConnectionsPrefix: (wsId: string, projectId: string) =>

@@ -20,6 +20,7 @@ from app.routers import (
     approvals,
     capabilities,
     custom_agents,
+    llm_vault,
     llm_connections,
     runs,
     setup,
@@ -33,7 +34,7 @@ from app.store.llm_governance import (
     reconcile_orphaned_llm_attempts_forever,
 )
 from app.store.llm_connections import ProjectConnectionStore
-from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
+from app.store.llm_credentials import ProjectCredentialStore
 from app.store.llm_setup import AgentsSetupStore
 from app.store.run_leases import (
     requeue_expired_runs,
@@ -166,18 +167,15 @@ async def lifespan(application: FastAPI):
     maintenance_connection = None
     maintenance_task = None
     maintenance_listener = None
+    credential_store = None
     worker_stop = asyncio.Event()
     worker_tasks: list[asyncio.Task] = []
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
-        application.state.llm_credential_store = ProjectCredentialStore(
-            pool, CredentialCipher.from_environment()
-        )
-        application.state.llm_connection_store = ProjectConnectionStore(
-            pool,
-            application.state.llm_credential_store,
-        )
+        credential_store = ProjectCredentialStore.from_environment()
+        application.state.llm_credential_store = credential_store
+        application.state.llm_connection_store = ProjectConnectionStore(pool)
         application.state.agents_setup_store = AgentsSetupStore(pool)
         maintenance_connection = await pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
@@ -256,6 +254,8 @@ async def lifespan(application: FastAPI):
             )
         elif maintenance_connection is not None:
             await maintenance_connection.close()
+        if credential_store is not None:
+            await credential_store.aclose()
         await pool.close()
         logger.info("Agents service shut down: PostgreSQL pool closed")
 
@@ -281,6 +281,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # custom_agents first: it owns static shapes (/custom/*, /definitions) that
 # must win over the run routers' /{run_id}/... wildcards.
 auth_dependencies = [Depends(authenticate_request)]
+app.include_router(llm_vault.router)
 app.include_router(custom_agents.router, dependencies=auth_dependencies)
 app.include_router(llm_connections.router, dependencies=auth_dependencies)
 app.include_router(setup.router, dependencies=auth_dependencies)

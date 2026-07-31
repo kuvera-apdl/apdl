@@ -52,6 +52,7 @@ services:
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
       APDL_RUNTIME_POSTGRES_PASSWORD: ${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}
+      APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
     healthcheck:
       test:
         - CMD-SHELL
@@ -78,6 +79,7 @@ services:
       PGUSER: apdl
       PGPASSWORD: apdl_dev
       PGDATABASE: apdl
+      APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
       POSTGRES_MIGRATIONS_DIR: /migrations
     depends_on:
       postgres:
@@ -188,6 +190,41 @@ services:
       config:
         condition: service_healthy
 
+  # Single custodian for all project LLM provider credentials. Only this
+  # service receives the encryption key and the database role that can read
+  # ciphertext; consumers obtain one exact key just before provider egress.
+  llm-vault:
+    build:
+      context: ../../services/llm-vault
+      dockerfile: Dockerfile
+    expose:
+      - "8086"
+    environment:
+      POSTGRES_URL: postgresql://apdl_llm_vault:${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}@postgres:5432/apdl
+      LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
+      LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
+      LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
+      LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
+      AGENTS_SERVICE_URL: http://agents:8083
+      CODEGEN_SERVICE_URL: http://codegen:8084
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8086/ready', timeout=2))['status'] == 'ready'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-migrate:
+        condition: service_completed_successfully
+
   agents:
     profiles: ["agents"]
     build:
@@ -196,7 +233,9 @@ services:
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
     environment:
-      AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
+      LLM_VAULT_URL: http://llm-vault:8086
+      LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
+      LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -223,6 +262,8 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      llm-vault:
+        condition: service_healthy
 
   # Codegen — autonomous code-implementation "hands". It creates and repairs
   # PR branches; GitHub alone owns CI verification, review policy, and merge.
@@ -243,9 +284,9 @@ services:
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       # Empty disables the webhook endpoint; the CI poller remains available.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
-      # Platform key for Codegen-owned project credentials. It is not a
-      # provider credential and has no development default.
-      CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
+      LLM_VAULT_URL: http://llm-vault:8086
+      LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
+      LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
       CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
       # Fail-closed deployment mode. The base stack cannot publish; the secure
       # tenant runtime overlay selects tenant_draft_pr explicitly.
@@ -319,6 +360,8 @@ services:
         condition: service_healthy
       postgres-migrate:
         condition: service_completed_successfully
+      llm-vault:
+        condition: service_healthy
 
   clickhouse-writer:
     # This service is intentionally not a bare `docker compose up` entrypoint.
@@ -364,6 +407,8 @@ services:
       QUERY_SERVICE_URL: http://query:8082
       AGENTS_SERVICE_URL: http://agents:8083
       CODEGEN_SERVICE_URL: http://codegen:8084
+      LLM_VAULT_URL: http://llm-vault:8086
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
       APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
@@ -396,6 +441,8 @@ services:
       config:
         condition: service_healthy
       query:
+        condition: service_healthy
+      llm-vault:
         condition: service_healthy
     networks:
       - default

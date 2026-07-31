@@ -3,15 +3,17 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 import {
-  getLlmModels,
+  createLlmConnection,
+  getLlmConnection,
   listLlmConnections,
   llmConnectionDetailSchema,
   llmConnectionListSchema,
   llmConnectionSummarySchema,
-  llmModelInventorySchema,
-  putLlmConnection,
-  refreshLlmModels,
+  refreshLlmConnection,
+  replaceLlmConnection,
   revokeLlmConnection,
+  type LlmConnectionDetail,
+  type LlmConnectionSummary,
 } from '../../src/api/llmConnections'
 import { AUTH_UNAUTHORIZED_EVENT } from '../../src/core/auth-events'
 
@@ -21,338 +23,218 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
-const connection = {
-  baseUrl: 'http://agents.test',
-  actor: 'tester',
-}
+const service = { baseUrl: 'http://vault.test', actor: 'tester' }
+const CONNECTION_ID = '10000000-0000-4000-8000-000000000001'
 
-const OPENAI_MODEL = {
-  schema_version: 'llm_provider_model@1',
-  provider: 'openai',
-  model_id: 'gpt-5',
-  display_name: 'GPT-5',
-  supported_tiers: ['fast', 'reasoning'],
-  catalog_version: '2026-08-01',
-  data_residency: 'us',
-  allowed_data_classifications: ['public', 'internal'],
-  pricing_status: 'operator_review_required',
-} as const
-
-const OPENAI_SUMMARY = {
-  schema_version: 'llm_provider_connection@1',
+const SUMMARY: LlmConnectionSummary = {
+  schema_version: 'project_llm_connection@1',
+  connection_id: CONNECTION_ID,
   project_id: 'demo',
   provider: 'openai',
+  label: 'Production',
   version: 3,
+  inventory_version: 4,
   state: 'active',
-  catalog_version: '2026-08-01',
-  validated_at: '2026-08-01T12:00:00+00:00',
-  created_at: '2026-08-01T11:00:00+00:00',
-  updated_at: '2026-08-01T12:00:00+00:00',
+  consumers: ['agents', 'codegen'],
+  validated_at: '2026-08-01T12:00:00Z',
+  created_at: '2026-08-01T11:00:00Z',
+  updated_at: '2026-08-01T12:00:00Z',
   revoked_at: null,
   model_count: 1,
-} as const
+}
 
-const OPENAI_DETAIL = {
-  ...OPENAI_SUMMARY,
-  models: [OPENAI_MODEL],
-} as const
+const DETAIL: LlmConnectionDetail = {
+  ...SUMMARY,
+  models: [
+    {
+      schema_version: 'project_llm_provider_model@1',
+      model_id: 'gpt-5.4-mini',
+    },
+  ],
+}
 
-const OPENAI_INVENTORY = {
-  schema_version: 'llm_provider_model_inventory@1',
-  project_id: 'demo',
-  provider: 'openai',
-  connection_version: 3,
-  models: [OPENAI_MODEL],
-} as const
-
-const REVOKED_OPENAI_SUMMARY = {
-  ...OPENAI_SUMMARY,
+const REVOKED: LlmConnectionSummary = {
+  ...SUMMARY,
   version: 4,
+  inventory_version: 5,
   state: 'revoked',
-  updated_at: '2026-08-01T13:00:00+00:00',
-  revoked_at: '2026-08-01T13:00:00+00:00',
-} as const
+  consumers: [],
+  model_count: 0,
+  updated_at: '2026-08-01T13:00:00Z',
+  revoked_at: '2026-08-01T13:00:00Z',
+}
 
-describe('project LLM connection response schemas', () => {
-  test('accept canonical response contracts and reject unknown fields at every boundary', () => {
-    expect(llmConnectionSummarySchema.safeParse(OPENAI_SUMMARY).success).toBe(true)
-    expect(llmConnectionDetailSchema.safeParse(OPENAI_DETAIL).success).toBe(true)
+describe('project LLM vault schemas', () => {
+  test('accept strict secret-free contracts', () => {
+    expect(llmConnectionSummarySchema.safeParse(SUMMARY).success).toBe(true)
+    expect(llmConnectionDetailSchema.safeParse(DETAIL).success).toBe(true)
     expect(
       llmConnectionListSchema.safeParse({
-        schema_version: 'llm_provider_connection_list@1',
+        schema_version: 'project_llm_connection_list@1',
         project_id: 'demo',
-        connections: [OPENAI_SUMMARY],
+        connections: [SUMMARY],
       }).success,
     ).toBe(true)
-    expect(llmModelInventorySchema.safeParse(OPENAI_INVENTORY).success).toBe(true)
-
     expect(
-      llmConnectionDetailSchema.safeParse({
-        ...OPENAI_DETAIL,
-        credential_source: 'environment',
-      }).success,
+      llmConnectionDetailSchema.safeParse({ ...DETAIL, api_key: 'secret' }).success,
     ).toBe(false)
     expect(
       llmConnectionDetailSchema.safeParse({
-        ...OPENAI_DETAIL,
-        models: [{ ...OPENAI_MODEL, deprecated: false }],
-      }).success,
-    ).toBe(false)
-    expect(
-      llmConnectionListSchema.safeParse({
-        schema_version: 'llm_provider_connection_list@1',
-        project_id: 'demo',
-        connections: [{ ...OPENAI_SUMMARY, health: 'ready' }],
-      }).success,
-    ).toBe(false)
-    expect(
-      llmModelInventorySchema.safeParse({
-        ...OPENAI_INVENTORY,
-        next_page_token: null,
+        ...DETAIL,
+        models: [{ ...DETAIL.models[0], endpoint_host: 'api.openai.com' }],
       }).success,
     ).toBe(false)
   })
+})
 
-  test('does not permit secret material in any connection response', async () => {
-    expect(
-      llmConnectionSummarySchema.safeParse({
-        ...OPENAI_SUMMARY,
-        api_key: 'sk-secret',
-      }).success,
-    ).toBe(false)
-    expect(
-      llmConnectionDetailSchema.safeParse({
-        ...OPENAI_DETAIL,
-        api_key: 'sk-secret',
-      }).success,
-    ).toBe(false)
-    expect(
-      llmModelInventorySchema.safeParse({
-        ...OPENAI_INVENTORY,
-        models: [{ ...OPENAI_MODEL, api_key: 'sk-secret' }],
-      }).success,
-    ).toBe(false)
-
+describe('project LLM vault API', () => {
+  test('uses exact canonical paths and bodies', async () => {
+    const urls: string[] = []
+    const bodies: unknown[] = []
     server.use(
-      http.put('http://agents.test/v1/agents/llm-connections/openai', () =>
-        HttpResponse.json({ ...OPENAI_DETAIL, api_key: 'sk-secret' }),
+      http.get('http://vault.test/v1/llm-connections', ({ request }) => {
+        urls.push(request.url)
+        return HttpResponse.json({
+          schema_version: 'project_llm_connection_list@1',
+          project_id: 'demo',
+          connections: [SUMMARY],
+        })
+      }),
+      http.post('http://vault.test/v1/llm-connections', async ({ request }) => {
+        urls.push(request.url)
+        bodies.push(await request.json())
+        return HttpResponse.json(DETAIL)
+      }),
+      http.get(`http://vault.test/v1/llm-connections/${CONNECTION_ID}`, ({ request }) => {
+        urls.push(request.url)
+        return HttpResponse.json(DETAIL)
+      }),
+      http.put(`http://vault.test/v1/llm-connections/${CONNECTION_ID}`, async ({ request }) => {
+        urls.push(request.url)
+        bodies.push(await request.json())
+        return HttpResponse.json(DETAIL)
+      }),
+      http.post(
+        `http://vault.test/v1/llm-connections/${CONNECTION_ID}/refresh`,
+        async ({ request }) => {
+          urls.push(request.url)
+          bodies.push(await request.json())
+          return HttpResponse.json(DETAIL)
+        },
+      ),
+      http.post(
+        `http://vault.test/v1/llm-connections/${CONNECTION_ID}/revoke`,
+        async ({ request }) => {
+          urls.push(request.url)
+          bodies.push(await request.json())
+          return HttpResponse.json(REVOKED)
+        },
       ),
     )
 
+    await listLlmConnections(service, 'demo')
+    await createLlmConnection(
+      service,
+      'demo',
+      'openai',
+      'Production',
+      'sk-secret',
+      ['agents', 'codegen'],
+    )
+    await getLlmConnection(service, CONNECTION_ID, 'demo')
+    await replaceLlmConnection(service, SUMMARY, 'Production', 'sk-new', ['agents'])
+    await refreshLlmConnection(service, SUMMARY)
+    await revokeLlmConnection(service, SUMMARY, 'Credential retired')
+
+    expect(urls).toEqual([
+      'http://vault.test/v1/llm-connections?project_id=demo',
+      'http://vault.test/v1/llm-connections',
+      `http://vault.test/v1/llm-connections/${CONNECTION_ID}?project_id=demo`,
+      `http://vault.test/v1/llm-connections/${CONNECTION_ID}`,
+      `http://vault.test/v1/llm-connections/${CONNECTION_ID}/refresh`,
+      `http://vault.test/v1/llm-connections/${CONNECTION_ID}/revoke`,
+    ])
+    expect(bodies).toEqual([
+      {
+        project_id: 'demo',
+        provider: 'openai',
+        label: 'Production',
+        api_key: 'sk-secret',
+        consumers: ['agents', 'codegen'],
+      },
+      {
+        project_id: 'demo',
+        provider: 'openai',
+        label: 'Production',
+        api_key: 'sk-new',
+        consumers: ['agents'],
+        version: 3,
+      },
+      { project_id: 'demo', version: 3 },
+      { project_id: 'demo', version: 3, reason: 'Credential retired' },
+    ])
+  })
+
+  test('rejects secret-bearing and cross-project responses', async () => {
+    server.use(
+      http.get('http://vault.test/v1/llm-connections', () =>
+        HttpResponse.json({
+          schema_version: 'project_llm_connection_list@1',
+          project_id: 'other',
+          connections: [],
+        }),
+      ),
+      http.post('http://vault.test/v1/llm-connections', () =>
+        HttpResponse.json({ ...DETAIL, api_key: 'leaked' }),
+      ),
+    )
+    await expect(listLlmConnections(service, 'demo')).rejects.toThrow(
+      'crossed project authority',
+    )
     await expect(
-      putLlmConnection(connection, 'openai', 'demo', 'sk-secret', 0),
+      createLlmConnection(service, 'demo', 'openai', 'Production', 'secret', ['agents']),
     ).rejects.toMatchObject({ code: 'schema_mismatch' })
   })
 
-  test.each([
-    {
-      label: 'connect',
-      path: 'http://agents.test/v1/agents/llm-connections/openai',
-      request: () =>
-        putLlmConnection(connection, 'openai', 'demo', 'invalid-provider-key', 0),
-    },
-    {
-      label: 'refresh',
-      path: 'http://agents.test/v1/agents/llm-connections/openai/refresh-models',
-      request: () => refreshLlmModels(connection, 'openai', 'demo', 3),
-    },
-  ])('does not treat provider credential rejection during $label as an expired Admin session', async ({
-    path,
-    request,
-  }) => {
+  test('provider rejection does not emit an expired-session event', async () => {
     const unauthorized = vi.fn()
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorized)
     server.use(
-      http.all(path, () =>
+      http.post('http://vault.test/v1/llm-connections', () =>
         HttpResponse.json(
-          {
-            detail: {
-              code: 'invalid_key',
-              message: 'Provider rejected the credential',
-            },
-          },
+          { detail: { code: 'invalid_key', message: 'Provider rejected the credential' } },
           { status: 401 },
         ),
       ),
     )
-
     try {
-      await expect(request()).rejects.toMatchObject({ status: 401 })
+      await expect(
+        createLlmConnection(service, 'demo', 'openai', 'Production', 'bad', ['agents']),
+      ).rejects.toMatchObject({ status: 401 })
       expect(unauthorized).not.toHaveBeenCalled()
     } finally {
       window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorized)
     }
   })
 
-  test.each([
-    {
-      label: 'connect',
-      path: 'http://agents.test/v1/agents/llm-connections/openai',
-      request: () =>
-        putLlmConnection(connection, 'openai', 'demo', 'provider-key', 0),
-    },
-    {
-      label: 'refresh',
-      path: 'http://agents.test/v1/agents/llm-connections/openai/refresh-models',
-      request: () => refreshLlmModels(connection, 'openai', 'demo', 3),
-    },
-  ])('still terminates an expired Admin session during $label', async ({ path, request }) => {
+  test('ordinary unauthorized responses emit an expired-session event', async () => {
     const unauthorized = vi.fn()
     window.addEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorized)
     server.use(
-      http.all(path, () =>
-        HttpResponse.json({ detail: 'Login required' }, { status: 401 }),
+      http.post('http://vault.test/v1/llm-connections', () =>
+        HttpResponse.json(
+          { detail: 'Authentication required' },
+          { status: 401 },
+        ),
       ),
     )
-
     try {
-      await expect(request()).rejects.toMatchObject({ status: 401 })
-      expect(unauthorized).toHaveBeenCalledTimes(1)
+      await expect(
+        createLlmConnection(service, 'demo', 'openai', 'Production', 'bad', ['agents']),
+      ).rejects.toMatchObject({ status: 401 })
+      expect(unauthorized).toHaveBeenCalledOnce()
     } finally {
       window.removeEventListener(AUTH_UNAUTHORIZED_EVENT, unauthorized)
     }
-  })
-})
-
-describe('project LLM connection API', () => {
-  test('uses the exact endpoint paths, query parameters, and mutation bodies', async () => {
-    const seenUrls: string[] = []
-    const seenBodies: unknown[] = []
-
-    server.use(
-      http.get('http://agents.test/v1/agents/llm-connections', ({ request }) => {
-        seenUrls.push(request.url)
-        return HttpResponse.json({
-          schema_version: 'llm_provider_connection_list@1',
-          project_id: 'demo',
-          connections: [OPENAI_SUMMARY],
-        })
-      }),
-      http.put(
-        'http://agents.test/v1/agents/llm-connections/openai',
-        async ({ request }) => {
-          seenUrls.push(request.url)
-          seenBodies.push(await request.json())
-          return HttpResponse.json(OPENAI_DETAIL)
-        },
-      ),
-      http.get(
-        'http://agents.test/v1/agents/llm-connections/openai/models',
-        ({ request }) => {
-          seenUrls.push(request.url)
-          return HttpResponse.json(OPENAI_INVENTORY)
-        },
-      ),
-      http.post(
-        'http://agents.test/v1/agents/llm-connections/openai/refresh-models',
-        async ({ request }) => {
-          seenUrls.push(request.url)
-          seenBodies.push(await request.json())
-          return HttpResponse.json(OPENAI_DETAIL)
-        },
-      ),
-      http.post(
-        'http://agents.test/v1/agents/llm-connections/openai/revoke',
-        async ({ request }) => {
-          seenUrls.push(request.url)
-          seenBodies.push(await request.json())
-          return HttpResponse.json(REVOKED_OPENAI_SUMMARY)
-        },
-      ),
-    )
-
-    await listLlmConnections(connection, 'demo')
-    await putLlmConnection(connection, 'openai', 'demo', 'sk-project-secret', 0)
-    await getLlmModels(connection, 'openai', 'demo')
-    await refreshLlmModels(connection, 'openai', 'demo', 3)
-    await revokeLlmConnection(connection, 'openai', 'demo', 3, 'Credential rotated')
-
-    expect(seenUrls).toEqual([
-      'http://agents.test/v1/agents/llm-connections?project_id=demo',
-      'http://agents.test/v1/agents/llm-connections/openai',
-      'http://agents.test/v1/agents/llm-connections/openai/models?project_id=demo',
-      'http://agents.test/v1/agents/llm-connections/openai/refresh-models',
-      'http://agents.test/v1/agents/llm-connections/openai/revoke',
-    ])
-    expect(seenBodies).toEqual([
-      {
-        project_id: 'demo',
-        api_key: 'sk-project-secret',
-        version: 0,
-      },
-      {
-        project_id: 'demo',
-        version: 3,
-      },
-      {
-        project_id: 'demo',
-        version: 3,
-        reason: 'Credential rotated',
-      },
-    ])
-  })
-
-  test('rejects responses that cross the requested project or provider authority', async () => {
-    const anthropicModel = {
-      ...OPENAI_MODEL,
-      provider: 'anthropic',
-      model_id: 'claude-sonnet-4',
-      display_name: 'Claude Sonnet 4',
-    } as const
-    const anthropicDetail = {
-      ...OPENAI_DETAIL,
-      provider: 'anthropic',
-      models: [anthropicModel],
-    } as const
-
-    server.use(
-      http.get('http://agents.test/v1/agents/llm-connections', () =>
-        HttpResponse.json({
-          schema_version: 'llm_provider_connection_list@1',
-          project_id: 'other',
-          connections: [],
-        }),
-      ),
-      http.put('http://agents.test/v1/agents/llm-connections/openai', () =>
-        HttpResponse.json(anthropicDetail),
-      ),
-      http.get('http://agents.test/v1/agents/llm-connections/openai/models', () =>
-        HttpResponse.json({
-          ...OPENAI_INVENTORY,
-          provider: 'anthropic',
-          models: [anthropicModel],
-        }),
-      ),
-      http.post(
-        'http://agents.test/v1/agents/llm-connections/openai/refresh-models',
-        () =>
-          HttpResponse.json({
-            ...OPENAI_DETAIL,
-            project_id: 'other',
-          }),
-      ),
-      http.post('http://agents.test/v1/agents/llm-connections/openai/revoke', () =>
-        HttpResponse.json({
-          ...REVOKED_OPENAI_SUMMARY,
-          provider: 'anthropic',
-        }),
-      ),
-    )
-
-    await expect(listLlmConnections(connection, 'demo')).rejects.toThrow(
-      'LLM connection list crossed project authority',
-    )
-    await expect(
-      putLlmConnection(connection, 'openai', 'demo', 'sk-secret', 0),
-    ).rejects.toThrow('LLM connection response crossed project authority')
-    await expect(getLlmModels(connection, 'openai', 'demo')).rejects.toThrow(
-      'LLM model inventory crossed project authority',
-    )
-    await expect(refreshLlmModels(connection, 'openai', 'demo', 3)).rejects.toThrow(
-      'LLM model refresh crossed project authority',
-    )
-    await expect(
-      revokeLlmConnection(connection, 'openai', 'demo', 3, 'Credential rotated'),
-    ).rejects.toThrow('LLM connection revocation crossed project authority')
   })
 })

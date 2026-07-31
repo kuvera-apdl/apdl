@@ -16,11 +16,14 @@ not supported.
 
 ## PostgreSQL role boundary
 
-Fresh Compose clusters bootstrap three dedicated identities before the schema
+Fresh Compose clusters bootstrap four dedicated identities before the schema
 migrator runs:
 
-- `apdl_runtime` is the login used by every long-running service. It is not a
-  superuser, database owner, role creator, or member of another role.
+- `apdl_runtime` is the shared login used by ordinary long-running services. It
+  is not a superuser, database owner, role creator, or member of another role.
+- `apdl_llm_vault` is the dedicated login used only by the project LLM
+  credential vault. It alone can read provider ciphertext, can write the
+  consumer projections it owns, and cannot update immutable vault audit rows.
 - `apdl_audit_operator` is a `NOLOGIN` caller role. A named human or automation
   login may be granted this role only through the deployment's reviewed access
   workflow; it receives narrow audit preview/verification reads plus execute
@@ -30,16 +33,20 @@ migrator runs:
   never granted to runtime or operator callers.
 
 `apdl_runtime` is a shared non-owner boundary, not per-service least privilege:
-all long-running services use the same credential and migration `044` grants it
-ordinary application-table access across the APDL schema. A compromised service
-therefore has cross-service database reach, but cannot own schema objects,
-assume another role, mutate immutable audit history, or invoke audited purge.
-Splitting the credential per service is outside this developer-preview release.
+ordinary long-running services use the same credential and migration `044`
+grants it ordinary application-table access across the APDL schema. A
+compromised ordinary service therefore has cross-service database reach, but
+cannot read `llm_vault_provider_secrets`, own schema objects, assume another
+role, mutate immutable audit history, or invoke audited purge. The credential
+vault is the deliberate exception with its narrower dedicated role. Splitting
+the remaining ordinary services per service is outside this developer-preview
+release.
 
 The `apdl` database owner remains migration-only. Do not place its URL in a
 service deployment. If an existing local `.env` still contains an owner-valued
 `POSTGRES_URL`, replace it with the `apdl_runtime` URL from `.env.example`
-before starting a host-run service.
+before starting an ordinary host-run service; use the `apdl_llm_vault` URL only
+for the vault and its offline key-rotation command.
 
 `infra/docker/postgres/init-apdl-roles.sh` is strictly a fresh-`initdb`
 bootstrap. In-place upgrades are unsupported, so do not attempt to retrofit

@@ -26,6 +26,7 @@ for lock in \
     services/config/requirements.lock \
     services/query/requirements.lock \
     services/agents/requirements.lock \
+    services/llm-vault/requirements.lock \
     services/admin-api/requirements.lock \
     services/codegen/requirements.lock \
     pipeline/redis/requirements.lock

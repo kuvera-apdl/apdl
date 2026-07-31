@@ -322,7 +322,7 @@ test('creates a project and opens its grouped project-management sections', asyn
   expect(await screen.findByText('Project Authority')).toBeInTheDocument()
   expect(screen.getByText('Members')).toBeInTheDocument()
   expect(screen.getByText('Agents')).toBeInTheDocument()
-  expect(await screen.findByText('LLM provider connections')).toBeInTheDocument()
+  expect(await screen.findByText('Project LLM credential vault')).toBeInTheDocument()
   expect(screen.getByText('SDK Credentials')).toBeInTheDocument()
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })

@@ -1,74 +1,26 @@
-"""Strict project-scoped Codegen LLM connection and model discovery API."""
+"""Read-only Codegen projection of vault-managed project LLM connections."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request, status
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from fastapi import APIRouter, HTTPException, Path, Query, Request
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.auth import Principal, require_project
-from app.llm.provider_catalog import (
-    ProviderDiscoveryError,
-    ProviderModel,
-    discover_models,
-)
+from app.auth import require_project
+from app.llm.provider_catalog import ProviderModel
 from app.store.llm_connections import (
     ConnectionMetadata,
-    LlmConnectionAssignmentConflictError,
-    LlmConnectionAuthorizationError,
     LlmConnectionConflictError,
     LlmConnectionNotFoundError,
     ProjectConnectionStore,
 )
-from app.store.llm_credentials import CredentialStoreError
 
 
 ProviderPath = Literal["openai", "anthropic", "google", "xai"]
 PROJECT_PATTERN = r"^[A-Za-z0-9]{1,64}$"
-
 router = APIRouter(prefix="/v1/llm-connections", tags=["llm-connections"])
-
-
-class PutConnectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    project_id: str = Field(pattern=PROJECT_PATTERN)
-    api_key: SecretStr = Field(min_length=1, max_length=16_384)
-    version: int = Field(ge=0)
-
-    @field_validator("api_key")
-    @classmethod
-    def validate_api_key_size(cls, value: SecretStr) -> SecretStr:
-        if len(value.get_secret_value().encode("utf-8")) > 16_384:
-            raise ValueError("api_key must not exceed 16384 UTF-8 bytes")
-        return value
-
-
-class RefreshConnectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    project_id: str = Field(pattern=PROJECT_PATTERN)
-    version: int = Field(ge=1)
-
-
-class RevokeConnectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    project_id: str = Field(pattern=PROJECT_PATTERN)
-    version: int = Field(ge=1)
-    reason: str = Field(min_length=1, max_length=2_000)
-
-    @field_validator("reason")
-    @classmethod
-    def validate_reason(cls, value: str) -> str:
-        if value != value.strip() or "\r" in value or "\n" in value:
-            raise ValueError(
-                "reason must not contain surrounding whitespace or line breaks"
-            )
-        return value
 
 
 class ProviderModelResponse(BaseModel):
@@ -109,10 +61,6 @@ class ConnectionSummaryResponse(BaseModel):
     updated_at: datetime
     revoked_at: datetime | None
     model_count: int = Field(ge=0, le=1_000)
-
-
-class ConnectionDetailResponse(ConnectionSummaryResponse):
-    models: list[ProviderModelResponse]
 
 
 class ConnectionListResponse(BaseModel):
@@ -181,59 +129,20 @@ def _store(request: Request) -> ProjectConnectionStore:
     return request.app.state.llm_connection_store
 
 
-def _mutation_actor(request: Request, project_id: str) -> UUID:
-    principal: Principal = request.state.principal
-    if principal.project_id != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Credential is not authorized for this project",
-        )
-    if principal.actor_user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="A current human session is required",
-        )
-    return UUID(principal.actor_user_id)
-
-
-def _provider_error(exc: ProviderDiscoveryError) -> HTTPException:
-    return HTTPException(
-        status_code=exc.status_code,
-        detail={"code": exc.code, "message": str(exc)},
-    )
-
-
 def _store_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, LlmConnectionAuthorizationError):
-        return HTTPException(status_code=403, detail=str(exc))
     if isinstance(exc, LlmConnectionNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(
-        exc,
-        (LlmConnectionConflictError, LlmConnectionAssignmentConflictError),
-    ):
+    if isinstance(exc, LlmConnectionConflictError):
         return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(
-        status_code=503, detail="LLM connection storage is unavailable"
+        status_code=503, detail="LLM connection projection is unavailable"
     )
-
-
-async def _preflight_mutation(
-    request: Request, project_id: str
-) -> tuple[ProjectConnectionStore, UUID]:
-    store = _store(request)
-    actor_user_id = _mutation_actor(request, project_id)
-    try:
-        await store.assert_mutation_authority(project_id, actor_user_id)
-    except LlmConnectionAuthorizationError as exc:
-        raise _store_error(exc) from exc
-    return store, actor_user_id
 
 
 @router.get("", response_model=ConnectionListResponse)
 async def list_connections(
     request: Request,
-    project_id: str = Query(..., pattern=PROJECT_PATTERN),
+    project_id: str = Query(pattern=PROJECT_PATTERN),
 ) -> ConnectionListResponse:
     require_project(request, project_id, "agents:read")
     try:
@@ -242,61 +151,21 @@ async def list_connections(
         raise _store_error(exc) from exc
     return ConnectionListResponse(
         project_id=project_id,
-        connections=[_summary(item) for item in connections],
-    )
-
-
-@router.put("/{provider}", response_model=ConnectionDetailResponse)
-async def put_connection(
-    body: PutConnectionRequest,
-    request: Request,
-    provider: ProviderPath = Path(...),
-) -> ConnectionDetailResponse:
-    store, actor_user_id = await _preflight_mutation(request, body.project_id)
-    api_key = body.api_key.get_secret_value()
-    try:
-        models = await discover_models(provider, api_key)
-        connection = await store.put(
-            body.project_id,
-            provider,
-            api_key,
-            models,
-            expected_version=body.version,
-            actor_user_id=actor_user_id,
-        )
-    except ProviderDiscoveryError as exc:
-        raise _provider_error(exc) from exc
-    except (
-        CredentialStoreError,
-        LlmConnectionAuthorizationError,
-        LlmConnectionConflictError,
-        LlmConnectionAssignmentConflictError,
-        LlmConnectionNotFoundError,
-    ) as exc:
-        raise _store_error(exc) from exc
-    except Exception as exc:
-        raise _store_error(exc) from exc
-    finally:
-        api_key = ""
-    return ConnectionDetailResponse(
-        **_summary(connection).model_dump(),
-        models=[_model(model) for model in models],
+        connections=[_summary(connection) for connection in connections],
     )
 
 
 @router.get("/{provider}/models", response_model=ModelInventoryResponse)
 async def get_models(
     request: Request,
-    provider: ProviderPath = Path(...),
-    project_id: str = Query(..., pattern=PROJECT_PATTERN),
+    provider: ProviderPath = Path(),
+    project_id: str = Query(pattern=PROJECT_PATTERN),
 ) -> ModelInventoryResponse:
     require_project(request, project_id, "agents:read")
     try:
         connection, models = await _store(request).get_active_with_models(
             project_id, provider
         )
-    except (LlmConnectionNotFoundError, LlmConnectionConflictError) as exc:
-        raise _store_error(exc) from exc
     except Exception as exc:
         raise _store_error(exc) from exc
     return ModelInventoryResponse(
@@ -306,74 +175,3 @@ async def get_models(
         inventory_version=connection.inventory_version,
         models=[_model(model) for model in models],
     )
-
-
-@router.post("/{provider}/refresh-models", response_model=ConnectionDetailResponse)
-async def refresh_models(
-    body: RefreshConnectionRequest,
-    request: Request,
-    provider: ProviderPath = Path(...),
-) -> ConnectionDetailResponse:
-    store, actor_user_id = await _preflight_mutation(request, body.project_id)
-    api_key = ""
-    credential = None
-    try:
-        credential = await store.credential_for_refresh(
-            body.project_id, provider, expected_version=body.version
-        )
-        api_key = credential.api_key
-        models = await discover_models(provider, api_key)
-        connection = await store.refresh(
-            body.project_id,
-            provider,
-            models,
-            expected_version=body.version,
-            expected_credential_id=credential.credential_id,
-            actor_user_id=actor_user_id,
-        )
-    except ProviderDiscoveryError as exc:
-        raise _provider_error(exc) from exc
-    except (
-        CredentialStoreError,
-        LlmConnectionAuthorizationError,
-        LlmConnectionConflictError,
-        LlmConnectionAssignmentConflictError,
-        LlmConnectionNotFoundError,
-    ) as exc:
-        raise _store_error(exc) from exc
-    except Exception as exc:
-        raise _store_error(exc) from exc
-    finally:
-        api_key = ""
-        credential = None
-    return ConnectionDetailResponse(
-        **_summary(connection).model_dump(),
-        models=[_model(model) for model in models],
-    )
-
-
-@router.post("/{provider}/revoke", response_model=ConnectionSummaryResponse)
-async def revoke_connection(
-    body: RevokeConnectionRequest,
-    request: Request,
-    provider: ProviderPath = Path(...),
-) -> ConnectionSummaryResponse:
-    store, actor_user_id = await _preflight_mutation(request, body.project_id)
-    try:
-        connection = await store.revoke(
-            body.project_id,
-            provider,
-            expected_version=body.version,
-            actor_user_id=actor_user_id,
-        )
-    except (
-        CredentialStoreError,
-        LlmConnectionAuthorizationError,
-        LlmConnectionConflictError,
-        LlmConnectionAssignmentConflictError,
-        LlmConnectionNotFoundError,
-    ) as exc:
-        raise _store_error(exc) from exc
-    except Exception as exc:
-        raise _store_error(exc) from exc
-    return _summary(connection)

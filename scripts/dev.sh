@@ -128,6 +128,7 @@ cmd_setup() {
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"
     setup_python_package "Query Service"     "$ROOT_DIR/services/query"
     setup_python_package "Agents Service"    "$ROOT_DIR/services/agents"
+    setup_python_package "LLM Vault Service" "$ROOT_DIR/services/llm-vault"
     setup_python_package "Codegen Service"   "$ROOT_DIR/services/codegen"
     setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
@@ -149,7 +150,7 @@ cmd_setup() {
     echo "  scripts/dev.sh smoke-fresh Isolated end-to-end fresh-install proof"
     echo "  scripts/dev.sh check       Lint + test every package in parallel"
     echo ""
-    echo "  make run-ingestion / run-config / run-query / run-agents / run-codegen / run-pipeline"
+    echo "  make run-ingestion / run-config / run-query / run-llm-vault / run-agents / run-codegen / run-pipeline"
     echo "                             Run one service locally with hot-reload"
     echo ""
 }
