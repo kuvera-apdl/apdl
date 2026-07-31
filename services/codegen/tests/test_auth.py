@@ -58,6 +58,7 @@ def _row(
         "roles": roles,
         "active": active,
         "expires_at": expires_at,
+        "actor_user_id": None,
         "execution_authorized": execution_authorized,
     }
 

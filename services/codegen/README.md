@@ -14,30 +14,33 @@ for the full design and phase plan.
 
 ## Status
 
-The generalized Phase 0–9 pipeline is implemented. A strict repository profile,
+The generalized pipeline is implemented. A strict repository profile,
 exact-version contract evidence, requirement ledger, bounded inspection slices,
 risk-based verification plan, semantic review, and GitHub runtime evidence feed
-one model-agnostic Aider editor. Continuous evaluation gates which exact model
-and orchestration revision may publish through evaluated rollout stages. APDL
-creates PRs and bounded same-branch repairs; GitHub owns CI, review policy, and
-merge.
+one model-agnostic Aider editor. APDL creates draft PRs and bounded same-branch
+repairs; GitHub owns CI, review policy, and merge.
 
-Publication is fail-closed. Offline and shadow deployments have no PR
-publication capability. Reviewed and low-risk-canary deployments must load an
-operator-controlled evaluation bundle for the exact `CODEGEN_MODEL` and
-`CODEGEN_REVISION`; the decision is persisted before any GitHub write token is
-minted and is read-only in Admin. The OSS developer-preview commands do not
-enable any publishing stage: `make dev-all` opts into Codegen only in `offline`
-mode, without a Docker socket or branch/PR authority. Publication tooling in the
-source tree is experimental operator infrastructure and is outside the supported
-release surface.
+Publication is fail-closed. Offline deployments have no PR capability.
+The secure `tenant_draft_pr` deployment requires immutable controller, worker,
+and egress-proxy images, an active repository grant, and active project editor
+and helper assignments. Runtime model selection comes only from those project
+assignments; provider credentials are decrypted just in time and never become
+controller or worker environment defaults. `make dev-all` keeps Codegen offline,
+without a Docker socket or branch/PR authority. The separate `development_pr`
+overlay is an explicit local-only draft workflow.
+
+APDL does not run an operator model-evaluation program or promote generated
+changes based on a platform corpus. Every production pull request starts as a
+draft. Tenants evaluate it through their own GitHub CI, review rules, branch
+protection, and merge process; APDL only observes those results and may perform
+bounded same-branch repairs.
 
 The 0.3.0 dependency gate covers both the offline API/control plane and the
 published `Dockerfile.worker` Aider dependency graph. The worker uses a
 reproducible universal Python 3.12 hash lock, and CI permits only three exact,
-expiring no-fix advisories with checked-in reachability evidence. Publication
-credentials, tenant exposure, and rollout overlays remain experimental
-operator infrastructure outside the supported deployment surface.
+expiring no-fix advisories with checked-in reachability evidence. The tenant
+runtime pins all Codegen images by local digest and isolates model egress behind
+the shipped proxy policy.
 
 ### Canonical repository profiler
 
@@ -65,6 +68,11 @@ active operator-verified grant can authorize GitHub access.
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
+| GET | `/v1/llm-connections?project_id=…` | List the project's active provider connections without credential material |
+| PUT | `/v1/llm-connections/{provider}` | Owner-controlled create or credential replacement with live model discovery |
+| GET | `/v1/llm-connections/{provider}/models?project_id=…` | Read the validated current model inventory |
+| POST | `/v1/llm-connections/{provider}/refresh-models` | Owner-controlled credential revalidation and inventory refresh |
+| POST | `/v1/llm-connections/{provider}/revoke` | Owner-controlled terminal connection revocation |
 | GET | `/v1/capabilities/changeset-creation?project_id=…` | Authenticated project capability and exact blocking reasons |
 | POST | `/v1/changesets` | Enqueue a changeset during a PR publication stage |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
@@ -185,25 +193,23 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
-CODEGEN_MODEL=claude-opus-4-8      # canonical supported provider/model ID; see below
-CODEGEN_REVISION=                  # immutable candidate/deployment digest
-CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
-                                   # release Compose commands force offline
+CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64= # canonical Base64 of exactly 32 random bytes
+CODEGEN_LLM_BROKER_DIR=/tmp/apdl-codegen-llm-broker # absolute host-visible broker root
+CODEGEN_REVISION=                  # immutable controller/worker revision
+CODEGEN_ROLLOUT_STAGE=offline      # offline | development_pr | tenant_draft_pr
+                                   # base Compose forces offline
 CODEGEN_DEVELOPMENT_MODE=          # experimental internal marker; leave unset
-CODEGEN_ROLLOUT_AUTHORIZATION_PATH= # read-only bundle for experimental evaluated stages
 CODEGEN_PLATFORM_SAFETY_POLICY_PATH= # absolute path to operator safety-policy JSON
 CODEGEN_SANDBOX=docker             # fail-closed isolated-worker default
-CODEGEN_SANDBOX_NETWORK=           # development_pr only; evaluated stages require empty
+CODEGEN_SANDBOX_IMAGE=             # exact worker image ID in tenant_draft_pr
+CODEGEN_SANDBOX_NETWORK=           # development_pr only; tenant runtime requires empty
+CODEGEN_CONTROLLER_IMAGE_ID=       # exact tenant-runtime controller image ID
 CODEGEN_EGRESS_POLICY_SHA256=      # digest of checked-in proxy policy sources
-CODEGEN_EGRESS_PROXY_IMAGE_ID=     # exact evaluated proxy image ID
+CODEGEN_EGRESS_PROXY_IMAGE_ID=     # exact tenant-runtime proxy image ID
 CODEGEN_EGRESS_SOCKET_VOLUME=      # controller-owned proxy Unix-socket volume
 CODEGEN_EGRESS_PROXY_URL=http://127.0.0.1:3128
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
-ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
-                                   #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-OPENAI_BASE_URL=https://api.openai.com/v1
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
@@ -221,21 +227,88 @@ breaking configuration change; deployments that previously supplied an inline
 PEM or a PEM file path must encode the file and migrate to the single setting
 above.
 
-The secure worker does not accept arbitrary LiteLLM provider prefixes. The
-canonical resolver accepts `anthropic`, `azure`, `cohere`, `deepseek`,
-`fireworks`, `gemini`/`google`, `groq`, `mistral`, `ollama`, `openai`,
-`openrouter`, `together_ai`, and `xai`. Canonical bare Claude, GPT/o-series, and
-Gemini model names resolve to their corresponding providers. `CODEGEN_MODEL`
-and `CODEGEN_HELPER_MODEL` must both select one of those providers and supply
-exactly its required credential and routing variables; unrelated provider
-secrets are not forwarded to the worker.
+Generate the Codegen credential-encryption key independently from every provider
+credential and keep it in the deployment secret manager:
 
-Vertex AI and Amazon Bedrock are intentionally unsupported. Vertex project and
-location values are routing metadata, not an executable credential contract,
-and AWS credentials are not part of the worker allowlist. Supporting either
-provider requires a reviewed credential, routing, isolation, egress, and
-evaluation-evidence contract; adding only a model prefix or ambient credential
-would fail closed.
+```bash
+openssl rand -base64 32 | tr -d '\n'
+```
+
+Codegen tenant serving supports one strict provider set: `anthropic`, `openai`,
+`google`, and `xai`. Model IDs must come from the current validated project
+inventory and the supported Codegen catalog. Provider API endpoints are fixed;
+custom base URLs, arbitrary LiteLLM prefixes, ambient provider credentials,
+Vertex AI, and Amazon Bedrock are not accepted. Supporting another provider
+requires an explicit credential, routing, isolation, and egress contract.
+
+### Project LLM connections and assignments
+
+Project LLM credentials are created and replaced through the
+owner-controlled Admin proxy to `PUT /v1/llm-connections/{provider}`. The
+canonical create body uses `version: 0`; a replacement uses the current
+connection version:
+
+```json
+{
+  "project_id": "demo",
+  "api_key": "provider-secret-from-your-secret-manager",
+  "version": 0
+}
+```
+
+Codegen validates the key against the provider's fixed model-list endpoint,
+keeps only compatible supported models, encrypts the credential at rest, and
+returns no credential identifiers or secret material. Use the list and
+`/{provider}/models` endpoints above to read the resulting non-secret
+inventory. Refresh and revoke mutations also require the current project owner,
+or an active delegated member holding both `agents:manage` and
+`credentials:manage`, plus the exact current connection version.
+The revoke request's required human reason is validated as request intent but is
+never logged or persisted; lifecycle storage records only the canonical
+non-secret `provider_connection_revoked` category.
+
+After creating the required connections, a trusted control-plane operator
+atomically assigns exactly one editor model and one helper model:
+
+```bash
+cd services/codegen
+.venv/bin/python -m scripts.assign_llm_models \
+  --project-id demo \
+  --editor-provider anthropic \
+  --editor-model-id claude-sonnet-5 \
+  --helper-provider openai \
+  --helper-model-id gpt-5.4-nano \
+  --actor operator@example.com
+```
+
+The two roles may use different providers, but each selected model must be in
+that project's active inventory and support the assigned role. New changesets
+snapshot both assignments. Each brief, edit, review, or repair phase then
+revalidates current project, repository, deployment, model, connection, and
+credential authority before decrypting only that phase's credential through
+the local broker. Replacing or revoking a credential therefore affects the next
+phase that has not started provider egress; no global `CODEGEN_MODEL`,
+`CODEGEN_HELPER_MODEL`, or ambient provider-key setting can route tenant work.
+
+Platform-key rotation is an offline maintenance operation. Drain and stop every
+APDL runtime that holds the shared PostgreSQL maintenance locks—not only Codegen
+replicas—then supply the old and new independent 32-byte standard-Base64 keys
+only to the rotation process and run the exclusive-barrier command:
+
+```bash
+cd services/codegen
+export CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64='...'
+export CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64='...'
+.venv/bin/python -m scripts.rotate_llm_credential_key \
+  --actor operator@example.com
+unset CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64
+unset CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64
+```
+
+The command re-reads and verifies every active row before one atomic commit.
+Its output contains only the rotated count and non-secret audit IDs. Restart
+all drained APDL runtimes only after the command succeeds; every Codegen
+instance must use the new `CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64`.
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /
@@ -308,179 +381,52 @@ scripts/dev.sh up-full
 ```
 
 Both commands use the base Compose service with the explicit `codegen` profile.
-The base service forces `CODEGEN_ROLLOUT_STAGE=offline`, clears the publication
-authorization path, exposes no host port, and mounts no Docker socket. It can be
-inspected by operators but cannot create a branch or pull request.
+The base service forces `CODEGEN_ROLLOUT_STAGE=offline`, exposes no host port,
+and mounts no Docker socket. It can be inspected by operators but cannot create
+a branch or pull request.
 
-The repository retains evaluation and publication components for continued
-development, but no supported OSS release command enables them. Do not treat
-the development or evaluated overlays as deployment templates for this release.
+## Secure tenant draft runtime
 
-## Experimental evaluation and publication tooling
+`tenant_draft_pr` is the production draft-publication capability. It accepts no
+deployment-level provider model or credential. Every request resolves the
+project's active editor and helper assignments and obtains one phase-bound
+credential from the local broker.
 
-The evaluation corpus covers Node, Python, Go, Rust, JVM, and .NET repositories
-with digest-bound synthetic defects. A sealed controller owns the corpus,
-mutation labels, harness, rollout policy, and oracles. It launches the exact
-production sandbox image once per case through Docker. That candidate image
-contains the real Aider editor but deliberately excludes the sealed corpus,
-fixtures, and oracle files; it receives only an opaque invocation identity,
-public task, isolated mutated workspace, behavior configuration, and matching
-model-provider credential. Neither side receives GitHub, PostgreSQL, APDL, or
-SSH credentials during evaluation.
-
-Rollout stages are strict capabilities:
-
-1. `offline` runs the fixture corpus and is the service default; changeset
-   publication endpoints are disabled.
-2. `shadow` runs generation without branch or PR capability.
-3. `reviewed_pr` requires a valid operator bundle and always opens a draft PR.
-4. `low_risk_canary` is reserved for promotion evidence from reviewed PRs.
-   `rollout_policy@4` deliberately denies it until real GitHub CI/review
-   observations are represented by a later policy contract.
-
-`development_pr` is not a step in this evaluated progression. It remains an
-internal development capability and cannot produce an evaluation bundle or
-satisfy `reviewed_pr` authorization. It is not enabled by `make dev-core` or
-`make dev-all` and is outside the OSS developer-preview support boundary.
-
-### Run the real candidate evaluation
-
-Run the operator workflow from the repository root. Export only the provider
-credential matching the selected model; do not pass the repository `.env` into
-the evaluation container:
+Build and validate the three runtime images, apply migrations, then start the
+tenant overlay:
 
 ```bash
-export CODEGEN_MODEL=claude-opus-4-8
-export ANTHROPIC_API_KEY=... # use your secret manager or current shell
-
-# Optional. Defaults to the current Git commit only for a clean worktree. A
-# dirty tree must be committed or given a distinct tag-safe revision.
 export CODEGEN_REVISION="$(git rev-parse HEAD)"
-
-# Optional name override. Otherwise the workflow creates a unique temporary
-# controller-owned proxy-socket volume and removes it after evaluation.
-export CODEGEN_EVALUATION_SOCKET_VOLUME=apdl-codegen-evaluation-egress
-
-make evaluate-codegen
-```
-
-This command:
-
-1. builds the API image as the sealed evaluation controller;
-2. builds `Dockerfile.worker` as the production candidate, labels it with the
-   exact revision, and verifies that it contains no corpus/oracle assets;
-3. builds the checked-in Squid policy, exports it only through an attested Unix
-   socket volume, and actively probes metadata/private/direct bypasses from the
-   immutable controller image;
-4. resolves all three images to immutable local `sha256:...` image IDs and uses
-   those IDs for the evaluation itself;
-5. gives only the controller the Docker socket and a host/container same-path
-   temporary bind, so sibling candidate mounts resolve through the host daemon;
-6. forwards only an explicit model-provider and behavior-setting allowlist; and
-7. evaluates and builds the publication bundle in one trusted invocation using
-   the checked-in strict `rollout_policy_v4.json`.
-
-Every candidate container runs with Docker `--network none`, mounts the proxy
-socket volume read-only, and starts a sealed loopback TCP-to-Unix relay so
-standard HTTP proxy clients continue to work. The run persists controller-made,
-launch-ID-bound attestation digests for every measured case. The run and bundle
-content-address the exact controller image ID, candidate image ID, proxy image
-ID, network-none socket transport, reviewed concurrency of one, egress-policy
-digest, revision, and normalized non-secret behavior configuration. Provider
-credentials are excluded, but model/helper routing, Aider path, prompt/review
-toggles, retries, contract settings, timeouts, and provider endpoints are bound.
-Changing any bound value makes the service reject the old bundle at startup.
-
-It never builds publication authority from `--results`. Existing result files
-may be inspected or re-aggregated, but only a just-completed trusted Docker run
-may emit `publication-bundle.json`.
-
-Artifacts default to
-`local-files/codegen-rollouts/$CODEGEN_REVISION/` (already ignored by Git):
-
-```text
-controller-image-id.txt
-candidate-image-id.txt
-egress-proxy-image-id.txt
-rollout-policy.json
-evaluation-run.json
-evaluation-report.json
-evaluation-segments.json
-publication-bundle.json
-```
-
-Override that absolute destination with `CODEGEN_EVALUATION_ARTIFACT_DIR`. The
-controller image retains sealed evaluation material, so treat it as an operator
-artifact. The production candidate image is the only image that may run model
-work against a fixture or customer repository.
-
-`CODEGEN_REVISION` names the evaluated orchestration candidate; the strict
-candidate identity additionally binds the exact images and effective behavior.
-Use a new revision whenever source or behavior changes so artifacts remain
-separate and auditable. Even if an old revision is reused accidentally, the
-identity digest prevents its bundle from authorizing different behavior.
-
-The checked-in `rollout_policy@4` gates reviewed draft-PR publication on the
-overall metrics and on every risk, ecosystem, and task-type segment produced by
-the sealed offline harness. Each segment must meet its minimum sample and
-eligible escaped-defect denominator, with zero escaped defects. The current
-eight-case corpus intentionally cannot satisfy the default two-sample segment
-floor for every slice, so operators must expand the sealed corpus before
-reviewed publication can be authorized. GitHub CI, human review, merge, revert,
-and post-merge outcomes remain unavailable during this run and are never
-fabricated. Those external observations are required for later
-canary/expansion decisions.
-
-### Deploy the evaluated candidate
-
-Review the report and bundle, keep the model-provider and behavior variables
-identical to the evaluated values, then use the shipped egress and rollout
-Compose overlays:
-
-```bash
-unset CODEGEN_SANDBOX_NETWORK
-# Optional; Make otherwise derives a policy-addressed production volume name.
-export CODEGEN_EGRESS_SOCKET_VOLUME=apdl-codegen-reviewed-egress
+make build-codegen-runtime
 make migrate-postgres
-make codegen-reviewed-config
-make codegen-reviewed-up
+make codegen-tenant-config
+make codegen-tenant-up
 ```
 
-The Make target reads all three image-ID files, verifies revision, role, and
-egress-policy labels, mounts `publication-bundle.json` read-only at
-`/run/apdl/codegen/publication-bundle.json`, and recreates Codegen with
-`reviewed_pr` without rebuilding or pulling. The exact evaluated controller ID
-runs the API and the exact evaluated candidate ID runs each production sandbox.
-The exact evaluated proxy ID attaches only to the Compose uplink and exports
-Squid through the controller-owned Unix socket volume. Workers have no Docker
-network, mount that volume read-only, and can reach only the loopback relay.
-Startup and pre-launch attestation verifies the exact proxy image, entrypoint,
-command, image-defined healthcheck, non-root user, read-only root,
-privilege/capability/security settings, tmpfs and socket mounts, volume labels,
-absence of host-published ports, and the public uplink. Before and after each
-active probe, the proxy must be the socket volume's only running consumer. The
-immutable controller probe verifies absolute-form HTTP denials for metadata and
-private port-80 URLs, CONNECT denials, an allowed public CONNECT control, and
-direct public, private/metadata, and external-DNS isolation. Refusal or reset is
-treated as reachability failure, not as proof of blocking.
-The overlay derives the current user's UID/GID and Docker socket group, which
-supports both Linux Docker hosts and Docker Desktop's user-owned socket.
+The build targets tag local images for convenience. `codegen-tenant-config`
+resolves those tags to exact local `sha256:...` image IDs and rejects a mutable
+controller, worker, or proxy reference. It also verifies the controller and
+worker revision/role labels, the proxy's checked-in policy digest, the Docker
+socket and group, the broker directory, and the rendered Compose contract. The
+overlay hard-codes `tenant_draft_pr`; ambient host settings cannot promote the
+offline base service.
 
-Migration `026_codegen_egress_publication.sql` archives active evaluated
-authorization JSON that predates egress attestation. New evaluated writes are
-constrained to `publication_authorization@4` /
-`publication_request@3`, where the requested and expected egress-policy digests
-must be canonical and equal.
+Workers run with Docker `--network none`, mount the controller-owned proxy socket
+volume read-only, and use a loopback TCP-to-Unix relay for standard HTTP clients.
+Startup and every worker launch revalidate the proxy image, healthcheck,
+non-root/read-only security settings, socket topology, public uplink, and active
+metadata/private/direct-bypass probes. The allowlist covers only checked-in
+GitHub, model-provider, and package-registry destinations.
 
 The overlay mounts a Docker control socket into the credential-bearing Codegen
-API. That is sufficient for a single-operator self-hosted machine but grants
-host-root-equivalent container authority. Production deployments should replace
-it with a dedicated rootless or policy-constrained worker launcher. Merely
-naming a Docker object is not treated as proof: evaluated startup and every
-worker launch revalidate the effective proxy/volume topology and run the
-controller-owned active deny probe.
-Destination policy lives in `infra/docker/codegen-egress/`; changing any policy
-source changes the digest and invalidates prior evaluation evidence.
+API. That grants host-root-equivalent container authority; production operators
+should prefer a dedicated rootless or policy-constrained worker launcher. The
+destination policy lives in `infra/docker/codegen-egress/`; changing it changes
+the required `CODEGEN_EGRESS_POLICY_SHA256` and proxy image identity.
+
+For local draft-PR development, `docker-compose.codegen-development.yml` remains
+an explicit `development_pr` mode with a mutable worker and unfiltered named
+bridge. It is not a production deployment template.
 
 Two auxiliary LLM passes bracket the edit. Low-risk work may skip them when the
 model is unavailable; medium/high-risk work fails closed. `CODEGEN_BRIEF` compiles the
@@ -490,8 +436,8 @@ criteria), and `CODEGEN_REVIEW` judges the produced diff against the original
 spec before the push. A review rejection re-invokes the agent with feedback
 (`CODEGEN_EDIT_RETRIES`, default 1) before the changeset fails; the retry message
 re-carries the full work order, since each aider
-invocation is a fresh process. `CODEGEN_HELPER_MODEL` runs these passes on a
-different model than the editor (default: `CODEGEN_MODEL`).
+invocation is a fresh process. Tenant execution runs these passes with the
+project's helper assignment; edit and repair use its editor assignment.
 
 GitHub merge observation records the merge commit SHA, and `/revert` uses it deterministically:
 the editor fetches the commit into the shallow clone and runs `git revert`
@@ -608,40 +554,34 @@ The editor sits behind the `Editor` interface; *how/where* it runs is config:
   and model-created symlinks are rejected before they can enter evidence or
   persisted prompts.
 - **Trusted local in-process (`CODEGEN_SANDBOX=in-process`)** — available only
-  with `CODEGEN_TRUSTED_REPOS_ONLY=true` while the rollout is `offline` or
-  `shadow`. The service refuses this mode for every PR publication stage.
+  with `CODEGEN_TRUSTED_REPOS_ONLY=true` while publication is `offline`. The
+  service refuses this mode for every PR publication stage.
 
 Enable the sandbox:
 
 ```bash
-make build-codegen-sandbox        # revision-labeled production candidate
+make build-codegen-sandbox        # revision-labeled production worker
 export CODEGEN_SANDBOX=docker
 unset CODEGEN_SANDBOX_NETWORK
-# For Compose deployment use docker-compose.codegen-rollout.yml via
-# `make codegen-reviewed-up`; it mounts the host's explicit Docker socket path.
+# `make codegen-tenant-up` mounts the explicit Docker socket and immutable images.
 ```
 
 The local `development_pr` overlay creates an explicitly development-only bridge
-that is not egress-filtered. Evaluated PR stages reject every configured sandbox
-network and require `--network none`, the shipped proxy image, exact policy
+that is not egress-filtered. `tenant_draft_pr` rejects every configured sandbox
+network and requires `--network none`, the shipped proxy image, exact policy
 digest, controller-owned socket volume, exact proxy runtime configuration, and
 successful controller probes. The allowlist
 covers only the checked-in GitHub, model-provider, and package-registry domains;
 private, link-local, metadata, reserved, and direct non-proxy egress are denied.
 The same topology and probes are re-attested immediately before every
-inspection, editor, and evaluation container. Reviewed deployment also
-hard-pins and content-binds `CODEGEN_MAX_CONCURRENT_JOBS=1`.
+inspection and editor container. Tenant deployment also hard-pins
+`CODEGEN_MAX_CONCURRENT_JOBS=1`.
 Tunables: `CODEGEN_SANDBOX_IMAGE`, `CODEGEN_SANDBOX_MEMORY`,
 `CODEGEN_SANDBOX_CPUS`, `CODEGEN_SANDBOX_PIDS`, `CODEGEN_DOCKER_BIN`. Mounting a
 Docker socket still grants the API process host-level Docker authority; deploy
 the API and worker launcher on a dedicated host or use a remote worker boundary.
 
-## Going live (future design; unsupported in 0.3.0)
-
-Nothing in this section is a 0.3.0 deployment procedure. The worker image and
-its dependencies are release-built and vulnerability-gated, but publication
-credentials, external GitHub controls, sandbox deployment, and rollout
-overlays remain outside the supported deployment boundary.
+## Production prerequisites
 
 The autonomous loop runs once these external pieces are set up:
 
@@ -657,16 +597,15 @@ The autonomous loop runs once these external pieces are set up:
    `make grant-codegen-repository` as described in
    [Repository authority](#repository-authority). Never provision a repository
    through a tenant API key or an unverified installation ID.
-2. **Provision and evaluate the coding agent.** Make `aider` available where
+2. **Provision the coding agent.** Make `aider` available where
    the editor runs
    — `uv pip install -e ".[agent]"` on the codegen host for v1, or build the
    hardened sandbox image (`Dockerfile.worker`) to run one changeset per
-   container. Set `CODEGEN_MODEL` and the matching provider key (e.g.
-   `ANTHROPIC_API_KEY`). Run the offline/shadow corpus for the exact model and
-   immutable `CODEGEN_REVISION`, review the report, and mount the resulting
-   operator bundle before selecting a PR rollout stage. Optionally set each
-   repo's test command through connection `tenant_policy.test_cmd` (otherwise it is
-   auto-detected).
+   container. Create the project's provider connections and atomically assign
+   its editor and helper models as described above. Build the immutable runtime,
+   validate it with `make codegen-tenant-config`, and start it with
+   `make codegen-tenant-up`. Optionally set each repo's test command through
+   connection `tenant_policy.test_cmd` (otherwise it is auto-detected).
 3. **Add a repo webhook** → configure a non-empty `GITHUB_WEBHOOK_SECRET`, then
    point GitHub at `POST /webhooks/github` with events `pull_request`,
    `check_run`, `check_suite`, and `status`. An unset secret disables the
@@ -675,8 +614,8 @@ The autonomous loop runs once these external pieces are set up:
    reviews, and green checks). GitHub is the enforcement and merge authority.
 
 Flow: an approved feature proposal enqueues a `code_implementation` run (agents
-service) → `POST /v1/changesets` → the job recomputes and persists the rollout
-decision → only an allowed decision permits minting a repo token → the Aider
+service) → `POST /v1/changesets` → the job recomputes and persists publication
+authority → only an allowed decision permits minting a repo token → the Aider
 editor in a sandboxed clone returns a gated patch and exact tree identity → the
 controller reconstructs and publishes that tree with a just-in-time write
 credential, then recovers or opens one branch-bound PR (draft when policy or

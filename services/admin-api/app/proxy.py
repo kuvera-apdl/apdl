@@ -415,6 +415,28 @@ def required_role(service: str, method: str, path: str) -> str | None:
             return "agents:manage"
         return ""
     if service == "codegen":
+        if path.startswith("/v1/llm-connections"):
+            provider_path = (
+                r"/v1/llm-connections/"
+                r"(?:openai|anthropic|google|xai)"
+            )
+            if method == "GET" and (
+                path == "/v1/llm-connections"
+                or re.fullmatch(provider_path + r"/models", path) is not None
+            ):
+                return "agents:read"
+            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
+                return _LLM_CONNECTION_MANAGER
+            if (
+                method == "POST"
+                and re.fullmatch(
+                    provider_path + r"/(?:refresh-models|revoke)",
+                    path,
+                )
+                is not None
+            ):
+                return _LLM_CONNECTION_MANAGER
+            return ""
         if method == "GET" and (
             path.startswith("/v1/changesets") or path.startswith("/v1/connections/")
         ):
@@ -627,14 +649,18 @@ async def proxy_service(
     )
 
     ephemeral_credential_id: str | None = None
-    require_human_actor = service == "agents" and (
-        request.method not in _SAFE_METHODS
-        or upstream_path == "/v1/agents/setup"
-    )
+    require_human_actor = (
+        service == "agents"
+        and (
+            request.method not in _SAFE_METHODS
+            or upstream_path == "/v1/agents/setup"
+        )
+    ) or role == _LLM_CONNECTION_MANAGER
     credential_roles = roles
     if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
         # Grant only the upstream read capability needed by this management
-        # surface. Agents rechecks live authority inside mutation transactions.
+        # surface. The receiving service rechecks live authority inside
+        # mutation transactions.
         credential_roles = frozenset({"agents:read"})
     api_key, ephemeral_credential_id = await _service_credential(
         request,

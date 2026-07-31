@@ -14,7 +14,7 @@
 # Hardened at deploy time (beyond the docker-run caps the orchestrator already sets
 # — --cap-drop ALL, no-new-privileges, pids/memory/cpu limits, non-root):
 #   * read-only root filesystem + a writable /workspace (tmpfs or emptyDir)
-#   * Docker --network none + a read-only attested proxy Unix socket; a sealed
+#   * Docker --network none + a read-only attested proxy Unix socket; a trusted
 #     loopback relay preserves normal HTTP proxy clients without bridge access
 #   * direct public, APDL, private, link-local, metadata, and DNS egress probes
 # Each phase consumes one strict, bounded, versioned stdin envelope; task data
@@ -39,27 +39,13 @@ RUN npm install --global --ignore-scripts --no-audit --no-fund --omit=optional \
     && test "$(node -p "require('/usr/local/lib/node_modules/pyright/package.json').version")" \
         = "${IMAGE_PYRIGHT_VERSION}"
 
-# The evaluation controller contains sealed corpus/oracle material. The candidate
-# must run the same production editor without receiving those answers. Prune them
-# in an intermediate stage, then copy only that pruned tree into the final image;
-# deleting them after a direct COPY would leave them recoverable from an image
-# layer.
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS candidate-source
-WORKDIR /candidate
-COPY app/ app/
-RUN rm -rf \
-        app/evaluations/fixtures \
-        app/evaluations/corpus_v2.json \
-        app/evaluations/oracles_v1.json \
-    && find app -type d -name __pycache__ -prune -exec rm -rf '{}' +
-
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 ARG CODEGEN_REVISION
 RUN test -n "$CODEGEN_REVISION" \
     && test "$CODEGEN_REVISION" != "development-unversioned"
 LABEL org.opencontainers.image.revision="$CODEGEN_REVISION" \
       dev.apdl.codegen.revision="$CODEGEN_REVISION" \
-      dev.apdl.codegen.role="candidate"
+      dev.apdl.codegen.role="worker"
 # git: clone/commit. Node 20 LTS and npm come from an immutable official image;
 # sanitized exact-lock contract inspection for JS/TS repositories needs them.
 ARG DEBIAN_SNAPSHOT=20260623T000000Z
@@ -75,16 +61,15 @@ COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack
-# Install the pinned, model-agnostic Aider engine, then copy the pruned APDL
-# source directly. Both production and evaluation invoke explicit Python
-# modules, avoiding a build-isolation dependency download for the local package.
+# Install the pinned, model-agnostic Aider engine, then copy the APDL source;
+# .dockerignore excludes generated Python artifacts from both Codegen images.
 COPY requirements-agent.lock /tmp/requirements-agent.lock
 COPY scripts/verify_aider_distribution.py /tmp/verify-aider-distribution.py
 RUN pip install --no-cache-dir --no-deps --require-hashes \
         -r /tmp/requirements-agent.lock \
     && python /tmp/verify-aider-distribution.py \
     && rm /tmp/requirements-agent.lock /tmp/verify-aider-distribution.py
-COPY --from=candidate-source /candidate/app /app/app
+COPY app/ /app/app
 COPY sandbox/run_changeset.py /app/run_changeset.py
 RUN useradd --create-home --uid 1000 agent \
     && mkdir -p /workspace \

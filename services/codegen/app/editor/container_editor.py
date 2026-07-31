@@ -9,8 +9,8 @@ tree and resolves dependency contracts. The untrusted repo code therefore never
 executes in the API container that holds the GitHub App key, the Postgres DSN,
 and the internal token. The repository credential and each phase's complete task
 request are consumed from bounded stdin contracts rather than process metadata.
-Only the second container receives the model provider key. It returns a binary
-patch and Git object identities;
+Only the second container can request one just-in-time provider credential from
+the controller-owned broker. It returns a binary patch and Git object identities;
 the controller reconstructs and publishes the approved tree with a separate
 just-in-time write credential.
 
@@ -24,10 +24,10 @@ verified-cleanup path has a daemon-backed smoke contract. A live model/repositor
 edit still requires deployment credentials and remains an external integration.
 
 Hardening applied here via ``docker run`` flags: ``--rm``, ``--network none``
-for evaluated work, a read-only root,
+for tenant publication work, a read-only root,
 writable no-exec tmpfs mounts, ``--cap-drop ALL``, ``--security-opt
 no-new-privileges``, and pids/memory/cpu caps; the image runs non-root.
-Evaluated stages mount only an attested proxy Unix-socket volume read-only and
+Tenant publication mounts only an attested proxy Unix-socket volume read-only and
 start a sealed loopback relay. Local development uses a separate
 development-only bridge.
 """
@@ -40,9 +40,11 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import uuid
 from dataclasses import replace
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -53,6 +55,7 @@ from app.config import (
     codegen_egress_proxy_url,
     codegen_egress_socket_volume,
     codegen_job_budget,
+    codegen_llm_broker_dir,
 )
 from app.contracts.models import ContractBundle
 from app.egress import (
@@ -63,10 +66,7 @@ from app.egress import (
     worker_socket_mount,
 )
 from app.editor.base import EditRequest, EditResult
-from app.editor.environment import (
-    CODEGEN_BEHAVIOR_ENV,
-    resolve_model_provider_environment,
-)
+from app.editor.environment import CODEGEN_BEHAVIOR_ENV
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.worker_contract import (
     encode_codegen_preparation_request,
@@ -89,13 +89,12 @@ from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE = "apdl-codegen-sandbox:latest"
+_DEFAULT_IMAGE = "apdl-codegen-worker:latest"
 _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 
-# Provider keys forwarded into the sandbox by NAME only (docker reads them from
-# our process env), so their VALUES never appear on the docker argv / process
-# list. The GitHub App private key, Postgres DSN, and internal token are
-# deliberately absent — the sandbox must not receive them.
+# Provider credentials are never forwarded through Docker environment or argv.
+# The bounded worker stdin envelope carries only this job's ephemeral authority;
+# the GitHub App private key, Postgres DSN, and internal token remain absent.
 # Editor knobs (non-secret) forwarded into the sandbox so the AiderEditor
 # inside behaves EXACTLY like the in-process one — an operator's timeouts,
 # fail-closed posture, and auxiliary-pass toggles must not silently revert to
@@ -130,8 +129,6 @@ class ContainerAiderEditor:
     ) -> None:
         self._image = image or os.getenv("CODEGEN_SANDBOX_IMAGE", _DEFAULT_IMAGE)
         self._docker = docker_bin or os.getenv("CODEGEN_DOCKER_BIN", "docker")
-        self._model = os.getenv("CODEGEN_MODEL", "claude-opus-4-8")
-        self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
         self._memory = os.getenv("CODEGEN_SANDBOX_MEMORY", "2g")
         self._cpus = os.getenv("CODEGEN_SANDBOX_CPUS", "2")
         self._pids = os.getenv("CODEGEN_SANDBOX_PIDS", "512")
@@ -159,7 +156,7 @@ class ContainerAiderEditor:
             )
         if configured_egress and self._network:
             raise ValueError(
-                "evaluated workers use Docker --network none; "
+                "tenant publication workers use Docker --network none; "
                 "CODEGEN_SANDBOX_NETWORK must be empty"
             )
         self._proxy_environment = (
@@ -180,10 +177,10 @@ class ContainerAiderEditor:
     ) -> None:
         """Fail PR-stage startup unless Docker, image, and network are real.
 
-        Evaluated stages additionally require the exact immutable sandbox image
+        Tenant publication additionally requires the exact immutable sandbox image
         bound into their evidence. Local development may use a rebuilt tag, but
         it still validates the daemon, image revision label, and isolated named
-        network before the API accepts work. Offline/shadow can boot without a
+        network before the API accepts work. Offline/local use can boot without a
         Docker daemon because their changeset endpoints are disabled.
         """
         if not expected_revision or expected_revision == "development-unversioned":
@@ -229,7 +226,7 @@ class ContainerAiderEditor:
                 and self._controller_image_id
             ):
                 raise RuntimeError(
-                    "evaluated PR rollout requires an attested Codegen egress policy"
+                    "tenant draft publication requires an attested Codegen egress policy"
                 )
             self._egress_attestation = self._attest_egress_policy(
                 launch_id="codegen-runtime-startup"
@@ -253,7 +250,7 @@ class ContainerAiderEditor:
             and self._controller_image_id
         ):
             raise RuntimeError(
-                "evaluated worker launch requires an attested Codegen egress policy"
+                "tenant worker launch requires an attested Codegen egress policy"
             )
         return attest_docker_egress_policy(
             docker_bin=self._docker,
@@ -309,16 +306,16 @@ class ContainerAiderEditor:
             )
             return self._parse_result(rc, out, err, editor_request)
         except Exception as exc:  # an attempt must never raise to the job runner
-            logger.exception("Sandboxed edit failed for %s", request.repo)
-            return EditResult(success=False, branch=request.branch, error=str(exc))
-
-    def _selected_provider_environment(self) -> dict[str, str]:
-        """Resolve the exact credential/routing union required by both models."""
-        return resolve_model_provider_environment(
-            os.environ,
-            model=self._model,
-            helper_model=self._helper_model,
-        )
+            logger.error(
+                "Sandboxed edit failed for %s with %s",
+                request.repo,
+                type(exc).__name__,
+            )
+            return EditResult(
+                success=False,
+                branch=request.branch,
+                error=f"Sandboxed editor failed with {type(exc).__name__}",
+            )
 
     def _docker_argv(
         self,
@@ -329,15 +326,36 @@ class ContainerAiderEditor:
         """Assemble the model-bearing editor command after source attestation."""
         if request.repository_preparation is None:
             raise ValueError("sandbox editor requires repository preparation evidence")
+        if request.llm_execution is None:
+            raise ValueError(
+                "sandbox editor requires project LLM execution authority"
+            )
+        socket_path = Path(request.llm_execution.socket_path)
+        lexical_broker_root = Path(codegen_llm_broker_dir())
+        lexical_broker_directory = socket_path.parent
+        broker_root = lexical_broker_root.resolve()
+        broker_directory = lexical_broker_directory.resolve()
+        try:
+            socket_stat = socket_path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("project LLM broker socket is unavailable") from exc
+        if (
+            broker_directory.parent != broker_root
+            or lexical_broker_directory.parent != lexical_broker_root
+            or socket_path.name != "broker.sock"
+            or not stat.S_ISSOCK(socket_stat.st_mode)
+        ):
+            raise ValueError("project LLM broker socket is not canonical")
         argv = self._sandbox_argv(container_name=container_name, role="editor")
         # Task data is carried exclusively by the bounded stdin contract. This
         # argv contains only sandbox/runtime configuration and provider-key
         # names, never task text, repository authority, or tenant policy.
         argv += [
-            "-e",
-            f"CODEGEN_MODEL={self._model}",
-            "-e",
-            f"CODEGEN_HELPER_MODEL={self._helper_model}",
+            "--mount",
+            (
+                f"type=bind,src={broker_directory},"
+                f"dst={lexical_broker_directory},readonly"
+            ),
             "-e",
             "HOME=/workspace/home",
             "-e",
@@ -348,10 +366,6 @@ class ContainerAiderEditor:
         for key in _CONFIG_ENV_FORWARD:
             if os.environ.get(key):
                 argv += ["-e", f"{key}={os.environ[key]}"]
-        # Provider secrets are forwarded by NAME only. Repository authority is
-        # absent from argv and environ and is consumed from stdin instead.
-        for key in self._selected_provider_environment():
-            argv += ["-e", key]
         if self._proxy_environment:
             argv += [
                 "--entrypoint",
@@ -439,10 +453,9 @@ class ContainerAiderEditor:
         return argv
 
     def _docker_env(self, request: EditRequest) -> dict[str, str]:
-        """Docker client environment carrying provider keys, never Git authority."""
-        env = self._docker_control_env()
-        env.update(self._selected_provider_environment())
-        return env
+        """Docker client environment with no provider or repository authority."""
+        del request
+        return self._docker_control_env()
 
     @staticmethod
     def _docker_control_env() -> dict[str, str]:
@@ -458,19 +471,29 @@ class ContainerAiderEditor:
     ) -> EditResult:
         data = _last_json(stdout)
         if data is not None:
+            success = bool(data.get("success"))
+            tenant_execution = request.llm_execution is not None
             return EditResult(
-                success=bool(data.get("success")),
+                success=success,
                 branch=data.get("branch") or request.branch,
                 diff_stat=data.get("diff_stat") or {},
                 changed_paths=data.get("changed_paths") or [],
                 diff_text=data.get("diff_text") or "",
-                error=data.get("error"),
+                error=(
+                    "Sandboxed editor did not complete successfully"
+                    if tenant_execution and not success
+                    else data.get("error")
+                ),
                 logs_uri=data.get("logs_uri"),
                 head_sha=data.get("head_sha"),
                 base_sha=data.get("base_sha"),
                 candidate_tree_sha=data.get("candidate_tree_sha"),
                 patch_base64=data.get("patch_base64"),
-                prompts=data.get("prompts") or [],
+                prompts=(
+                    []
+                    if tenant_execution and not success
+                    else data.get("prompts") or []
+                ),
                 contract_bundle=(
                     ContractBundle.model_validate(data["contract_bundle"])
                     if data.get("contract_bundle") is not None
@@ -528,6 +551,12 @@ class ContainerAiderEditor:
                     if data.get("review_verdict") is not None
                     else None
                 ),
+            )
+        if request.llm_execution is not None:
+            return EditResult(
+                success=False,
+                branch=request.branch,
+                error=f"sandbox produced no valid result (exit {rc})",
             )
         tail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
         return EditResult(

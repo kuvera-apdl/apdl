@@ -7,7 +7,11 @@ secrets-off-argv property, result parsing, and that an attempt never raises.
 
 import asyncio
 import json
+import socket
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +25,7 @@ from app.editor.worker_contract import (
     encode_codegen_worker_request,
 )
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.llm.contracts import LlmExecutionAuthority
 from app.profiling import RepoProfile
 from app.requirements import compile_requirement_ledger
 from app.runtime.models import (
@@ -47,9 +52,38 @@ def _default_container_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-provider-key")
 
 
+@pytest.fixture
+def llm_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[LlmExecutionAuthority]:
+    with tempfile.TemporaryDirectory(
+        prefix="apdl-llm-test-",
+        dir="/tmp",
+    ) as temporary_root:
+        broker_root = Path(temporary_root).resolve()
+        broker_directory = broker_root / "job"
+        broker_directory.mkdir()
+        socket_path = broker_directory / "broker.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(socket_path.as_posix())
+        listener.listen(1)
+        monkeypatch.setenv("CODEGEN_LLM_BROKER_DIR", broker_root.as_posix())
+        try:
+            yield LlmExecutionAuthority(
+                socket_path=socket_path.as_posix(),
+                token="test-broker-capability-" + ("x" * 43),
+                editor_model="openai/gpt-5.4-mini",
+                helper_model="anthropic/claude-haiku-4-5-20251001",
+                allowed_phases=("brief", "edit", "review"),
+            )
+        finally:
+            listener.close()
+
+
 def _req(**over) -> EditRequest:
     base = dict(
         repo="acme/widgets",
+        changeset_id="cs_container_test",
         base_branch="main",
         branch="apdl/x",
         token="ghs_secrettoken",
@@ -64,9 +98,9 @@ def _req(**over) -> EditRequest:
     return request
 
 
-def test_docker_argv_has_hardening_and_image_last():
+def test_docker_argv_has_hardening_and_image_last(llm_execution):
     editor = ContainerAiderEditor(image="apdl-sandbox:test")
-    argv = editor._docker_argv(_req())
+    argv = editor._docker_argv(_req(llm_execution=llm_execution))
     assert argv[:3] == ["docker", "run", "--rm"]
     assert "--cap-drop" in argv and "ALL" in argv
     assert "no-new-privileges" in argv
@@ -78,20 +112,22 @@ def test_docker_argv_has_hardening_and_image_last():
     assert argv[-1] == "apdl-sandbox:test"  # image is the final arg
 
 
-def test_docker_argv_names_container_for_forced_cleanup():
+def test_docker_argv_names_container_for_forced_cleanup(llm_execution):
     argv = ContainerAiderEditor()._docker_argv(
-        _req(), container_name="apdl-codegen-test"
+        _req(llm_execution=llm_execution),
+        container_name="apdl-codegen-test",
     )
     name_index = argv.index("--name")
     assert argv[name_index + 1] == "apdl-codegen-test"
 
 
-def test_docker_argv_contains_no_task_request_values():
+def test_docker_argv_contains_no_task_request_values(llm_execution):
     request = _req(
         title="sentinel-title",
         spec="sentinel task secret",
         constraints=["sentinel-constraint"],
         test_cmd="sentinel-test-command",
+        llm_execution=llm_execution,
     )
     editor = ContainerAiderEditor()
     argv = " ".join(editor._docker_argv(request))
@@ -111,24 +147,32 @@ def test_docker_argv_contains_no_task_request_values():
     assert "HOME=/workspace/home" in argv
 
 
-def test_worker_envelope_carries_effective_safety_policy_and_revert_sha():
+def test_worker_envelope_carries_effective_safety_policy_and_revert_sha(
+    llm_execution,
+):
     safety_policy = resolve_effective_policy(
         TenantCodegenConnectionPolicy(gates=TenantCodegenGatesPolicy(max_files=5)),
         PlatformCodegenSafetyPolicy(),
     )
-    req = _req(safety_policy=safety_policy, revert_sha="cafebabe")
+    req = _req(
+        safety_policy=safety_policy,
+        revert_sha="cafebabe",
+        llm_execution=llm_execution,
+    )
     envelope = decode_codegen_worker_request(encode_codegen_worker_request(req))
     assert envelope.safety_policy == safety_policy
     assert envelope.safety_policy_sha256 == safety_policy.canonical_digest()
     assert envelope.revert_sha == "cafebabe"
 
 
-def test_docker_argv_forwards_editor_config(monkeypatch):
+def test_docker_argv_forwards_editor_config(monkeypatch, llm_execution):
     # The sandboxed AiderEditor must behave exactly like the in-process one:
     # operator knobs (fail-closed posture, timeouts, pass toggles) ride along.
     monkeypatch.setenv("CODEGEN_REQUIRE_VERIFY", "false")
     monkeypatch.setenv("CODEGEN_CONVENTIONS", "false")
-    argv = " ".join(ContainerAiderEditor()._docker_argv(_req()))
+    argv = " ".join(
+        ContainerAiderEditor()._docker_argv(_req(llm_execution=llm_execution))
+    )
     assert "CODEGEN_REQUIRE_VERIFY=false" in argv
     assert "CODEGEN_CONVENTIONS=false" in argv
 
@@ -146,7 +190,7 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
 def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(
     monkeypatch,
 ):
-    revision = "evaluated-revision"
+    revision = "tenant-revision"
     image = "sha256:" + "a" * 64
     policy = "b" * 64
     proxy_image = "sha256:" + "c" * 64
@@ -195,7 +239,7 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(
 
 def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch):
     revision = "local-development"
-    image = "apdl-codegen-sandbox:local-development"
+    image = "apdl-codegen-worker:local-development"
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-development")
     calls: list[list[str]] = []
     responses = iter(["27.5.1", revision, "[]"])
@@ -226,7 +270,10 @@ def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch)
     ]
 
 
-def test_attested_worker_uses_network_none_socket_configuration(monkeypatch):
+def test_attested_worker_uses_network_none_socket_configuration(
+    monkeypatch,
+    llm_execution,
+):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
         "CODEGEN_EGRESS_PROXY_IMAGE_ID",
@@ -238,7 +285,7 @@ def test_attested_worker_uses_network_none_socket_configuration(monkeypatch):
         "sha256:" + "d" * 64,
     )
 
-    argv = ContainerAiderEditor()._docker_argv(_req())
+    argv = ContainerAiderEditor()._docker_argv(_req(llm_execution=llm_execution))
 
     assert argv[argv.index("--network") + 1] == "none"
     socket_mount = argv[argv.index("--mount") + 1]
@@ -250,7 +297,7 @@ def test_attested_worker_uses_network_none_socket_configuration(monkeypatch):
 
 
 @pytest.mark.parametrize("network", ["bridge", "default", "host", "none", "custom"])
-def test_evaluated_runtime_rejects_any_configured_network(monkeypatch, network):
+def test_tenant_runtime_rejects_any_configured_network(monkeypatch, network):
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
@@ -267,7 +314,7 @@ def test_evaluated_runtime_rejects_any_configured_network(monkeypatch, network):
         ContainerAiderEditor(image="sha256:" + "a" * 64)
 
 
-def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
+def test_pr_runtime_preflight_rejects_mutable_worker_image(monkeypatch):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
         "CODEGEN_EGRESS_PROXY_IMAGE_ID",
@@ -280,8 +327,8 @@ def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="immutable sandbox image digest"):
-        ContainerAiderEditor(image="apdl-codegen-sandbox:latest").assert_runtime_ready(
-            expected_revision="evaluated-revision"
+        ContainerAiderEditor(image="apdl-codegen-worker:latest").assert_runtime_ready(
+            expected_revision="tenant-revision"
         )
 
 
@@ -305,32 +352,88 @@ def test_pr_runtime_preflight_rejects_mismatched_image_revision(monkeypatch):
 
     with pytest.raises(RuntimeError, match="does not match CODEGEN_REVISION"):
         ContainerAiderEditor(image="sha256:" + "a" * 64).assert_runtime_ready(
-            expected_revision="evaluated-revision"
+            expected_revision="tenant-revision"
         )
 
 
-def test_secrets_are_passed_by_name_not_value(monkeypatch):
+def test_broker_capability_and_provider_secrets_never_enter_docker_argv(
+    monkeypatch,
+    llm_execution,
+):
     private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
     encoded_private_key = "Z2l0aHViLWFwcC1wcml2YXRlLWtleS1zZW50aW5lbA=="
     decoded_private_key = "github-app-private-key-sentinel"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secretvalue")
     monkeypatch.setenv(private_key_setting, encoded_private_key)
     editor = ContainerAiderEditor()
-    argv = editor._docker_argv(_req())
+    argv = editor._docker_argv(_req(llm_execution=llm_execution))
     joined = " ".join(argv)
-    # The provider key NAME is forwarded; repository authority is not.
-    assert "ANTHROPIC_API_KEY" in argv
+
+    assert "ANTHROPIC_API_KEY" not in argv
     assert "GH_TOKEN" not in argv
-    # ...but their VALUES never touch the argv.
     assert "ghs_secrettoken" not in joined
     assert "sk-ant-secretvalue" not in joined
-    # The App private key is never forwarded at all.
+    assert llm_execution.token not in joined
+    broker_directory = Path(llm_execution.socket_path).parent.as_posix()
+    assert (f"type=bind,src={broker_directory},dst={broker_directory},readonly") in argv
     assert private_key_setting not in argv
     assert encoded_private_key not in joined
     assert decoded_private_key not in joined
 
 
-def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
+def test_macos_tmp_symlink_uses_resolved_mount_source_and_lexical_destination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_resolve = Path.resolve
+    with tempfile.TemporaryDirectory(
+        prefix="apdl-macos-broker-",
+        dir="/tmp",
+    ) as lexical_root_value:
+        lexical_root = Path(lexical_root_value)
+        lexical_directory = lexical_root / "job"
+        lexical_directory.mkdir()
+        lexical_socket = lexical_directory / "broker.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(lexical_socket.as_posix())
+        listener.listen(1)
+        monkeypatch.setenv(
+            "CODEGEN_LLM_BROKER_DIR",
+            lexical_root.as_posix(),
+        )
+
+        def macos_resolve(
+            path: Path,
+            strict: bool = False,
+        ) -> Path:
+            value = path.as_posix()
+            root_value = lexical_root.as_posix()
+            if value == root_value or value.startswith(f"{root_value}/"):
+                return Path(f"/private{value}")
+            return real_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", macos_resolve)
+        authority = LlmExecutionAuthority(
+            socket_path=lexical_socket.as_posix(),
+            token="test-broker-capability-" + ("x" * 43),
+            editor_model="openai/gpt-5.4-mini",
+            helper_model="anthropic/claude-haiku-4-5-20251001",
+            allowed_phases=("brief", "edit", "review"),
+        )
+        try:
+            argv = ContainerAiderEditor()._docker_argv(
+                _req(llm_execution=authority)
+            )
+        finally:
+            listener.close()
+
+    expected = (
+        f"type=bind,src=/private{lexical_directory},"
+        f"dst={lexical_directory},readonly"
+    )
+    assert expected in argv
+
+
+def test_docker_env_carries_no_provider_repository_or_internal_secrets(
     monkeypatch,
 ):
     private_key_setting = "GITHUB_APP_PRIVATE_KEY_BASE64"
@@ -340,7 +443,7 @@ def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
     monkeypatch.setenv(private_key_setting, encoded_private_key)
     monkeypatch.setenv("APDL_INTERNAL_TOKEN", "internal")
     env = ContainerAiderEditor()._docker_env(_req())
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant-secretvalue"
+    assert "ANTHROPIC_API_KEY" not in env
     assert "GH_TOKEN" not in env
     assert private_key_setting not in env
     assert encoded_private_key not in env.values()
@@ -348,7 +451,10 @@ def test_docker_env_carries_provider_secrets_but_not_repository_or_internal(
     assert "APDL_INTERNAL_TOKEN" not in env
 
 
-def test_worker_forwards_exact_main_and_helper_provider_union(monkeypatch):
+def test_worker_uses_explicit_project_routing_and_ignores_ambient_models(
+    monkeypatch,
+    llm_execution,
+):
     monkeypatch.setenv("CODEGEN_MODEL", "openai/gpt-5")
     monkeypatch.setenv("CODEGEN_HELPER_MODEL", "gemini/gemini-2.5-flash")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
@@ -356,33 +462,50 @@ def test_worker_forwards_exact_main_and_helper_provider_union(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
     monkeypatch.setenv("GROQ_API_KEY", "unrelated-secret")
     editor = ContainerAiderEditor()
+    request = _req(llm_execution=llm_execution)
 
-    argv = editor._docker_argv(_req())
-    env = editor._docker_env(_req())
+    argv = editor._docker_argv(request)
+    env = editor._docker_env(request)
+    envelope = decode_codegen_worker_request(encode_codegen_worker_request(request))
 
-    assert "CODEGEN_MODEL=openai/gpt-5" in argv
-    assert "CODEGEN_HELPER_MODEL=gemini/gemini-2.5-flash" in argv
-    assert env["OPENAI_API_KEY"] == "openai-secret"
-    assert env["OPENAI_BASE_URL"] == "https://openai.example/v1"
-    assert env["GEMINI_API_KEY"] == "gemini-secret"
-    assert "GROQ_API_KEY" not in env
-    for name in (
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "GEMINI_API_KEY",
+    assert envelope.llm_execution == llm_execution
+    assert envelope.llm_execution.editor_model == "openai/gpt-5.4-mini"
+    assert envelope.llm_execution.helper_model == "anthropic/claude-haiku-4-5-20251001"
+    joined = " ".join(argv)
+    assert "CODEGEN_MODEL" not in joined
+    assert "CODEGEN_HELPER_MODEL" not in joined
+    for name in MODEL_PROVIDER_ENV:
+        assert name not in joined
+        assert name not in env
+    for value in (
+        "openai-secret",
+        "https://openai.example/v1",
+        "gemini-secret",
+        "unrelated-secret",
+        llm_execution.token,
     ):
-        assert name in argv
-    for value in ("openai-secret", "https://openai.example/v1", "gemini-secret"):
-        assert value not in argv
+        assert value not in joined
+        assert value not in env.values()
 
 
-def test_worker_rejects_ambiguous_gemini_credentials(monkeypatch):
+def test_ambient_ambiguous_provider_credentials_are_ignored(
+    monkeypatch,
+    llm_execution,
+):
     monkeypatch.setenv("CODEGEN_MODEL", "gemini/gemini-2.5-pro")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
     monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
 
-    with pytest.raises(ValueError, match="ambiguous credentials"):
-        ContainerAiderEditor()._docker_argv(_req())
+    request = _req(llm_execution=llm_execution)
+    editor = ContainerAiderEditor()
+    argv = editor._docker_argv(request)
+    environment = editor._docker_env(request)
+    joined = " ".join(argv)
+
+    assert "GEMINI_API_KEY" not in joined
+    assert "GOOGLE_API_KEY" not in joined
+    assert "gemini-secret" not in environment.values()
+    assert "google-secret" not in environment.values()
 
 
 def test_preflight_launch_uses_default_pid_isolation_and_no_provider_env(
@@ -566,7 +689,8 @@ async def test_implement_never_raises_on_docker_fault(monkeypatch):
     monkeypatch.setattr(editor, "_run_docker", boom)
     res = await editor.implement(_req())
     assert res.success is False
-    assert "docker daemon unreachable" in (res.error or "")
+    assert res.error == "Sandboxed editor failed with RuntimeError"
+    assert "docker daemon unreachable" not in (res.error or "")
 
 
 @pytest.mark.asyncio
@@ -586,12 +710,16 @@ async def test_oversized_task_is_rejected_before_any_container_launch(monkeypatc
     result = await editor.implement(request)
 
     assert result.success is False
-    assert "strict schema" in (result.error or "")
+    assert result.error == "Sandboxed editor failed with CodegenWorkerRequestError"
+    assert "x" * 20 not in (result.error or "")
     assert launched is False
 
 
 @pytest.mark.asyncio
-async def test_implement_reattests_egress_immediately_before_worker(monkeypatch):
+async def test_implement_reattests_egress_immediately_before_worker(
+    monkeypatch,
+    llm_execution,
+):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
         "CODEGEN_EGRESS_PROXY_IMAGE_ID",
@@ -639,7 +767,7 @@ async def test_implement_reattests_egress_immediately_before_worker(monkeypatch)
     monkeypatch.setattr(editor, "_attest_egress_policy", attest)
     monkeypatch.setattr(editor, "_run_docker", run)
 
-    result = await editor.implement(_req())
+    result = await editor.implement(_req(llm_execution=llm_execution))
 
     assert result.success is True
     assert events == [
@@ -972,7 +1100,7 @@ async def test_container_cleanup_raises_if_container_still_exists(monkeypatch, c
 
 
 @pytest.mark.asyncio
-async def test_implement_parses_a_successful_run(monkeypatch):
+async def test_implement_parses_a_successful_run(monkeypatch, llm_execution):
     editor = ContainerAiderEditor()
     preflight = json.dumps(
         {
@@ -998,7 +1126,7 @@ async def test_implement_parses_a_successful_run(monkeypatch):
         return 0, f"log line\n{payload}\n", "stderr noise"
 
     monkeypatch.setattr(editor, "_run_docker", fake_run)
-    res = await editor.implement(_req())
+    res = await editor.implement(_req(llm_execution=llm_execution))
     assert res.success is True
     assert res.diff_stat == {"files": 1}
     assert len(container_names) == 2
@@ -1009,9 +1137,12 @@ async def test_implement_parses_a_successful_run(monkeypatch):
     assert preparation_request.read_token == "ghs_secrettoken"
     assert preparation_request.repository == "acme/widgets"
     worker_request = decode_codegen_worker_request(launches[1][2])
-    assert worker_request.schema_version == "codegen_worker_request@2"
+    assert worker_request.schema_version == "codegen_worker_request@3"
     assert worker_request.read_token == "ghs_secrettoken"
     assert worker_request.spec == "do the thing"
+    assert worker_request.llm_execution == llm_execution
+    assert llm_execution.token not in " ".join(launches[1][0])
+    assert llm_execution.token not in launches[1][1].values()
     assert "GH_TOKEN" not in launches[0][1]
     assert "GH_TOKEN" not in launches[1][1]
 
@@ -1041,7 +1172,8 @@ async def test_failed_preflight_never_launches_provider_container(monkeypatch):
     result = await editor.implement(_req())
 
     assert result.success is False
-    assert "repository preflight failed" in (result.error or "")
+    assert result.error == "Sandboxed editor failed with RuntimeError"
+    assert "InspectionPathError" not in (result.error or "")
     assert len(launches) == 1
     assert "app.inspection.preflight_cli" in launches[0]
     assert "ANTHROPIC_API_KEY" not in launches[0]

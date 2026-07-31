@@ -20,12 +20,13 @@ from pydantic import (
 
 from app.editor.base import EditRequest
 from app.inspection.preparation import RepositoryPreparationEvidence
+from app.llm.contracts import LlmExecutionAuthority
 from app.requirements.models import RequirementLedger
 from app.runtime.models import RuntimeAcceptancePlan, RuntimeAcceptancePolicy
 from app.safety.policy import EffectiveCodegenSafetyPolicy
 
 CODEGEN_PREPARATION_REQUEST_SCHEMA_VERSION = "codegen_preparation_request@1"
-CODEGEN_WORKER_REQUEST_SCHEMA_VERSION = "codegen_worker_request@2"
+CODEGEN_WORKER_REQUEST_SCHEMA_VERSION = "codegen_worker_request@3"
 MAX_CODEGEN_PREPARATION_REQUEST_BYTES = 1024 * 1024
 MAX_CODEGEN_WORKER_REQUEST_BYTES = 8 * 1024 * 1024
 _REPOSITORY_PATTERN = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
@@ -47,6 +48,7 @@ class _CodegenWorkerRequestSource(_StrictModel):
     """Controller-owned request fields validated before any container launch."""
 
     read_token: StrictStr = Field(min_length=1, max_length=4096)
+    changeset_id: StrictStr = Field(max_length=128)
     repository: StrictStr = Field(
         min_length=3,
         max_length=256,
@@ -106,8 +108,9 @@ class CodegenPreparationRequest(_CodegenWorkerRequestSource):
 class CodegenWorkerRequest(_CodegenWorkerRequestSource):
     """Complete and sole task-bearing input accepted by the editor worker."""
 
-    schema_version: Literal["codegen_worker_request@2"]
+    schema_version: Literal["codegen_worker_request@3"]
     repository_preparation: RepositoryPreparationEvidence
+    llm_execution: LlmExecutionAuthority
 
     @model_validator(mode="after")
     def validate_preparation_binding(self) -> CodegenWorkerRequest:
@@ -131,12 +134,14 @@ class CodegenWorkerRequest(_CodegenWorkerRequestSource):
         """Reconstruct the in-process editor request after strict validation."""
         request = _source_to_edit_request(self)
         request.repository_preparation = self.repository_preparation
+        request.llm_execution = self.llm_execution
         return request
 
 
 def _source_to_edit_request(source: _CodegenWorkerRequestSource) -> EditRequest:
     return EditRequest(
         repo=source.repository,
+        changeset_id=source.changeset_id,
         project_scope=source.project_scope,
         base_branch=source.base_branch,
         branch=source.branch,
@@ -171,6 +176,7 @@ def _source_request_sha256(source: _CodegenWorkerRequestSource) -> str:
 def _source_values(request: EditRequest) -> dict[str, object]:
     return {
         "read_token": request.token,
+        "changeset_id": request.changeset_id,
         "repository": request.repo,
         "project_scope": request.project_scope or request.repo,
         "base_branch": request.base_branch,
@@ -235,12 +241,17 @@ def encode_codegen_worker_request(request: EditRequest) -> bytes:
         raise CodegenWorkerRequestError(
             "codegen worker request requires repository preparation evidence"
         )
+    if request.llm_execution is None:
+        raise CodegenWorkerRequestError(
+            "codegen worker request requires project LLM execution authority"
+        )
     try:
         envelope = CodegenWorkerRequest.model_validate(
             {
                 **_source_values(request),
                 "schema_version": CODEGEN_WORKER_REQUEST_SCHEMA_VERSION,
                 "repository_preparation": request.repository_preparation,
+                "llm_execution": request.llm_execution,
             }
         )
     except ValidationError as exc:

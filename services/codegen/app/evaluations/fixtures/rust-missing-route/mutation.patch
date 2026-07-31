@@ -1,7 +1,0 @@
---- a/src/main.rs
-+++ b/src/main.rs
-@@ -6,3 +6,3 @@
- fn router() -> Router {
--    Router::new().route("/health/codegen", get(health))
-+    Router::new()
- }

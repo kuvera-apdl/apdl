@@ -65,10 +65,10 @@ async def _probe_codegen_readiness(
 ) -> dict[str, Any]:
     """Read Codegen's strict readiness/capability contract.
 
-    A reachable process is not enough: offline and shadow deployments are
-    healthy but cannot accept the changeset mutations produced by an approval
-    command.  Malformed or non-ready responses are unavailable, never inferred
-    as publication-capable.
+    A reachable process is not enough: an offline deployment is healthy but
+    cannot accept the changeset mutations produced by an approval command.
+    Malformed or non-ready responses are unavailable, never inferred as
+    publication-capable.
     """
     if not configured:
         return {

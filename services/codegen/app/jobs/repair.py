@@ -508,9 +508,14 @@ async def repair_failed_ci(
         return
     try:
         risk = changeset.controls.risk_level
+        llm_snapshot = changeset.llm_execution_snapshot
+        if llm_snapshot is None:
+            raise RuntimeError(
+                "Changeset is missing immutable LLM execution authority"
+            )
         authorization = publication_gate.authorize(
             risk=risk,
-            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
+            snapshot=llm_snapshot,
         )
         await changeset_store.set_publication_authorization(
             pool, observation.changeset_id, authorization
@@ -581,6 +586,7 @@ async def repair_failed_ci(
         async with mint_read_token(observation.changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
+                    changeset_id=observation.changeset_id,
                     repo=connection.repository_full_name,
                     project_scope=changeset.project_id,
                     requirement_ledger=changeset.requirement_ledger,
@@ -625,7 +631,7 @@ async def repair_failed_ci(
             classification=classification,
             confidence=confidence,
             started_at=started_at,
-            error=f"CI repair editor failed: {exc}",
+            error=f"CI repair editor failed with {type(exc).__name__}",
             exhausted=True,
             runtime_evidence=runtime_evidence,
         )

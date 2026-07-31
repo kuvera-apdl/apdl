@@ -1,8 +1,0 @@
-[package]
-name = "evaluation-fixture"
-version = "0.0.0"
-edition = "2021"
-
-[dependencies]
-axum = "0.7.5"
-serde_json = "1.0.120"

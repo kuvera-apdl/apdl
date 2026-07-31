@@ -1,8 +1,0 @@
---- a/src/client.js
-+++ b/src/client.js
-@@ -1,4 +1,4 @@
- export function start(client) {
--  client.onReady(() => client.track("signup"));
-+  client.track("signup");
-   return () => client.close();
- }

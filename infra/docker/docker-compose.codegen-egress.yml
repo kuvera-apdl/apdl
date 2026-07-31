@@ -1,6 +1,6 @@
 services:
   codegen-egress-proxy:
-    image: ${CODEGEN_EGRESS_PROXY_IMAGE:?set the evaluated egress proxy image ID}
+    image: ${CODEGEN_EGRESS_PROXY_IMAGE_ID:?set the immutable tenant egress proxy image ID}
     pull_policy: never
     restart: unless-stopped
     read_only: true

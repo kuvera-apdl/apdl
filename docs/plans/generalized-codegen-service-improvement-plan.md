@@ -24,7 +24,7 @@ flowchart LR
     D --> E["Editing agent with inspection tools"]
     E --> F["Pre-push safety and semantic review"]
     F -->|Actionable rejection| E
-    F --> R["Evidence-backed rollout authorization"]
+    F --> R["Project assignment-bound draft authorization"]
     V["Active operator-verified repository grant"] --> T["Exact repository authority check"]
     R --> T
     T -->|Denied or revoked| O["No GitHub write credential"]
@@ -72,7 +72,7 @@ The canonical authority chain is:
 APDL principal
   -> same-project active RepositoryGrant
   -> immutable changeset repository snapshot
-  -> rollout publication authorization
+  -> project assignment-bound draft publication authorization
   -> repository-scoped, minimum-permission GitHub token
   -> branch or PR mutation
 ```
@@ -522,14 +522,14 @@ containing:
 - repair prompt evidence, changed files, resulting commit SHA, and attempt number;
 - final retry disposition: awaiting CI, repaired, exhausted, or superseded.
 
-Suggested PR-creation policy:
+PR-creation policy:
 
-- Low risk: automatic ready-for-review PR; GitHub CI verifies it.
-- Medium risk: automatic draft PR; GitHub reviewers decide when it is ready.
-- High risk: draft PR with risk warnings and requested specialist reviewers.
-- Missing CI or evidence: create a clearly marked draft PR with
-  `external_ci_status=unverified_external_ci`; GitHub maintainers decide how to
-  proceed.
+- Every production change starts as a draft PR, regardless of APDL risk tier.
+- Risk metadata and missing evidence remain visible on the draft.
+- Tenant-owned GitHub rules, CI, and reviewers decide whether the PR becomes
+  ready for review or can merge.
+- Missing CI is recorded as `external_ci_status=unverified_external_ci`, never
+  inferred to be successful.
 
 ### Exit Criteria
 
@@ -541,22 +541,16 @@ Suggested PR-creation policy:
 - Actionable CI failures trigger bounded, deduplicated repair attempts on the
   same PR, while exhausted failures remain visible for human intervention.
 
-## Phase 9: Build Continuous Codegen Evaluations
+## Phase 9: Tenant-Owned Codegen Evaluation
 
-**Status: implemented (2026-07-11).** A digest-bound multi-stack mutation corpus,
-sealed evaluator oracles, strict finite metrics with explicit denominators, and
-content-addressed reports support offline and non-publishing shadow runs. PR
-publication requires an operator-mounted report/policy bundle bound to the exact
-model and codegen revision; the service recomputes a per-request decision before
-minting any GitHub write token. Reviewed rollout always creates a draft, while
-only an eligible low-risk canary may be ready for review. The default sample and
-metric thresholds fail closed; smaller migration corpora require an explicit
-operator policy rather than an implicit threshold reduction.
+**Status: implemented (2026-07-31).** APDL has no operator-run model corpus,
+sealed evaluator, evidence bundle, reviewed stage, or canary promotion path.
+Production publication is authorized from the changeset's exact project model
+assignments and immutable runtime identity, and it can create only a draft pull
+request. GitHub remains the evaluation boundary: each tenant owns CI, review
+rules, readiness, branch protection, and merge.
 
-Maintain a multi-stack evaluation corpus with real repositories and synthetic
-mutations.
-
-Measure:
+Tenants can measure the outcomes that matter to their repositories, including:
 
 - requirement coverage;
 - build, lint, and test pass rates;
@@ -570,21 +564,25 @@ Measure:
 - flaky or infrastructure failure classification accuracy;
 - performance by model, ecosystem, task type, and risk tier.
 
-Roll out changes through:
+A tenant can change its evaluation or rollout process without a platform
+promotion gate:
 
-1. offline regression evaluation;
-2. shadow generation without PR creation;
-3. PR creation with mandatory review;
-4. low-risk ready-for-review PR canary;
-5. observation of GitHub-native merges, closures, and reverts;
-6. gradual expansion based on escaped-defect rate.
+1. select project-scoped editor and helper models;
+2. generate draft pull requests against authorized repositories;
+3. run repository-owned GitHub CI and rulesets;
+4. review, mark ready, close, or merge through GitHub;
+5. observe merges, closures, repairs, and reverts in APDL;
+6. change model assignments or repository policy based on those outcomes.
+
+APDL must not convert these observations into a platform claim that a model is
+approved, nor make a pull request ready for review on the tenant's behalf.
 
 ## Model Strategy
 
 Do not begin with a model replacement.
 
 First fix contract provenance, context retrieval, and the GitHub CI repair loop.
-Then evaluate models by task class:
+Tenants can then evaluate models by task class:
 
 - smaller models for profiling and classification;
 - general coding models for narrow, well-specified edits;
@@ -607,8 +605,8 @@ Introduce one strict schema for each pipeline boundary:
 7. `CIVerificationObservation`
 8. `CIRemediationAttempt`
 9. `RuntimeAcceptancePlan`
-10. `EvaluationRun` and `EvaluationReport`
-11. `PublicationAuthorization`
+10. `LlmExecutionSnapshot`
+11. `TenantPublicationAuthorization`
 
 Do not introduce aliases or permissive fallback field names. Version schema
 changes explicitly and reject unknown or ambiguous shapes where practical.
@@ -631,7 +629,7 @@ changes explicitly and reject unknown or ambiguous shapes where practical.
 9. Add dependency-slice context retrieval for editing and CI remediation.
 10. Generate policy-based tests and runtime workflows for GitHub CI.
 11. Replace diff-only review with evidence-backed semantic review.
-12. Add the evaluation corpus and staged rollout controls.
+12. Add project-scoped LLM routing and exact draft-publication authorization.
 
 ## Program-Level Success Criteria
 
@@ -657,10 +655,11 @@ The generalized codegen service is ready for broader autonomous use when:
   polling recovery path;
 - actionable GitHub CI failures can be repaired on the same PR within a bounded
   retry budget, without duplicate or stale-head repair attempts;
-- model upgrades can be evaluated independently from orchestration changes;
-- offline and shadow evaluation cannot receive a GitHub publication capability;
+- tenants can evaluate model upgrades independently through their GitHub
+  workflow and review process;
+- offline deployments cannot receive a GitHub publication capability;
 - PR generation and CI repair cannot mint a GitHub write token without a
-  persisted authorization bound to the exact evaluated model and codegen
-  revision;
+  persisted authorization bound to the exact project model assignments,
+  repository, runtime identity, and codegen revision;
 - escaped defects and human correction size improve against the existing
-  baseline over a representative evaluation set.
+  tenant baseline.

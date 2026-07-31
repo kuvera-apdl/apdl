@@ -8,13 +8,31 @@ it does not preserve the removed CI-as-lifecycle columns or statuses.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
+from app.config import (
+    codegen_revision,
+    codegen_rollout_stage,
+)
+from app.editor.environment import codegen_tenant_behavior_configuration_sha256
+from app.llm.provider_catalog import CATALOG_VERSION, catalog_model
 from app.safety.policy import TenantCodegenConnectionPolicy
 
 _T0 = datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc)
+_TEST_LLM_CREDENTIAL_KEY = bytes(range(32))
+TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64 = base64.b64encode(
+    _TEST_LLM_CREDENTIAL_KEY
+).decode("ascii")
+TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID = (
+    "sha256:"
+    + hashlib.sha256(_TEST_LLM_CREDENTIAL_KEY).hexdigest()[:32]
+)
+_UNSET = object()
 
 
 def _json(value: Any) -> Any:
@@ -62,6 +80,84 @@ class FakeConn:
             **row,
             "connected_repository": row.get("repository_full_name"),
         }
+
+    def _active_llm_assignment_rows(
+        self,
+        project_id: str,
+        *,
+        include_model_metadata: bool,
+        encryption_key_id: object = _UNSET,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for role in ("editor", "helper"):
+            assignment = self._rows("llm_assignments").get((project_id, role))
+            if assignment is None:
+                continue
+            provider = assignment["provider"]
+            connection = self._rows("llm_connections").get(
+                (project_id, provider)
+            )
+            if (
+                connection is None
+                or connection["state"] != "active"
+                or connection["version"] != assignment["connection_version"]
+                or connection["inventory_version"]
+                != assignment["inventory_version"]
+                or connection["catalog_version"]
+                != assignment["catalog_version"]
+            ):
+                continue
+            credential = self._rows("llm_credentials").get(
+                connection["credential_id"]
+            )
+            if (
+                credential is None
+                or credential["project_id"] != project_id
+                or credential["provider"] != provider
+                or credential["state"] != "active"
+                or (
+                    encryption_key_id is not _UNSET
+                    and credential.get("encryption_key_id") != encryption_key_id
+                )
+            ):
+                continue
+            model = self._rows("llm_models").get(
+                (project_id, provider, assignment["model_id"])
+            )
+            if (
+                model is None
+                or model["connection_version"] != connection["version"]
+                or model["inventory_version"]
+                != connection["inventory_version"]
+                or role not in model["supported_roles"]
+            ):
+                continue
+            row = {
+                "role": role,
+                "provider": provider,
+                "model_id": assignment["model_id"],
+                "connection_state": "active",
+            }
+            if include_model_metadata:
+                row.update(
+                    assignment_version=assignment["assignment_version"],
+                    connection_version=assignment["connection_version"],
+                    inventory_version=assignment["inventory_version"],
+                    catalog_version=assignment["catalog_version"],
+                    context_window_tokens=model["context_window_tokens"],
+                    supports_tool_calling=model["supports_tool_calling"],
+                    supports_structured_output=model[
+                        "supports_structured_output"
+                    ],
+                    input_cost_per_million_tokens_usd_micros=model[
+                        "input_cost_per_million_tokens_usd_micros"
+                    ],
+                    output_cost_per_million_tokens_usd_micros=model[
+                        "output_cost_per_million_tokens_usd_micros"
+                    ],
+                )
+            rows.append(row)
+        return rows
 
     def _insert_pr_observation(self, args: tuple[Any, ...]) -> str | None:
         rows = self._rows("pull_request_observations")
@@ -302,6 +398,9 @@ class FakeConn:
         if "SELECT status FROM codegen_changesets" in query:
             row = self._rows("changesets").get(args[0])
             return row["status"] if row else None
+        if "SELECT llm_execution_snapshot" in query:
+            row = self._rows("changesets").get(args[0])
+            return row.get("llm_execution_snapshot") if row else None
         if "SELECT project_id" in query and "retry_of_changeset_id = $1" in query:
             row = next(
                 (
@@ -548,6 +647,7 @@ class FakeConn:
             is_retry = "retry_of_changeset_id" in query
             retry_of_changeset_id = args[14] if is_retry else None
             control_metadata = args[15] if is_retry else args[14]
+            llm_execution_snapshot = args[16] if is_retry else args[15]
             if any(
                 (
                     is_retry
@@ -602,6 +702,7 @@ class FakeConn:
                 "effective_safety_policy_sha256": args[9],
                 "retry_of_changeset_id": retry_of_changeset_id,
                 "control_metadata": control_metadata,
+                "llm_execution_snapshot": llm_execution_snapshot,
                 "error": None,
                 "created_at": _T0,
                 "updated_at": _T0,
@@ -793,6 +894,12 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchrow: {query}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "FROM codegen_project_model_assignments AS assignment" in query:
+            return self._active_llm_assignment_rows(
+                args[0],
+                include_model_metadata="assignment.assignment_version" in query,
+                encryption_key_id=(args[1] if len(args) > 1 else _UNSET),
+            )
         if "UPDATE github_repository_grants" in query:
             project_id = args[0]
             revoked = []
@@ -958,6 +1065,11 @@ class FakePool:
         for name in (
             "repository_grants",
             "connections",
+            "llm_credentials",
+            "llm_connections",
+            "llm_models",
+            "llm_assignments",
+            "llm_attempts",
             "changesets",
             "pull_request_observations",
             "pull_request_publication_events",
@@ -977,6 +1089,132 @@ class FakePool:
         self.acquire_count += 1
         self.conn = FakeConn(self.store)
         return _Acquire(self.conn)
+
+    def add_llm_connection(
+        self,
+        project_id: str,
+        *,
+        provider: str = "anthropic",
+        editor_model_id: str = "claude-sonnet-5",
+        helper_model_id: str | None = None,
+    ) -> None:
+        """Seed one active provider inventory and both canonical assignments."""
+        helper_model_id = helper_model_id or editor_model_id
+        editor_model = catalog_model(provider, editor_model_id)
+        helper_model = catalog_model(provider, helper_model_id)
+        if editor_model is None or "editor" not in editor_model.supported_roles:
+            raise ValueError("editor_model_id must be editor-eligible")
+        if helper_model is None or "helper" not in helper_model.supported_roles:
+            raise ValueError("helper_model_id must be helper-eligible")
+
+        credential_id = str(
+            uuid5(NAMESPACE_URL, f"apdl-test:{project_id}:{provider}")
+        )
+        self.store["llm_credentials"][credential_id] = {
+            "credential_id": credential_id,
+            "project_id": project_id,
+            "provider": provider,
+            "credential_version": 1,
+            "state": "active",
+            "encryption_key_id": TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID,
+        }
+        self.store["llm_connections"][(project_id, provider)] = {
+            "project_id": project_id,
+            "provider": provider,
+            "version": 1,
+            "inventory_version": 1,
+            "state": "active",
+            "credential_id": credential_id,
+            "catalog_version": CATALOG_VERSION,
+        }
+        for model in {editor_model.model_id: editor_model, helper_model.model_id: helper_model}.values():
+            self.store["llm_models"][
+                (project_id, provider, model.model_id)
+            ] = {
+                "project_id": project_id,
+                "provider": provider,
+                "model_id": model.model_id,
+                "connection_version": 1,
+                "inventory_version": 1,
+                "supported_roles": model.supported_roles,
+                "context_window_tokens": model.context_window_tokens,
+                "supports_tool_calling": model.supports_tool_calling,
+                "supports_structured_output": model.supports_structured_output,
+                "input_cost_per_million_tokens_usd_micros": (
+                    model.input_cost_per_million_tokens_usd_micros
+                ),
+                "output_cost_per_million_tokens_usd_micros": (
+                    model.output_cost_per_million_tokens_usd_micros
+                ),
+            }
+        for role, model_id in (
+            ("editor", editor_model_id),
+            ("helper", helper_model_id),
+        ):
+            self.store["llm_assignments"][(project_id, role)] = {
+                "project_id": project_id,
+                "role": role,
+                "provider": provider,
+                "model_id": model_id,
+                "assignment_version": 1,
+                "connection_version": 1,
+                "inventory_version": 1,
+                "catalog_version": CATALOG_VERSION,
+            }
+
+    def _llm_execution_snapshot(
+        self,
+        project_id: str,
+        grant: dict[str, Any] | None,
+    ) -> str | None:
+        if grant is None:
+            return None
+        assignments = self.conn._active_llm_assignment_rows(
+            project_id,
+            include_model_metadata=True,
+        )
+        if [row["role"] for row in assignments] != ["editor", "helper"]:
+            return None
+        return json.dumps(
+            {
+                "schema_version": "codegen_llm_execution_snapshot@2",
+                "project_id": project_id,
+                "repository_grant_id": grant["grant_id"],
+                "repository_id": grant["repository_id"],
+                "repository_installation_id": grant["installation_id"],
+                "repository_full_name": grant["repository_full_name"],
+                "codegen_revision": codegen_revision(),
+                "behavior_configuration_sha256": (
+                    codegen_tenant_behavior_configuration_sha256()
+                ),
+                "rollout_stage": codegen_rollout_stage().value,
+                "assignments": [
+                    {
+                        "schema_version": "codegen_llm_assignment_snapshot@1",
+                        "role": row["role"],
+                        "provider": row["provider"],
+                        "model_id": row["model_id"],
+                        "assignment_version": row["assignment_version"],
+                        "connection_version": row["connection_version"],
+                        "inventory_version": row["inventory_version"],
+                        "catalog_version": row["catalog_version"],
+                        "context_window_tokens": row["context_window_tokens"],
+                        "supports_tool_calling": row["supports_tool_calling"],
+                        "supports_structured_output": row[
+                            "supports_structured_output"
+                        ],
+                        "input_cost_per_million_tokens_usd_micros": row[
+                            "input_cost_per_million_tokens_usd_micros"
+                        ],
+                        "output_cost_per_million_tokens_usd_micros": row[
+                            "output_cost_per_million_tokens_usd_micros"
+                        ],
+                    }
+                    for row in assignments
+                ],
+            },
+            sort_keys=True,
+        )
 
     def add_connection(
         self,
@@ -1022,6 +1260,7 @@ class FakePool:
             "created_at": _T0,
             "updated_at": _T0,
         }
+        self.add_llm_connection(project_id)
 
     def add_changeset(
         self,
@@ -1107,6 +1346,10 @@ class FakePool:
                     "risk_level": "high",
                     "revert": None,
                 }
+            ),
+            "llm_execution_snapshot": self._llm_execution_snapshot(
+                project_id,
+                grant,
             ),
             "error": None,
             "created_at": _T0,

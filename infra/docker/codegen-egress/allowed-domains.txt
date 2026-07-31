@@ -20,13 +20,4 @@
 .openai.com
 .googleapis.com
 .googleusercontent.com
-.openrouter.ai
-.mistral.ai
-.groq.com
-.deepseek.com
-.cohere.com
-.cohere.ai
-.together.xyz
-.fireworks.ai
 .x.ai
-.openai.azure.com

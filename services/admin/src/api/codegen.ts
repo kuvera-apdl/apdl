@@ -6,6 +6,17 @@ import {
   changesetSchema,
   repoConnectionSchema,
 } from './schemas/codegen'
+import {
+  codegenLlmConnectionDetailSchema,
+  codegenLlmConnectionListSchema,
+  codegenLlmConnectionSummarySchema,
+  codegenLlmModelInventorySchema,
+  codegenLlmProjectIdSchema,
+  codegenLlmProviderSchema,
+  putCodegenLlmConnectionRequestSchema,
+  refreshCodegenLlmConnectionRequestSchema,
+  revokeCodegenLlmConnectionRequestSchema,
+} from './schemas/codegen-llm-connections'
 import { changesetObservationHistorySchema } from './schemas/codegen-observations'
 import { runtimeEvidenceObservationListSchema } from './schemas/codegen-runtime'
 import type {
@@ -14,6 +25,16 @@ import type {
   RepoConnection,
   RuntimeEvidenceObservation,
 } from './types/codegen'
+import type {
+  CodegenLlmConnectionDetail,
+  CodegenLlmConnectionList,
+  CodegenLlmConnectionSummary,
+  CodegenLlmModelInventory,
+  CodegenLlmProvider,
+  PutCodegenLlmConnectionRequest,
+  RefreshCodegenLlmConnectionRequest,
+  RevokeCodegenLlmConnectionRequest,
+} from './types/codegen-llm-connections'
 
 export interface ListChangesetsParams {
   projectId: string
@@ -119,5 +140,125 @@ export function retryChangeset(
   return request(conn, `/v1/changesets/${encodeURIComponent(changesetId)}/retry`, {
     method: 'POST',
     schema: changesetSchema,
+  })
+}
+
+function codegenLlmConnectionPath(provider?: CodegenLlmProvider): string {
+  const base = '/v1/llm-connections'
+  return provider ? `${base}/${codegenLlmProviderSchema.parse(provider)}` : base
+}
+
+export function listCodegenLlmConnections(
+  conn: ServiceConnection,
+  projectId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<CodegenLlmConnectionList> {
+  const canonicalProjectId = codegenLlmProjectIdSchema.parse(projectId)
+  return request(conn, codegenLlmConnectionPath(), {
+    query: { project_id: canonicalProjectId },
+    schema: codegenLlmConnectionListSchema,
+    signal: options.signal,
+  }).then((result) => {
+    if (result.project_id !== canonicalProjectId) {
+      throw new Error('Codegen LLM connection list crossed project authority')
+    }
+    return result
+  })
+}
+
+export function putCodegenLlmConnection(
+  conn: ServiceConnection,
+  provider: CodegenLlmProvider,
+  requestBody: PutCodegenLlmConnectionRequest,
+): Promise<CodegenLlmConnectionDetail> {
+  const canonicalProvider = codegenLlmProviderSchema.parse(provider)
+  const body = putCodegenLlmConnectionRequestSchema.parse(requestBody)
+  return request(conn, codegenLlmConnectionPath(canonicalProvider), {
+    method: 'PUT',
+    body,
+    schema: codegenLlmConnectionDetailSchema,
+    // Provider authentication failures do not invalidate the Admin session.
+    redirectOnUnauthorized: false,
+  }).then((result) => {
+    if (
+      result.project_id !== body.project_id ||
+      result.provider !== canonicalProvider
+    ) {
+      throw new Error('Codegen LLM connection response crossed project authority')
+    }
+    return result
+  })
+}
+
+export function getCodegenLlmModels(
+  conn: ServiceConnection,
+  provider: CodegenLlmProvider,
+  projectId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<CodegenLlmModelInventory> {
+  const canonicalProvider = codegenLlmProviderSchema.parse(provider)
+  const canonicalProjectId = codegenLlmProjectIdSchema.parse(projectId)
+  return request(conn, `${codegenLlmConnectionPath(canonicalProvider)}/models`, {
+    query: { project_id: canonicalProjectId },
+    schema: codegenLlmModelInventorySchema,
+    signal: options.signal,
+  }).then((result) => {
+    if (
+      result.project_id !== canonicalProjectId ||
+      result.provider !== canonicalProvider
+    ) {
+      throw new Error('Codegen LLM model inventory crossed project authority')
+    }
+    return result
+  })
+}
+
+export function refreshCodegenLlmModels(
+  conn: ServiceConnection,
+  provider: CodegenLlmProvider,
+  requestBody: RefreshCodegenLlmConnectionRequest,
+): Promise<CodegenLlmConnectionDetail> {
+  const canonicalProvider = codegenLlmProviderSchema.parse(provider)
+  const body = refreshCodegenLlmConnectionRequestSchema.parse(requestBody)
+  return request(
+    conn,
+    `${codegenLlmConnectionPath(canonicalProvider)}/refresh-models`,
+    {
+      method: 'POST',
+      body,
+      schema: codegenLlmConnectionDetailSchema,
+      // Revalidation can surface a provider credential rejection.
+      redirectOnUnauthorized: false,
+    },
+  ).then((result) => {
+    if (
+      result.project_id !== body.project_id ||
+      result.provider !== canonicalProvider
+    ) {
+      throw new Error('Codegen LLM model refresh crossed project authority')
+    }
+    return result
+  })
+}
+
+export function revokeCodegenLlmConnection(
+  conn: ServiceConnection,
+  provider: CodegenLlmProvider,
+  requestBody: RevokeCodegenLlmConnectionRequest,
+): Promise<CodegenLlmConnectionSummary> {
+  const canonicalProvider = codegenLlmProviderSchema.parse(provider)
+  const body = revokeCodegenLlmConnectionRequestSchema.parse(requestBody)
+  return request(conn, `${codegenLlmConnectionPath(canonicalProvider)}/revoke`, {
+    method: 'POST',
+    body,
+    schema: codegenLlmConnectionSummarySchema,
+  }).then((result) => {
+    if (
+      result.project_id !== body.project_id ||
+      result.provider !== canonicalProvider
+    ) {
+      throw new Error('Codegen LLM connection revocation crossed project authority')
+    }
+    return result
   })
 }

@@ -1,0 +1,43 @@
+services:
+  # Secure tenant draft-PR deployment. All three images are immutable local image
+  # IDs validated by `make codegen-tenant-config`; model credentials remain in
+  # Codegen's encrypted project store and are released through the local broker.
+  codegen:
+    image: ${CODEGEN_CONTROLLER_IMAGE_ID:?set the immutable controller image ID}
+    pull_policy: never
+    user: "${CODEGEN_DOCKER_UID:?set CODEGEN_DOCKER_UID}:${CODEGEN_DOCKER_GID:?set CODEGEN_DOCKER_GID}"
+    group_add:
+      - "${CODEGEN_DOCKER_SOCKET_GID:?set CODEGEN_DOCKER_SOCKET_GID}"
+    environment:
+      CODEGEN_REVISION: ${CODEGEN_REVISION:?set the immutable CODEGEN_REVISION}
+      CODEGEN_CONTROLLER_IMAGE_ID: ${CODEGEN_CONTROLLER_IMAGE_ID:?set the immutable controller image ID}
+      CODEGEN_ROLLOUT_STAGE: tenant_draft_pr
+      CODEGEN_SANDBOX: docker
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:?set the immutable worker image ID}
+      CODEGEN_SANDBOX_NETWORK: ""
+      CODEGEN_EGRESS_POLICY_SHA256: ${CODEGEN_EGRESS_POLICY_SHA256:?set the shipped egress policy digest}
+      CODEGEN_EGRESS_PROXY_IMAGE_ID: ${CODEGEN_EGRESS_PROXY_IMAGE_ID:?set the immutable egress proxy image ID}
+      CODEGEN_EGRESS_SOCKET_VOLUME: ${CODEGEN_EGRESS_SOCKET_VOLUME:?set the controller-owned egress socket volume}
+      CODEGEN_EGRESS_PROXY_URL: http://127.0.0.1:3128
+      CODEGEN_MAX_CONCURRENT_JOBS: "1"
+      DOCKER_HOST: unix:///var/run/docker.sock
+      CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
+      CODEGEN_AIDER_BIN: ${CODEGEN_AIDER_BIN:-aider}
+      CODEGEN_REQUIRE_VERIFY: ${CODEGEN_REQUIRE_VERIFY:-false}
+      CODEGEN_CONVENTIONS: ${CODEGEN_CONVENTIONS:-true}
+      CODEGEN_SDK_REFERENCE: ${CODEGEN_SDK_REFERENCE:-}
+      CODEGEN_CONTRACTS: ${CODEGEN_CONTRACTS:-true}
+      CODEGEN_CONTRACT_INSTALL_TIMEOUT: ${CODEGEN_CONTRACT_INSTALL_TIMEOUT:-600}
+      CODEGEN_TIMEOUT: ${CODEGEN_TIMEOUT:-1800}
+      CODEGEN_GIT_TIMEOUT: ${CODEGEN_GIT_TIMEOUT:-300}
+      CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
+    volumes:
+      - type: bind
+        source: ${CODEGEN_DOCKER_SOCKET:?set the absolute Docker socket path}
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
+        target: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
+    depends_on:
+      codegen-egress-proxy:
+        condition: service_healthy

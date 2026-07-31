@@ -51,8 +51,8 @@ WORKDIR /app
 COPY requirements.lock .
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 COPY app/ app/
-# Run the API as a non-root user. Evaluation and Compose deliberately replace
-# this UID with the invoking host UID so bind-mounted artifacts stay writable.
+# Run the API as a non-root user. Tenant-runtime Compose deliberately replaces
+# this UID with the invoking host UID so the Docker socket remains accessible.
 # Git only records the executable bit, so a checkout created with a restrictive
 # umask can otherwise leave copied source readable only by image UID 1000.
 RUN useradd --create-home --uid 1000 appuser \

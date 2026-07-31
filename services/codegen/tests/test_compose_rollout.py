@@ -15,7 +15,9 @@ DEVELOPMENT_COMPOSE = (
     REPO_ROOT / "infra/docker/docker-compose.codegen-development.yml"
 )
 EGRESS_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.codegen-egress.yml"
-ROLLOUT_COMPOSE = REPO_ROOT / "infra/docker/docker-compose.codegen-rollout.yml"
+TENANT_RUNTIME_COMPOSE = (
+    REPO_ROOT / "infra/docker/docker-compose.codegen-tenant-runtime.yml"
+)
 DOCKER = shutil.which("docker")
 MAKE = shutil.which("make")
 
@@ -38,13 +40,15 @@ def _compose_config(*files: Path, environment: dict[str, str]) -> dict:
     return json.loads(completed.stdout)
 
 
-def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> None:
+def test_base_compose_cannot_be_promoted_by_ambient_tenant_environment() -> None:
     environment = os.environ.copy()
     environment.update(
         {
             "CODEGEN_DEVELOPMENT_MODE": "true",
-            "CODEGEN_ROLLOUT_STAGE": "reviewed_pr",
-            "CODEGEN_ROLLOUT_AUTHORIZATION_PATH": "/stale/publication-bundle.json",
+            "CODEGEN_ROLLOUT_STAGE": "tenant_draft_pr",
+            "CODEGEN_CONTROLLER_IMAGE_ID": "sha256:" + "a" * 64,
+            "CODEGEN_EGRESS_POLICY_SHA256": "b" * 64,
+            "CODEGEN_EGRESS_PROXY_IMAGE_ID": "sha256:" + "c" * 64,
         }
     )
 
@@ -52,7 +56,6 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
     codegen_environment = config["services"]["codegen"]["environment"]
 
     assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "offline"
-    assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == ""
     assert codegen_environment["CODEGEN_EGRESS_POLICY_SHA256"] == ""
     assert codegen_environment["CODEGEN_EGRESS_PROXY_IMAGE_ID"] == ""
     assert codegen_environment["CODEGEN_EGRESS_PROXY_URL"] == (
@@ -93,12 +96,11 @@ def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
             "CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID": "999",
             "CODEGEN_DEVELOPMENT_DOCKER_UID": "1000",
             "CODEGEN_DEVELOPMENT_SANDBOX_IMAGE": (
-                "apdl-codegen-sandbox:local-development"
+                "apdl-codegen-worker:local-development"
             ),
             "CODEGEN_DEVELOPMENT_SANDBOX_NETWORK": "apdl-codegen-development",
-            # Neither stale publication value may alter this explicit local mode.
-            "CODEGEN_ROLLOUT_STAGE": "reviewed_pr",
-            "CODEGEN_ROLLOUT_AUTHORIZATION_PATH": "/stale/bundle.json",
+            # An ambient tenant mode may not alter this explicit local mode.
+            "CODEGEN_ROLLOUT_STAGE": "tenant_draft_pr",
         }
     )
 
@@ -115,10 +117,9 @@ def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
     assert codegen_environment["CODEGEN_DEVELOPMENT_MODE"] == "true"
     assert codegen_environment["CODEGEN_REVISION"] == "local-development"
     assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "development_pr"
-    assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == ""
     assert codegen_environment["CODEGEN_SANDBOX"] == "docker"
     assert codegen_environment["CODEGEN_SANDBOX_IMAGE"] == (
-        "apdl-codegen-sandbox:local-development"
+        "apdl-codegen-worker:local-development"
     )
     assert codegen_environment["CODEGEN_SANDBOX_NETWORK"] == (
         "apdl-codegen-development"
@@ -129,10 +130,6 @@ def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
         "source": "/var/run/docker.sock",
         "target": "/var/run/docker.sock",
     } in codegen["volumes"]
-    assert all(
-        volume["target"] != "/run/apdl/codegen/publication-bundle.json"
-        for volume in codegen["volumes"]
-    )
     assert codegen["healthcheck"]["test"] == [
         "CMD",
         "curl",
@@ -156,7 +153,7 @@ def test_dev_all_starts_codegen_offline_without_publication_overlay() -> None:
     rendered = completed.stdout
     assert "CODEGEN_DEVELOPMENT_DOCKER_SOCKET=" not in rendered
     assert "docker-compose.codegen-development.yml" not in rendered
-    assert "apdl-codegen-sandbox:local-development" not in rendered
+    assert "apdl-codegen-worker:local-development" not in rendered
     assert "--profile agents --profile codegen build agents codegen" in rendered
     assert (
         "--profile agents --profile codegen up -d --no-build --no-deps --wait"
@@ -207,25 +204,23 @@ def test_dev_script_delegates_full_stack_lifecycle_to_make() -> None:
     assert "dc_full down" not in down_body
 
 
-def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
+def test_tenant_runtime_overlay_injects_immutable_runtime_identity() -> None:
     controller_image = "sha256:" + "a" * 64
     candidate_image = "sha256:" + "b" * 64
     proxy_image = "sha256:" + "c" * 64
     egress_policy = "d" * 64
     environment = os.environ.copy()
-    environment.pop("CODEGEN_ROLLOUT_STAGE", None)
     environment.update(
         {
-            "CODEGEN_CONTROLLER_IMAGE": controller_image,
+            "CODEGEN_CONTROLLER_IMAGE_ID": controller_image,
             "CODEGEN_DOCKER_GID": "1000",
             "CODEGEN_DOCKER_SOCKET": "/var/run/docker.sock",
             "CODEGEN_DOCKER_SOCKET_GID": "1000",
             "CODEGEN_DOCKER_UID": "1000",
             "CODEGEN_EGRESS_POLICY_SHA256": egress_policy,
-            "CODEGEN_EGRESS_PROXY_IMAGE": proxy_image,
+            "CODEGEN_EGRESS_PROXY_IMAGE_ID": proxy_image,
             "CODEGEN_EGRESS_SOCKET_VOLUME": "codegen-egress-socket",
-            "CODEGEN_REVISION": "evaluated-revision",
-            "CODEGEN_ROLLOUT_BUNDLE_PATH": "/tmp/publication-bundle.json",
+            "CODEGEN_REVISION": "tenant-revision",
             "CODEGEN_SANDBOX_IMAGE": candidate_image,
         }
     )
@@ -233,20 +228,17 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
     config = _compose_config(
         BASE_COMPOSE,
         EGRESS_COMPOSE,
-        ROLLOUT_COMPOSE,
+        TENANT_RUNTIME_COMPOSE,
         environment=environment,
     )
     codegen = config["services"]["codegen"]
     codegen_environment = codegen["environment"]
 
     assert codegen["image"] == controller_image
-    assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "reviewed_pr"
-    assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == (
-        "/run/apdl/codegen/publication-bundle.json"
-    )
+    assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "tenant_draft_pr"
     assert codegen_environment["CODEGEN_CONTROLLER_IMAGE_ID"] == controller_image
     assert codegen_environment["CODEGEN_SANDBOX_IMAGE"] == candidate_image
-    assert codegen_environment["CODEGEN_REVISION"] == "evaluated-revision"
+    assert codegen_environment["CODEGEN_REVISION"] == "tenant-revision"
     assert codegen_environment["CODEGEN_EGRESS_POLICY_SHA256"] == egress_policy
     assert codegen_environment["CODEGEN_EGRESS_PROXY_IMAGE_ID"] == proxy_image
     assert codegen_environment["CODEGEN_EGRESS_PROXY_URL"] == (
@@ -259,6 +251,8 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
     assert codegen_environment["CODEGEN_MAX_CONCURRENT_JOBS"] == "1"
     assert "VERTEXAI_PROJECT" not in codegen_environment
     assert "VERTEXAI_LOCATION" not in codegen_environment
+    assert "OPENAI_API_KEY" not in codegen_environment
+    assert "ANTHROPIC_API_KEY" not in codegen_environment
     assert codegen["depends_on"]["codegen-egress-proxy"]["condition"] == (
         "service_healthy"
     )

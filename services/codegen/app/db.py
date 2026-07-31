@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 28
-MIGRATION_NAME = "028_admin_execution_authority.sql"
+MIGRATION_VERSION = 55
+MIGRATION_NAME = "055_codegen_tenant_publication.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_project_execution_authorizations", "project_id"),
@@ -67,6 +67,10 @@ REQUIRED_COLUMNS = frozenset(
             "codegen_changesets",
             "publication_authorization_egress_unattested_legacy",
         ),
+        (
+            "codegen_changesets",
+            "publication_authorization_pre_tenant_legacy",
+        ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),
@@ -74,6 +78,37 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "ci_remediation_status"),
         ("codegen_changesets", "retry_of_changeset_id"),
         ("codegen_changesets", "control_metadata"),
+        ("codegen_changesets", "llm_execution_snapshot"),
+        ("codegen_changesets", "llm_execution_snapshot_v1_legacy"),
+        ("codegen_project_provider_credentials", "credential_id"),
+        ("codegen_project_provider_credentials", "project_id"),
+        ("codegen_project_provider_credentials", "provider"),
+        ("codegen_project_provider_credentials", "credential_version"),
+        ("codegen_project_provider_credentials", "state"),
+        ("codegen_project_provider_credentials", "ciphertext"),
+        ("codegen_project_provider_credentials", "nonce"),
+        ("codegen_project_provider_credentials", "encryption_key_id"),
+        ("codegen_project_provider_connections", "project_id"),
+        ("codegen_project_provider_connections", "provider"),
+        ("codegen_project_provider_connections", "version"),
+        ("codegen_project_provider_connections", "inventory_version"),
+        ("codegen_project_provider_connections", "state"),
+        ("codegen_project_provider_connections", "credential_id"),
+        ("codegen_project_provider_models", "project_id"),
+        ("codegen_project_provider_models", "provider"),
+        ("codegen_project_provider_models", "model_id"),
+        ("codegen_project_provider_models", "supported_roles"),
+        ("codegen_project_model_assignments", "project_id"),
+        ("codegen_project_model_assignments", "role"),
+        ("codegen_project_model_assignments", "provider"),
+        ("codegen_project_model_assignments", "model_id"),
+        ("codegen_project_model_assignments", "assignment_version"),
+        ("codegen_llm_attempts", "attempt_id"),
+        ("codegen_llm_attempts", "project_id"),
+        ("codegen_llm_attempts", "changeset_id"),
+        ("codegen_llm_attempts", "phase"),
+        ("codegen_llm_attempts", "role"),
+        ("codegen_llm_attempts", "credential_id"),
         ("codegen_pull_request_observations", "github_updated_at"),
         ("codegen_pull_request_publication_events", "event_id"),
         ("codegen_pull_request_publication_events", "event_sequence"),

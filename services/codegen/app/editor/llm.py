@@ -16,7 +16,7 @@ amplifiers, never a reason a changeset cannot run at all.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from app import config
 
@@ -28,7 +28,13 @@ CompleteFn = Callable[[str, str], Awaitable[str | None]]
 
 
 def resolve_completer(
-    model: str | None = None, timeout: float | None = None
+    model: str | None = None,
+    timeout: float | None = None,
+    *,
+    api_key: str | None = None,
+    endpoint_url: str | None = None,
+    raise_errors: bool = False,
+    usage_callback: Callable[[int, int], None] | None = None,
 ) -> CompleteFn | None:
     """Build a completion function for the configured helper model.
 
@@ -45,37 +51,70 @@ def resolve_completer(
         logger.info("LiteLLM is not installed; auxiliary LLM steps are disabled.")
         return None
 
-    try:
-        # Same key resolution LiteLLM applies on the real call; unknown model
-        # mappings raise, in which case we try the call anyway and let it speak.
-        if not litellm.validate_environment(model).get("keys_in_environment", False):
-            logger.warning(
-                "No provider key in env for helper model %s; "
-                "auxiliary LLM steps are disabled.",
-                model,
-            )
-            return None
-    except Exception:  # pragma: no cover - depends on litellm internals
-        pass
+    if api_key is None:
+        try:
+            # This branch belongs only to an explicit trusted-local/custom
+            # editor; tenant execution supplies a phase-scoped key directly.
+            if not litellm.validate_environment(model).get(
+                "keys_in_environment", False
+            ):
+                logger.warning(
+                    "No explicit local credential for helper model %s; "
+                    "auxiliary LLM steps are disabled.",
+                    model,
+                )
+                return None
+        except Exception:  # pragma: no cover - depends on litellm internals
+            pass
 
     async def complete(system: str, user: str) -> str | None:
         try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=[
+            call_options = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                timeout=timeout,
-                # Newer models reject sampler params (temperature); never send any.
-                drop_params=True,
+                "timeout": timeout,
+                "drop_params": True,
+            }
+            if api_key is not None:
+                call_options["api_key"] = api_key
+            if endpoint_url is not None:
+                call_options["api_base"] = endpoint_url
+            response = await litellm.acompletion(
+                **call_options,
             )
+            usage = (
+                response.get("usage")
+                if isinstance(response, Mapping)
+                else getattr(response, "usage", None)
+            )
+            usage_get = getattr(usage, "get", None)
+            if usage_callback is not None and callable(usage_get):
+                input_tokens = usage_get("prompt_tokens")
+                output_tokens = usage_get("completion_tokens")
+                if (
+                    isinstance(input_tokens, int)
+                    and not isinstance(input_tokens, bool)
+                    and 0 <= input_tokens <= 10_000_000_000
+                    and isinstance(output_tokens, int)
+                    and not isinstance(output_tokens, bool)
+                    and 0 <= output_tokens <= 10_000_000_000
+                ):
+                    usage_callback(input_tokens, output_tokens)
             content = response["choices"][0]["message"]["content"]
             return content.strip() if isinstance(content, str) else None
         except Exception as exc:
             # An auxiliary call must never sink the changeset; the caller
             # proceeds without it.
-            logger.warning("Auxiliary LLM call (%s) failed: %s", model, exc)
+            logger.warning(
+                "Auxiliary LLM call (%s) failed with %s",
+                model,
+                type(exc).__name__,
+            )
+            if raise_errors:
+                raise
             return None
 
     return complete

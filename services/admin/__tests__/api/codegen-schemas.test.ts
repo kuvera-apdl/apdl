@@ -6,10 +6,11 @@ import {
   repoConnectionSchema,
   tenantCodegenConnectionPolicySchema,
 } from '@/api/schemas/codegen'
+import { codegenLlmExecutionSnapshotSchema } from '@/api/schemas/codegen-publication'
 import {
   makeReviewVerdict,
   makeDevelopmentPublicationAuthorization,
-  makePublicationAuthorization,
+  makeTenantPublicationAuthorization,
   makeRuntimeAcceptancePlan,
   makeRuntimeEvidenceAssessment,
   makeVerificationCoverage,
@@ -55,6 +56,7 @@ const sample = {
   runtime_evidence_assessment: null,
   review_verdict: null,
   publication_authorization: null,
+  llm_execution_snapshot: null,
   tenant_policy_snapshot: null,
   effective_safety_policy_sha256: null,
   error: null,
@@ -237,14 +239,39 @@ describe('codegen schemas', () => {
     expect(changesetSchema.safeParse(bad).success).toBe(false)
   })
 
-  it('parses a strict publication authorization and its nested decision', () => {
+  it('parses tenant draft authority bound to the exposed execution snapshot', () => {
+    const authorization = makeTenantPublicationAuthorization()
     const parsed = changesetSchema.parse({
       ...sample,
-      publication_authorization: makePublicationAuthorization(),
+      publication_authorization: authorization,
+      llm_execution_snapshot: authorization.request.execution_snapshot,
     })
 
-    expect(parsed.publication_authorization?.request.requested_stage).toBe('reviewed_pr')
-    expect(parsed.publication_authorization?.decision.allowed).toBe(false)
+    expect(parsed.publication_authorization?.schema_version).toBe(
+      'tenant_publication_authorization@1',
+    )
+    expect(parsed.publication_authorization?.request.requested_stage).toBe('tenant_draft_pr')
+    expect(parsed.publication_authorization?.decision.allowed).toBe(true)
+    expect(parsed.llm_execution_snapshot?.assignments.map(({ role }) => role)).toEqual([
+      'editor',
+      'helper',
+    ])
+  })
+
+  it('enforces canonical repository grants and normalized snapshot revisions', () => {
+    const snapshot = makeTenantPublicationAuthorization().request.execution_snapshot
+    const maxGrant = { ...snapshot, repository_grant_id: `ghg_${'a'.repeat(128)}` }
+
+    expect(maxGrant.repository_grant_id).toHaveLength(132)
+    expect(codegenLlmExecutionSnapshotSchema.safeParse(maxGrant).success).toBe(true)
+    expect(codegenLlmExecutionSnapshotSchema.safeParse({
+      ...maxGrant,
+      repository_grant_id: `${maxGrant.repository_grant_id}a`,
+    }).success).toBe(false)
+    expect(codegenLlmExecutionSnapshotSchema.safeParse({
+      ...snapshot,
+      codegen_revision: ` ${snapshot.codegen_revision}`,
+    }).success).toBe(false)
   })
 
   it('parses a separate draft-only local development authorization', () => {
@@ -288,54 +315,69 @@ describe('codegen schemas', () => {
     }
   })
 
-  it('rejects publication authorization for a different stage, policy, candidate, or egress policy', () => {
-    const authorization = makePublicationAuthorization()
+  it('rejects tenant authority with mismatched snapshot, runtime, or decision identity', () => {
+    const authorization = makeTenantPublicationAuthorization()
     const mismatchedStage = {
       ...authorization,
-      decision: { ...authorization.decision, requested_stage: 'low_risk_canary' },
+      request: {
+        ...authorization.request,
+        execution_snapshot: {
+          ...authorization.request.execution_snapshot,
+          rollout_stage: 'development_pr',
+        },
+      },
     }
-    const mismatchedPolicy = {
+    const mismatchedRevision = {
       ...authorization,
-      decision: { ...authorization.decision, policy_sha256: '9'.repeat(64) },
+      request: {
+        ...authorization.request,
+        runtime_identity: {
+          ...authorization.request.runtime_identity,
+          codegen_revision: 'another-revision',
+        },
+      },
     }
-    const mismatchedCandidate = {
+    const mismatchedBehavior = {
       ...authorization,
-      expected_candidate_identity_sha256: '8'.repeat(64),
+      request: {
+        ...authorization.request,
+        runtime_identity: {
+          ...authorization.request.runtime_identity,
+          behavior_configuration_sha256: 'f'.repeat(64),
+        },
+      },
     }
-    const mismatchedEgressPolicy = {
+    const mismatchedRisk = {
       ...authorization,
-      expected_egress_policy_sha256: 'd'.repeat(64),
+      decision: { ...authorization.decision, risk: 'high' },
     }
 
-    expect(changesetSchema.safeParse({
-      ...sample,
-      publication_authorization: mismatchedStage,
-    }).success).toBe(false)
-    expect(changesetSchema.safeParse({
-      ...sample,
-      publication_authorization: mismatchedPolicy,
-    }).success).toBe(false)
-    expect(changesetSchema.safeParse({
-      ...sample,
-      publication_authorization: mismatchedCandidate,
-    }).success).toBe(false)
-    expect(changesetSchema.safeParse({
-      ...sample,
-      publication_authorization: mismatchedEgressPolicy,
-    }).success).toBe(false)
+    for (const publication_authorization of [
+      mismatchedStage,
+      mismatchedRevision,
+      mismatchedBehavior,
+      mismatchedRisk,
+    ]) {
+      expect(changesetSchema.safeParse({
+        ...sample,
+        publication_authorization,
+        llm_execution_snapshot: authorization.request.execution_snapshot,
+      }).success).toBe(false)
+    }
   })
 
-  it('rejects legacy evaluated publication schema versions', () => {
-    const authorization = makePublicationAuthorization()
+  it('rejects removed evaluated publication schemas and stages', () => {
+    const authorization = makeTenantPublicationAuthorization()
     const legacyAuthorization = {
       ...authorization,
-      schema_version: 'publication_authorization@3',
+      schema_version: 'publication_authorization@4',
     }
     const legacyRequest = {
       ...authorization,
       request: {
         ...authorization.request,
-        schema_version: 'publication_request@2',
+        schema_version: 'publication_request@3',
+        requested_stage: 'reviewed_pr',
       },
     }
 
@@ -349,11 +391,17 @@ describe('codegen schemas', () => {
     }).success).toBe(false)
   })
 
-  it('rejects denied publication that grants a GitHub publication capability', () => {
-    const authorization = makePublicationAuthorization()
+  it('rejects tenant publication authority that is not allowed and draft-only', () => {
+    const authorization = makeTenantPublicationAuthorization()
     const bad = {
       ...authorization,
-      decision: { ...authorization.decision, publish_branch: true },
+      draft_only: false,
+      decision: {
+        ...authorization.decision,
+        allowed: false,
+        publish_branch: false,
+        create_pull_request: false,
+      },
     }
 
     expect(changesetSchema.safeParse({
@@ -363,10 +411,10 @@ describe('codegen schemas', () => {
   })
 
   it('rejects unknown fields inside publication requests and decisions', () => {
-    const authorization = makePublicationAuthorization()
+    const authorization = makeTenantPublicationAuthorization()
     const requestWithExtra = {
       ...authorization,
-      request: { ...authorization.request, legacy_stage: 'reviewed_pr' },
+      request: { ...authorization.request, evaluation_report_sha256: 'a'.repeat(64) },
     }
     const decisionWithExtra = {
       ...authorization,

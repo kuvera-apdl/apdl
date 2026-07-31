@@ -12,7 +12,7 @@ PINNED_PYTHON = (
 def test_worker_uses_immutable_images_snapshot_packages_and_hash_lock() -> None:
     source = (CODEGEN_DIR / "Dockerfile.worker").read_text(encoding="utf-8")
 
-    assert source.count(f"FROM {PINNED_PYTHON}") == 2
+    assert source.count(f"FROM {PINNED_PYTHON}") == 1
     assert source.startswith("# APDL codegen agent sandbox")
     assert "FROM node:20-bookworm-slim@sha256:" in source
     assert "snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}" in source
@@ -20,6 +20,7 @@ def test_worker_uses_immutable_images_snapshot_packages_and_hash_lock() -> None:
     assert "--no-deps --require-hashes" in source
     assert "-r /tmp/requirements-agent.lock" in source
     assert "python /tmp/verify-aider-distribution.py" in source
+    assert 'dev.apdl.codegen.role="worker"' in source
     assert "pip install --no-cache-dir uv" not in source
     assert "deb.nodesource.com" not in source
 
@@ -34,6 +35,16 @@ def test_codegen_locks_cover_runtime_and_worker_tools() -> None:
     assert "--hash=sha256:" in worker_lock
     assert "aider-chat==0.86.2" in worker_lock
     assert "uv==0.11.29" in worker_lock
+
+
+def test_codegen_build_context_excludes_generated_python_artifacts() -> None:
+    patterns = set(
+        (CODEGEN_DIR / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    )
+
+    assert "**/__pycache__/" in patterns
+    assert "**/*.pyc" in patterns
+    assert ".venv/" in patterns
 
 
 def test_egress_proxy_uses_immutable_base_and_package_snapshot() -> None:

@@ -13,6 +13,7 @@ import pytest
 
 from app.editor.base import EditRequest
 from app.editor.container_editor import ContainerAiderEditor
+from app.llm.contracts import LlmAttemptLease, LlmRuntimeBinding
 
 
 def _docker_daemon_available(docker: str) -> bool:
@@ -713,13 +714,32 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
     """Prove the provider-free/code-bearing and provider-bearing phases are split."""
     docker, image_id = built_worker_image
     provider_value = f"h12-provider-sentinel-{uuid.uuid4().hex}"
+    ambient_provider_value = f"ambient-provider-sentinel-{uuid.uuid4().hex}"
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "none")
-    monkeypatch.setenv("CODEGEN_MODEL", "openai/gpt-5")
-    monkeypatch.setenv("OPENAI_API_KEY", provider_value)
+    monkeypatch.setenv("CODEGEN_MODEL", "anthropic/ambient-model-must-be-ignored")
+    monkeypatch.setenv("OPENAI_API_KEY", ambient_provider_value)
     editor = ContainerAiderEditor(image=image_id, docker_bin=docker)
+    broker_lease = LlmAttemptLease(
+        attempt_id=uuid.uuid4(),
+        phase="edit",
+        binding=LlmRuntimeBinding(
+            role="editor",
+            provider="openai",
+            model_id="gpt-5.4-mini",
+            litellm_model="openai/gpt-5.4-mini",
+            credential_environment_name="OPENAI_API_KEY",
+            endpoint_url="https://api.openai.com/v1",
+            assignment_version=1,
+            credential_id=uuid.uuid4(),
+            credential_version=1,
+            input_cost_per_million_tokens_usd_micros=750_000,
+            output_cost_per_million_tokens_usd_micros=4_500_000,
+            api_key=provider_value,
+        ),
+    )
 
     preparation_probe = textwrap.dedent(
-        f"""
+        """
         import json
         import os
         import shutil
@@ -745,52 +765,50 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         lifecycle_result = workspace / "lifecycle-parent-environment.json"
         checker_result = workspace / "checker-parent-environment.json"
         provider_name = "OPENAI_API_KEY"
-        provider_value = {provider_value!r}
 
         hostile_probe = repository / "steal-parent-environment.js"
         hostile_probe.write_text(
             '''
         const fs = require("fs");
-        const parent = fs.readFileSync(`/proc/${{process.ppid}}/environ`);
-        fs.writeFileSync(
-          "/workspace/lifecycle-parent-environment.json",
-          JSON.stringify({{
-            saw_name: parent.includes(Buffer.from("OPENAI_API_KEY")),
-            saw_value: parent.includes(Buffer.from({json.dumps(provider_value)}))
-          }})
-        );
+        const parent = fs.readFileSync(`/proc/${process.ppid}/environ`);
+            fs.writeFileSync(
+              "/workspace/lifecycle-parent-environment.json",
+              JSON.stringify({
+                saw_name: parent.includes(Buffer.from("OPENAI_API_KEY"))
+              })
+            );
         ''',
             encoding="utf-8",
         )
         (repository / "package.json").write_text(
             json.dumps(
-                {{
+                {
                     "name": "hostile-repository",
                     "version": "1.0.0",
-                    "scripts": {{
+                    "scripts": {
                         "preinstall": "node steal-parent-environment.js",
                         "install": "node steal-parent-environment.js",
                         "postinstall": "node steal-parent-environment.js",
-                    }},
-                }}
+                    },
+                }
             ),
             encoding="utf-8",
         )
         (repository / "package-lock.json").write_text(
             json.dumps(
-                {{
+                {
                     "name": "hostile-repository",
                     "version": "1.0.0",
                     "lockfileVersion": 3,
                     "requires": True,
-                    "packages": {{
-                        "": {{
+                    "packages": {
+                        "": {
                             "name": "hostile-repository",
                             "version": "1.0.0",
                             "hasInstallScript": True,
-                        }}
-                    }},
-                }}
+                        }
+                    },
+                }
             ),
             encoding="utf-8",
         )
@@ -841,7 +859,7 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         )
         assert active_probe.returncode == 0, active_probe.stderr
         observed = json.loads(lifecycle_result.read_text(encoding="utf-8"))
-        assert observed == {{"saw_name": False, "saw_value": False}}, observed
+        assert observed == {"saw_name": False}, observed
 
         fake_checker = (
             repository / "node_modules/typescript/bin/tsc"
@@ -850,14 +868,13 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         fake_checker.write_text(
             '''
         const fs = require("fs");
-        const parent = fs.readFileSync(`/proc/${{process.ppid}}/environ`);
-        fs.writeFileSync(
-          "/workspace/checker-parent-environment.json",
-          JSON.stringify({{
-            saw_name: parent.includes(Buffer.from("OPENAI_API_KEY")),
-            saw_value: parent.includes(Buffer.from({json.dumps(provider_value)}))
-          }})
-        );
+        const parent = fs.readFileSync(`/proc/${process.ppid}/environ`);
+            fs.writeFileSync(
+              "/workspace/checker-parent-environment.json",
+              JSON.stringify({
+                saw_name: parent.includes(Buffer.from("OPENAI_API_KEY"))
+              })
+            );
         ''',
             encoding="utf-8",
         )
@@ -866,11 +883,11 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         sdk.mkdir(parents=True)
         (sdk / "package.json").write_text(
             json.dumps(
-                {{
+                {
                     "name": "example-sdk",
                     "version": "1.0.0",
                     "types": "index.d.ts",
-                }}
+                }
             ),
             encoding="utf-8",
         )
@@ -889,7 +906,7 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
                 installed_root=repository.as_posix(),
                 language="TypeScript",
                 snippet=(
-                    'import {{ value }} from "example-sdk";\\n'
+                    'import { value } from "example-sdk";\\n'
                     "void value;"
                 ),
             )
@@ -899,18 +916,17 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         assert not checker_result.exists(), (
             "a repository-installed checker ran in the preparation phase"
         )
-        parent_environment = Path(f"/proc/{{os.getpid()}}/environ").read_bytes()
+        parent_environment = Path(f"/proc/{os.getpid()}/environ").read_bytes()
         assert provider_name.encode() not in parent_environment
-        assert provider_value.encode() not in parent_environment
         print(
             json.dumps(
-                {{
+                {
                     "checker_executed": checker_result.exists(),
                     "checker_status": checked.status.value,
                     "lifecycle_automatically_executed": False,
                     "proc_probe": observed,
                     "provider_in_preparation": False,
-                }},
+                },
                 sort_keys=True,
             )
         )
@@ -934,6 +950,10 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
     ]
     preparation_environment = editor._docker_control_env()
     assert "OPENAI_API_KEY" not in preparation_environment
+    assert provider_value not in " ".join(preparation_argv)
+    assert ambient_provider_value not in " ".join(preparation_argv)
+    assert provider_value not in preparation_environment.values()
+    assert ambient_provider_value not in preparation_environment.values()
     preparation_rc, preparation_stdout, preparation_stderr = await editor._run_docker(
         preparation_argv,
         preparation_environment,
@@ -945,31 +965,44 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         "checker_executed": False,
         "checker_status": "passed",
         "lifecycle_automatically_executed": False,
-        "proc_probe": {"saw_name": False, "saw_value": False},
+        "proc_probe": {"saw_name": False},
         "provider_in_preparation": False,
     }
 
     editor_probe = textwrap.dedent(
-        f"""
+        """
         import json
         import os
         import subprocess
+        import sys
         from pathlib import Path
 
-        from app.editor.aider_editor import _agent_env
+        from app.editor.aider_editor import _agent_env, _git_env
+        from app.llm.contracts import LlmAttemptLease
 
         workspace = Path("/workspace")
         repository = workspace / "candidate"
         repository.mkdir()
-        provider_value = {provider_value!r}
+        lease = LlmAttemptLease.model_validate_json(sys.stdin.buffer.read())
+        binding = lease.binding
+        assert lease.phase == "edit"
+        assert binding.role == "editor"
+        assert binding.provider == "openai"
+        provider_name = binding.credential_environment_name
+        provider_value = binding.api_key
+        assert provider_name not in os.environ
+        assert provider_value not in os.environ.values()
         hook_result = workspace / "hook-parent-environment"
         lifecycle_result = workspace / "editor-lifecycle-executed"
         checker_result = workspace / "editor-checker-executed"
         agent_environment = _agent_env(
             workspace / "agent-home",
-            model="openai/gpt-5",
+            model=binding.litellm_model,
+            provider_environment={provider_name: provider_value},
         )
-        assert agent_environment["OPENAI_API_KEY"] == provider_value
+        git_environment = _git_env()
+        assert agent_environment[provider_name] == provider_value
+        assert provider_name not in git_environment
         assert agent_environment["GIT_CONFIG_KEY_0"] == "core.hooksPath"
         assert agent_environment["GIT_CONFIG_VALUE_0"] == "/dev/null"
 
@@ -979,7 +1012,7 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
                 check=False,
                 capture_output=True,
                 text=True,
-                env=agent_environment,
+                env=git_environment,
             )
             assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -989,17 +1022,17 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         hook = repository / ".git/hooks/pre-commit"
         hook.write_text(
             "#!/bin/sh\\n"
-            f"tr '\\\\0' '\\\\n' < /proc/$PPID/environ > {{hook_result}}\\n",
+            f"tr '\\\\0' '\\\\n' < /proc/$PPID/environ > {hook_result}\\n",
             encoding="utf-8",
         )
         hook.chmod(0o755)
         (repository / "package.json").write_text(
             json.dumps(
-                {{
-                    "scripts": {{
+                {
+                    "scripts": {
                         "prepare": "touch /workspace/editor-lifecycle-executed"
-                    }}
-                }}
+                    }
+                }
             ),
             encoding="utf-8",
         )
@@ -1023,14 +1056,16 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         )
         print(
             json.dumps(
-                {{
+                {
                     "candidate_committed": True,
                     "checker_executed": checker_result.exists(),
                     "hook_executed": hook_result.exists(),
                     "lifecycle_executed": lifecycle_result.exists(),
-                    "provider_in_editor": os.environ.get("OPENAI_API_KEY")
+                    "provider_in_agent": agent_environment.get(provider_name)
                     == provider_value,
-                }},
+                    "provider_in_git": provider_name in git_environment,
+                    "provider_in_worker_parent": provider_name in os.environ,
+                },
                 sort_keys=True,
             )
         )
@@ -1042,8 +1077,6 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         role="editor",
     )
     editor_argv += [
-        "-e",
-        "OPENAI_API_KEY",
         "-e",
         "HOME=/workspace/home",
         "-e",
@@ -1064,11 +1097,16 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
             spec="Perform a legitimate edit without executing repository code.",
         )
     )
-    assert editor_environment["OPENAI_API_KEY"] == provider_value
+    assert "OPENAI_API_KEY" not in editor_environment
+    assert provider_value not in " ".join(editor_argv)
+    assert ambient_provider_value not in " ".join(editor_argv)
+    assert provider_value not in editor_environment.values()
+    assert ambient_provider_value not in editor_environment.values()
     editor_rc, editor_stdout, editor_stderr = await editor._run_docker(
         editor_argv,
         editor_environment,
         container_name=editor_name,
+        stdin_data=broker_lease.model_dump_json().encode("utf-8"),
     )
     assert editor_rc == 0, editor_stderr
     editor_result = json.loads(editor_stdout.strip().splitlines()[-1])
@@ -1077,7 +1115,9 @@ async def test_malicious_repository_code_cannot_reach_provider_credentials(
         "checker_executed": False,
         "hook_executed": False,
         "lifecycle_executed": False,
-        "provider_in_editor": True,
+        "provider_in_agent": True,
+        "provider_in_git": False,
+        "provider_in_worker_parent": False,
     }
 
 

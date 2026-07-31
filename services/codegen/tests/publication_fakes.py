@@ -4,92 +4,76 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.evaluations.models import (
-    RiskLevel,
-    RolloutDecision,
-    RolloutStage,
-    canonical_sha256,
-)
-from app.evaluations.publication import (
-    PublicationAuthorization,
-    PublicationRequest,
+from app.llm.contracts import LlmExecutionSnapshot
+from app.llm.provider_catalog import runtime_model
+from app.models.execution import PublicationStage, RiskLevel
+from app.publication import (
+    PublicationAuthorizationRecord,
+    PublicationGateError,
+    TenantPublicationRuntimeIdentity,
+    build_development_publication_authorization,
+    build_tenant_publication_authorization,
 )
 
 
 @dataclass
 class FakePublicationGate:
-    stage: RolloutStage = RolloutStage.low_risk_canary
-    allowed: bool = True
-    reasons: list[str] = field(default_factory=lambda: ["evaluation threshold failed"])
-    calls: list[tuple[RiskLevel, str]] = field(default_factory=list)
+    """Issue real draft-only authorizations for the exact supplied snapshot."""
+
+    stage: PublicationStage = PublicationStage.tenant_draft_pr
+    rejection: str | None = None
+    calls: list[tuple[RiskLevel, LlmExecutionSnapshot]] = field(default_factory=list)
 
     def authorize(
         self,
         *,
         risk: RiskLevel,
-        canary_identity: str,
-    ) -> PublicationAuthorization:
-        self.calls.append((risk, canary_identity))
-        request = PublicationRequest(
-            requested_stage=self.stage,
+        snapshot: LlmExecutionSnapshot,
+    ) -> PublicationAuthorizationRecord:
+        self.calls.append((risk, snapshot))
+        if self.rejection is not None:
+            raise PublicationGateError(self.rejection)
+        if snapshot.rollout_stage != self.stage.value:
+            raise PublicationGateError(
+                "execution snapshot does not match the fake publication stage"
+            )
+        if self.stage is PublicationStage.development_pr:
+            editor = snapshot.assignment("editor")
+            return build_development_publication_authorization(
+                risk=risk,
+                model=runtime_model(
+                    editor.provider,
+                    editor.model_id,
+                ).litellm_model,
+                codegen_revision=snapshot.codegen_revision,
+            )
+        if self.stage is not PublicationStage.tenant_draft_pr:
+            raise PublicationGateError(
+                f"the {self.stage.value} publication stage cannot publish to GitHub"
+            )
+        runtime_identity = TenantPublicationRuntimeIdentity.build(
+            controller_image_id=f"sha256:{'1' * 64}",
+            worker_image_id=f"sha256:{'2' * 64}",
+            codegen_revision=snapshot.codegen_revision,
+            behavior_configuration_sha256=(
+                snapshot.behavior_configuration_sha256
+            ),
+            egress_policy_sha256="3" * 64,
+            egress_proxy_image_id=f"sha256:{'4' * 64}",
+            max_concurrent_jobs=1,
+        )
+        return build_tenant_publication_authorization(
             risk=risk,
-            model="test-model@1",
-            codegen_revision="test-revision",
-            candidate_identity_sha256="a" * 64,
-            egress_policy_sha256="8" * 64,
-            canary_identity=(
-                canary_identity if self.stage is RolloutStage.low_risk_canary else None
-            ),
-        )
-        decision_payload = {
-            "schema_version": "rollout_decision@3",
-            "requested_stage": self.stage,
-            "risk": risk,
-            "allowed": self.allowed,
-            "publish_branch": self.allowed,
-            "create_pull_request": self.allowed,
-            "ready_for_review": (
-                self.allowed and self.stage is RolloutStage.low_risk_canary
-            ),
-            "reasons": [] if self.allowed else self.reasons,
-            "evaluation_summary_sha256": "d" * 64,
-            "segmented_report_sha256": "9" * 64,
-            "policy_sha256": "c" * 64,
-            "canary_identity_sha256": (
-                "b" * 64 if self.stage is RolloutStage.low_risk_canary else None
-            ),
-            "canary_bucket": (
-                0 if self.stage is RolloutStage.low_risk_canary else None
-            ),
-        }
-        decision = RolloutDecision(
-            **decision_payload,
-            decision_sha256=canonical_sha256(decision_payload),
-        )
-        authorization_payload = {
-            "schema_version": "publication_authorization@4",
-            "request": request.model_dump(mode="python"),
-            "expected_model": "test-model@1",
-            "expected_codegen_revision": "test-revision",
-            "expected_candidate_identity_sha256": "a" * 64,
-            "expected_egress_policy_sha256": "8" * 64,
-            "report_sha256": "e" * 64,
-            "segmented_report_sha256": "9" * 64,
-            "bundle_sha256": "f" * 64,
-            "policy_sha256": "c" * 64,
-            "decision": decision.model_dump(mode="python"),
-        }
-        return PublicationAuthorization(
-            **authorization_payload,
-            authorization_sha256=canonical_sha256(authorization_payload),
+            snapshot=snapshot,
+            runtime_identity=runtime_identity,
         )
 
 
 def allowing_publication_gate(
-    stage: RolloutStage = RolloutStage.low_risk_canary,
+    stage: PublicationStage = PublicationStage.tenant_draft_pr,
 ) -> FakePublicationGate:
     return FakePublicationGate(stage=stage)
 
 
 def denying_publication_gate() -> FakePublicationGate:
-    return FakePublicationGate(allowed=False)
+    return FakePublicationGate(rejection="tenant publication is unavailable")

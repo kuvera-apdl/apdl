@@ -35,6 +35,7 @@ from app.publication import (
     DevelopmentPublicationAuthorization,
     PublicationAuthorizationRecord,
     PublicationGate,
+    TenantPublicationAuthorization,
 )
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
@@ -151,21 +152,36 @@ def _pr_body(
             f"- Stage: `{publication.request.requested_stage.value}`\n"
             f"- Model: `{publication.request.model}`\n"
             f"- Codegen revision: `{publication.request.codegen_revision}`\n"
-            "- Authority: local development; no evaluation evidence is claimed.\n"
+            "- Authority: local development; no production runtime attestation "
+            "is claimed.\n"
             f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
             "- This authorization always creates a draft PR. GitHub CI, review, "
             "and merge remain authoritative."
         )
-    else:
+    elif isinstance(publication, TenantPublicationAuthorization):
+        snapshot = publication.request.execution_snapshot
+        editor_assignment = snapshot.assignment("editor")
+        helper_assignment = snapshot.assignment("helper")
         publication_text = (
             f"- Stage: `{publication.request.requested_stage.value}`\n"
-            f"- Model: `{publication.request.model}`\n"
-            f"- Codegen revision: `{publication.request.codegen_revision}`\n"
-            f"- Evaluation report SHA-256: `{publication.report_sha256}`\n"
+            f"- Editor assignment: `{editor_assignment.provider}/"
+            f"{editor_assignment.model_id}` (version "
+            f"`{editor_assignment.assignment_version}`)\n"
+            f"- Helper assignment: `{helper_assignment.provider}/"
+            f"{helper_assignment.model_id}` (version "
+            f"`{helper_assignment.assignment_version}`)\n"
+            f"- Codegen revision: `{snapshot.codegen_revision}`\n"
+            f"- Execution snapshot SHA-256: "
+            f"`{publication.request.execution_snapshot_sha256}`\n"
+            f"- Runtime identity SHA-256: "
+            f"`{publication.request.runtime_identity.identity_sha256}`\n"
+            "- Authority: exact tenant-owned editor/helper assignments.\n"
             f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
-            "- This authorizes PR publication only; GitHub CI, review, and merge "
-            "remain authoritative."
+            "- This authorization always creates a draft PR. GitHub CI, review, "
+            "and merge remain authoritative."
         )
+    else:  # pragma: no cover - the discriminated union is exhaustive
+        raise TypeError("unsupported publication authorization")
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
@@ -290,9 +306,14 @@ async def _execute_changeset_job(
             effective_safety_policy_sha256=(effective_safety_policy.canonical_digest()),
         )
         risk = changeset.controls.risk_level
+        llm_snapshot = changeset.llm_execution_snapshot
+        if llm_snapshot is None:
+            raise RuntimeError(
+                "Changeset is missing immutable LLM execution authority"
+            )
         authorization = publication_gate.authorize(
             risk=risk,
-            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
+            snapshot=llm_snapshot,
         )
         await store.set_publication_authorization(pool, changeset_id, authorization)
         if not authorization.decision.allowed:
@@ -325,6 +346,7 @@ async def _execute_changeset_job(
         async with mint_read_token(changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
+                    changeset_id=changeset_id,
                     repo=connection.repository_full_name,
                     project_scope=changeset.project_id,
                     base_branch=base_branch,
@@ -580,7 +602,10 @@ async def _execute_changeset_job(
             return
         try:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error, error=str(exc)
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
+                error=f"Changeset execution failed with {type(exc).__name__}",
             )
         except Exception:
             logger.exception("Could not mark changeset %s errored", changeset_id)

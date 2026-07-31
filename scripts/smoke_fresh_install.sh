@@ -38,9 +38,10 @@ export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
 export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
-export ANTHROPIC_API_KEY=""
-export OPENAI_API_KEY=""
-export XAI_API_KEY=""
+# Public, disposable test-only platform keys for the isolated smoke database.
+# Compose exposes each value only to its owning controller.
+export AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+export CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
 

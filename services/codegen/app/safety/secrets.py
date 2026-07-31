@@ -16,6 +16,7 @@ _SECRET_ENVIRONMENT_MARKERS: Final = (
     "ANTHROPIC",
     "APDL",
     "DATABASE",
+    "ENCRYPTION",
     "GEMINI",
     "GITHUB",
     "GOOGLE",
@@ -25,6 +26,7 @@ _SECRET_ENVIRONMENT_MARKERS: Final = (
     "PRIVATE_KEY",
     "SECRET",
     "TOKEN",
+    "XAI",
 )
 
 
@@ -91,6 +93,7 @@ _COMMON_TOKEN_PATTERNS: tuple[_SecretPattern, ...] = (
         "provider_secret_key",
         re.compile(
             r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}|"
+            r"xai-[A-Za-z0-9_-]{16,}|"
             r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})\b"
         ),
         REDACTION_MARKER,

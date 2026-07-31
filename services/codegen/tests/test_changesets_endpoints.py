@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app import capabilities
 from app.main import app
-from app.evaluations.models import RolloutStage
+from app.models.execution import PublicationStage
 from app.models.observations import CIVerificationObservation, ExternalCIStatus
 from app.runtime.collector import RuntimeEvidenceCollection
 from app.runtime.evidence import build_runtime_evidence_observation
@@ -17,13 +17,22 @@ from app.runtime.models import RuntimeAcceptancePlan
 from app.routers import changesets as changesets_router
 from app.safety.policy import TenantCodegenConnectionPolicy
 from app.store.runtime_evidence import apply_runtime_evidence_observation
-from tests.fakes import FakePool
+from tests.fakes import (
+    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    FakePool,
+)
 
 
 @pytest.fixture(autouse=True)
 def executable_changeset_runtime(monkeypatch):
     """Give lifecycle tests an executable runtime without external Docker/GitHub."""
-    app.state.codegen_rollout_stage = RolloutStage.development_pr
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", "local-development")
+    monkeypatch.setenv(
+        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
+        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    )
+    app.state.codegen_rollout_stage = PublicationStage.development_pr
     app.state.job_deps = {
         "editor": object(),
         "mint_read_token": object(),
@@ -54,7 +63,9 @@ def _client(pool: FakePool) -> AsyncClient:
 
 @pytest.mark.asyncio
 async def test_create_changeset_requires_connection():
-    async with _client(FakePool()) as client:
+    pool = FakePool()
+    pool.add_llm_connection("demo")
+    async with _client(pool) as client:
         resp = await client.post(
             "/v1/changesets",
             json={
@@ -71,22 +82,22 @@ async def test_create_changeset_requires_connection():
 
 
 @pytest.mark.asyncio
-async def test_evaluation_only_stage_rejects_changeset_before_queueing():
+async def test_offline_stage_rejects_changeset_before_queueing():
     pool = FakePool()
     pool.add_connection("demo")
-    app.state.codegen_rollout_stage = RolloutStage.shadow
+    app.state.codegen_rollout_stage = PublicationStage.offline
     try:
         async with _client(pool) as client:
             response = await client.post(
                 "/v1/changesets",
                 json={
                     "project_id": "demo",
-                    "idempotency_key": "test:evaluation-stage",
+                    "idempotency_key": "test:disabled-stage",
                     "task": {"title": "x", "spec": "do the thing"},
                 },
             )
     finally:
-        app.state.codegen_rollout_stage = RolloutStage.development_pr
+        app.state.codegen_rollout_stage = PublicationStage.development_pr
 
     assert response.status_code == 409
     assert response.json()["detail"] == {

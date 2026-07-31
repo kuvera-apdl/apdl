@@ -11,7 +11,9 @@ import base64
 import binascii
 import logging
 import os
+import re
 import tempfile
+from pathlib import Path
 
 from app.editor.deadlines import (
     MAX_CODEGEN_JOB_BUDGET_SECONDS as _MAX_CODEGEN_JOB_BUDGET_SECONDS,
@@ -25,7 +27,7 @@ from app.egress import (
     validate_proxy_url,
     validate_socket_volume,
 )
-from app.evaluations.models import RolloutStage
+from app.models.execution import PublicationStage
 from app.safety.policy import (
     PlatformCodegenSafetyPolicy,
     load_platform_safety_policy,
@@ -111,12 +113,12 @@ def github_webhook_secret() -> str:
 
 
 def codegen_model() -> str:
-    """LiteLLM model id the editor drives (any provider key present in env)."""
+    """Explicit local/custom-editor fallback; never used for tenant routing."""
     return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
 
 
 def codegen_revision() -> str:
-    """Immutable codegen candidate revision bound to rollout evidence.
+    """Immutable Codegen worker revision bound to publication authority.
 
     Production deployments should set ``CODEGEN_REVISION`` to the image or Git
     digest. The fallback is intentionally conspicuous and cannot publish. The
@@ -130,25 +132,22 @@ def codegen_revision() -> str:
     )
 
 
-def codegen_rollout_stage() -> RolloutStage:
+def codegen_rollout_stage() -> PublicationStage:
     """Configured deployment stage; offline is the fail-closed default."""
-    raw = os.getenv("CODEGEN_ROLLOUT_STAGE", RolloutStage.offline.value).strip()
+    raw = os.getenv(
+        "CODEGEN_ROLLOUT_STAGE", PublicationStage.offline.value
+    ).strip()
     try:
-        return RolloutStage(raw)
+        return PublicationStage(raw)
     except ValueError as exc:
-        allowed = ", ".join(stage.value for stage in RolloutStage)
+        allowed = ", ".join(stage.value for stage in PublicationStage)
         raise ValueError(
             f"CODEGEN_ROLLOUT_STAGE must be one of: {allowed}"
         ) from exc
 
 
-def codegen_rollout_authorization_path() -> str:
-    """Operator-mounted rollout evidence used for evaluated PR stages."""
-    return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
-
-
 def codegen_development_mode() -> bool:
-    """Explicit local-only acknowledgement for unevaluated draft PRs.
+    """Explicit local-only acknowledgement for development draft PRs.
 
     The rollout stage alone is not enough to enter development publication.
     The local Compose overlay must set this second, deliberately named marker;
@@ -249,14 +248,39 @@ def codegen_sandbox_network() -> str:
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
 
 
+def codegen_llm_broker_dir() -> str:
+    """Shared host path for per-changeset controller/worker Unix sockets."""
+    value = os.getenv(
+        "CODEGEN_LLM_BROKER_DIR",
+        "/tmp/apdl-codegen-llm-broker",
+    )
+    path = Path(value)
+    if (
+        not value
+        or len(value) > 54
+        or value == "/"
+        or value.startswith("//")
+        or value.endswith("/")
+        or not path.is_absolute()
+        or re.fullmatch(r"/[A-Za-z0-9._/-]+", value) is None
+        or any(part in {".", ".."} for part in path.parts)
+        or path.as_posix() != value
+    ):
+        raise ValueError(
+            "CODEGEN_LLM_BROKER_DIR must be a canonical safe absolute path "
+            "of at most 54 characters"
+        )
+    return value
+
+
 def codegen_egress_policy_sha256() -> str:
-    """Content identity of the shipped, evaluated worker egress policy."""
+    """Content identity of the shipped tenant worker egress policy."""
     raw = os.getenv("CODEGEN_EGRESS_POLICY_SHA256", "").strip()
     return validate_policy_sha256(raw) if raw else ""
 
 
 def codegen_egress_proxy_image_id() -> str:
-    """Immutable proxy image ID bound into evaluated publication evidence."""
+    """Immutable proxy image ID bound into tenant publication authority."""
     raw = os.getenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", "").strip()
     return validate_proxy_image_id(raw) if raw else ""
 
@@ -281,8 +305,8 @@ def codegen_controller_image_id() -> str:
 
 
 def codegen_sandbox_image() -> str:
-    """Configured production candidate image reference."""
-    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-sandbox:latest").strip()
+    """Configured isolated worker image reference."""
+    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-worker:latest").strip()
 
 
 def codegen_trusted_repos_only() -> bool:
@@ -291,11 +315,10 @@ def codegen_trusted_repos_only() -> bool:
 
 
 def codegen_helper_model() -> str:
-    """LiteLLM model id for the auxiliary calls (brief compile + diff review).
+    """Explicit local/custom-editor helper model fallback.
 
-    Defaults to the editing model so a single ``CODEGEN_MODEL`` configures the
-    whole pipeline; override with ``CODEGEN_HELPER_MODEL`` to run the auxiliary
-    steps on a cheaper/faster model than the editor.
+    Tenant requests never call this getter; project assignments provide their
+    exact helper model.
     """
     return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
 

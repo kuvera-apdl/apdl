@@ -1,211 +1,181 @@
 import { z } from 'zod'
 
+import {
+  codegenLlmProjectIdSchema,
+  codegenLlmProviderSchema,
+  codegenLlmRoleSchema,
+} from './codegen-llm-connections'
+
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/)
+const dockerImageIdSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/)
+const codegenRevisionSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => value === value.trim(), 'codegen revision must be normalized')
 
 export const codegenRiskLevelSchema = z.enum(['low', 'medium', 'high'])
-export const rolloutStageSchema = z.enum([
-  'offline',
-  'shadow',
-  'development_pr',
-  'reviewed_pr',
-  'low_risk_canary',
-])
 
-export const publicationRequestSchema = z
+export const codegenLlmAssignmentSnapshotSchema = z
   .object({
-    schema_version: z.literal('publication_request@3'),
-    requested_stage: rolloutStageSchema,
-    risk: codegenRiskLevelSchema,
-    model: z.string().min(1),
-    codegen_revision: z.string().min(1),
-    candidate_identity_sha256: sha256Schema,
-    egress_policy_sha256: sha256Schema,
-    canary_identity: z.string().min(1).max(500).nullable(),
+    schema_version: z.literal('codegen_llm_assignment_snapshot@1'),
+    role: codegenLlmRoleSchema,
+    provider: codegenLlmProviderSchema,
+    model_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/),
+    assignment_version: z.number().int().min(1),
+    connection_version: z.number().int().min(1),
+    inventory_version: z.number().int().min(1),
+    catalog_version: z.string().regex(/^codegen-provider-catalog@[1-9][0-9]*$/),
+    context_window_tokens: z.number().int().min(16_000),
+    supports_tool_calling: z.boolean(),
+    supports_structured_output: z.boolean(),
+    input_cost_per_million_tokens_usd_micros: z.number().int().nonnegative(),
+    output_cost_per_million_tokens_usd_micros: z.number().int().nonnegative(),
   })
   .strict()
-  .superRefine((request, ctx) => {
-    if (!['reviewed_pr', 'low_risk_canary'].includes(request.requested_stage)) {
-      ctx.addIssue({
+
+export const codegenLlmExecutionSnapshotSchema = z
+  .object({
+    schema_version: z.literal('codegen_llm_execution_snapshot@2'),
+    project_id: codegenLlmProjectIdSchema,
+    repository_grant_id: z
+      .string()
+      .min(5)
+      .max(132)
+      .regex(/^ghg_[A-Za-z0-9_-]+$/),
+    repository_id: z.number().int().min(1),
+    repository_installation_id: z.number().int().min(1),
+    repository_full_name: z
+      .string()
+      .max(201)
+      .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    codegen_revision: codegenRevisionSchema,
+    behavior_configuration_sha256: sha256Schema,
+    rollout_stage: z.enum([
+      'offline',
+      'development_pr',
+      'tenant_draft_pr',
+    ]),
+    assignments: z.tuple([
+      codegenLlmAssignmentSnapshotSchema,
+      codegenLlmAssignmentSnapshotSchema,
+    ]),
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    if (snapshot.assignments[0].role !== 'editor') {
+      context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'publication requests must target a PR publication stage',
+        path: ['assignments', 0, 'role'],
+        message: 'the first assignment must be the editor assignment',
       })
     }
-    if (request.requested_stage === 'low_risk_canary' && request.canary_identity === null) {
-      ctx.addIssue({
+    if (snapshot.assignments[1].role !== 'helper') {
+      context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'canary publication requires a stable identity',
-      })
-    }
-    if (request.requested_stage !== 'low_risk_canary' && request.canary_identity !== null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'canary_identity is valid only for the canary stage',
+        path: ['assignments', 1, 'role'],
+        message: 'the second assignment must be the helper assignment',
       })
     }
   })
 
-export const rolloutDecisionSchema = z
+export const tenantPublicationRuntimeIdentitySchema = z
   .object({
-    schema_version: z.literal('rollout_decision@3'),
-    requested_stage: rolloutStageSchema,
+    schema_version: z.literal('tenant_publication_runtime_identity@1'),
+    controller_image_id: dockerImageIdSchema,
+    worker_image_id: dockerImageIdSchema,
+    codegen_revision: codegenRevisionSchema.refine((value) => value === value.trim(), {
+      message: 'runtime codegen_revision must be normalized',
+    }),
+    behavior_configuration_sha256: sha256Schema,
+    egress_policy_sha256: sha256Schema,
+    egress_proxy_image_id: dockerImageIdSchema,
+    egress_transport: z.literal('network_none_unix_socket@1'),
+    max_concurrent_jobs: z.literal(1),
+    identity_sha256: sha256Schema,
+  })
+  .strict()
+
+export const tenantPublicationRequestSchema = z
+  .object({
+    schema_version: z.literal('tenant_publication_request@1'),
+    requested_stage: z.literal('tenant_draft_pr'),
     risk: codegenRiskLevelSchema,
-    allowed: z.boolean(),
-    publish_branch: z.boolean(),
-    create_pull_request: z.boolean(),
-    ready_for_review: z.boolean(),
-    reasons: z.array(z.string()),
-    evaluation_summary_sha256: sha256Schema.nullable(),
-    segmented_report_sha256: sha256Schema.nullable(),
-    policy_sha256: sha256Schema,
-    canary_identity_sha256: sha256Schema.nullable(),
-    canary_bucket: z.number().int().min(0).max(99).nullable(),
+    execution_snapshot: codegenLlmExecutionSnapshotSchema,
+    execution_snapshot_sha256: sha256Schema,
+    runtime_identity: tenantPublicationRuntimeIdentitySchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.execution_snapshot.rollout_stage !== request.requested_stage) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['execution_snapshot', 'rollout_stage'],
+        message: 'the execution snapshot must target the requested tenant stage',
+      })
+    }
+    if (
+      request.execution_snapshot.codegen_revision !==
+      request.runtime_identity.codegen_revision
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['runtime_identity', 'codegen_revision'],
+        message: 'the runtime and execution snapshot revisions must match',
+      })
+    }
+    if (
+      request.execution_snapshot.behavior_configuration_sha256 !==
+      request.runtime_identity.behavior_configuration_sha256
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['runtime_identity', 'behavior_configuration_sha256'],
+        message: 'the runtime and execution behavior identities must match',
+      })
+    }
+  })
+
+export const tenantPublicationDecisionSchema = z
+  .object({
+    schema_version: z.literal('tenant_publication_decision@1'),
+    requested_stage: z.literal('tenant_draft_pr'),
+    risk: codegenRiskLevelSchema,
+    allowed: z.literal(true),
+    publish_branch: z.literal(true),
+    create_pull_request: z.literal(true),
+    ready_for_review: z.literal(false),
+    reasons: z.tuple([]),
     decision_sha256: sha256Schema,
   })
   .strict()
-  .superRefine((decision, ctx) => {
-    const publishing =
-      decision.publish_branch || decision.create_pull_request || decision.ready_for_review
 
-    if (decision.requested_stage === 'development_pr') {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'evaluated rollout decisions cannot target the development stage',
-      })
-    }
-
-    if (!decision.allowed && publishing) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'a denied rollout cannot grant publication capabilities',
-      })
-    }
-    if (decision.allowed && decision.reasons.length > 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'an allowed rollout cannot contain denial reasons',
-      })
-    }
-    if (!decision.allowed && decision.reasons.length === 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'a denied rollout requires at least one reason',
-      })
-    }
-
-    if (decision.requested_stage === 'offline' || decision.requested_stage === 'shadow') {
-      if (publishing) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'offline and shadow stages cannot publish',
-        })
-      }
-      if (!decision.allowed) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'offline and shadow execution is always allowed',
-        })
-      }
-    } else if (decision.allowed) {
-      if (!decision.publish_branch || !decision.create_pull_request) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'an allowed PR stage must grant branch and PR publication',
-        })
-      }
-      const expectedReady = decision.requested_stage === 'low_risk_canary'
-      if (decision.ready_for_review !== expectedReady) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'ready-for-review is granted only to an allowed canary',
-        })
-      }
-      if (decision.evaluation_summary_sha256 === null) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'publication requires an evaluation summary digest',
-        })
-      }
-      if (decision.segmented_report_sha256 === null) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'publication requires a segmented report digest',
-        })
-      }
-    }
-  })
-
-const evaluatedPublicationAuthorizationSchema = z
+export const tenantPublicationAuthorizationSchema = z
   .object({
-    schema_version: z.literal('publication_authorization@4'),
-    request: publicationRequestSchema,
-    expected_model: z.string().min(1),
-    expected_codegen_revision: z.string().min(1),
-    expected_candidate_identity_sha256: sha256Schema,
-    expected_egress_policy_sha256: sha256Schema,
-    report_sha256: sha256Schema,
-    segmented_report_sha256: sha256Schema,
-    bundle_sha256: sha256Schema,
-    policy_sha256: sha256Schema,
-    decision: rolloutDecisionSchema,
+    schema_version: z.literal('tenant_publication_authorization@1'),
+    authority: z.literal('tenant_model_assignments'),
+    request: tenantPublicationRequestSchema,
+    decision: tenantPublicationDecisionSchema,
+    draft_only: z.literal(true),
     authorization_sha256: sha256Schema,
   })
   .strict()
-  .superRefine((authorization, ctx) => {
-    if (authorization.request.model !== authorization.expected_model) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication request model does not match expected_model',
-      })
-    }
-    if (authorization.request.codegen_revision !== authorization.expected_codegen_revision) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication request revision does not match expected_codegen_revision',
-      })
-    }
+  .superRefine((authorization, context) => {
     if (
-      authorization.request.candidate_identity_sha256 !==
-      authorization.expected_candidate_identity_sha256
+      authorization.decision.requested_stage !==
+      authorization.request.requested_stage
     ) {
-      ctx.addIssue({
+      context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'publication request candidate identity does not match expected identity',
-      })
-    }
-    if (
-      authorization.request.egress_policy_sha256 !==
-      authorization.expected_egress_policy_sha256
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication request egress policy does not match expected policy',
-      })
-    }
-    if (authorization.decision.requested_stage !== authorization.request.requested_stage) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication decision stage does not match its request',
+        path: ['decision', 'requested_stage'],
+        message: 'the publication decision stage must match its request',
       })
     }
     if (authorization.decision.risk !== authorization.request.risk) {
-      ctx.addIssue({
+      context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'publication decision risk does not match its request',
-      })
-    }
-    if (authorization.decision.policy_sha256 !== authorization.policy_sha256) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication decision does not use the bundled policy',
-      })
-    }
-    if (
-      authorization.decision.segmented_report_sha256 !==
-      authorization.segmented_report_sha256
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'publication decision does not use the bundled segmented report',
+        path: ['decision', 'risk'],
+        message: 'the publication decision risk must match its request',
       })
     }
   })
@@ -244,16 +214,17 @@ export const developmentPublicationAuthorizationSchema = z
     authorization_sha256: sha256Schema,
   })
   .strict()
-  .superRefine((authorization, ctx) => {
+  .superRefine((authorization, context) => {
     if (authorization.request.risk !== authorization.decision.risk) {
-      ctx.addIssue({
+      context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'development publication decision risk does not match its request',
+        path: ['decision', 'risk'],
+        message: 'development publication decision risk must match its request',
       })
     }
   })
 
 export const publicationAuthorizationSchema = z.union([
-  evaluatedPublicationAuthorizationSchema,
+  tenantPublicationAuthorizationSchema,
   developmentPublicationAuthorizationSchema,
 ])

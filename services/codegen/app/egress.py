@@ -25,8 +25,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 EGRESS_POLICY_LABEL = "dev.apdl.codegen.egress.policy-sha256"
 EGRESS_ROLE_LABEL = "dev.apdl.codegen.egress.role"
 EGRESS_SOCKET_VOLUME_LABEL = "dev.apdl.codegen.egress.socket-volume"
+CODEGEN_ROLE_LABEL = "dev.apdl.codegen.role"
 EGRESS_PROXY_ROLE = "proxy"
 EGRESS_SOCKET_ROLE = "socket"
+EGRESS_CONTROLLER_ROLE = "controller"
 EGRESS_TRANSPORT = "network_none_unix_socket@1"
 EGRESS_PROXY_HOST = "127.0.0.1"
 EGRESS_PROXY_PORT = 3128
@@ -227,7 +229,7 @@ def inherited_proxy_environment(
 
 
 def worker_socket_mount(socket_volume: str) -> str:
-    """Return the canonical read-only Docker mount for one evaluated worker."""
+    """Return the canonical read-only Docker mount for one tenant worker."""
     return (
         f"type=volume,src={validate_socket_volume(socket_volume)},"
         f"dst={EGRESS_SOCKET_DIR},readonly"
@@ -384,7 +386,7 @@ def validate_proxy_container_inspect(
     if not isinstance(health, dict) or health.get("Status") != "healthy":
         raise ValueError("attested egress proxy container is not healthy")
     if container.get("Image") != expected_proxy_image_id:
-        raise ValueError("running egress proxy image does not match evaluation")
+        raise ValueError("running egress proxy image does not match runtime identity")
     if not isinstance(config, dict):
         raise ValueError("running egress proxy configuration is missing")
     labels = config.get("Labels")
@@ -489,8 +491,8 @@ def validate_probe_image_inspect(
         raise ValueError("egress probe image inspection returned another image")
     if not isinstance(labels, dict):
         raise ValueError("egress probe image has no identity labels")
-    if labels.get("dev.apdl.codegen.role") != "evaluation-controller":
-        raise ValueError("egress probe must use the sealed evaluation controller")
+    if labels.get(CODEGEN_ROLE_LABEL) != EGRESS_CONTROLLER_ROLE:
+        raise ValueError("egress probe must use the sealed controller")
 
 
 def validate_public_uplink_inspect(payload: Any, *, expected_name: str) -> None:

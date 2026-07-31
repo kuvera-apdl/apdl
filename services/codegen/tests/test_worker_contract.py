@@ -21,12 +21,24 @@ from app.editor.worker_contract import (
     read_codegen_preparation_request,
     read_codegen_worker_request,
 )
+from app.llm.contracts import LlmExecutionAuthority
 from tests.preparation_fakes import repository_preparation
+
+
+def _llm_execution() -> LlmExecutionAuthority:
+    return LlmExecutionAuthority(
+        socket_path="/tmp/apdl-codegen-test-broker/run/broker.sock",
+        token="test-broker-capability-" + ("x" * 43),
+        editor_model="openai/gpt-5.4-mini",
+        helper_model="anthropic/claude-haiku-4-5-20251001",
+        allowed_phases=("brief", "edit", "review"),
+    )
 
 
 def _request(**overrides: object) -> EditRequest:
     values: dict[str, object] = {
         "repo": "acme/widgets",
+        "changeset_id": "cs_worker_contract",
         "project_scope": "project-123",
         "base_branch": "main",
         "branch": "apdl/change",
@@ -36,6 +48,7 @@ def _request(**overrides: object) -> EditRequest:
         "constraints": ["keep tests green"],
         "test_cmd": "python -m pytest -q",
         "risk_level": "high",
+        "llm_execution": _llm_execution(),
     }
     values.update(overrides)
     request = EditRequest(**values)
@@ -85,6 +98,7 @@ def test_worker_request_is_one_canonical_versioned_envelope():
     assert set(payload) == {
         "schema_version",
         "read_token",
+        "changeset_id",
         "repository",
         "project_scope",
         "base_branch",
@@ -103,6 +117,7 @@ def test_worker_request_is_one_canonical_versioned_envelope():
         "runtime_acceptance_plan",
         "runtime_acceptance_policy",
         "repository_preparation",
+        "llm_execution",
     }
     decoded = decode_codegen_worker_request(encoded)
     reconstructed = decoded.to_edit_request()
@@ -110,12 +125,15 @@ def test_worker_request_is_one_canonical_versioned_envelope():
     assert reconstructed.token == "ghs_read_only"
     assert reconstructed.spec == _request().spec
     assert reconstructed.safety_policy == _request().safety_policy
+    assert reconstructed.changeset_id == "cs_worker_contract"
+    assert reconstructed.llm_execution == _llm_execution()
+    assert _llm_execution().token not in repr(reconstructed)
 
 
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda value: value.update({"schema_version": "codegen_worker_request@3"}),
+        lambda value: value.update({"schema_version": "codegen_worker_request@2"}),
         lambda value: value.update({"legacy_spec": value["spec"]}),
         lambda value: value.pop("spec"),
         lambda value: value.update({"existing_branch": "false"}),

@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.egress import (
+    CODEGEN_ROLE_LABEL,
     EGRESS_POLICY_LABEL,
     EGRESS_PROXY_ENTRYPOINT,
     EGRESS_PROXY_HEALTHCHECK,
@@ -41,7 +42,7 @@ PROBE_IMAGE = "sha256:" + "b" * 64
 PROXY_IMAGE = "sha256:" + "c" * 64
 PROXY_ID = "d" * 64
 SOCKET_VOLUME = "apdl-codegen-test-egress"
-UPLINK = "evaluation_default"
+UPLINK = "tenant_runtime_default"
 
 
 def _volume(*, policy: str = POLICY) -> list[dict]:
@@ -134,7 +135,7 @@ def _probe_image() -> list[dict]:
         {
             "Id": PROBE_IMAGE,
             "Config": {
-                "Labels": {"dev.apdl.codegen.role": "evaluation-controller"}
+                "Labels": {CODEGEN_ROLE_LABEL: "controller"}
             },
         }
     ]
@@ -278,7 +279,7 @@ def test_full_attestation_uses_controller_probe_on_network_none():
     attestation = attest_docker_egress_policy(
         docker_bin="docker",
         probe_image=PROBE_IMAGE,
-        launch_id="eval_inv_" + "e" * 32,
+        launch_id="tenant_inv_" + "e" * 32,
         socket_volume=SOCKET_VOLUME,
         expected_policy_sha256=POLICY,
         expected_proxy_image_id=PROXY_IMAGE,
@@ -286,7 +287,7 @@ def test_full_attestation_uses_controller_probe_on_network_none():
         runner=runner,
     )
 
-    assert attestation.launch_id == "eval_inv_" + "e" * 32
+    assert attestation.launch_id == "tenant_inv_" + "e" * 32
     assert attestation.probe_image_id == PROBE_IMAGE
     assert len(attestation.evidence_sha256()) == 64
     probe_command = next(command for command in commands if command[1] == "run")
@@ -338,7 +339,7 @@ def test_attestation_rejects_a_new_volume_consumer_after_the_probe():
         attest_docker_egress_policy(
             docker_bin="docker",
             probe_image=PROBE_IMAGE,
-            launch_id="eval_inv_" + "e" * 32,
+            launch_id="tenant_inv_" + "e" * 32,
             socket_volume=SOCKET_VOLUME,
             expected_policy_sha256=POLICY,
             expected_proxy_image_id=PROXY_IMAGE,

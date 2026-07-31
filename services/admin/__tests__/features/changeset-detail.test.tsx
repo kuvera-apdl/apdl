@@ -12,7 +12,7 @@ import { ChangesetDetailPage } from '../../src/features/codegen/ChangesetDetailP
 import {
   makeChangesetObservationHistory,
   makeDevelopmentPublicationAuthorization,
-  makePublicationAuthorization,
+  makeTenantPublicationAuthorization,
   makeReviewVerdict,
   makeRuntimeAcceptancePlan,
   makeRuntimeEvidenceAssessment,
@@ -62,6 +62,7 @@ function makeChangeset(overrides: Record<string, unknown> = {}) {
     runtime_evidence_assessment: null,
     review_verdict: null,
     publication_authorization: null,
+    llm_execution_snapshot: null,
     tenant_policy_snapshot: null,
     effective_safety_policy_sha256: null,
     error: 'verification failed (`npm run build`):\nDid you mean to import hashBucket?',
@@ -243,14 +244,16 @@ describe('ChangesetDetailPage', () => {
     expect(screen.queryByText('CI passed')).not.toBeInTheDocument()
   })
 
-  test('shows the evidence-bound publication decision without offering merge controls', async () => {
+  test('shows tenant model and runtime publication authority without merge controls', async () => {
+    const authorization = makeTenantPublicationAuthorization()
     server.use(
       http.get('*/api/projects/demo/codegen/v1/changesets/:id', () =>
         HttpResponse.json(
           makeChangeset({
-            status: 'error',
-            error: 'publication denied by rollout evidence',
-            publication_authorization: makePublicationAuthorization(),
+            status: 'pr_open',
+            error: null,
+            publication_authorization: authorization,
+            llm_execution_snapshot: authorization.request.execution_snapshot,
           }),
         ),
       ),
@@ -258,15 +261,21 @@ describe('ChangesetDetailPage', () => {
 
     renderDetail()
     expect(await screen.findByText('Publication authorization')).toBeInTheDocument()
-    expect(screen.getByText('Denied')).toBeInTheDocument()
-    expect(screen.getByText('Reviewed PR')).toBeInTheDocument()
+    expect(screen.getByText('Allowed')).toBeInTheDocument()
+    expect(screen.getByText('Tenant Draft PR')).toBeInTheDocument()
+    expect(screen.getByText('Tenant model assignments')).toBeInTheDocument()
+    expect(screen.getByText('demo')).toBeInTheDocument()
+    expect(screen.getByText('acme/widgets')).toBeInTheDocument()
     expect(screen.getByText('openai/gpt-5.3-codex')).toBeInTheDocument()
-    expect(screen.getByText('codegen-improvements@9838401')).toBeInTheDocument()
-    expect(screen.getByText('test pass rate 0.800 is below required 0.950')).toBeInTheDocument()
+    expect(screen.getByText('anthropic/claude-haiku-4-5-20251001')).toBeInTheDocument()
+    expect(screen.getByText('codegen-tenant-routing@9838401')).toBeInTheDocument()
     expect(screen.getByText('1'.repeat(64))).toBeInTheDocument()
-    expect(screen.getByText('2'.repeat(64))).toBeInTheDocument()
-    expect(screen.getByText('5'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText('6'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText('4'.repeat(64))).toBeInTheDocument()
+    expect(screen.getByText('8'.repeat(64))).toBeInTheDocument()
     expect(screen.getByText(/GitHub remains authoritative for CI, review policy, and merge/)).toBeInTheDocument()
+    expect(screen.queryByText(/Evaluation report/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/canary/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /merge/i })).not.toBeInTheDocument()
   })
 
@@ -286,7 +295,7 @@ describe('ChangesetDetailPage', () => {
     renderDetail()
     expect(await screen.findByText('Development PR')).toBeInTheDocument()
     expect(screen.getByText('Local development only')).toBeInTheDocument()
-    expect(screen.getByText(/this is not rollout evidence/)).toBeInTheDocument()
+    expect(screen.getByText(/does not claim tenant model-assignment or production runtime authority/)).toBeInTheDocument()
     expect(screen.getByText('Draft only')).toBeInTheDocument()
     expect(screen.queryByText('Evaluation report SHA-256')).not.toBeInTheDocument()
     expect(screen.queryByText('Candidate identity SHA-256')).not.toBeInTheDocument()

@@ -21,8 +21,9 @@ from pydantic import (
 )
 
 from app.contracts.models import ContractBundle
-from app.evaluations.models import RiskLevel
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.llm.contracts import LlmExecutionSnapshot
+from app.models.execution import RiskLevel
 from app.models.observations import (
     CIRemediationStatus,
     ExternalCIStatus,
@@ -236,6 +237,10 @@ class Changeset(BaseModel):
     effective_safety_policy_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    #: Exact editor/helper assignments and repository identity captured in the
+    #: same transaction that admitted this changeset. Provider credentials are
+    #: intentionally resolved just in time and never persisted here.
+    llm_execution_snapshot: LlmExecutionSnapshot | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

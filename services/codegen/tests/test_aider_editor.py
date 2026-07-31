@@ -337,7 +337,8 @@ async def test_implement_never_raises_on_unexpected_fault(monkeypatch, tmp_path)
 
     assert result.success is False
     assert result.branch == "apdl/x"
-    assert "kaboom" in (result.error or "")
+    assert result.error == "Editor failed with RuntimeError"
+    assert "kaboom" not in (result.error or "")
     # The throwaway workdir is cleaned up even on the failure path.
     assert not list(tmp_path.iterdir())
 
@@ -362,7 +363,8 @@ async def test_in_process_editor_fails_before_checkout_without_selected_provider
     )
 
     assert result.success is False
-    assert "requires ANTHROPIC_API_KEY" in (result.error or "")
+    assert result.error == "Editor failed with ModelProviderConfigurationError"
+    assert "ANTHROPIC_API_KEY" not in (result.error or "")
     assert not list(tmp_path.iterdir())
 
 
@@ -1143,7 +1145,8 @@ async def test_runtime_workflow_refuses_symlink_to_outside_secret(
     result = await editor.implement(request)
 
     assert result.success is False
-    assert "repository contains a symbolic link" in (result.error or "")
+    assert result.error == "Editor failed with InspectionPathError"
+    assert "outside-runtime-workflow.yml" not in (result.error or "")
     assert "provider-secret-that-must-not-be-read" not in (result.error or "")
     assert pipeline.aider_messages == []
     assert pipeline.pushed is False
@@ -1377,7 +1380,11 @@ async def test_review_rejection_without_retries_fails_the_changeset(
 @pytest.mark.asyncio
 async def test_pipeline_runs_without_any_completer(monkeypatch, tmp_path):
     """No LiteLLM completer means both auxiliary passes skip and editing continues."""
-    monkeypatch.setattr(aider_editor, "resolve_completer", lambda _model: None)
+    monkeypatch.setattr(
+        aider_editor,
+        "resolve_completer",
+        lambda _model, **_kwargs: None,
+    )
     editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
     pipeline = _Pipeline(editor, monkeypatch)
 

@@ -90,7 +90,7 @@ def test_compose_fails_closed_while_local_example_enables_bounded_onboarding() -
     assert "APDL_DEV_CLIENT_KEY=" not in environment
 
 
-def test_local_example_keeps_shared_routing_complete_and_last() -> None:
+def test_local_example_keeps_service_routing_complete_and_last() -> None:
     environment = (ROOT / ".env.example").read_text(encoding="utf-8")
     compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
     routing = environment.split("# ── Routing", maxsplit=1)[1]
@@ -100,8 +100,6 @@ def test_local_example_keeps_shared_routing_complete_and_last() -> None:
         "POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev"
         "@localhost:5432/apdl",
         "CLICKHOUSE_URL=http://localhost:8123",
-        "OPENAI_BASE_URL=https://api.openai.com/v1",
-        "ANTHROPIC_BASE_URL=https://api.anthropic.com",
         "INGESTION_SERVICE_URL=http://localhost:8080",
         "CONFIG_SERVICE_URL=http://localhost:8081",
         "QUERY_SERVICE_URL=http://localhost:8082",
@@ -127,5 +125,7 @@ def test_local_example_keeps_shared_routing_complete_and_last() -> None:
     assert environment.index("# ── ClickHouse Writer") < environment.index(
         "# ── Routing"
     )
-    assert "ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}" in compose
-    assert "OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}" in compose
+    assert "ANTHROPIC_BASE_URL" not in environment
+    assert "OPENAI_BASE_URL" not in environment
+    assert "ANTHROPIC_BASE_URL" not in compose
+    assert "OPENAI_BASE_URL" not in compose

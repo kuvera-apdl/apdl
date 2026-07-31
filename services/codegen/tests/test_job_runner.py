@@ -10,8 +10,8 @@ import pytest
 
 from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
+from app.editor.environment import codegen_tenant_behavior_configuration_sha256
 from app.editor.fake import FakeEditor
-from app.evaluations.models import RiskLevel, RolloutStage
 from app.github.app_auth import AuthorizedRepositoryTarget, InstallationToken
 from app.github.pulls import PullRequest, PullRequestIdentityError
 from app.github.token_broker import GitHubTokenBroker
@@ -23,6 +23,7 @@ from app.models.changeset import (
     ChangesetStatus,
 )
 from app.models.connection import RepositoryTarget
+from app.models.execution import PublicationStage, RiskLevel
 from app.models.observations import ExternalCIStatus, GitHubPRStatus
 from app.models.pr_publication import (
     PublicationCleanupConfirmed,
@@ -33,6 +34,7 @@ from app.publication import (
     DEVELOPMENT_CODEGEN_REVISION,
     ConfiguredPublicationGate,
     DevelopmentPublicationAuthorization,
+    TenantPublicationAuthorization,
 )
 from app.profiling import RepoProfile
 from app.profiling.models import (
@@ -63,7 +65,10 @@ from app.semantic_review import assemble_review_verdict
 from app.store import changesets as store
 from app.store import pr_publication as publication_store
 from app.verification import build_verification_plan, evaluate_verification_coverage
-from tests.fakes import FakePool
+from tests.fakes import (
+    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    FakePool,
+)
 from tests.publisher_fakes import FakeBranchPublisher
 from tests.publication_fakes import (
     allowing_publication_gate,
@@ -76,6 +81,17 @@ _TASK = {
     "context": {},
     "constraints": ["keeps existing tests green"],
 }
+
+
+@pytest.fixture(autouse=True)
+def tenant_publication_environment(monkeypatch):
+    """Capture tenant-draft execution snapshots unless a test opts out."""
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "tenant_draft_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", "test-revision")
+    monkeypatch.setenv(
+        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
+        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    )
 
 
 async def run_changeset_job(*args, publication_gate=None, **kwargs):
@@ -289,7 +305,7 @@ def _workflow_bound_plan() -> RuntimeAcceptancePlan:
 
 
 @pytest.mark.asyncio
-async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
+async def test_job_opens_tenant_draft_pr_for_low_risk_change_with_external_ci():
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets", installation_id=1)
     await _seed(pool, "cs_abc12345")
@@ -316,7 +332,7 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
 
     async def open_pr(**kwargs) -> PullRequest:
         calls.update(kwargs)
-        return _pr(9)
+        return _pr(9, status=GitHubPRStatus.draft)
 
     await run_changeset_job(
         pool,
@@ -331,21 +347,29 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert final.pr_url.endswith("/pull/9")
     assert final.pr_number == 9
     assert final.head_sha == "c" * 40
-    assert final.github_pr_status is GitHubPRStatus.open
+    assert final.github_pr_status is GitHubPRStatus.draft
     assert final.external_ci_status is ExternalCIStatus.pending
     assert final.branch.startswith("apdl/add-dark-mode-")
     assert final.diff_stat == {"files": 3, "additions": 10, "deletions": 0}
     assert final.requirement_ledger is not None
     assert final.requirement_ledger.ready_for_pull_request()
-    assert final.publication_authorization is not None
-    assert final.publication_authorization.decision.ready_for_review is True
+    assert isinstance(
+        final.publication_authorization,
+        TenantPublicationAuthorization,
+    )
+    assert final.publication_authorization.decision.ready_for_review is False
+    assert final.publication_authorization.draft_only is True
+    assert (
+        final.publication_authorization.request.execution_snapshot
+        == final.llm_execution_snapshot
+    )
     # The editor saw the resolved repo/branch + the minted token.
     assert isinstance(editor.last_request, EditRequest)
     assert editor.last_request.repo == "acme/widgets"
     assert editor.last_request.base_branch == "main"
     assert editor.last_request.token == "ghs_tok"
-    # Low-risk work with external CI is ready for GitHub review immediately.
-    assert calls["draft"] is False
+    # Tenant-owned publication always leaves review readiness to GitHub.
+    assert calls["draft"] is True
     assert calls["repo"] == "acme/widgets"
     assert calls["base"] == "main"
     assert calls["token"] == "ghs_tok"
@@ -353,7 +377,7 @@ async def test_job_opens_ready_pr_for_low_risk_change_with_external_ci():
     assert "## Requirement ledger" in calls["body"]
     assert "`REQ-001`" in calls["body"]
     assert "## Publication rollout" in calls["body"]
-    assert "low_risk_canary" in calls["body"]
+    assert "tenant_draft_pr" in calls["body"]
     assert final.publication_authorization.authorization_sha256 in calls["body"]
 
 
@@ -468,7 +492,11 @@ async def test_revocation_after_reconstruction_blocks_jit_push_lease():
 
 
 @pytest.mark.asyncio
-async def test_development_publication_always_opens_draft_without_evidence_claims():
+async def test_development_publication_always_opens_draft_without_evidence_claims(
+    monkeypatch,
+):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
     pool = FakePool()
     pool.add_connection("demo", repo="acme/widgets", installation_id=1)
     await _seed(pool, "cs_dev12345")
@@ -498,9 +526,11 @@ async def test_development_publication_always_opens_draft_without_evidence_claim
         mint_token=_mint,
         open_pr=open_pr,
         publication_gate=ConfiguredPublicationGate(
-            stage=RolloutStage.development_pr,
-            model="test-model@1",
+            stage=PublicationStage.development_pr,
             codegen_revision=DEVELOPMENT_CODEGEN_REVISION,
+            behavior_configuration_sha256=(
+                codegen_tenant_behavior_configuration_sha256()
+            ),
             development_mode=True,
         ),
     )
@@ -514,8 +544,11 @@ async def test_development_publication_always_opens_draft_without_evidence_claim
     )
     assert final.publication_authorization.draft_only is True
     assert calls["draft"] is True
-    assert "local development; no evaluation evidence is claimed" in calls["body"]
-    assert "Evaluation report SHA-256" not in calls["body"]
+    assert (
+        "local development; no production runtime attestation is claimed"
+        in calls["body"]
+    )
+    assert "Execution snapshot SHA-256" not in calls["body"]
 
 
 @pytest.mark.asyncio
@@ -708,7 +741,7 @@ async def test_job_marks_failed_generation_as_error_without_opening_pr():
 
 
 @pytest.mark.asyncio
-async def test_rollout_denial_never_mints_token_or_invokes_editor():
+async def test_publication_gate_rejection_never_mints_token_or_invokes_editor():
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_rollout_denied")
@@ -736,15 +769,16 @@ async def test_rollout_denial_never_mints_token_or_invokes_editor():
     final = await store.get_changeset(pool, "cs_rollout_denied")
     assert final is not None
     assert final.status is ChangesetStatus.error
-    assert "before GitHub credential minting" in (final.error or "")
-    assert final.publication_authorization is not None
-    assert final.publication_authorization.decision.allowed is False
+    assert final.error == "Changeset execution failed with PublicationGateError"
+    assert final.publication_authorization is None
+    assert gate.calls == [(RiskLevel.high, final.llm_execution_snapshot)]
     assert minted == []
     assert editor.last_request is None
 
 
 @pytest.mark.asyncio
-async def test_offline_stage_has_no_github_write_capability():
+async def test_offline_stage_has_no_github_write_capability(monkeypatch):
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "offline")
     pool = FakePool()
     pool.add_connection("demo")
     await _seed(pool, "cs_offline")
@@ -766,16 +800,19 @@ async def test_offline_stage_has_no_github_write_capability():
         mint_token=mint,
         open_pr=open_pr,
         publication_gate=ConfiguredPublicationGate(
-            stage=RolloutStage.offline,
-            model="test-model@1",
+            stage=PublicationStage.offline,
             codegen_revision="test-revision",
+            behavior_configuration_sha256=(
+                codegen_tenant_behavior_configuration_sha256()
+            ),
         ),
     )
 
     final = await store.get_changeset(pool, "cs_offline")
     assert final is not None
     assert final.status is ChangesetStatus.error
-    assert "offline rollout stage cannot publish" in (final.error or "")
+    assert final.error == "Changeset execution failed with PublicationGateError"
+    assert "offline rollout stage" not in final.error
     assert final.publication_authorization is None
     assert minted == []
     assert editor.last_request is None
@@ -830,7 +867,8 @@ async def test_job_errors_on_unexpected_editor_fault():
 
     final = await store.get_changeset(pool, "cs_boom0001")
     assert final.status == ChangesetStatus.error
-    assert "kaboom" in (final.error or "")
+    assert final.error == "Changeset execution failed with RuntimeError"
+    assert "kaboom" not in final.error
 
 
 @pytest.mark.asyncio
@@ -904,7 +942,7 @@ async def test_policy_alone_cannot_bypass_workflow_gate_without_attestation():
         editor=editor,
         mint_token=_mint,
         open_pr=open_pr,
-        publication_gate=allowing_publication_gate(RolloutStage.reviewed_pr),
+        publication_gate=allowing_publication_gate(),
     )
 
     final = await store.get_changeset(pool, "cs_workflow_guard")
@@ -1200,7 +1238,8 @@ async def test_malformed_stored_tenant_policy_fails_before_token_minting():
 
     final = pool.store["changesets"]["cs_badpolicy"]
     assert final["status"] == ChangesetStatus.error.value
-    assert "protected_paths" in (final["error"] or "")
+    assert final["error"] == "Changeset execution failed with ValidationError"
+    assert "protected_paths" not in final["error"]
     assert minted == []
     assert editor.last_request is None
 
@@ -1469,7 +1508,7 @@ async def test_job_uses_private_risk_control_for_higher_risk_change():
         },
     )
     calls: dict = {}
-    gate = allowing_publication_gate(RolloutStage.reviewed_pr)
+    gate = allowing_publication_gate()
     editor = FakeEditor()
 
     async def open_pr(**kwargs) -> PullRequest:
@@ -1488,7 +1527,7 @@ async def test_job_uses_private_risk_control_for_higher_risk_change():
     stored = await store.get_changeset(pool, "cs_risk0001")
     assert stored.status is ChangesetStatus.pr_open
     assert stored.github_pr_status is GitHubPRStatus.draft
-    assert gate.calls == [(RiskLevel.medium, "demo:10")]
+    assert gate.calls == [(RiskLevel.medium, stored.llm_execution_snapshot)]
     assert editor.last_request.risk_level == "medium"
     assert calls["draft"] is True
 

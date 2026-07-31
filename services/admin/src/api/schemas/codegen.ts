@@ -11,7 +11,10 @@ import {
   runtimeAcceptancePlanSchema,
   runtimeEvidenceAssessmentSchema,
 } from './codegen-runtime'
-import { publicationAuthorizationSchema } from './codegen-publication'
+import {
+  codegenLlmExecutionSnapshotSchema,
+  publicationAuthorizationSchema,
+} from './codegen-publication'
 import { externalHttpsUrlSchema } from './urls'
 
 // One LLM prompt the run actually sent (brief compilation, an edit instruction
@@ -771,6 +774,7 @@ export const changesetSchema = z
     runtime_evidence_assessment: runtimeEvidenceAssessmentSchema.nullable(),
     review_verdict: reviewVerdictSchema.nullable(),
     publication_authorization: publicationAuthorizationSchema.nullable(),
+    llm_execution_snapshot: codegenLlmExecutionSnapshotSchema.nullable(),
     tenant_policy_snapshot: z.lazy(() => tenantCodegenConnectionPolicySchema).nullable(),
     effective_safety_policy_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
     error: z.string().nullable(),

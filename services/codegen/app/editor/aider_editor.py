@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -64,6 +65,10 @@ from app.editor.deadlines import (
 )
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
+from app.llm.broker import (
+    LlmBrokerClient,
+    classify_provider_failure,
+)
 from app.editor.prompts import append_prompt, replace_latest_prompt
 from app.editor.environment import (
     PROCESS_ENV,
@@ -181,23 +186,32 @@ def _basic_auth_header(token: str) -> str:
     return f"AUTHORIZATION: basic {raw}"
 
 
-def _agent_env(home: Path, *, model: str | None = None) -> dict[str, str]:
+def _agent_env(
+    home: Path,
+    *,
+    model: str,
+    provider_environment: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Minimal agent environment with an isolated home and no repo configuration."""
     home.mkdir(parents=True, exist_ok=True)
     tmp = home / "tmp"
     tmp.mkdir(exist_ok=True)
     env = {k: os.environ[k] for k in _ENV_PASSTHROUGH if k in os.environ}
-    main_model = model or config.codegen_model()
     # This subprocess performs only the Aider editing call. Auxiliary helper
     # calls run in the controller, so forwarding helper-only credentials here
     # would violate the minimum-environment contract.
-    env.update(
-        resolve_model_provider_environment(
-            os.environ,
-            model=main_model,
-            helper_model=main_model,
+    if provider_environment is None:
+        # Explicit trusted-local/custom seam; tenant serving always supplies a
+        # project runtime binding on the EditRequest.
+        env.update(
+            resolve_model_provider_environment(
+                os.environ,
+                model=model,
+                helper_model=model,
+            )
         )
-    )
+    else:
+        env.update(provider_environment)
     env.setdefault("PATH", os.defpath)
     env["HOME"] = str(home)
     env["TMPDIR"] = str(tmp)
@@ -396,14 +410,23 @@ def _sole_external_ci_uncertainty(verdict: ReviewVerdict) -> bool:
     )
 
 
-def _model_settings_yaml(model: str) -> str:
+def _model_settings_yaml(
+    model: str,
+    endpoint_url: str | None = None,
+) -> str:
     """Aider model-settings that disable ``temperature``.
 
     Newer models (e.g. ``claude-opus-4-8``) reject the ``temperature`` parameter,
     but aider sends it by default — which silently fails the request and produces
     a no-op edit. Disabling it is safe (the model uses its own default).
     """
-    return f'- name: "{model}"\n  use_temperature: false\n'
+    document = f"- name: {json.dumps(model)}\n  use_temperature: false\n"
+    if endpoint_url is not None:
+        document += (
+            "  extra_params:\n"
+            f"    api_base: {json.dumps(endpoint_url)}\n"
+        )
+    return document
 
 
 def _coverage_retry_message(coverage: VerificationCoverage) -> str:
@@ -419,22 +442,22 @@ def _coverage_retry_message(coverage: VerificationCoverage) -> str:
 class AiderEditor:
     """Editor that drives Aider headlessly in a sandboxed clone (model-agnostic).
 
-    The model is read from ``CODEGEN_MODEL`` (default ``claude-opus-4-8``); any
-    LiteLLM-supported id works as long as the matching provider key is present in
-    the service env (it is forwarded to the agent process, the GitHub token is
-    not).
+    Tenant execution receives explicit project bindings on each request.
+    Constructor models and process-environment credentials are a trusted-local
+    custom-editor seam and are never a tenant-serving fallback.
     """
 
     def __init__(
         self,
         *,
         model: str | None = None,
+        helper_model: str | None = None,
         aider_bin: str | None = None,
         workdir_base: str | None = None,
         complete: CompleteFn | None = None,
     ) -> None:
-        self._model = model or config.codegen_model()
-        self._helper_model = os.getenv("CODEGEN_HELPER_MODEL") or self._model
+        self._model = model or "anthropic/claude-opus-5"
+        self._helper_model = helper_model or self._model
         # Explicit binaries remain a test/trusted-local injection seam. The
         # production default always uses the version-pinned hardened adapter.
         self._aider_bin = aider_bin
@@ -460,90 +483,44 @@ class AiderEditor:
         try:
             return await self._run(request)
         except Exception as exc:  # an attempt must never raise to the job runner
-            logger.exception("Aider edit failed for %s", request.repo)
-            return EditResult(success=False, branch=request.branch, error=str(exc))
+            logger.error(
+                "Aider edit failed for %s with %s",
+                request.repo,
+                type(exc).__name__,
+            )
+            return EditResult(
+                success=False,
+                branch=request.branch,
+                error=f"Editor failed with {type(exc).__name__}",
+            )
 
-    async def implement_workspace(
-        self,
-        request: EditRequest,
-        workspace: Path,
-    ) -> EditResult:
-        """Run the production editing pipeline in an existing evaluation checkout.
-
-        This is the credential-free execution seam used by the offline/shadow
-        evaluator.  The caller owns a clean, already-materialized git workspace;
-        this method edits that checkout in place and deliberately performs no
-        clone, branch creation, fetch, push, dependency install, or repository
-        checker execution. Read-only profiling, requirement compilation, the
-        configured brief/Aider/review loop, verification coverage, and the full
-        deterministic safety gate remain identical to :meth:`implement`.
-        Tasks that need exact dependency contracts require provider-free
-        preparation evidence.
-
-        Evaluation workspaces cannot represent an existing-PR repair or remote
-        revert because either operation requires GitHub state and credentials.
-        Ordinary candidate failures follow the Editor contract and are returned
-        as ``EditResult(success=False)`` rather than raised.
-        """
-        try:
-            return await self._run(request, workspace=workspace)
-        except Exception as exc:  # keep the same never-raise attempt contract
-            # The evaluator's stderr crosses a trust boundary.  Do not log the
-            # raw exception or candidate-controlled repository text here; the
-            # typed result remains available to the in-process caller.
-            logger.error("Aider workspace edit failed with an internal error")
-            return EditResult(success=False, branch=request.branch, error=str(exc))
-
-    async def _run(
-        self,
-        request: EditRequest,
-        *,
-        workspace: Path | None = None,
-    ) -> EditResult:
-        # Validate both configured model paths before preparing a checkout. The
-        # helper runs in-process while Aider runs as a subprocess, but neither
-        # path may silently fall back to an unrelated credential in the service
-        # environment.
-        resolve_model_provider_environment(
-            os.environ,
-            model=self._model,
-            helper_model=self._helper_model,
-        )
-        keep = config.codegen_keep_workdir()
-        workspace_mode = workspace is not None
-        if workspace_mode:
-            assert workspace is not None
-            repo_dir = workspace.expanduser().resolve()
-            # Evaluation context/config files must remain outside the candidate
-            # repository even if CODEGEN_WORKDIR was accidentally pointed at the
-            # mounted checkout. Try the configured base first, then safe local
-            # fallbacks, accepting only a directory outside the resolved repo.
-            work: Path | None = None
-            for candidate in (
-                Path(self._workdir_base),
-                Path(tempfile.gettempdir()),
-                repo_dir.parent,
-            ):
-                scratch_base = candidate.expanduser().resolve()
-                if scratch_base == repo_dir or repo_dir in scratch_base.parents:
-                    continue
-                try:
-                    work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=scratch_base))
-                except OSError:
-                    continue
-                break
-            if work is None:
-                raise RuntimeError(
-                    "Workspace evaluation requires a writable scratch directory "
-                    "outside the git worktree."
-                )
+    async def _run(self, request: EditRequest) -> EditResult:
+        runtime = request.llm_execution
+        broker_client: LlmBrokerClient | None = None
+        if runtime is None:
+            # Explicit trusted-local editors can use configured fallback models.
+            # Tenant production always supplies immutable project bindings.
+            main_model = self._model
+            helper_model = self._helper_model
+            editor_provider_environment = resolve_model_provider_environment(
+                os.environ,
+                model=main_model,
+                helper_model=main_model,
+            )
+            helper_api_key = None
+            helper_endpoint = None
         else:
-            work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
-            repo_dir = work / "repo"
-        # A workspace evaluation never even derives an auth header, so an empty
-        # token is a valid input and no credential can reach git accidentally.
-        header = None if workspace_mode else _basic_auth_header(request.token)
-        clone_url = None if workspace_mode else f"https://github.com/{request.repo}.git"
+            main_model = runtime.editor_model
+            helper_model = runtime.helper_model
+            editor_provider_environment = {}
+            helper_api_key = None
+            helper_endpoint = None
+            broker_client = LlmBrokerClient(runtime, request.changeset_id)
+        keep = config.codegen_keep_workdir()
+        work = Path(tempfile.mkdtemp(prefix="apdl-cs-", dir=self._workdir_base))
+        repo_dir = work / "repo"
+        header = _basic_auth_header(request.token)
+        clone_url = f"https://github.com/{request.repo}.git"
         # Prompt transcript for the operator UI (see EditResult.prompts). Every
         # exit path — fail() or success — carries whatever was recorded so far.
         prompts: list[dict[str, Any]] = []
@@ -641,19 +618,13 @@ class AiderEditor:
         run_deadline = CodegenRunDeadline(self._job_budget)
         deadline_token = _RUN_DEADLINE.set(run_deadline)
         try:
-            # 1. Production clones with one-shot auth.  Offline/shadow evaluation
-            #    instead receives one clean, mutation-materialized checkout and
-            #    must never gain a remote repository capability.
+            # 1. Clone the authorized repository with one-shot read credentials.
             preparation = request.repository_preparation
             preflight = preparation.attestation if preparation is not None else None
             source_branch = (
                 request.branch if request.existing_branch else request.base_branch
             )
-            if (
-                not workspace_mode
-                and config.codegen_isolated_worker()
-                and preflight is None
-            ):
+            if config.codegen_isolated_worker() and preflight is None:
                 return fail(
                     "Isolated repository editing requires provider-free preparation "
                     "evidence."
@@ -666,62 +637,22 @@ class AiderEditor:
                 return fail(
                     "Repository preparation identity does not match the edit request."
                 )
-            if workspace_mode:
-                if (
-                    request.revert_sha
-                    or request.existing_branch
-                    or request.expected_head_sha
-                ):
-                    return fail(
-                        "Workspace evaluation does not support remote revert or "
-                        "existing-branch repair inputs."
-                    )
-                if not repo_dir.is_dir():
-                    return fail("Workspace evaluation requires an existing directory.")
-                rc, out = await self._git(
-                    repo_dir, ["rev-parse", "--is-inside-work-tree"]
-                )
-                if rc != 0 or out.strip() != "true":
-                    return fail("Workspace evaluation requires a git worktree.")
-                rc, out = await self._git(repo_dir, ["rev-parse", "--show-toplevel"])
-                if rc != 0:
-                    return fail("Workspace evaluation could not resolve its git root.")
-                try:
-                    git_root = Path(out.strip()).expanduser().resolve(strict=True)
-                except (OSError, RuntimeError):
-                    return fail("Workspace evaluation could not resolve its git root.")
-                if git_root != repo_dir:
-                    return fail(
-                        "Workspace evaluation directory must be the git worktree root."
-                    )
-                rc, out = await self._git(
-                    repo_dir, ["status", "--porcelain", "--untracked-files=all"]
-                )
-                if rc != 0:
-                    return fail(
-                        "Workspace evaluation could not inspect checkout state: "
-                        + _tail(out)
-                    )
-                if out.strip():
-                    return fail("Workspace evaluation requires a clean git worktree.")
-            else:
-                # Repairs clone the existing PR branch; initial runs clone base
-                # and cut a new branch exactly as before.
-                rc, out = await self._git(
-                    None,
-                    [
-                        "clone",
-                        "--depth",
-                        "1",
-                        "--branch",
-                        source_branch,
-                        clone_url,
-                        str(repo_dir),
-                    ],
-                    auth_header=header,
-                )
-                if rc != 0:
-                    return fail(f"clone failed: {_tail(out)}")
+            # Repairs clone the existing PR branch; initial runs clone the base.
+            rc, out = await self._git(
+                None,
+                [
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    source_branch,
+                    clone_url,
+                    str(repo_dir),
+                ],
+                auth_header=header,
+            )
+            if rc != 0:
+                return fail(f"clone failed: {_tail(out)}")
             rc, baseline = await self._git(repo_dir, ["rev-parse", "HEAD"])
             if rc != 0:
                 return fail(f"could not resolve branch head: {_tail(baseline)}")
@@ -749,7 +680,7 @@ class AiderEditor:
                     "Repair refused because the PR head changed from "
                     f"{request.expected_head_sha} to {baseline}."
                 )
-            if not workspace_mode and not request.existing_branch:
+            if not request.existing_branch:
                 rc, out = await self._git(repo_dir, ["checkout", "-b", request.branch])
                 if rc != 0:
                     return fail(f"branch failed: {_tail(out)}")
@@ -758,9 +689,9 @@ class AiderEditor:
             await self._git(repo_dir, ["config", "user.name", "APDL Codegen"])
 
             # 2. Consume the provider-free phase's strict evidence. Trusted
-            # local/evaluation callers may derive read-only metadata here, but
-            # this provider-bearing process never installs dependencies or
-            # invokes repository-owned package executables/checkers.
+            # local callers may derive read-only metadata here, but this
+            # provider-bearing process never installs dependencies or invokes
+            # repository-owned package executables/checkers.
             if preparation is not None:
                 probe = _RepoProbe(
                     verify_cmd=preparation.verification_command,
@@ -860,13 +791,90 @@ class AiderEditor:
             need_brief = self._brief_enabled and request.revert_sha is None
             need_review = self._review_enabled and request.revert_sha is None
             fail_closed_auxiliary = request.risk_level in {"medium", "high"}
-            complete = self._complete
-            if complete is None and (need_brief or need_review):
-                complete = resolve_completer(self._helper_model)
-            if (
-                complete is None
-                and fail_closed_auxiliary
-                and (need_brief or need_review)
+            if broker_client is not None:
+
+                def broker_completer(phase: str) -> CompleteFn:
+                    async def complete(system: str, user: str) -> str | None:
+                        lease, started_at = await broker_client.acquire(phase)
+                        binding = lease.binding
+                        usage: tuple[int, int] | None = None
+
+                        def record_usage(
+                            input_tokens: int, output_tokens: int
+                        ) -> None:
+                            nonlocal usage
+                            usage = (input_tokens, output_tokens)
+
+                        try:
+                            resolved = resolve_completer(
+                                binding.litellm_model,
+                                api_key=binding.api_key,
+                                endpoint_url=binding.endpoint_url,
+                                raise_errors=True,
+                                usage_callback=record_usage,
+                            )
+                            if resolved is None:
+                                raise RuntimeError(
+                                    "Project helper runtime is unavailable"
+                                )
+                            content = await resolved(system, user)
+                        except asyncio.CancelledError:
+                            await asyncio.shield(
+                                broker_client.finish(
+                                    lease,
+                                    started_at,
+                                    status="cancelled",
+                                    error_classification="cancelled",
+                                )
+                            )
+                            raise
+                        except Exception as exc:
+                            await broker_client.finish(
+                                lease,
+                                started_at,
+                                status="failed",
+                                error_classification=(
+                                    classify_provider_failure(exc)
+                                ),
+                            )
+                            raise
+                        else:
+                            await broker_client.finish(
+                                lease,
+                                started_at,
+                                status=(
+                                    "succeeded"
+                                    if content is not None
+                                    else "failed"
+                                ),
+                                input_tokens=usage[0] if usage else None,
+                                output_tokens=usage[1] if usage else None,
+                                error_classification=(
+                                    None if content is not None else "unknown"
+                                ),
+                            )
+                            return content
+                        finally:
+                            binding = None
+                            lease = None
+
+                    return complete
+
+                brief_complete = broker_completer("brief")
+                review_complete = broker_completer("review")
+            else:
+                complete = self._complete
+                if complete is None and (need_brief or need_review):
+                    complete = resolve_completer(
+                        helper_model,
+                        api_key=helper_api_key,
+                        endpoint_url=helper_endpoint,
+                    )
+                brief_complete = complete
+                review_complete = complete
+            if fail_closed_auxiliary and (
+                (need_brief and brief_complete is None)
+                or (need_review and review_complete is None)
             ):
                 return fail(
                     f"{request.risk_level}-risk change requires available brief/review "
@@ -874,7 +882,7 @@ class AiderEditor:
                 )
             task_text = request.spec
             brief_used = False
-            if need_brief and complete is not None:
+            if need_brief and brief_complete is not None:
                 repo_digest = build_repo_digest(repo_dir, probe.profile)
                 if contract_bundle and contract_bundle.resolutions:
                     repo_digest += "\n\n" + render_contract_bundle(contract_bundle)
@@ -902,7 +910,7 @@ class AiderEditor:
                             spec=request.spec,
                             repo_digest=repo_digest,
                             verification_context=probe.preamble,
-                            complete=complete,
+                            complete=brief_complete,
                         ),
                         timeout=helper_timeout,
                     )
@@ -953,7 +961,7 @@ class AiderEditor:
             aider_control.mkdir(mode=0o700)
             settings_file = aider_control / "aider.model.settings.yml"
             settings_file.write_text(
-                _model_settings_yaml(self._model), encoding="utf-8"
+                _model_settings_yaml(main_model), encoding="utf-8"
             )
             aider_config = aider_control / "aider.conf.yml"
             aider_config.write_text("{}\n", encoding="utf-8")
@@ -985,7 +993,7 @@ class AiderEditor:
                 "--env-file",
                 str(aider_env),
                 "--model",
-                self._model,
+                main_model,
                 "--model-settings-file",
                 str(settings_file),
                 "--model-metadata-file",
@@ -1128,15 +1136,102 @@ class AiderEditor:
                             "notes": edit_notes,
                         },
                     )
-                    rc, out = await self._exec(
-                        [*argv, "--message", message],
-                        cwd=repo_dir,
-                        env=_agent_env(work / "agent-home", model=self._model),
-                        timeout=self._agent_timeout,
-                    )
+                    if broker_client is None:
+                        rc, out = await self._exec(
+                            [*argv, "--message", message],
+                            cwd=repo_dir,
+                            env=_agent_env(
+                                work / "agent-home",
+                                model=main_model,
+                                provider_environment=(
+                                    editor_provider_environment
+                                ),
+                            ),
+                            timeout=self._agent_timeout,
+                        )
+                    else:
+                        editor_phase = (
+                            "repair" if request.existing_branch else "edit"
+                        )
+                        lease, started_at = await broker_client.acquire(
+                            editor_phase
+                        )
+                        binding = lease.binding
+                        provider_environment = {
+                            binding.credential_environment_name: binding.api_key
+                        }
+                        try:
+                            if (
+                                binding.role != "editor"
+                                or binding.litellm_model != main_model
+                            ):
+                                raise RuntimeError(
+                                    "Project editor lease does not match "
+                                    "the execution authority"
+                                )
+                            settings_file.write_text(
+                                _model_settings_yaml(
+                                    binding.litellm_model,
+                                    binding.endpoint_url,
+                                ),
+                                encoding="utf-8",
+                            )
+                            rc, out = await self._exec(
+                                [*argv, "--message", message],
+                                cwd=repo_dir,
+                                env=_agent_env(
+                                    work / "agent-home",
+                                    model=binding.litellm_model,
+                                    provider_environment=(
+                                        provider_environment
+                                    ),
+                                ),
+                                timeout=self._agent_timeout,
+                            )
+                        except asyncio.CancelledError:
+                            await asyncio.shield(
+                                broker_client.finish(
+                                    lease,
+                                    started_at,
+                                    status="cancelled",
+                                    error_classification="cancelled",
+                                )
+                            )
+                            raise
+                        except Exception as exc:
+                            await broker_client.finish(
+                                lease,
+                                started_at,
+                                status="failed",
+                                error_classification=(
+                                    classify_provider_failure(exc)
+                                ),
+                            )
+                            raise
+                        else:
+                            await broker_client.finish(
+                                lease,
+                                started_at,
+                                status=(
+                                    "succeeded" if rc == 0 else "failed"
+                                ),
+                                error_classification=(
+                                    None
+                                    if rc == 0
+                                    else (
+                                        "provider_timeout"
+                                        if rc == 124
+                                        else "provider_unavailable"
+                                    )
+                                ),
+                            )
+                        finally:
+                            provider_environment.clear()
+                            binding = None
+                            lease = None
                     if rc != 0:
                         return fail(
-                            f"aider exited {rc}: {_tail(out, _VERIFY_ERR_TAIL)}"
+                            f"aider provider invocation exited with status {rc}"
                         )
                 agent_pending = True
 
@@ -1158,10 +1253,13 @@ class AiderEditor:
                 except ChangedPathError as exc:
                     return fail(f"could not inspect changed paths safely: {exc}")
                 if not changed_paths:
-                    # Surface aider's own output so a no-op edit (e.g. an unreachable
-                    # or misnamed model) is diagnosable from the changeset error.
+                    if broker_client is not None:
+                        # Provider output can contain request/response material.
+                        # Tenant changesets persist only a canonical result.
+                        return fail("The agent produced no changes.")
                     return fail(
-                        f"The agent produced no changes. aider: {_tail(out, _VERIFY_ERR_TAIL)}"
+                        "The agent produced no changes. aider: "
+                        + _tail(out, _VERIFY_ERR_TAIL)
                     )
                 _, diff_text = await self._git(repo_dir, ["diff", f"{base}..HEAD"])
                 dependency_slice = build_dependency_slice(repo_dir, changed_paths)
@@ -1288,7 +1386,7 @@ class AiderEditor:
                         diff_text=diff_text,
                     )
                     model_response: str | None = None
-                    if need_review and complete is not None:
+                    if need_review and review_complete is not None:
                         review_round += 1
                         review_prompt = render_semantic_review_prompt(
                             ledger=requirement_ledger,
@@ -1316,7 +1414,10 @@ class AiderEditor:
                                 self._llm_timeout
                             )
                             model_response = await asyncio.wait_for(
-                                complete(SEMANTIC_REVIEW_SYSTEM, review_prompt),
+                                review_complete(
+                                    SEMANTIC_REVIEW_SYSTEM,
+                                    review_prompt,
+                                ),
                                 timeout=helper_timeout,
                             )
                         except Exception as exc:

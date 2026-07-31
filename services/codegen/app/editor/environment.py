@@ -1,4 +1,4 @@
-"""One canonical environment contract for production and evaluation editors."""
+"""One canonical environment contract for tenant and trusted-local editors."""
 
 from __future__ import annotations
 
@@ -69,20 +69,23 @@ MODEL_PROVIDER_CREDENTIAL_ENV: tuple[str, ...] = (
 )
 
 # Provider configuration that can alter where/how a model request is routed,
-# without granting access to that provider. These values are publication
-# identity; API keys and every other credential in MODEL_PROVIDER_ENV are not.
+# without granting access to that provider. These values affect local/custom
+# runtime behavior; API keys and every other credential in MODEL_PROVIDER_ENV do
+# not belong in a behavior identity.
 MODEL_PROVIDER_ROUTING_ENV: tuple[str, ...] = (
     "OPENAI_API_BASE",
     "OPENAI_BASE_URL",
+    "ANTHROPIC_API_BASE",
     "ANTHROPIC_BASE_URL",
+    "GEMINI_API_BASE",
+    "XAI_API_BASE",
     "OLLAMA_API_BASE",
     "AZURE_API_BASE",
     "AZURE_API_VERSION",
 )
 
-# Every non-secret setting that identifies the candidate or can change its
-# prompt, gates, retries, or runtime behavior. Evaluation and production
-# forward exactly this same tuple; the behavior fingerprint excludes revision.
+# Every non-secret setting that can change an editor's prompts, gates, retries,
+# or runtime behavior. The behavior fingerprint excludes revision.
 CODEGEN_BEHAVIOR_ENV: tuple[str, ...] = (
     "CODEGEN_MODEL",
     "CODEGEN_HELPER_MODEL",
@@ -102,12 +105,6 @@ CODEGEN_BEHAVIOR_ENV: tuple[str, ...] = (
     "CODEGEN_GIT_TIMEOUT",
     "CODEGEN_LLM_TIMEOUT",
 )
-
-EVALUATION_ENV: tuple[str, ...] = (
-    *PROCESS_ENV,
-    *CODEGEN_BEHAVIOR_ENV,
-)
-
 
 class ModelProviderConfigurationError(ValueError):
     """A configured model cannot be given one unambiguous minimal environment."""
@@ -376,11 +373,11 @@ def normalized_codegen_behavior_configuration(
     defaults, the derived whole-job budget, and ignored legacy switches all
     collapse to the values the editor actually uses. An explicit mapping is
     resolved without mutating process-global ``os.environ``, so callers can
-    safely fingerprint the exact environment forwarded to an evaluation.
+    safely fingerprint one explicit editor environment.
 
     ``CODEGEN_REVISION`` is candidate provenance, not editor behavior, and is
     intentionally absent. Provider credentials are also absent; rotating a key
-    must not invalidate otherwise identical evaluation evidence.
+    must not invalidate an otherwise identical worker runtime identity.
     """
     source: Mapping[str, str] = dict(os.environ) if environment is None else environment
 
@@ -436,6 +433,39 @@ def codegen_behavior_configuration_sha256(
 ) -> str:
     """Hash the canonical effective behavior configuration as strict JSON."""
     payload = normalized_codegen_behavior_configuration(environment)
+    canonical = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def codegen_tenant_behavior_configuration_sha256(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Hash tenant-serving behavior without local/custom model routing.
+
+    The immutable changeset snapshot records editor/helper assignments
+    separately. Deployment model names and provider-routing variables belong
+    only to explicit trusted-local/custom editors and therefore cannot alter a
+    tenant changeset's behavior identity.
+    """
+    source = dict(os.environ) if environment is None else dict(environment)
+    for name in (
+        "CODEGEN_MODEL",
+        "CODEGEN_HELPER_MODEL",
+        *MODEL_PROVIDER_ENV,
+        *MODEL_PROVIDER_ROUTING_ENV,
+    ):
+        source.pop(name, None)
+    payload = normalized_codegen_behavior_configuration(source)
+    payload["schema_version"] = "codegen_tenant_behavior_configuration@1"
+    payload.pop("model", None)
+    payload.pop("helper_model", None)
+    payload.pop("provider_routing", None)
     canonical = json.dumps(
         payload,
         allow_nan=False,

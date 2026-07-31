@@ -16,6 +16,7 @@ import asyncpg
 from app.contracts.models import ContractBundle
 from app.editor.prompts import bound_prompt_transcript
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.llm.contracts import LlmExecutionSnapshot
 from app.models.changeset import (
     CI_SYNCABLE_STATUSES,
     AuthorizedRevertControl,
@@ -41,6 +42,7 @@ from app.runtime.models import RuntimeAcceptancePlan, RuntimeEvidenceAssessment
 from app.safety.policy import TenantCodegenConnectionPolicy
 from app.semantic_review.models import ReviewVerdict
 from app.store.jsonb import loads_jsonb
+from app.store.llm_routing import capture_execution_snapshot
 from app.verification.models import VerificationCoverage, VerificationPlan
 
 #: Pre-PR pipeline states a running job actively drives (``queued`` excluded:
@@ -210,6 +212,16 @@ def _tenant_policy_snapshot_from_row(
     return TenantCodegenConnectionPolicy.model_validate_json(raw)
 
 
+def _llm_execution_snapshot_from_row(
+    row: asyncpg.Record,
+) -> LlmExecutionSnapshot | None:
+    value = _optional_column(row, "llm_execution_snapshot")
+    if value is None:
+        return None
+    raw = value if isinstance(value, str) else json.dumps(value)
+    return LlmExecutionSnapshot.model_validate_json(raw)
+
+
 def _controls_from_row(row: asyncpg.Record) -> ChangesetControlMetadata:
     value = row["control_metadata"]
     raw = value if isinstance(value, str) else json.dumps(value)
@@ -254,6 +266,7 @@ def _row_to_changeset(row: asyncpg.Record) -> Changeset:
         effective_safety_policy_sha256=_optional_column(
             row, "effective_safety_policy_sha256"
         ),
+        llm_execution_snapshot=_llm_execution_snapshot_from_row(row),
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -381,6 +394,30 @@ async def create_changeset(
     controls = ChangesetControlMetadata()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"apdl:codegen-idempotency:{project_id}:{idempotency_key}",
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                project_id,
+                idempotency_key,
+            )
+            if row is not None:
+                _assert_idempotency_request(
+                    row, idempotency_request_sha256
+                )
+                return _row_to_changeset(row), False
+            llm_snapshot = await capture_execution_snapshot(
+                conn,
+                project_id=project_id,
+                repository_target=repository_target,
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO codegen_changesets
@@ -390,9 +427,10 @@ async def create_changeset(
                      effective_safety_policy_sha256, repository_grant_id,
                      repository_id, repository_installation_id,
                      repository_full_name, repository_target_quarantined,
-                     control_metadata)
+                     control_metadata, llm_execution_snapshot)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10, $11, $12, $13, $14, false, $15::jsonb)
+                        $10, $11, $12, $13, $14, false, $15::jsonb,
+                        $16::jsonb)
                 ON CONFLICT (project_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -415,6 +453,7 @@ async def create_changeset(
                 repository_target.installation_id,
                 repository_target.repository_full_name,
                 controls.model_dump_json(),
+                llm_snapshot.model_dump_json(),
             )
             created = row is not None
             if row is None:
@@ -457,6 +496,26 @@ async def create_revert_changeset(
         raise ValueError("Changeset project does not match its repository grant")
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"apdl:codegen-idempotency:{project_id}:{idempotency_key}",
+            )
+            existing = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                project_id,
+                idempotency_key,
+            )
+            if existing is not None:
+                _assert_revert_control(existing, source_changeset_id)
+                _assert_idempotency_request(
+                    existing, idempotency_request_sha256
+                )
+                return _row_to_changeset(existing), False
             source = await conn.fetchrow(
                 """
                 SELECT *
@@ -492,6 +551,11 @@ async def create_revert_changeset(
                 raise ValueError(
                     "Revert request digest does not match its authorized target"
                 )
+            llm_snapshot = await capture_execution_snapshot(
+                conn,
+                project_id=project_id,
+                repository_target=repository_target,
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO codegen_changesets
@@ -501,9 +565,10 @@ async def create_revert_changeset(
                      effective_safety_policy_sha256, repository_grant_id,
                      repository_id, repository_installation_id,
                      repository_full_name, repository_target_quarantined,
-                     control_metadata)
+                     control_metadata, llm_execution_snapshot)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10, $11, $12, $13, $14, false, $15::jsonb)
+                        $10, $11, $12, $13, $14, false, $15::jsonb,
+                        $16::jsonb)
                 ON CONFLICT (project_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -526,6 +591,7 @@ async def create_revert_changeset(
                 repository_target.installation_id,
                 repository_target.repository_full_name,
                 controls.model_dump_json(),
+                llm_snapshot.model_dump_json(),
             )
             created = row is not None
             if row is None:
@@ -583,6 +649,62 @@ async def create_retry_changeset(
         raise ValueError("Retry request digest does not match its private controls")
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"apdl:codegen-idempotency:{project_id}:{idempotency_key}",
+            )
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                f"apdl:codegen-retry:{project_id}:{retry_of_changeset_id}",
+            )
+            key_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                project_id,
+                idempotency_key,
+            )
+            if key_row is not None:
+                if (
+                    str(key_row["retry_of_changeset_id"] or "")
+                    != retry_of_changeset_id
+                ):
+                    raise ChangesetIdempotencyConflict(
+                        "Idempotency key is already bound to a different "
+                        "retry lineage"
+                    )
+                _assert_idempotency_request(
+                    key_row, idempotency_request_sha256
+                )
+                return _row_to_changeset(key_row), False
+            lineage_row = await conn.fetchrow(
+                """
+                SELECT *
+                FROM codegen_changesets
+                WHERE project_id = $1 AND retry_of_changeset_id = $2
+                FOR UPDATE
+                """,
+                project_id,
+                retry_of_changeset_id,
+            )
+            if lineage_row is not None:
+                if str(lineage_row["idempotency_key"]) != idempotency_key:
+                    raise ChangesetIdempotencyConflict(
+                        "Retry lineage is already bound to a different "
+                        "idempotency key"
+                    )
+                _assert_idempotency_request(
+                    lineage_row, idempotency_request_sha256
+                )
+                return _row_to_changeset(lineage_row), False
+            llm_snapshot = await capture_execution_snapshot(
+                conn,
+                project_id=project_id,
+                repository_target=repository_target,
+            )
             row = await conn.fetchrow(
                 """
                 INSERT INTO codegen_changesets
@@ -592,9 +714,10 @@ async def create_retry_changeset(
                      repository_grant_id, repository_id,
                      repository_installation_id, repository_full_name,
                      repository_target_quarantined, retry_of_changeset_id,
-                     control_metadata)
+                     control_metadata, llm_execution_snapshot)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                        $10, $11, $12, $13, $14, false, $15, $16::jsonb)
+                        $10, $11, $12, $13, $14, false, $15, $16::jsonb,
+                        $17::jsonb)
                 ON CONFLICT DO NOTHING
                 RETURNING *
                 """,
@@ -618,6 +741,7 @@ async def create_retry_changeset(
                 repository_target.repository_full_name,
                 retry_of_changeset_id,
                 controls.model_dump_json(),
+                llm_snapshot.model_dump_json(),
             )
             if row is not None:
                 return _row_to_changeset(row), True
