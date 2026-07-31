@@ -12,12 +12,14 @@ from app.llm.contracts import (
     ErrorClassification,
     LlmBudgetExceededError,
     LlmCostOverrunError,
+    LlmCredentialUnavailableError,
     LlmGovernanceError,
     LlmGovernanceUnavailableError,
     LlmPolicyDeniedError,
     LlmRequestContext,
     LlmRunInactiveError,
     PreparedLlmAttempt,
+    ProjectModelAssignment,
     ProjectLlmPolicy,
     ProviderName,
     ProviderPolicy,
@@ -374,6 +376,42 @@ async def begin_llm_call(
         _unavailable(context, "creating a logical call", exc)
 
 
+async def load_project_model_assignment(
+    context: LlmRequestContext,
+    *,
+    tier: Literal["fast", "reasoning"],
+) -> ProjectModelAssignment:
+    """Load the project's sole canonical assignment for one LLM tier."""
+    if tier not in {"fast", "reasoning"}:
+        raise ValueError("tier must be fast or reasoning")
+    try:
+        async with context.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT project_id, tier, provider, model, endpoint_url
+                FROM llm_project_model_assignments
+                WHERE project_id = $1 AND tier = $2
+                """,
+                context.project_id,
+                tier,
+            )
+        if row is None:
+            raise LlmCredentialUnavailableError(
+                f"Project has no {tier} LLM model assignment"
+            )
+        return ProjectModelAssignment(
+            project_id=str(row["project_id"]),
+            tier=tier,
+            provider=cast(ProviderName, str(row["provider"])),
+            model=str(row["model"]),
+            endpoint_url=str(row["endpoint_url"]),
+        )
+    except LlmGovernanceError:
+        raise
+    except Exception as exc:
+        _unavailable(context, "loading project model assignment", exc)
+
+
 async def prepare_provider_attempt(
     context: LlmRequestContext,
     *,
@@ -432,10 +470,16 @@ async def prepare_provider_attempt(
                            provider.data_residency,
                            provider.allowed_data_classifications,
                            provider.input_cost_per_million_tokens_usd_micros,
-                           provider.output_cost_per_million_tokens_usd_micros
+                           provider.output_cost_per_million_tokens_usd_micros,
+                           credential.credential_id,
+                           credential.credential_version
                     FROM llm_project_policies AS policy
                     JOIN llm_project_provider_policies AS provider
                       ON provider.project_id = policy.project_id
+                    LEFT JOIN llm_project_provider_credentials AS credential
+                      ON credential.project_id = provider.project_id
+                     AND credential.provider = provider.provider
+                     AND credential.state = 'active'
                     WHERE policy.project_id = $1
                       AND provider.provider = $2
                       AND provider.model = $3
@@ -452,6 +496,10 @@ async def prepare_provider_attempt(
                     raise LlmPolicyDeniedError(
                         f"Provider/model {provider}/{model} is not enabled for "
                         f"project {context.project_id}"
+                    )
+                if provider != "local" and policy_row["credential_id"] is None:
+                    raise LlmCredentialUnavailableError(
+                        f"Project provider connection {provider} is unavailable"
                     )
                 provider_policy = _provider_policy(policy_row)
                 if not provider_policy.permits(
@@ -553,11 +601,12 @@ async def prepare_provider_attempt(
                         attempt_id, call_id, project_id, run_id, attempt_number,
                         execution_owner_id, provider, model, endpoint_url, prompt_sha256,
                         estimated_input_tokens, max_output_tokens,
-                        reserved_cost_usd_micros
+                        reserved_cost_usd_micros, credential_id,
+                        credential_version
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7,
-                        $8, $9, $10, $11, $12, $13
+                        $8, $9, $10, $11, $12, $13, $14, $15
                     )
                     """,
                     attempt_id,
@@ -573,6 +622,8 @@ async def prepare_provider_attempt(
                     estimated_input_tokens,
                     max_output_tokens,
                     reserved_cost,
+                    policy_row["credential_id"],
+                    policy_row["credential_version"],
                 )
                 await conn.execute(
                     """
@@ -586,6 +637,16 @@ async def prepare_provider_attempt(
             attempt_id=attempt_id,
             reserved_cost_usd_micros=reserved_cost,
             provider_policy=provider_policy,
+            credential_id=(
+                UUID(str(policy_row["credential_id"]))
+                if policy_row["credential_id"] is not None
+                else None
+            ),
+            credential_version=(
+                int(policy_row["credential_version"])
+                if policy_row["credential_version"] is not None
+                else None
+            ),
         )
     except LlmGovernanceError:
         raise
@@ -605,14 +666,31 @@ async def mark_provider_egress(
                 await _assert_execution_active(conn, context)
                 updated = await conn.fetchval(
                     """
-                    UPDATE llm_provider_attempts
+                    UPDATE llm_provider_attempts AS attempt
                     SET status = 'in_flight', egress_started_at = now()
-                    WHERE attempt_id = $1
-                      AND project_id = $2
-                      AND run_id = $3
-                      AND execution_owner_id = $4
-                      AND status = 'prepared'
-                    RETURNING attempt_id
+                    WHERE attempt.attempt_id = $1
+                      AND attempt.project_id = $2
+                      AND attempt.run_id = $3
+                      AND attempt.execution_owner_id = $4
+                      AND attempt.status = 'prepared'
+                      AND (
+                          (
+                              attempt.provider = 'local'
+                              AND attempt.credential_id IS NULL
+                          )
+                          OR EXISTS (
+                              SELECT 1
+                              FROM llm_project_provider_credentials AS credential
+                              WHERE credential.credential_id =
+                                    attempt.credential_id
+                                AND credential.project_id = attempt.project_id
+                                AND credential.provider = attempt.provider
+                                AND credential.credential_version =
+                                    attempt.credential_version
+                                AND credential.state = 'active'
+                          )
+                      )
+                    RETURNING attempt.attempt_id
                     """,
                     attempt_id,
                     context.project_id,
@@ -620,8 +698,8 @@ async def mark_provider_egress(
                     context.execution_owner_id,
                 )
                 if updated is None:
-                    raise LlmPolicyDeniedError(
-                        f"Provider attempt {attempt_id} is not prepared"
+                    raise LlmCredentialUnavailableError(
+                        f"Provider attempt {attempt_id} lost credential authority"
                     )
     except LlmGovernanceError:
         raise

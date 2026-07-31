@@ -53,4 +53,7 @@ export const queryKeys = {
     [wsId, 'custom-agents', 'definitions', projectId] as const,
   agentExecutionCapabilities: (wsId: string, projectId: string) =>
     [wsId, 'agents', 'execution-capabilities', projectId] as const,
+  llmConnections: (wsId: string) => [wsId, 'agents', 'llm-connections'] as const,
+  llmModels: (wsId: string, provider: string) =>
+    [wsId, 'agents', 'llm-connections', provider, 'models'] as const,
 }

@@ -8,6 +8,9 @@ SQL = (ROOT / "pipeline/postgres/migrations/023_llm_governance.sql").read_text()
 XAI_SQL = (
     ROOT / "pipeline/postgres/migrations/045_xai_llm_provider.sql"
 ).read_text()
+PROJECT_CREDENTIAL_ROUTING_SQL = (
+    ROOT / "pipeline/postgres/migrations/049_project_scoped_llm_routing.sql"
+).read_text()
 
 
 def test_llm_governance_separates_logical_calls_and_provider_attempts():
@@ -56,3 +59,18 @@ def test_xai_provider_is_admitted_to_policy_and_attempt_ledgers():
     assert XAI_SQL.count(
         "provider IN ('openai', 'anthropic', 'google', 'xai', 'local')"
     ) == 2
+
+
+def test_project_routing_binds_tiers_and_attempts_to_exact_credentials():
+    sql = PROJECT_CREDENTIAL_ROUTING_SQL
+
+    assert "CREATE TABLE llm_project_model_assignments" in sql
+    assert "PRIMARY KEY (project_id, tier)" in sql
+    assert "tier IN ('fast', 'reasoning')" in sql
+    assert "ADD COLUMN credential_id UUID" in sql
+    assert "ADD COLUMN credential_version BIGINT" in sql
+    assert "llm_provider_attempts_credential_fk" in sql
+    assert "credential_id, project_id, provider, credential_version" in sql
+    assert "llm_provider_attempts_credential_binding_check" in sql
+    assert "llm_provider_attempts_protect_credential_binding" in sql
+    assert "'credential_unavailable'" in sql

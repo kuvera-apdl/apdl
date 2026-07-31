@@ -56,7 +56,7 @@ def test_compose_healthcheck_uses_core_readiness_only() -> None:
     assert "/ready/capabilities" not in agents_service
 
 
-def test_compose_and_example_forward_xai_credential_to_agents() -> None:
+def test_compose_forwards_only_platform_key_not_cloud_keys_to_agents() -> None:
     compose = (REPO_ROOT / "infra" / "docker" / "docker-compose.yml").read_text(
         encoding="utf-8"
     )
@@ -65,7 +65,11 @@ def test_compose_and_example_forward_xai_credential_to_agents() -> None:
     )[0]
     env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
 
-    assert "XAI_API_KEY: ${XAI_API_KEY:-}" in agents_service
+    assert "XAI_API_KEY:" not in agents_service
+    assert "OPENAI_API_KEY:" not in agents_service
+    assert "ANTHROPIC_API_KEY:" not in agents_service
+    assert "GOOGLE_API_KEY:" not in agents_service
+    assert "AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:" in agents_service
     assert (
         "LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}"
         in agents_service

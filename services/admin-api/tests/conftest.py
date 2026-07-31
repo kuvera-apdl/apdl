@@ -61,6 +61,7 @@ def make_settings(**overrides) -> Settings:
 class AuditConnection:
     def __init__(self, statements: list[tuple[str, tuple[object, ...]]]) -> None:
         self.statements = statements
+        self.llm_connection_authorized = True
 
     @asynccontextmanager
     async def transaction(self):
@@ -72,6 +73,10 @@ class AuditConnection:
 
     async def fetchrow(self, query: str, *args):
         self.statements.append((query, args))
+        if "AS llm_connection_authorized" in query:
+            return {
+                "llm_connection_authorized": self.llm_connection_authorized
+            }
         if "AS session_active" in query and "AS project_authorized" in query:
             return {"session_active": True, "project_authorized": True}
         raise AssertionError(f"Unexpected fetchrow query: {query}")

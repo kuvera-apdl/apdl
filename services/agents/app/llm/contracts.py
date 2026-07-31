@@ -13,6 +13,7 @@ import asyncpg
 
 
 ProviderName = Literal["openai", "anthropic", "google", "xai", "local"]
+ModelTier = Literal["fast", "reasoning"]
 DataClassification = Literal["public", "internal", "confidential", "restricted"]
 ExecutionKind = Literal["agent_run", "custom_agent_test"]
 ErrorClassification = Literal[
@@ -30,6 +31,7 @@ ErrorClassification = Literal[
     "run_inactive",
     "cost_overrun",
     "no_provider",
+    "credential_unavailable",
     "cancelled",
     "governance_unavailable",
     "unknown",
@@ -64,6 +66,10 @@ class LlmRunInactiveError(LlmGovernanceError):
 
 class LlmCostOverrunError(LlmGovernanceError):
     """Provider-reported usage exceeded the conservative cost reservation."""
+
+
+class LlmCredentialUnavailableError(LlmGovernanceError):
+    """The project credential required for provider egress is unavailable."""
 
 
 @dataclass(frozen=True)
@@ -119,6 +125,17 @@ class ProviderPolicy:
 
 
 @dataclass(frozen=True)
+class ProjectModelAssignment:
+    """One exact server-owned provider/model assignment for a project tier."""
+
+    project_id: str
+    tier: ModelTier
+    provider: ProviderName
+    model: str
+    endpoint_url: str
+
+
+@dataclass(frozen=True)
 class ProjectLlmPolicy:
     """Authoritative project budget and provider egress policy."""
 
@@ -156,6 +173,8 @@ class PreparedLlmAttempt:
     attempt_id: UUID
     reserved_cost_usd_micros: int
     provider_policy: ProviderPolicy
+    credential_id: UUID | None = None
+    credential_version: int | None = None
 
 
 @dataclass(frozen=True)

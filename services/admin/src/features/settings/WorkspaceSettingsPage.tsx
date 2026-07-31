@@ -1,4 +1,4 @@
-import { ChevronDown, FolderKanban, Loader2, Plus, ShieldCheck } from 'lucide-react'
+import { Bot, ChevronDown, FolderKanban, KeyRound, Loader2, Plus, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { z } from 'zod'
@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
 import { ProjectCredentialsCard } from '@/features/settings/ProjectCredentialsCard'
+import { ProjectLlmConnectionsCard } from '@/features/settings/ProjectLlmConnectionsCard'
 import { ProjectMembersCard } from '@/features/settings/ProjectMembersCard'
 
 export function WorkspaceSettingsPage() {
@@ -69,7 +70,7 @@ export function WorkspaceSettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Project management"
-        description="Review your projects, manage access, and issue reveal-once SDK credentials."
+        description="Review your projects, manage access, connect Agents providers, and issue reveal-once SDK credentials."
       />
 
       {identity?.projects.length === 0 ? (
@@ -162,7 +163,44 @@ export function WorkspaceSettingsPage() {
 
                       <ProjectMembersCard />
 
-                      <ProjectCredentialsCard />
+                      <section
+                        aria-labelledby={`project-${project.project_id}-agents-heading`}
+                        className="space-y-3"
+                      >
+                        <div>
+                          <h3
+                            id={`project-${project.project_id}-agents-heading`}
+                            className="flex items-center gap-2 font-semibold"
+                          >
+                            <Bot className="h-4 w-4" />
+                            Agents
+                          </h3>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Connect the project credentials Agents uses for provider calls and
+                            discover the models available to each key.
+                          </p>
+                        </div>
+                        <ProjectLlmConnectionsCard />
+                      </section>
+
+                      <section
+                        aria-labelledby={`project-${project.project_id}-sdk-heading`}
+                        className="space-y-3"
+                      >
+                        <div>
+                          <h3
+                            id={`project-${project.project_id}-sdk-heading`}
+                            className="flex items-center gap-2 font-semibold"
+                          >
+                            <KeyRound className="h-4 w-4" />
+                            SDK connections
+                          </h3>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Issue scoped reveal-once keys for browser and server SDKs.
+                          </p>
+                        </div>
+                        <ProjectCredentialsCard />
+                      </section>
                     </div>
                   ) : null}
                 </Card>

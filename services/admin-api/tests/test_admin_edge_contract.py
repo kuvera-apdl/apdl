@@ -127,10 +127,5 @@ def test_local_example_keeps_shared_routing_complete_and_last() -> None:
     assert environment.index("# ── ClickHouse Writer") < environment.index(
         "# ── Routing"
     )
-    assert (
-        "ANTHROPIC_BASE_URL: "
-        "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    ) in compose
-    assert (
-        "OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}"
-    ) in compose
+    assert "ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}" in compose
+    assert "OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}" in compose

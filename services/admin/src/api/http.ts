@@ -22,8 +22,11 @@ export interface RequestOptions<T> {
   signal?: AbortSignal
   /** Additional non-credential headers for the proxied service request. */
   headers?: Record<string, string>
-  /** Login probes throw 401 locally; normal requests terminate the console session. */
-  redirectOnUnauthorized?: boolean
+  /**
+   * Login probes can disable session termination. A request with a second
+   * authentication domain can classify its canonical 401 body precisely.
+   */
+  redirectOnUnauthorized?: boolean | ((body: unknown) => boolean)
   /** Canonical response mirror; a mismatch throws ApiError(code: "schema_mismatch"). */
   schema?: ZodType<T>
 }
@@ -231,11 +234,11 @@ export async function request<T>(
         response.statusText,
         response.headers,
       )
-      if (
-        response.status === 401 &&
-        options.redirectOnUnauthorized !== false &&
-        typeof window !== 'undefined'
-      ) {
+      const redirectOnUnauthorized =
+        typeof options.redirectOnUnauthorized === 'function'
+          ? options.redirectOnUnauthorized(data)
+          : options.redirectOnUnauthorized !== false
+      if (response.status === 401 && redirectOnUnauthorized && typeof window !== 'undefined') {
         notifyUnauthorized(response)
       }
       if (response.status >= 500 && attempt < maxAttempts - 1) {

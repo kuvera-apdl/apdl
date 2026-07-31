@@ -45,14 +45,9 @@ async def test_capability_report_separates_configuration_and_reachability(
 
     capabilities = report["capabilities"]
     assert report["status"] == "degraded"
-    assert capabilities["llm"]["configured"] is True
-    assert capabilities["llm"]["reachable"] is True
-    assert capabilities["llm"]["providers"] == {
-        "openai": {"configured": True, "reachable": True},
-        "anthropic": {"configured": False, "reachable": False},
-        "google": {"configured": False, "reachable": False},
-        "xai": {"configured": False, "reachable": False},
-        "local": {"configured": False, "reachable": False},
+    assert capabilities["llm"] == {
+        "credential_store": {"configured": True, "operational": True},
+        "project_credentials": "tenant_scoped",
     }
     assert capabilities["query"] == {"configured": True, "reachable": True}
     assert capabilities["config"] == {"configured": True, "reachable": False}
@@ -61,7 +56,7 @@ async def test_capability_report_separates_configuration_and_reachability(
         "reachable": True,
         "changeset_creation": "tenant_scoped",
     }
-    assert len(probed_urls) == 4
+    assert len(probed_urls) == 3
     assert "openai-secret" not in str(report)
 
 
@@ -94,7 +89,7 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
 
 
 @pytest.mark.asyncio
-async def test_xai_readiness_uses_models_endpoint_without_leaking_key(
+async def test_generic_readiness_never_probes_or_reports_tenant_provider_keys(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -117,15 +112,10 @@ async def test_xai_readiness_uses_models_endpoint_without_leaking_key(
 
     report = await readiness.capability_report()
 
-    assert probes == [
-        (
-            "https://api.x.ai/v1/models",
-            {"Authorization": "Bearer xai-secret"},
-        )
-    ]
-    assert report["capabilities"]["llm"]["providers"]["xai"] == {
-        "configured": True,
-        "reachable": True,
+    assert probes == []
+    assert report["capabilities"]["llm"] == {
+        "credential_store": {"configured": True, "operational": True},
+        "project_credentials": "tenant_scoped",
     }
     assert "xai-secret" not in str(report)
 

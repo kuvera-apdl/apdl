@@ -41,6 +41,14 @@ class ProviderPolicyInput:
 
 
 @dataclass(frozen=True)
+class ModelAssignmentInput:
+    tier: str
+    provider: str
+    model: str
+    endpoint_url: str
+
+
+@dataclass(frozen=True)
 class PolicyReplacement:
     project_id: str
     required_data_residency: str
@@ -49,14 +57,15 @@ class PolicyReplacement:
     actor: str
     reason: str
     provider_policies: tuple[ProviderPolicyInput, ...]
+    model_assignments: tuple[ModelAssignmentInput, ...]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Replace one authorized project's LLM policy using the Agents "
-            "container's exact endpoint and model configuration. Provider "
-            "credentials are read only from the container environment."
+            "server's fixed endpoint catalog and exact model assignments. "
+            "Provider credentials are managed separately per project."
         )
     )
     parser.add_argument("--project-id", required=True)
@@ -241,6 +250,20 @@ def validate_replacement(args: argparse.Namespace) -> PolicyReplacement:
         actor=actor,
         reason=reason,
         provider_policies=tuple(by_model[model] for model in sorted(by_model)),
+        model_assignments=(
+            ModelAssignmentInput(
+                tier="fast",
+                provider=provider,
+                model=runtime.fast_model,
+                endpoint_url=runtime.endpoint_url,
+            ),
+            ModelAssignmentInput(
+                tier="reasoning",
+                provider=provider,
+                model=runtime.reasoning_model,
+                endpoint_url=runtime.endpoint_url,
+            ),
+        ),
     )
 
 
@@ -387,6 +410,10 @@ async def replace_policy(replacement: PolicyReplacement, *, dsn: str) -> str:
                 replacement.run_cost_limit_usd_micros,
             )
             await conn.execute(
+                "DELETE FROM llm_project_model_assignments WHERE project_id = $1",
+                replacement.project_id,
+            )
+            await conn.execute(
                 "DELETE FROM llm_project_provider_policies WHERE project_id = $1",
                 replacement.project_id,
             )
@@ -409,6 +436,21 @@ async def replace_policy(replacement: PolicyReplacement, *, dsn: str) -> str:
                     list(policy.allowed_data_classifications),
                     policy.input_cost_per_million_tokens_usd_micros,
                     policy.output_cost_per_million_tokens_usd_micros,
+                )
+            for assignment in replacement.model_assignments:
+                await conn.execute(
+                    """
+                    INSERT INTO llm_project_model_assignments (
+                        project_id, tier, provider, model, endpoint_url,
+                        assigned_by_actor
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    replacement.project_id,
+                    assignment.tier,
+                    assignment.provider,
+                    assignment.model,
+                    assignment.endpoint_url,
+                    replacement.actor,
                 )
 
             next_snapshot = _snapshot(

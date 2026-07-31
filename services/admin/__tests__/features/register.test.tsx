@@ -232,6 +232,13 @@ test('creates a project and opens its grouped project-management sections', asyn
       return HttpResponse.json(withProject, { status: 201 })
     }),
     http.get('*/api/projects/firstproject/credentials', () => HttpResponse.json([])),
+    http.get('*/api/projects/firstproject/agents/v1/agents/llm-connections', () =>
+      HttpResponse.json({
+        schema_version: 'llm_provider_connection_list@1',
+        project_id: 'firstproject',
+        connections: [],
+      }),
+    ),
     http.get('*/api/projects/firstproject/authorization', () =>
       HttpResponse.json({
         project_id: 'firstproject',
@@ -276,6 +283,8 @@ test('creates a project and opens its grouped project-management sections', asyn
   expect(screen.getByText('Your Access')).toBeInTheDocument()
   expect(await screen.findByText('Project Authority')).toBeInTheDocument()
   expect(screen.getByText('Members')).toBeInTheDocument()
+  expect(screen.getByText('Agents')).toBeInTheDocument()
+  expect(await screen.findByText('LLM provider connections')).toBeInTheDocument()
   expect(screen.getByText('SDK Credentials')).toBeInTheDocument()
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })

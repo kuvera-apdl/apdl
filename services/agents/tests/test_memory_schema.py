@@ -50,8 +50,8 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 45
-    assert MIGRATION_NAME == "045_xai_llm_provider.sql"
+    assert MIGRATION_VERSION == 50
+    assert MIGRATION_NAME == "050_llm_provider_connections.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
     assert (
         "admin_project_execution_authorizations",
@@ -70,6 +70,12 @@ def test_startup_requires_current_agents_contract_migration():
     assert ("llm_provider_attempts", "egress_started_at") in REQUIRED_COLUMNS
     assert ("llm_project_policy_audit", "previous_policy") in REQUIRED_COLUMNS
     assert ("llm_project_policy_audit", "next_policy") in REQUIRED_COLUMNS
+    assert ("llm_project_provider_connections", "credential_id") in REQUIRED_COLUMNS
+    assert ("llm_project_provider_models", "model_id") in REQUIRED_COLUMNS
+    assert (
+        "llm_project_provider_connection_audit",
+        "actor_user_id",
+    ) in REQUIRED_COLUMNS
 
 
 @pytest.mark.asyncio

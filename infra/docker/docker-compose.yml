@@ -196,6 +196,7 @@ services:
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
     environment:
+      AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -203,12 +204,6 @@ services:
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
       LLM_FAST_XAI: ${LLM_FAST_XAI:-grok-4.20-0309-non-reasoning}
       LLM_REASONING_XAI: ${LLM_REASONING_XAI:-grok-4.5}
       LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}

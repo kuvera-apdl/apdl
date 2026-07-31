@@ -16,13 +16,23 @@ from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.pgvector_store import PgVectorStore
 from app.readiness import capability_report
 from app.request_body_limit import RequestBodyLimitMiddleware
-from app.routers import approvals, capabilities, custom_agents, runs, status, triggers
+from app.routers import (
+    approvals,
+    capabilities,
+    custom_agents,
+    llm_connections,
+    runs,
+    status,
+    triggers,
+)
 from app.schema import assert_schema_ready
 from app.store.approval_effects import run_approval_effect_worker_forever
 from app.store.llm_governance import (
     reconcile_orphaned_llm_attempts,
     reconcile_orphaned_llm_attempts_forever,
 )
+from app.store.llm_connections import ProjectConnectionStore
+from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
 from app.store.run_leases import (
     requeue_expired_runs,
     requeue_expired_runs_forever,
@@ -159,6 +169,13 @@ async def lifespan(application: FastAPI):
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
+        application.state.llm_credential_store = ProjectCredentialStore(
+            pool, CredentialCipher.from_environment()
+        )
+        application.state.llm_connection_store = ProjectConnectionStore(
+            pool,
+            application.state.llm_credential_store,
+        )
         maintenance_connection = await pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
             maintenance_connection
@@ -262,6 +279,7 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # must win over the run routers' /{run_id}/... wildcards.
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(custom_agents.router, dependencies=auth_dependencies)
+app.include_router(llm_connections.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(triggers.router, dependencies=auth_dependencies)
 app.include_router(status.router, dependencies=auth_dependencies)
@@ -283,7 +301,13 @@ async def readiness_check(request: Request):
 
     runtime_objects_ready = all(
         getattr(state, attribute, None) is not None
-        for attribute in ("pg_pool", "authenticator", "vector_store")
+        for attribute in (
+            "pg_pool",
+            "authenticator",
+            "vector_store",
+            "llm_credential_store",
+            "llm_connection_store",
+        )
     )
     runtime_tasks = (
         getattr(state, "run_dispatcher_task", None),

@@ -42,6 +42,8 @@ def runtime_state():
     app.state.pg_pool = _Pool()
     app.state.authenticator = object()
     app.state.vector_store = object()
+    app.state.llm_credential_store = object()
+    app.state.llm_connection_store = object()
     app.state.run_dispatcher_task = _RunningTask()
     app.state.run_reaper_task = _RunningTask()
     app.state.approval_effect_task = _RunningTask()

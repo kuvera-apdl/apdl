@@ -23,6 +23,7 @@ dependencies = [
     "fastembed>=0.3.0",
     "httpx>=0.27.0",
     "pydantic>=2.9.0",
+    "cryptography>=49.0.0",
 ]
 
 [project.optional-dependencies]

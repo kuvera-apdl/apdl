@@ -137,32 +137,20 @@ def test_runtime_configuration_is_the_router_and_cli_shared_authority(monkeypatc
 
     configuration = router.provider_runtime_configuration("openai")
 
-    assert configuration.endpoint_url == "https://llm.example.test/v1"
+    assert configuration.endpoint_url == "https://api.openai.com/v1"
     assert configuration.fast_model == "fast-reviewed-v1"
     assert configuration.reasoning_model == "reasoning-reviewed-v2"
-    assert router._tier_models("fast") == [
-        {
-            "provider": "openai",
-            "model": "fast-reviewed-v1",
-            "endpoint_url": "https://llm.example.test/v1",
-        }
-    ]
-    assert router._tier_models("reasoning") == [
-        {
-            "provider": "openai",
-            "model": "reasoning-reviewed-v2",
-            "endpoint_url": "https://llm.example.test/v1",
-        }
-    ]
 
 
 @pytest.mark.parametrize("suffix", ["?api_key=secret", "#secret"])
-def test_runtime_endpoint_rejects_secret_bearing_url_components(monkeypatch, suffix):
+def test_runtime_ignores_remote_endpoint_environment_overrides(monkeypatch, suffix):
     _configure_openai(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", f"https://llm.example.test/v1{suffix}")
 
-    with pytest.raises(ValueError, match="query or fragment"):
-        router.provider_runtime_configuration("openai")
+    assert (
+        router.provider_runtime_configuration("openai").endpoint_url
+        == "https://api.openai.com/v1"
+    )
 
 
 def test_xai_runtime_configuration_is_router_and_cli_shared_authority(monkeypatch):
@@ -176,20 +164,6 @@ def test_xai_runtime_configuration_is_router_and_cli_shared_authority(monkeypatc
         fast_model="grok-fast-reviewed",
         reasoning_model="grok-reasoning-reviewed",
     )
-    assert router._tier_models("fast") == [
-        {
-            "provider": "xai",
-            "model": "grok-fast-reviewed",
-            "endpoint_url": "https://api.x.ai/v1",
-        }
-    ]
-    assert router._tier_models("reasoning") == [
-        {
-            "provider": "xai",
-            "model": "grok-reasoning-reviewed",
-            "endpoint_url": "https://api.x.ai/v1",
-        }
-    ]
 
 
 def test_xai_runtime_defaults_preserve_fast_and_reasoning_tiers(monkeypatch):
@@ -203,32 +177,15 @@ def test_xai_runtime_defaults_preserve_fast_and_reasoning_tiers(monkeypatch):
     assert configuration.reasoning_model == "grok-4.5"
 
 
-@pytest.mark.asyncio
-async def test_missing_provider_credential_fails_before_database_connect(monkeypatch):
+def test_policy_validation_does_not_read_process_provider_credentials(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("POSTGRES_URL", "postgresql://operator-test")
-
-    async def unexpected_connect(_dsn: str):
-        raise AssertionError("credential validation must happen before PostgreSQL")
-
-    monkeypatch.setattr(provision_llm_policy.asyncpg, "connect", unexpected_connect)
-
-    with pytest.raises(SystemExit, match="OPENAI_API_KEY is required"):
-        await provision_llm_policy.provision(_args())
-
-
-@pytest.mark.asyncio
-async def test_missing_xai_credential_fails_before_database_connect(monkeypatch):
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setenv("POSTGRES_URL", "postgresql://operator-test")
 
-    async def unexpected_connect(_dsn: str):
-        raise AssertionError("credential validation must happen before PostgreSQL")
+    openai = provision_llm_policy.validate_replacement(_args())
+    xai = provision_llm_policy.validate_replacement(_args(provider="xai"))
 
-    monkeypatch.setattr(provision_llm_policy.asyncpg, "connect", unexpected_connect)
-
-    with pytest.raises(SystemExit, match="XAI_API_KEY is required"):
-        await provision_llm_policy.provision(_args(provider="xai"))
+    assert openai.provider_policies[0].provider == "openai"
+    assert xai.provider_policies[0].provider == "xai"
 
 
 @pytest.mark.asyncio
@@ -303,7 +260,7 @@ async def test_replacement_is_authorized_locked_atomic_and_non_secret(
     inserted_models = {connection.calls[index][1][2] for index in insert_indexes}
     assert inserted_models == {"fast-reviewed-v1", "reasoning-reviewed-v2"}
     assert all(
-        connection.calls[index][1][3] == "https://llm.example.test/v1"
+        connection.calls[index][1][3] == "https://api.openai.com/v1"
         for index in insert_indexes
     )
 
@@ -441,8 +398,12 @@ def test_remote_policy_requires_https_endpoint(monkeypatch):
     _configure_openai(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://llm.example.test/v1")
 
-    with pytest.raises(SystemExit, match="must use HTTPS"):
-        provision_llm_policy.validate_replacement(_args())
+    replacement = provision_llm_policy.validate_replacement(_args())
+
+    assert all(
+        policy.endpoint_url == "https://api.openai.com/v1"
+        for policy in replacement.provider_policies
+    )
 
 
 def test_migration_creates_immutable_non_secret_policy_audit():

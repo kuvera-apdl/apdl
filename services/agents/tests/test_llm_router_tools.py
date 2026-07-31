@@ -190,12 +190,13 @@ async def test_xai_plain_completion_uses_openai_compatible_response(monkeypatch)
 
     completions = Completions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    monkeypatch.setattr(router, "_get_xai", lambda: client)
+    monkeypatch.setattr(router, "_get_xai", lambda api_key: client)
 
     assert router._PROVIDER_FN["xai"] is router._xai_completion
     result = await router._xai_completion(
         "grok-test",
         _MESSAGES[:2],
+        api_key="project-xai-key",
         max_tokens=321,
         temperature=0.2,
     )
@@ -220,7 +221,12 @@ async def test_xai_tool_route_uses_xai_client_and_openai_wire(monkeypatch):
 
     async def route(model_tier, *, invoke, **kwargs):
         del model_tier, kwargs
-        return await invoke("xai", "grok-tool-test", {"max_tokens": 123})
+        return await invoke(
+            "xai",
+            "grok-tool-test",
+            "project-xai-key",
+            {"max_tokens": 123},
+        )
 
     async def completion_tools(
         model,
@@ -246,8 +252,8 @@ async def test_xai_tool_route_uses_xai_client_and_openai_wire(monkeypatch):
     def unexpected_local_client():
         raise AssertionError("xAI must not use the local provider client")
 
-    monkeypatch.setattr(router, "_route_with_fallback", route)
-    monkeypatch.setattr(router, "_get_xai", lambda: sentinel_client)
+    monkeypatch.setattr(router, "_route_project_assignment", route)
+    monkeypatch.setattr(router, "_get_xai", lambda _api_key: sentinel_client)
     monkeypatch.setattr(router, "_get_local", unexpected_local_client)
     monkeypatch.setattr(router, "_openai_completion_tools", completion_tools)
 

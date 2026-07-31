@@ -15,6 +15,11 @@ from typing import Any, Literal
 import httpx
 
 from app.tools.code import get_changeset_creation_capability
+from app.store.llm_credentials import (
+    CredentialCipher,
+    CredentialConfigurationError,
+    ENCRYPTION_KEY_ENV,
+)
 
 _PROBE_TIMEOUT_SECONDS = 2.0
 
@@ -112,51 +117,6 @@ async def _probe_codegen_readiness(
     }
 
 
-def _provider_probes() -> dict[str, dict[str, Any]]:
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    xai_key = os.getenv("XAI_API_KEY", "").strip()
-    local_url = os.getenv("LOCAL_LLM_URL", "").strip()
-
-    return {
-        "openai": {
-            "configured": bool(openai_key),
-            "url": _endpoint(
-                os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                "models",
-            ),
-            "headers": {"Authorization": f"Bearer {openai_key}"},
-        },
-        "anthropic": {
-            "configured": bool(anthropic_key),
-            "url": _endpoint(
-                os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-                "v1/models",
-            ),
-            "headers": {
-                "anthropic-version": "2023-06-01",
-                "x-api-key": anthropic_key,
-            },
-        },
-        "google": {
-            "configured": bool(google_key),
-            "url": "https://generativelanguage.googleapis.com/v1beta/models",
-            "headers": {"x-goog-api-key": google_key},
-        },
-        "xai": {
-            "configured": bool(xai_key),
-            "url": "https://api.x.ai/v1/models",
-            "headers": {"Authorization": f"Bearer {xai_key}"},
-        },
-        "local": {
-            "configured": bool(local_url),
-            "url": _endpoint(local_url, "models"),
-            "headers": {},
-        },
-    }
-
-
 def _service_probes() -> dict[str, dict[str, Any]]:
     service_urls = {
         "query": os.getenv("QUERY_SERVICE_URL", "http://localhost:8082"),
@@ -175,12 +135,11 @@ def _service_probes() -> dict[str, dict[str, Any]]:
 
 async def capability_report() -> dict[str, Any]:
     """Report optional workflow capabilities without affecting core readiness."""
-    provider_probes = _provider_probes()
     service_probes = _service_probes()
     generic_service_probes = {
         name: service_probes[name] for name in ("query", "config")
     }
-    generic_probes = {**provider_probes, **generic_service_probes}
+    generic_probes = generic_service_probes
     codegen_probe = service_probes["codegen"]
 
     timeout = httpx.Timeout(_PROBE_TIMEOUT_SECONDS)
@@ -204,17 +163,20 @@ async def capability_report() -> dict[str, Any]:
 
     *generic_results, codegen = results
     reachability = dict(zip(generic_probes, generic_results, strict=True))
-    providers = {
-        name: {
-            "configured": probe["configured"],
-            "reachable": reachability[name],
-        }
-        for name, probe in provider_probes.items()
-    }
+    encryption_configured = bool(os.getenv(ENCRYPTION_KEY_ENV, "").strip())
+    encryption_operational = False
+    if encryption_configured:
+        try:
+            CredentialCipher.from_environment()
+            encryption_operational = True
+        except CredentialConfigurationError:
+            pass
     llm = {
-        "configured": any(provider["configured"] for provider in providers.values()),
-        "reachable": any(provider["reachable"] for provider in providers.values()),
-        "providers": providers,
+        "credential_store": {
+            "configured": encryption_configured,
+            "operational": encryption_operational,
+        },
+        "project_credentials": "tenant_scoped",
     }
     services: dict[str, dict[str, Any]] = {
         name: {
@@ -226,10 +188,12 @@ async def capability_report() -> dict[str, Any]:
     services["codegen"] = codegen
     capabilities = {"llm": llm, **services}
     fully_available = (
+        encryption_operational
+        and
         all(
             capability["configured"] and capability["reachable"]
             for name, capability in capabilities.items()
-            if name != "codegen"
+            if name not in {"codegen", "llm"}
         )
         # Generic Codegen readiness deliberately cannot authorize a tenant.
         # ``tenant_scoped`` means the service is healthy and callers must use

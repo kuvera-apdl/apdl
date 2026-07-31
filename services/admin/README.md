@@ -58,6 +58,10 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   with safety-check verdicts, and persisted run outputs. (The backing
   endpoints — runs list, run results, run audit — were added to the agents
   service as plan gaps G1–G3.)
+- Project management (`/settings/workspace`): per-project ownership, membership,
+  reveal-once SDK credentials, and an Agents section for validating encrypted
+  OpenAI, Anthropic, Google, and xAI credentials, refreshing their supported
+  model inventories, replacing keys, and revoking connections.
 - Live updates: one credential-free, same-origin `EventSource` per project; the
   Admin API supplies the service key upstream. SSE events
   invalidate TanStack Query caches (admin views re-fetch rather than trusting

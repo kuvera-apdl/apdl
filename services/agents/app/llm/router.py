@@ -1,4 +1,4 @@
-"""Multi-provider LLM router with governed fallback.
+"""Project-scoped multi-provider LLM router.
 
 Tier 1 (fast): High-throughput, lower-cost tasks — summarisation, classification,
                UI config generation.
@@ -7,9 +7,9 @@ Tier 2 (reasoning): Complex analysis, experiment design, feature proposals.
 Supported providers are OpenAI, Anthropic, Google, xAI, and local
 OpenAI-compatible models.
 
-Each request is authorized, budgeted, and recorded in PostgreSQL before any
-provider egress. Fallback happens only for classified retryable failures and
-may cross a vendor boundary only when the project's explicit policy permits it.
+Each request is authorized, budgeted, bound to one project credential version,
+and recorded in PostgreSQL before any provider egress. Every tier has one exact
+assignment; there is no implicit provider or environment-key fallback.
 
 Two entry points share the tier/fallback machinery:
 
@@ -17,8 +17,7 @@ Two entry points share the tier/fallback machinery:
 * :func:`chat_completion_with_tools` — function calling. Conversations use the
   OpenAI wire shape as the neutral format (assistant messages may carry
   ``tool_calls``; tool results are ``{"role": "tool", ...}`` messages) and are
-  converted per provider, so a mid-conversation fallback to a different
-  provider can replay the same history.
+    converted per provider.
 """
 
 from __future__ import annotations
@@ -43,18 +42,22 @@ from app.llm.contracts import (
     ErrorClassification,
     LlmBudgetExceededError,
     LlmCostOverrunError,
+    LlmCredentialUnavailableError,
     LlmGovernanceError,
     LlmGovernanceUnavailableError,
     LlmPolicyDeniedError,
     LlmRequestContext,
     LlmRunInactiveError,
-    ProviderErrorDisposition,
-    ProviderName,
-    ProviderPolicy,
     canonical_prompt_bytes,
     classify_provider_error,
     conservative_input_token_bound,
     prompt_sha256,
+)
+from app.store.llm_credentials import (
+    CredentialCipher,
+    CredentialConfigurationError,
+    CredentialStoreError,
+    ProjectCredentialStore,
 )
 from app.store.llm_governance import (
     begin_llm_call,
@@ -62,6 +65,7 @@ from app.store.llm_governance import (
     finish_llm_call,
     finish_provider_attempt,
     load_project_llm_policy,
+    load_project_model_assignment,
     mark_provider_egress,
     prepare_provider_attempt,
 )
@@ -72,23 +76,21 @@ logger = logging.getLogger(__name__)
 #: provider stalls an agent run for up to 10 minutes per fallback rung.
 _REQUEST_TIMEOUT = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "120"))
 
-# ---------------------------------------------------------------------------
-# Lazy-initialised clients
-# ---------------------------------------------------------------------------
-
-_openai_client: openai.AsyncOpenAI | None = None
-_anthropic_client: anthropic.AsyncAnthropic | None = None
-_google_client: genai.Client | None = None
-_xai_client: openai.AsyncOpenAI | None = None
 _local_client: openai.AsyncOpenAI | None = None
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _PROVIDERS = ("openai", "anthropic", "google", "xai", "local")
+_REMOTE_ENDPOINTS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+    "google": "https://generativelanguage.googleapis.com",
+    "xai": "https://api.x.ai/v1",
+}
 
 
 @dataclass(frozen=True)
 class ProviderRuntimeConfiguration:
-    """One provider's exact endpoint and tier models from process environment."""
+    """Operator policy inputs; remote endpoints are fixed server-side."""
 
     provider: str
     endpoint_url: str
@@ -114,14 +116,8 @@ def _normalized_endpoint_url(value: str) -> str:
 
 
 def _provider_endpoint_url(provider: str) -> str:
-    if provider == "openai":
-        value = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    elif provider == "anthropic":
-        value = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    elif provider == "google":
-        value = "https://generativelanguage.googleapis.com"
-    elif provider == "xai":
-        value = "https://api.x.ai/v1"
+    if provider in _REMOTE_ENDPOINTS:
+        value = _REMOTE_ENDPOINTS[provider]
     elif provider == "local":
         value = os.getenv("LOCAL_LLM_URL", "")
     else:
@@ -133,15 +129,8 @@ def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguratio
     """Resolve the exact router configuration without returning credentials."""
     if provider not in _PROVIDERS:
         raise ValueError(f"Unknown provider {provider!r}")
-    if not _provider_available(provider):
-        credential = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "google": "GOOGLE_API_KEY",
-            "xai": "XAI_API_KEY",
-            "local": "LOCAL_LLM_URL",
-        }[provider]
-        raise ValueError(f"{credential} is required for provider {provider}")
+    if provider == "local" and not os.getenv("LOCAL_LLM_URL", "").strip():
+        raise ValueError("LOCAL_LLM_URL is required for provider local")
 
     if provider == "openai":
         fast_model = os.getenv("LLM_FAST_PRIMARY", "gpt-5.4-nano")
@@ -174,47 +163,35 @@ def provider_runtime_configuration(provider: str) -> ProviderRuntimeConfiguratio
     )
 
 
-def _get_openai() -> openai.AsyncOpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = openai.AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY", ""),
-            base_url=_provider_endpoint_url("openai"),
-            timeout=_REQUEST_TIMEOUT,
-        )
-    return _openai_client
+def _get_openai(api_key: str) -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        api_key=api_key,
+        base_url=_provider_endpoint_url("openai"),
+        timeout=_REQUEST_TIMEOUT,
+    )
 
 
-def _get_anthropic() -> anthropic.AsyncAnthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.AsyncAnthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-            base_url=_provider_endpoint_url("anthropic"),
-            timeout=_REQUEST_TIMEOUT,
-        )
-    return _anthropic_client
+def _get_anthropic(api_key: str) -> anthropic.AsyncAnthropic:
+    return anthropic.AsyncAnthropic(
+        api_key=api_key,
+        base_url=_provider_endpoint_url("anthropic"),
+        timeout=_REQUEST_TIMEOUT,
+    )
 
 
-def _get_google() -> genai.Client:
-    global _google_client
-    if _google_client is None:
-        _google_client = genai.Client(
-            api_key=os.getenv("GOOGLE_API_KEY", ""),
-            http_options=genai_types.HttpOptions(timeout=int(_REQUEST_TIMEOUT * 1000)),
-        )
-    return _google_client
+def _get_google(api_key: str) -> genai.Client:
+    return genai.Client(
+        api_key=api_key,
+        http_options=genai_types.HttpOptions(timeout=int(_REQUEST_TIMEOUT * 1000)),
+    )
 
 
-def _get_xai() -> openai.AsyncOpenAI:
-    global _xai_client
-    if _xai_client is None:
-        _xai_client = openai.AsyncOpenAI(
-            api_key=os.getenv("XAI_API_KEY", ""),
-            base_url=_provider_endpoint_url("xai"),
-            timeout=_REQUEST_TIMEOUT,
-        )
-    return _xai_client
+def _get_xai(api_key: str) -> openai.AsyncOpenAI:
+    return openai.AsyncOpenAI(
+        api_key=api_key,
+        base_url=_provider_endpoint_url("xai"),
+        timeout=_REQUEST_TIMEOUT,
+    )
 
 
 def _get_local() -> openai.AsyncOpenAI:
@@ -228,60 +205,43 @@ def _get_local() -> openai.AsyncOpenAI:
     return _local_client
 
 
-# ---------------------------------------------------------------------------
-# Tier → ordered model list
-# ---------------------------------------------------------------------------
+async def _load_attempt_api_key(
+    context: LlmRequestContext,
+    prepared,
+) -> str | None:
+    """Decrypt exactly the credential version reserved for this attempt."""
+    provider = prepared.provider_policy.provider
+    if provider == "local":
+        return None
+    if prepared.credential_id is None or prepared.credential_version is None:
+        raise LlmCredentialUnavailableError(
+            "Project provider credential binding is unavailable"
+        )
+    try:
+        store = ProjectCredentialStore(
+            context.pool,
+            CredentialCipher.from_environment(),
+        )
+        credential = await store.load_active(
+            context.project_id,
+            provider,
+            credential_id=prepared.credential_id,
+        )
+    except (CredentialConfigurationError, CredentialStoreError) as exc:
+        raise LlmCredentialUnavailableError(
+            "Project provider credential is unavailable"
+        ) from exc
+    if credential.credential_version != prepared.credential_version:
+        raise LlmCredentialUnavailableError(
+            "Project provider credential version changed before egress"
+        )
+    return credential.api_key
+
 
 _TIER_DEFAULTS: dict[str, dict[str, Any]] = {
     "fast": {"max_tokens": 4096, "temperature": 0.3},
     "reasoning": {"max_tokens": 8192, "temperature": 0.2},
 }
-
-
-def _tier_models(tier: str) -> list[dict[str, str]]:
-    """Return ordered provider/model/endpoint candidates for the tier.
-
-    Providers whose API key is not set are skipped (except local, which
-    is always available when LOCAL_LLM_URL is configured).
-    """
-    result: list[dict[str, str]] = []
-    for provider in _PROVIDERS:
-        if _provider_available(provider):
-            try:
-                configuration = provider_runtime_configuration(provider)
-            except ValueError:
-                logger.error(
-                    "Ignoring %s LLM candidate with invalid configuration", provider
-                )
-                continue
-            result.append(
-                {
-                    "provider": provider,
-                    "model": (
-                        configuration.fast_model
-                        if tier == "fast"
-                        else configuration.reasoning_model
-                    ),
-                    "endpoint_url": configuration.endpoint_url,
-                }
-            )
-    return result
-
-
-def _provider_available(provider: str) -> bool:
-    if provider == "openai":
-        return bool(os.getenv("OPENAI_API_KEY", "").strip())
-    if provider == "anthropic":
-        return bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
-    if provider == "google":
-        return bool(os.getenv("GOOGLE_API_KEY", "").strip())
-    if provider == "xai":
-        return bool(os.getenv("XAI_API_KEY", "").strip())
-    if provider == "local":
-        # Candidate only when its endpoint is explicitly configured. Project
-        # policy still authorizes the exact local model before any request.
-        return bool(os.getenv("LOCAL_LLM_URL", "").strip())
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -351,9 +311,13 @@ def _is_openai_reasoning_model(model: str) -> bool:
 async def _openai_completion(
     model: str,
     messages: list[dict[str, str]],
+    *,
+    api_key: str | None,
     **kwargs: Any,
 ) -> TextCompletion:
-    client = _get_openai()
+    if api_key is None:
+        raise LlmCredentialUnavailableError("OpenAI credential is unavailable")
+    client = _get_openai(api_key)
     if _is_openai_reasoning_model(model):
         # Reasoning-family models 400 on `max_tokens` (they take
         # `max_completion_tokens`) and on any non-default temperature — the
@@ -375,9 +339,13 @@ async def _openai_completion(
 async def _anthropic_completion(
     model: str,
     messages: list[dict[str, str]],
+    *,
+    api_key: str | None,
     **kwargs: Any,
 ) -> TextCompletion:
-    client = _get_anthropic()
+    if api_key is None:
+        raise LlmCredentialUnavailableError("Anthropic credential is unavailable")
+    client = _get_anthropic(api_key)
     system_text = ""
     chat_messages: list[dict[str, str]] = []
     for msg in messages:
@@ -408,9 +376,13 @@ async def _anthropic_completion(
 async def _google_completion(
     model: str,
     messages: list[dict[str, str]],
+    *,
+    api_key: str | None,
     **kwargs: Any,
 ) -> TextCompletion:
-    client = _get_google()
+    if api_key is None:
+        raise LlmCredentialUnavailableError("Google credential is unavailable")
+    client = _get_google(api_key)
     system_instruction: str | None = None
     contents: list[dict[str, Any]] = []
     for msg in messages:
@@ -444,11 +416,15 @@ async def _google_completion(
 async def _xai_completion(
     model: str,
     messages: list[dict[str, str]],
+    *,
+    api_key: str | None,
     **kwargs: Any,
 ) -> TextCompletion:
     # xAI's Chat Completions endpoint implements the OpenAI wire contract,
     # including usage fields and client-side function calling.
-    client = _get_xai()
+    if api_key is None:
+        raise LlmCredentialUnavailableError("xAI credential is unavailable")
+    client = _get_xai(api_key)
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
     )
@@ -463,8 +439,14 @@ async def _xai_completion(
 async def _local_completion(
     model: str,
     messages: list[dict[str, str]],
+    *,
+    api_key: str | None,
     **kwargs: Any,
 ) -> TextCompletion:
+    if api_key is not None:
+        raise LlmCredentialUnavailableError(
+            "Local provider must not receive a cloud credential"
+        )
     client = _get_local()
     resp = await client.chat.completions.create(
         model=model, messages=messages, **kwargs
@@ -505,21 +487,25 @@ def _governance_error_classification(
         return "policy_denied"
     if isinstance(exc, LlmCostOverrunError):
         return "cost_overrun"
+    if isinstance(exc, LlmCredentialUnavailableError):
+        return "credential_unavailable"
     if isinstance(exc, LlmGovernanceUnavailableError):
         return "governance_unavailable"
     return "unknown"
 
 
-async def _route_with_fallback(
+async def _route_project_assignment(
     model_tier: str,
     *,
     context: LlmRequestContext,
     prompt_bytes: bytes,
     operation: str,
-    invoke: Callable[[str, str, dict[str, Any]], Awaitable[_CompletionT]],
+    invoke: Callable[
+        [str, str, str | None, dict[str, Any]], Awaitable[_CompletionT]
+    ],
     kwargs: dict[str, Any],
 ) -> _CompletionT:
-    """Run one completion through policy, budget, audit, and safe fallback."""
+    """Run one completion through exact assignment, credential, and audit."""
     if model_tier not in _TIER_DEFAULTS:
         raise ValueError(
             f"Unknown model_tier {model_tier!r} — expected one of "
@@ -539,35 +525,32 @@ async def _route_with_fallback(
 
     policy = await load_project_llm_policy(context)
     call_id = await begin_llm_call(context, prompt_sha256=prompt_hash)
-    models = _tier_models(model_tier)
-    eligible: list[tuple[dict[str, str], ProviderPolicy]] = []
-    for entry in models:
-        provider_policy = policy.provider_policy(
+    try:
+        assignment = await load_project_model_assignment(
             context,
-            entry["provider"],
-            entry["model"],
-            entry["endpoint_url"],
+            tier=cast(Any, model_tier),
         )
-        if provider_policy is not None:
-            eligible.append((entry, provider_policy))
-
-    if not models:
-        message = (
-            f"No LLM providers are configured for tier {model_tier!r}; set a "
-            "supported provider credential or LOCAL_LLM_URL"
-        )
+    except LlmGovernanceError as exc:
+        classification = _governance_error_classification(exc)
         await finish_llm_call(
             context,
             call_id=call_id,
             status="blocked",
-            error_classification="no_provider",
-            error_message=message,
+            error_classification=classification,
+            error_message=str(exc),
         )
-        raise RuntimeError(message)
-    if not eligible:
+        raise
+
+    provider_policy = policy.provider_policy(
+        context,
+        assignment.provider,
+        assignment.model,
+        assignment.endpoint_url,
+    )
+    if provider_policy is None:
         message = (
-            f"Project policy permits none of the configured {model_tier!r} "
-            f"provider/models for {context.data_classification} data"
+            f"Project policy does not permit its {model_tier!r} assignment "
+            f"for {context.data_classification} data"
         )
         await finish_llm_call(
             context,
@@ -578,190 +561,147 @@ async def _route_with_fallback(
         )
         raise RuntimeError(message)
 
-    last_exc: Exception | None = None
-    last_disposition: ProviderErrorDisposition | None = None
-    last_provider: str | None = None
-    attempts = 0
-    for entry, _ in eligible:
-        provider = cast(ProviderName, entry["provider"])
-        model = entry["model"]
-        endpoint_url = entry["endpoint_url"]
-        if (
-            last_provider is not None
-            and provider != last_provider
-            and not policy.allow_cross_vendor_retry
-        ):
-            logger.warning(
-                "LLM %s stopped before cross-vendor retry (%s -> %s)",
-                operation,
-                last_provider,
-                provider,
-            )
-            break
+    provider = assignment.provider
+    model = assignment.model
+    try:
+        prepared = await prepare_provider_attempt(
+            context,
+            call_id=call_id,
+            attempt_number=1,
+            provider=provider,
+            model=model,
+            endpoint_url=assignment.endpoint_url,
+            prompt_sha256=prompt_hash,
+            estimated_input_tokens=estimated_input_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+    except LlmGovernanceError as exc:
+        classification = _governance_error_classification(exc)
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="blocked",
+            error_classification=classification,
+            error_message=str(exc),
+        )
+        raise
 
-        attempts += 1
-        try:
-            prepared = await prepare_provider_attempt(
-                context,
-                call_id=call_id,
-                attempt_number=attempts,
-                provider=provider,
-                model=model,
-                endpoint_url=endpoint_url,
-                prompt_sha256=prompt_hash,
-                estimated_input_tokens=estimated_input_tokens,
-                max_output_tokens=max_output_tokens,
-            )
-        except LlmGovernanceError as exc:
-            classification = _governance_error_classification(exc)
-            await finish_llm_call(
-                context,
-                call_id=call_id,
-                status="blocked",
-                error_classification=classification,
-                error_message=str(exc),
-            )
-            raise
+    try:
+        api_key = await _load_attempt_api_key(context, prepared)
+        await mark_provider_egress(context, attempt_id=prepared.attempt_id)
+    except asyncio.CancelledError:
+        await block_provider_attempt_before_egress(
+            context,
+            attempt_id=prepared.attempt_id,
+            error_classification="cancelled",
+            error_message="LLM request task was cancelled before egress",
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="cancelled",
+            error_classification="cancelled",
+            error_message="LLM request task was cancelled before egress",
+        )
+        raise
+    except LlmGovernanceError as exc:
+        classification = _governance_error_classification(exc)
+        await block_provider_attempt_before_egress(
+            context,
+            attempt_id=prepared.attempt_id,
+            error_classification=classification,
+            error_message=str(exc),
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="blocked",
+            error_classification=classification,
+            error_message=str(exc),
+        )
+        raise
 
-        try:
-            await mark_provider_egress(context, attempt_id=prepared.attempt_id)
-        except asyncio.CancelledError:
-            await block_provider_attempt_before_egress(
-                context,
-                attempt_id=prepared.attempt_id,
-                error_classification="cancelled",
-                error_message="LLM request task was cancelled before egress",
-            )
-            await finish_llm_call(
-                context,
-                call_id=call_id,
-                status="cancelled",
-                error_classification="cancelled",
-                error_message="LLM request task was cancelled before egress",
-            )
-            raise
-        except LlmGovernanceError as exc:
-            classification = _governance_error_classification(exc)
-            await block_provider_attempt_before_egress(
-                context,
-                attempt_id=prepared.attempt_id,
-                error_classification=classification,
-                error_message=str(exc),
-            )
-            await finish_llm_call(
-                context,
-                call_id=call_id,
-                status="blocked",
-                error_classification=classification,
-                error_message=str(exc),
-            )
-            raise
-        started = time.monotonic()
-        try:
-            result = await invoke(provider, model, dict(merged))
-        except asyncio.CancelledError:
-            latency_ms = int((time.monotonic() - started) * 1000)
-            await finish_provider_attempt(
-                context,
-                attempt=prepared,
-                status="cancelled",
-                latency_ms=latency_ms,
-                input_tokens=None,
-                output_tokens=None,
-                error_classification="cancelled",
-                error_message="LLM request task was cancelled after egress",
-            )
-            await finish_llm_call(
-                context,
-                call_id=call_id,
-                status="cancelled",
-                error_classification="cancelled",
-                error_message="LLM request task was cancelled after egress",
-            )
-            raise
-        except Exception as exc:
-            latency_ms = int((time.monotonic() - started) * 1000)
-            disposition = classify_provider_error(exc)
-            # Provider exception strings can echo request fragments. Persist
-            # and log only the type plus canonical classification.
-            error_message = f"{type(exc).__name__} ({disposition.classification})"
-            await finish_provider_attempt(
-                context,
-                attempt=prepared,
-                status="failed",
-                latency_ms=latency_ms,
-                input_tokens=None,
-                output_tokens=None,
-                error_classification=disposition.classification,
-                error_message=error_message,
-                retryable=disposition.retryable,
-            )
-            logger.warning(
-                "LLM %s failed (provider=%s, model=%s, classification=%s, "
-                "retryable=%s, exception_type=%s)",
-                operation,
-                provider,
-                model,
-                disposition.classification,
-                disposition.retryable,
-                type(exc).__name__,
-            )
-            last_exc = exc
-            last_disposition = disposition
-            last_provider = provider
-            if not disposition.retryable:
-                await finish_llm_call(
-                    context,
-                    call_id=call_id,
-                    status="failed",
-                    error_classification=disposition.classification,
-                    error_message=error_message,
-                )
-                raise RuntimeError(
-                    f"LLM {operation} failed without a safe retry "
-                    f"({provider}/{model}, {disposition.classification})"
-                ) from exc
-            continue
-
+    started = time.monotonic()
+    try:
+        result = await invoke(provider, model, api_key, dict(merged))
+    except asyncio.CancelledError:
         latency_ms = int((time.monotonic() - started) * 1000)
-        try:
-            await finish_provider_attempt(
-                context,
-                attempt=prepared,
-                status="succeeded",
-                latency_ms=latency_ms,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-            )
-        except LlmCostOverrunError as exc:
-            await finish_llm_call(
-                context,
-                call_id=call_id,
-                status="failed",
-                error_classification="cost_overrun",
-                error_message=str(exc),
-            )
-            raise
-        await finish_llm_call(context, call_id=call_id, status="succeeded")
-        # Visible at info level so fallback behavior remains operationally
-        # searchable in addition to the authoritative attempt ledger.
-        logger.info("LLM %s ok (provider=%s, model=%s)", operation, provider, model)
-        return result
+        await finish_provider_attempt(
+            context,
+            attempt=prepared,
+            status="cancelled",
+            latency_ms=latency_ms,
+            input_tokens=None,
+            output_tokens=None,
+            error_classification="cancelled",
+            error_message="LLM request task was cancelled after egress",
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="cancelled",
+            error_classification="cancelled",
+            error_message="LLM request task was cancelled after egress",
+        )
+        raise
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        disposition = classify_provider_error(exc)
+        error_message = f"{type(exc).__name__} ({disposition.classification})"
+        await finish_provider_attempt(
+            context,
+            attempt=prepared,
+            status="failed",
+            latency_ms=latency_ms,
+            input_tokens=None,
+            output_tokens=None,
+            error_classification=disposition.classification,
+            error_message=error_message,
+            retryable=False,
+        )
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="failed",
+            error_classification=disposition.classification,
+            error_message=error_message,
+        )
+        logger.warning(
+            "LLM %s failed (provider=%s, model=%s, classification=%s, "
+            "exception_type=%s)",
+            operation,
+            provider,
+            model,
+            disposition.classification,
+            type(exc).__name__,
+        )
+        raise RuntimeError(
+            f"LLM {operation} failed "
+            f"({provider}/{model}, {disposition.classification})"
+        ) from exc
 
-    classification: ErrorClassification = (
-        last_disposition.classification
-        if last_disposition is not None
-        else "no_provider"
-    )
-    message = f"No safe LLM retry remained for tier {model_tier!r}"
-    await finish_llm_call(
-        context,
-        call_id=call_id,
-        status="failed",
-        error_classification=classification,
-        error_message=message,
-    )
-    raise RuntimeError(message) from last_exc
+    latency_ms = int((time.monotonic() - started) * 1000)
+    try:
+        await finish_provider_attempt(
+            context,
+            attempt=prepared,
+            status="succeeded",
+            latency_ms=latency_ms,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        )
+    except LlmCostOverrunError as exc:
+        await finish_llm_call(
+            context,
+            call_id=call_id,
+            status="failed",
+            error_classification="cost_overrun",
+            error_message=str(exc),
+        )
+        raise
+    await finish_llm_call(context, call_id=call_id, status="succeeded")
+    logger.info("LLM %s ok (provider=%s, model=%s)", operation, provider, model)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -776,10 +716,10 @@ async def chat_completion(
     context: LlmRequestContext,
     **kwargs: Any,
 ) -> str:
-    """Route a chat completion through the governed provider chain.
+    """Route a chat completion through the project's exact governed assignment.
 
-    Every provider attempt is policy-checked, budgeted, and audited. Only
-    classified retryable failures may advance to another permitted candidate.
+    The provider attempt is policy-checked, budgeted, bound to the active
+    project credential, revalidated, and audited before egress.
 
     Args:
         model_tier: "fast" or "reasoning"
@@ -791,15 +731,23 @@ async def chat_completion(
         The assistant's response text.
 
     Raises:
-        RuntimeError: If policy, budget, or all safe provider candidates fail.
+        RuntimeError: If assignment, credential, policy, budget, or provider fails.
     """
 
     async def invoke(
-        provider: str, model: str, provider_kwargs: dict[str, Any]
+        provider: str,
+        model: str,
+        api_key: str | None,
+        provider_kwargs: dict[str, Any],
     ) -> TextCompletion:
-        return await _PROVIDER_FN[provider](model, messages, **provider_kwargs)
+        return await _PROVIDER_FN[provider](
+            model,
+            messages,
+            api_key=api_key,
+            **provider_kwargs,
+        )
 
-    completion = await _route_with_fallback(
+    completion = await _route_project_assignment(
         model_tier,
         context=context,
         prompt_bytes=canonical_prompt_bytes(messages=messages, tools=None),
@@ -1172,7 +1120,7 @@ async def chat_completion_with_tools(
     force_text: bool = False,
     **kwargs: Any,
 ) -> ToolCompletion:
-    """Route a tool-enabled completion through the governed provider chain.
+    """Route a tool-enabled completion through the exact governed assignment.
 
     Args:
         model_tier: "fast" or "reasoning".
@@ -1193,17 +1141,38 @@ async def chat_completion_with_tools(
     """
 
     async def invoke(
-        provider: str, model: str, provider_kwargs: dict[str, Any]
+        provider: str,
+        model: str,
+        api_key: str | None,
+        provider_kwargs: dict[str, Any],
     ) -> ToolCompletion:
         if provider == "openai":
-            client = _get_openai()
+            if api_key is None:
+                raise LlmCredentialUnavailableError(
+                    "OpenAI credential is unavailable"
+                )
+            client = _get_openai(api_key)
         elif provider == "anthropic":
-            client = _get_anthropic()
+            if api_key is None:
+                raise LlmCredentialUnavailableError(
+                    "Anthropic credential is unavailable"
+                )
+            client = _get_anthropic(api_key)
         elif provider == "google":
-            client = _get_google()
+            if api_key is None:
+                raise LlmCredentialUnavailableError(
+                    "Google credential is unavailable"
+                )
+            client = _get_google(api_key)
         elif provider == "xai":
-            client = _get_xai()
+            if api_key is None:
+                raise LlmCredentialUnavailableError("xAI credential is unavailable")
+            client = _get_xai(api_key)
         else:  # local — OpenAI-compatible servers speak the tools dialect
+            if api_key is not None:
+                raise LlmCredentialUnavailableError(
+                    "Local provider must not receive a cloud credential"
+                )
             client = _get_local()
 
         if provider == "anthropic":
@@ -1233,7 +1202,7 @@ async def chat_completion_with_tools(
             **provider_kwargs,
         )
 
-    return await _route_with_fallback(
+    return await _route_project_assignment(
         model_tier,
         context=context,
         prompt_bytes=canonical_prompt_bytes(messages=messages, tools=tools),
