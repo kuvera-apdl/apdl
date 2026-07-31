@@ -8,29 +8,21 @@ def test_service_headers_uses_project_map(monkeypatch):
         "APDL_SERVICE_API_KEYS",
         '{"acme":"proj_acme_0123456789abcdef"}',
     )
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
 
     assert service_headers("acme") == {"X-API-Key": "proj_acme_0123456789abcdef"}
 
 
-def test_service_headers_reuses_single_local_development_key(monkeypatch):
+def test_service_headers_ignores_removed_development_fallback(monkeypatch):
     monkeypatch.delenv("APDL_SERVICE_API_KEYS", raising=False)
     monkeypatch.setenv(
         "APDL_DEV_API_KEY",
         "proj_acme_0123456789abcdef",
     )
 
-    assert service_headers("acme") == {"X-API-Key": "proj_acme_0123456789abcdef"}
-
-
-def test_service_headers_rejects_local_key_for_another_project(monkeypatch):
-    monkeypatch.delenv("APDL_SERVICE_API_KEYS", raising=False)
-    monkeypatch.setenv(
-        "APDL_DEV_API_KEY",
-        "proj_other_0123456789abcdef",
-    )
-
-    with pytest.raises(RuntimeError, match="No service API key"):
+    with pytest.raises(
+        RuntimeError,
+        match="No service API key configured for project acme",
+    ):
         service_headers("acme")
 
 

@@ -5,7 +5,7 @@ Quick start::
     from apdl import APDL
 
     client = APDL.init(
-        api_key="proj_demo_0123456789abcdef",
+        api_key="proj_yourproject_replacewithrevealedkey",
         endpoint="https://apdl.example.com",
     )
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -18,7 +18,7 @@ Quick start::
 Or as a context manager::
 
     with APDL.init(
-        api_key="proj_demo_0123456789abcdef",
+        api_key="proj_yourproject_replacewithrevealedkey",
         endpoint="https://apdl.example.com",
     ) as client:
         client.identify("u_123", {"plan": "pro"})

@@ -70,8 +70,9 @@ an operation-specific token restricted to the immutable repository ID.
 creates the user and session in one transaction, but deliberately creates no
 `admin_user_projects` rows. A newly registered user is authenticated with
 `projects: []` and cannot call any project-scoped service route until an
-operator grants membership and roles separately. Registration requires an
-exact allowed `Origin` and is rate-limited with login at the console proxy.
+operator grants membership or the user creates a project from Workspace
+settings. Registration requires an exact allowed `Origin` and is rate-limited
+with login at the console proxy.
 
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
@@ -298,13 +299,15 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 - Set `expires_at` for short-lived credentials. Expired records are rejected.
 - Never store the plaintext key in PostgreSQL or logs.
 
-For local development, `APDL_DEV_API_KEY` provisions one confidential core key
-with `events:write`, Config read/write/evaluate, and `query:read`. It carries no
-Agents roles.
-`APDL_DEV_CLIENT_KEY` provisions one browser key with exactly `events:write`
-and `config:read`. `scripts/init-postgres.sh` derives and stores each kind,
-project, non-secret prefix, and hash. Production deployments must leave both
-settings unset, set `APDL_SERVICE_API_KEYS` only to confidential project keys
-for internal calls, set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact
-HTTPS origin, and provision least-privilege credentials through their normal
-secret-management workflow.
+Normal local bootstrap runs only the PostgreSQL schema migrations, so the
+project and credential catalogs start empty. Register through the loopback
+Admin Console, create a project in Workspace settings, and create reveal-once
+browser or confidential credentials there. The isolated fresh-smoke suite owns
+separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` fixtures; it
+first verifies the catalogs are empty, provisions those fixtures with the
+test-only SQL under `scripts/fixtures/`, and destroys the isolated volumes when
+the suite finishes. Production deployments should set
+`APDL_SERVICE_API_KEYS` only to confidential project keys for internal calls,
+set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS origin, disable
+public registration, and provision least-privilege credentials through their
+normal secret-management workflow.

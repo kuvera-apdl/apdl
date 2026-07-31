@@ -46,8 +46,9 @@ CONFIG_LEGACY_FIXTURE = (
     / "legacy_config_restrictive.sql"
 ).read_text()
 POSTGRES_RUNNER = (ROOT / "scripts" / "init-postgres.sh").read_text()
-DEV_CREDENTIAL_SQL = (
-    ROOT / "scripts" / "provision-dev-credential.sql"
+FRESH_SMOKE = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
+SMOKE_CREDENTIAL_SQL = (
+    ROOT / "scripts" / "fixtures" / "provision-smoke-credential.sql"
 ).read_text()
 MIGRATION_ENGINE = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
 CLICKHOUSE_RUNNER = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
@@ -95,11 +96,15 @@ def test_auth_credentials_enforce_confidential_and_browser_kinds():
     assert "roles @> ARRAY[" in credentials
     assert "roles <@ ARRAY[" in credentials
 
-    assert "APDL_DEV_CLIENT_KEY" in POSTGRES_RUNNER
-    assert '"local-dev-confidential"' in POSTGRES_RUNNER
-    assert '"local-dev-browser"' in POSTGRES_RUNNER
-    assert "provision-dev-credential.sql" in POSTGRES_RUNNER
-    assert "credential_kind, key_prefix, key_hash, roles" in DEV_CREDENTIAL_SQL
+    assert "auth_credentials" not in POSTGRES_RUNNER
+    assert "APDL_DEV_" not in POSTGRES_RUNNER
+    assert "APDL_SMOKE_" not in POSTGRES_RUNNER
+    assert "APDL_SMOKE_CONFIDENTIAL_KEY" in FRESH_SMOKE
+    assert "APDL_SMOKE_BROWSER_KEY" in FRESH_SMOKE
+    assert '"smoke-confidential"' in FRESH_SMOKE
+    assert '"smoke-browser"' in FRESH_SMOKE
+    assert "provision-smoke-credential.sql" in FRESH_SMOKE
+    assert "credential_kind, key_prefix, key_hash, roles" in SMOKE_CREDENTIAL_SQL
 
 
 def test_agents_core_migration_matches_the_running_service_contracts():

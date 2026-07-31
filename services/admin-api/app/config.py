@@ -117,20 +117,6 @@ def _service_keys() -> dict[str, str]:
     keys = _json_object(
         "APDL_SERVICE_API_KEYS", os.getenv("APDL_SERVICE_API_KEYS", "{}")
     )
-    dev_key = os.getenv("APDL_DEV_API_KEY", "")
-    if dev_key:
-        match = API_KEY_PATTERN.fullmatch(dev_key)
-        if match is None:
-            raise ValueError(
-                "APDL_DEV_API_KEY does not match proj_{project_id}_{secret}"
-            )
-        project_id = match.group("project_id")
-        existing = keys.get(project_id)
-        if existing is not None and existing != dev_key:
-            raise ValueError(
-                f"Conflicting service credentials for project {project_id}"
-            )
-        keys[project_id] = dev_key
 
     for project_id, api_key in keys.items():
         if PROJECT_ID_PATTERN.fullmatch(project_id) is None:

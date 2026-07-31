@@ -70,7 +70,7 @@ def test_compose_limits_forwarding_trust_to_the_admin_edge_network() -> None:
     assert 'APDL_ADMIN_TRUSTED_PROXY_CIDRS=["172.30.255.0/28"]' in environment
 
 
-def test_compose_fails_closed_and_bounds_public_registration() -> None:
+def test_compose_fails_closed_while_local_example_enables_bounded_onboarding() -> None:
     compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
     environment = (ROOT / ".env.example").read_text(encoding="utf-8")
 
@@ -83,6 +83,54 @@ def test_compose_fails_closed_and_bounds_public_registration() -> None:
         "APDL_ADMIN_MAX_PROJECTS_PER_USER: "
         "${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}"
     ) in compose
-    assert "APDL_ADMIN_REGISTRATION_ENABLED=false" in environment
+    assert "APDL_ADMIN_REGISTRATION_ENABLED=true" in environment
     assert "APDL_ADMIN_MAX_ACCOUNTS=100" in environment
     assert "APDL_ADMIN_MAX_PROJECTS_PER_USER=5" in environment
+    assert "APDL_DEV_API_KEY=" not in environment
+    assert "APDL_DEV_CLIENT_KEY=" not in environment
+
+
+def test_local_example_keeps_shared_routing_complete_and_last() -> None:
+    environment = (ROOT / ".env.example").read_text(encoding="utf-8")
+    compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
+    routing = environment.split("# ── Routing", maxsplit=1)[1]
+
+    for assignment in (
+        "REDIS_URL=redis://localhost:6379",
+        "POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev"
+        "@localhost:5432/apdl",
+        "CLICKHOUSE_URL=http://localhost:8123",
+        "OPENAI_BASE_URL=https://api.openai.com/v1",
+        "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+        "INGESTION_SERVICE_URL=http://localhost:8080",
+        "CONFIG_SERVICE_URL=http://localhost:8081",
+        "QUERY_SERVICE_URL=http://localhost:8082",
+        "AGENTS_SERVICE_URL=http://localhost:8083",
+        "CODEGEN_SERVICE_URL=http://localhost:8084",
+        "ADMIN_API_URL=http://localhost:8085",
+    ):
+        assert assignment in routing
+
+    assert environment.index("# ── Common") < environment.index("# ── Admin API")
+    assert environment.index("# ── Admin API") < environment.index(
+        "# ── Config Service"
+    )
+    assert environment.index("# ── Config Service") < environment.index(
+        "# ── Agents Service"
+    )
+    assert environment.index("# ── Agents Service") < environment.index(
+        "# ── Codegen Service"
+    )
+    assert environment.index("# ── Codegen Service") < environment.index(
+        "# ── ClickHouse Writer"
+    )
+    assert environment.index("# ── ClickHouse Writer") < environment.index(
+        "# ── Routing"
+    )
+    assert (
+        "ANTHROPIC_BASE_URL: "
+        "${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+    ) in compose
+    assert (
+        "OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+    ) in compose

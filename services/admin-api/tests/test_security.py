@@ -30,15 +30,24 @@ def test_settings_reject_a_service_key_for_another_project(monkeypatch) -> None:
         "APDL_SERVICE_API_KEYS",
         json.dumps({"other": "proj_demo_0123456789abcdef"}),
     )
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
 
     with pytest.raises(ValueError, match="does not belong"):
         Settings.from_env()
 
 
+def test_settings_ignore_removed_development_service_key(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv(
+        "APDL_DEV_API_KEY",
+        "proj_demo_0123456789abcdef",
+    )
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
+
+    assert Settings.from_env().service_api_keys == {}
+
+
 def test_settings_reject_wildcard_origins(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_ALLOWED_ORIGINS", '["*"]')
 
     with pytest.raises(ValueError, match="Invalid admin origin"):
@@ -47,7 +56,6 @@ def test_settings_reject_wildcard_origins(monkeypatch) -> None:
 
 def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.delenv("APDL_ADMIN_ALLOWED_ORIGINS", raising=False)
     monkeypatch.delenv("APDL_ADMIN_REGISTRATION_ENABLED", raising=False)
     monkeypatch.delenv("APDL_ADMIN_MAX_ACCOUNTS", raising=False)
@@ -72,7 +80,6 @@ def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None
 
 def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_REGISTRATION_ENABLED", "yes")
 
     with pytest.raises(ValueError, match="must be true or false"):
@@ -91,7 +98,6 @@ def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:
 
 def test_settings_cannot_exceed_outer_request_body_limit(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv(
         "APDL_ADMIN_MAX_REQUEST_BYTES",
@@ -104,7 +110,6 @@ def test_settings_cannot_exceed_outer_request_body_limit(monkeypatch) -> None:
 
 def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "true")
     monkeypatch.delenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", raising=False)
 
@@ -122,7 +127,6 @@ def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None
 )
 def test_settings_reject_invalid_admin_durations(monkeypatch, name: str) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv(name, "0")
 
     with pytest.raises(ValueError, match="positive duration"):
@@ -131,7 +135,6 @@ def test_settings_reject_invalid_admin_durations(monkeypatch, name: str) -> None
 
 def test_settings_reject_short_login_risk_secret(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", "too-short")
 
     with pytest.raises(ValueError, match="at least 32 bytes"):
@@ -151,7 +154,6 @@ def test_settings_reject_noncanonical_trusted_proxy_cidrs(
     raw: str,
 ) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_DEV_API_KEY", raising=False)
     monkeypatch.setenv("APDL_ADMIN_TRUSTED_PROXY_CIDRS", raw)
 
     with pytest.raises(ValueError, match="TRUSTED_PROXY_CIDRS"):

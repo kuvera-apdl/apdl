@@ -1,3 +1,4 @@
+-- Test-only credential fixture for the isolated fresh-install smoke suite.
 SELECT pg_advisory_lock_shared(:maintenance_inhibitor_lock_id);
 SELECT pg_advisory_lock_shared(:maintenance_guard_lock_id);
 

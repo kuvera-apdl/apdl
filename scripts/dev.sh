@@ -7,7 +7,7 @@
 #   scripts/dev.sh up-full    Opt into core + Agents + offline Codegen
 #   scripts/dev.sh smoke-fresh Hermetic fresh-install core proof
 #   scripts/dev.sh status     Container status + service health endpoints
-#   scripts/dev.sh smoke      End-to-end smoke test against the running stack
+#   scripts/dev.sh smoke      Running-stack smoke (requires APDL_SMOKE_* keys)
 #   scripts/dev.sh test       All tests           (make test)
 #   scripts/dev.sh lint       All linters         (make lint)
 #   scripts/dev.sh check      Parallel lint+test  (make check)
@@ -25,8 +25,8 @@ env_file_value() {
     [ -f "$ROOT_DIR/.env" ] || return 0
     awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$ROOT_DIR/.env"
 }
-SMOKE_API_KEY="${APDL_DEV_API_KEY:-$(env_file_value APDL_DEV_API_KEY)}"
-SMOKE_CLIENT_KEY="${APDL_DEV_CLIENT_KEY:-$(env_file_value APDL_DEV_CLIENT_KEY)}"
+SMOKE_CONFIDENTIAL_KEY="${APDL_SMOKE_CONFIDENTIAL_KEY:-$(env_file_value APDL_SMOKE_CONFIDENTIAL_KEY)}"
+SMOKE_BROWSER_KEY="${APDL_SMOKE_BROWSER_KEY:-$(env_file_value APDL_SMOKE_BROWSER_KEY)}"
 INGESTION_HOST_PORT="${APDL_INGESTION_HOST_PORT:-$(env_file_value APDL_INGESTION_HOST_PORT)}"
 CONFIG_HOST_PORT="${APDL_CONFIG_HOST_PORT:-$(env_file_value APDL_CONFIG_HOST_PORT)}"
 QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$(env_file_value APDL_QUERY_HOST_PORT)}"
@@ -146,7 +146,7 @@ cmd_setup() {
     echo ""
     echo "  scripts/dev.sh up-core     Run the supported core stack in Docker"
     echo "  scripts/dev.sh up-full     Opt into Agents + offline Codegen too"
-    echo "  scripts/dev.sh smoke       End-to-end smoke test"
+    echo "  scripts/dev.sh smoke-fresh Isolated end-to-end fresh-install proof"
     echo "  scripts/dev.sh check       Lint + test every package in parallel"
     echo ""
     echo "  make run-ingestion / run-config / run-query / run-agents / run-codegen / run-pipeline"
@@ -282,12 +282,14 @@ cmd_status() {
 }
 
 cmd_smoke() {
-    [ -n "$SMOKE_API_KEY" ] || die "APDL_DEV_API_KEY is required for the smoke test"
-    [ -n "$SMOKE_CLIENT_KEY" ] || die "APDL_DEV_CLIENT_KEY is required for the smoke test"
+    [ -n "$SMOKE_CONFIDENTIAL_KEY" ] || \
+        die "APDL_SMOKE_CONFIDENTIAL_KEY is required for the smoke test"
+    [ -n "$SMOKE_BROWSER_KEY" ] || \
+        die "APDL_SMOKE_BROWSER_KEY is required for the smoke test"
     require python3 "Install Python 3.12"
     info "Running the canonical core smoke against the current stack"
-    APDL_DEV_API_KEY="$SMOKE_API_KEY" \
-    APDL_DEV_CLIENT_KEY="$SMOKE_CLIENT_KEY" \
+    APDL_SMOKE_CONFIDENTIAL_KEY="$SMOKE_CONFIDENTIAL_KEY" \
+    APDL_SMOKE_BROWSER_KEY="$SMOKE_BROWSER_KEY" \
     APDL_GATEWAY_URL="http://localhost:$GATEWAY_HOST_PORT" \
     APDL_INGESTION_URL="http://localhost:$INGESTION_HOST_PORT" \
     APDL_CONFIG_URL="http://localhost:$CONFIG_HOST_PORT" \

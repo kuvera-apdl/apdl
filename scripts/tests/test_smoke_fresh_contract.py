@@ -11,6 +11,63 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FreshSmokeContractTests(unittest.TestCase):
+    def test_empty_bootstrap_precedes_explicit_smoke_fixture_seed(self) -> None:
+        script = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
+        postgres_init = (ROOT / "scripts" / "init-postgres.sh").read_text()
+        fixture = (
+            ROOT / "scripts" / "fixtures" / "provision-smoke-credential.sql"
+        ).read_text()
+        dev = (ROOT / "scripts" / "dev.sh").read_text()
+        core = (ROOT / "scripts" / "smoke_core.py").read_text()
+        experiment = (
+            ROOT / "scripts" / "smoke_experiment_analysis.py"
+        ).read_text()
+
+        self.assertNotIn("auth_credentials", postgres_init)
+        self.assertNotIn("APDL_DEV_", postgres_init)
+        self.assertNotIn("APDL_SMOKE_", postgres_init)
+        self.assertIn(
+            'SMOKE_CREDENTIAL_SQL="$ROOT_DIR/scripts/fixtures/'
+            'provision-smoke-credential.sql"',
+            script,
+        )
+        self.assertIn("INSERT INTO auth_credentials", fixture)
+
+        migration = script.index('"$ROOT_DIR/scripts/init-postgres.sh"')
+        empty_assertion = script.index("assert_empty_bootstrap_catalogs", migration)
+        seed = script.index("seed_smoke_credentials", empty_assertion)
+        credential_assertion = script.index("assert_credentials", seed)
+        self.assertLess(migration, empty_assertion)
+        self.assertLess(empty_assertion, seed)
+        self.assertLess(seed, credential_assertion)
+        for catalog in (
+            "admin_projects",
+            "admin_users",
+            "admin_user_projects",
+            "auth_credentials",
+            "admin_managed_credentials",
+            "llm_project_policies",
+            "llm_project_provider_policies",
+            "admin_project_execution_authorizations",
+        ):
+            self.assertIn(catalog, script)
+
+        for source in (script, dev, core, experiment):
+            self.assertNotIn("APDL_DEV_API_KEY", source)
+            self.assertNotIn("APDL_DEV_CLIENT_KEY", source)
+        for source in (script, dev, core):
+            self.assertIn("APDL_SMOKE_CONFIDENTIAL_KEY", source)
+            self.assertIn("APDL_SMOKE_BROWSER_KEY", source)
+        self.assertIn("APDL_SMOKE_CONFIDENTIAL_KEY", experiment)
+        self.assertIn(
+            "scripts/dev.sh smoke-fresh Isolated end-to-end fresh-install proof",
+            dev,
+        )
+        self.assertNotIn(
+            'echo "  scripts/dev.sh smoke       End-to-end smoke test"',
+            dev,
+        )
+
     def test_experiment_projection_requires_frozen_enrollment_authority(self) -> None:
         start = datetime(2026, 7, 1, tzinfo=timezone.utc)
         end = datetime(2026, 7, 2, tzinfo=timezone.utc)

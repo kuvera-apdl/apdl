@@ -160,13 +160,13 @@ def _project_id(confidential_key: str | None, browser_key: str | None) -> str:
     confidential = CONFIDENTIAL_KEY.fullmatch(confidential_key or "")
     if confidential is None:
         raise SmokeFailure(
-            "--confidential-key/APDL_DEV_API_KEY must match "
+            "--confidential-key/APDL_SMOKE_CONFIDENTIAL_KEY must match "
             "proj_{project_id}_{16-or-more-character-secret}"
         )
     browser = BROWSER_KEY.fullmatch(browser_key or "")
     if browser is None:
         raise SmokeFailure(
-            "--browser-key/APDL_DEV_CLIENT_KEY must match "
+            "--browser-key/APDL_SMOKE_BROWSER_KEY must match "
             "client_{project_id}_{16-or-more-character-secret}"
         )
     confidential_project = confidential.group("project_id")
@@ -637,13 +637,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--confidential-key",
-        default=os.environ.get("APDL_DEV_API_KEY"),
-        help="Confidential project key (env: APDL_DEV_API_KEY)",
+        default=os.environ.get("APDL_SMOKE_CONFIDENTIAL_KEY"),
+        help="Confidential project key (env: APDL_SMOKE_CONFIDENTIAL_KEY)",
     )
     parser.add_argument(
         "--browser-key",
-        default=os.environ.get("APDL_DEV_CLIENT_KEY"),
-        help="Browser project key (env: APDL_DEV_CLIENT_KEY)",
+        default=os.environ.get("APDL_SMOKE_BROWSER_KEY"),
+        help="Browser project key (env: APDL_SMOKE_BROWSER_KEY)",
     )
     parser.add_argument(
         "--gateway-url",

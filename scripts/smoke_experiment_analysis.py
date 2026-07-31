@@ -794,7 +794,7 @@ def _run(args: argparse.Namespace, analysis_case: str) -> None:
     match = CONFIDENTIAL_KEY.fullmatch(args.api_key or "")
     if match is None:
         raise SmokeFailure(
-            "--api-key/APDL_DEV_API_KEY must be a confidential "
+            "--api-key/APDL_SMOKE_CONFIDENTIAL_KEY must be a confidential "
             "proj_{project_id}_{secret} credential"
         )
     project_id = match.group("project_id")
@@ -1149,7 +1149,11 @@ def _run(args: argparse.Namespace, analysis_case: str) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--api-key", default=os.environ.get("APDL_DEV_API_KEY"))
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("APDL_SMOKE_CONFIDENTIAL_KEY"),
+        help="Confidential project key (env: APDL_SMOKE_CONFIDENTIAL_KEY)",
+    )
     parser.add_argument(
         "--ingestion-url",
         default=os.environ.get("APDL_INGESTION_URL", "http://localhost:8080"),

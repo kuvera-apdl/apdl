@@ -12,12 +12,7 @@ _API_KEY_PATTERN = re.compile(
 
 
 def service_headers(project_id: str) -> dict[str, str]:
-    """Return a service credential for exactly one project.
-
-    Production uses APDL_SERVICE_API_KEYS. Local development may reuse the
-    single credential provisioned from APDL_DEV_API_KEY when its project hint
-    matches the requested project.
-    """
+    """Return the configured service credential for exactly one project."""
     raw = os.environ.get("APDL_SERVICE_API_KEYS", "")
     if raw:
         try:
@@ -39,10 +34,5 @@ def service_headers(project_id: str) -> dict[str, str]:
                     "for that project"
                 )
             return {"X-API-Key": api_key}
-
-    dev_key = os.environ.get("APDL_DEV_API_KEY", "")
-    match = _API_KEY_PATTERN.fullmatch(dev_key)
-    if match is not None and match.group("project_id") == project_id:
-        return {"X-API-Key": dev_key}
 
     raise RuntimeError(f"No service API key configured for project {project_id}")

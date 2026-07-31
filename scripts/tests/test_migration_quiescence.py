@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "migration_quiescence.py"
 CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 POSTGRES_INIT = (ROOT / "scripts" / "init-postgres.sh").read_text()
+FRESH_SMOKE = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
 MAKEFILE = (ROOT / "Makefile").read_text()
 COMPOSE = (ROOT / "infra" / "docker" / "docker-compose.yml").read_text()
 DEPS_COMPOSE = (
@@ -43,7 +44,9 @@ GRANT_ENTRYPOINT = (
 ADMIN_PROVISION_ENTRYPOINT = (
     ROOT / "services/admin-api/scripts/create_admin_user.py"
 ).read_text()
-DEV_CREDENTIAL_SQL = (ROOT / "scripts/provision-dev-credential.sql").read_text()
+SMOKE_CREDENTIAL_SQL = (
+    ROOT / "scripts" / "fixtures" / "provision-smoke-credential.sql"
+).read_text()
 SPEC = importlib.util.spec_from_file_location("apdl_migration_quiescence", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 quiescence = importlib.util.module_from_spec(SPEC)
@@ -154,19 +157,23 @@ class MigrationQuiescenceTests(unittest.TestCase):
             guard = source.index("MAINTENANCE_GUARD_LOCK_ID", primary)
             self.assertLess(primary, guard)
 
-        primary_sql = DEV_CREDENTIAL_SQL.index(
+        primary_sql = SMOKE_CREDENTIAL_SQL.index(
             "pg_advisory_lock_shared(:maintenance_inhibitor_lock_id)"
         )
-        guard_sql = DEV_CREDENTIAL_SQL.index(
+        guard_sql = SMOKE_CREDENTIAL_SQL.index(
             "pg_advisory_lock_shared(:maintenance_guard_lock_id)"
         )
-        mutation = DEV_CREDENTIAL_SQL.index("INSERT INTO auth_credentials")
+        mutation = SMOKE_CREDENTIAL_SQL.index("INSERT INTO auth_credentials")
         self.assertLess(primary_sql, guard_sql)
         self.assertLess(guard_sql, mutation)
         self.assertIn(
-            'DEV_CREDENTIAL_SQL="$ROOT_DIR/scripts/provision-dev-credential.sql"',
-            POSTGRES_INIT,
+            'SMOKE_CREDENTIAL_SQL="$ROOT_DIR/scripts/fixtures/'
+            'provision-smoke-credential.sql"',
+            FRESH_SMOKE,
         )
+        self.assertNotIn("auth_credentials", POSTGRES_INIT)
+        self.assertNotIn("APDL_DEV_", POSTGRES_INIT)
+        self.assertNotIn("APDL_SMOKE_", POSTGRES_INIT)
 
     def test_both_migrators_hold_the_same_exclusive_database_fence(self) -> None:
         for source in (POSTGRES_MIGRATOR, CLICKHOUSE_MIGRATOR):

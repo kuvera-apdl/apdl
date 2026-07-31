@@ -86,14 +86,16 @@ make run-admin-api
 make run-admin
 ```
 
-Open `http://localhost:5173/register` and create an account. Registration starts
-an authenticated session with an empty project list. The user may create a
-core analytics project from the workspace settings, then create a restricted
-browser or confidential SDK credential from the same page. Copy the revealed
-key before closing the dialog; it cannot be recovered. An operator may instead
-grant membership to an operator-provisioned project. Self-created projects
-expose Agents history read-only by default and cannot execute LLM or Codegen
-work until an operator records an explicit project execution authorization.
+The normal bootstrap creates no users, projects, or credentials. The root
+`.env.example` enables registration for the loopback-bound local stack. Open
+`http://localhost:5173/register` and create an account; registration starts an
+authenticated session with an empty project list. The user may create a core
+analytics project from the workspace settings, then create a restricted browser
+or confidential SDK credential from the same page. Copy the revealed key before
+closing the dialog; it cannot be recovered. An operator may instead grant
+membership to an operator-provisioned project. Self-created projects expose
+Agents history read-only by default and cannot execute LLM or Codegen work until
+an operator records an explicit project execution authorization.
 
 Managed credential routes are:
 
@@ -167,8 +169,7 @@ Example degraded response:
 | Variable | Purpose |
 |---|---|
 | `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
-| `APDL_SERVICE_API_KEYS` | JSON object of project-scoped service keys; server-only |
-| `APDL_DEV_API_KEY` | Explicit local-only credential provisioned by `make migrate-postgres` |
+| `APDL_SERVICE_API_KEYS` | Canonical JSON object of project-scoped service keys; server-only |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
 | `CONFIG_SERVICE_URL` | Private config URL |
 | `QUERY_SERVICE_URL` | Private query URL |

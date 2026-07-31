@@ -413,7 +413,7 @@ fi
 wait "$inhibitor_pid"
 inhibitor_pid=""
 
-echo "==> Verifying development credential provisioning joins the shared fence"
+echo "==> Verifying smoke credential provisioning joins the shared fence"
 compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl <<'SQL'
 CREATE TABLE auth_credentials (
     credential_id TEXT PRIMARY KEY,
@@ -447,7 +447,7 @@ compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
     -v roles='{events:write}' \
     -v maintenance_inhibitor_lock_id=4158044083 \
     -v maintenance_guard_lock_id=4158044084 \
-    < "$ROOT_DIR/scripts/provision-dev-credential.sql" >/dev/null &
+    < "$ROOT_DIR/scripts/fixtures/provision-smoke-credential.sql" >/dev/null &
 credential_pid="$!"
 for _ in $(seq 1 30); do
     if [ "$(compose exec -T postgres psql -X -A -t -U apdl -d apdl \
@@ -460,7 +460,7 @@ assert_equal \
     '0' \
     "$(compose exec -T postgres psql -X -A -t -U apdl -d apdl \
         -c "SELECT count(*) FROM auth_credentials WHERE credential_id = 'maintenance-probe'")" \
-    "development credential mutation bypassed the exclusive maintenance fence"
+    "smoke credential mutation bypassed the exclusive maintenance fence"
 wait "$inhibitor_pid"
 inhibitor_pid=""
 wait "$credential_pid"
@@ -469,7 +469,7 @@ assert_equal \
     '1' \
     "$(compose exec -T postgres psql -X -A -t -U apdl -d apdl \
         -c "SELECT count(*) FROM auth_credentials WHERE credential_id = 'maintenance-probe'")" \
-    "development credential mutation did not resume after maintenance"
+    "smoke credential mutation did not resume after maintenance"
 
 echo "==> Verifying checksum drift fails closed"
 cp -R "$ROOT_DIR/pipeline/clickhouse/migrations" "$WORK_DIR/migrations"

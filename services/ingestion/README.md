@@ -131,9 +131,12 @@ newly unique storage identities.
 | POST   | `/v1/events` | Ingest a batch of events (returns `202` on acceptance)   |
 | GET    | `/health`    | Liveness probe — pings Redis, `200` ok / `503` degraded  |
 
+Set `APDL_CLIENT_KEY` to a reveal-once browser credential created in Workspace
+settings, then:
+
 ```bash
 curl -X POST http://localhost:8080/v1/events \
-  -H "x-api-key: client_demo_0123456789abcdef0123456789abcdef" \
+  -H "x-api-key: ${APDL_CLIENT_KEY}" \
   -H "Content-Type: application/json" \
   -d '{
     "events": [

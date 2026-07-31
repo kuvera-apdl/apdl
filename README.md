@@ -71,8 +71,14 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 
 git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
 cp .env.example .env
 make dev-core            # supported core + local Admin console
-make smoke               # strict event → flag evaluation → exact query result
 ```
+
+The normal bootstrap creates no projects, users, or API credentials. Open
+<http://localhost:5173/register>, create the first local account, then create a
+project in **Workspace settings**. From that project, create reveal-once browser
+or confidential SDK credentials as needed. The example enables registration
+only for the loopback-bound local stack; disable it before exposing Admin
+outside local development.
 
 This developer preview supports fresh, single-node databases only. Do not run
 `make dev-core` or the initialization scripts against an existing APDL
@@ -81,10 +87,11 @@ in this release.
 
 The same fresh-install proof CI runs is available as `make smoke-fresh`. It uses
 an isolated Compose project and fresh volumes, initializes both databases,
-provisions the canonical `demo` project with separate confidential and browser
-credentials, starts only the services needed for the core proof, sends and
-queries exactly one event, evaluates a flag, and removes every container and
-volume when it finishes.
+provisions a test-only `demo` project with separate confidential and browser
+credentials inside that isolated environment, starts only the services needed
+for the core proof, sends and queries exactly one event, evaluates a flag, and
+removes every container and volume when it finishes. Those fixtures never enter
+the normal developer database.
 
 Agents and Codegen are opt-in Compose profiles. `make dev-core` leaves both off;
 `make dev-all` starts Agents plus the offline Codegen API/control plane. It does
@@ -100,7 +107,7 @@ publication is not part of this OSS developer-preview release.
 | `scripts/dev.sh up-core` | Start the supported core stack (same as `make dev-core`) |
 | `scripts/dev.sh up-full` | Explicitly add optional Agents and offline Codegen (same as `make dev-all`) |
 | `scripts/dev.sh status` | Container status + service health endpoints |
-| `scripts/dev.sh smoke` | End-to-end smoke test against the running stack |
+| `scripts/dev.sh smoke` | Running-stack smoke; requires `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` |
 | `scripts/dev.sh check` | Lint + test every package in parallel |
 | `scripts/dev.sh logs [svc]` | Tail Docker logs |
 | `scripts/dev.sh down` / `reset` | Stop everything / also wipe data volumes |
@@ -134,7 +141,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
   privacyMode: 'standard',              // 'standard' | 'cookieless'
@@ -160,7 +167,7 @@ backend does not store or deliver UI configurations.
 from apdl import APDL
 
 with APDL.init(
-    api_key="proj_demo_0123456789abcdef0123456789abcdef",
+    api_key="proj_yourproject_replacewithrevealedkey",
     endpoint="http://localhost:8000",
 ) as client:
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -252,7 +259,7 @@ apdl/
 | One package | `make test-<pkg>` / `make lint-<pkg>` — `sdk`, `sdk-python`, `ingestion`, `config`, `query`, `agents` |
 | Build the JS SDK | `make build` |
 | ClickHouse migrations | `make migrate-clickhouse` |
-| Health overview / smoke test | `make status` / `make smoke` |
+| Health overview / isolated fresh-install smoke | `make status` / `make smoke-fresh` |
 | Stop containers | `make dev-down` |
 
 See [Database migration maintenance](docs/database-maintenance.md) for the

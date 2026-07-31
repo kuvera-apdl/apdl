@@ -143,7 +143,7 @@ export function LoginPage() {
           </form>
           {capabilities.isSuccess && capabilities.data.registration_enabled ? (
             <p className="mt-5 text-center text-sm text-muted-foreground">
-              Have an invitation?{' '}
+              New to this APDL workspace?{' '}
               <Link className="font-medium text-primary underline-offset-4 hover:underline" to="/register">
                 Create your account
               </Link>

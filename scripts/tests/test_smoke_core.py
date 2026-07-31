@@ -346,6 +346,24 @@ class CleanupTests(unittest.TestCase):
 
 
 class CredentialTests(unittest.TestCase):
+    def test_parser_uses_dedicated_smoke_environment_inputs(self) -> None:
+        confidential = "proj_demo_0123456789abcdef"
+        browser = "client_demo_0123456789abcdef"
+        with patch.dict(
+            smoke_core.os.environ,
+            {
+                "APDL_DEV_API_KEY": "proj_legacy_0123456789abcdef",
+                "APDL_DEV_CLIENT_KEY": "client_legacy_0123456789abcdef",
+                "APDL_SMOKE_CONFIDENTIAL_KEY": confidential,
+                "APDL_SMOKE_BROWSER_KEY": browser,
+            },
+            clear=True,
+        ):
+            args = smoke_core._parser().parse_args([])
+
+        self.assertEqual(args.confidential_key, confidential)
+        self.assertEqual(args.browser_key, browser)
+
     def test_credentials_must_be_strict_and_project_matched(self) -> None:
         self.assertEqual(
             smoke_core._project_id(

@@ -204,6 +204,8 @@ CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
 ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
                                    #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+OPENAI_BASE_URL=https://api.openai.com/v1
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```

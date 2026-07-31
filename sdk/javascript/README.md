@@ -38,7 +38,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'https://api.example.com',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -74,7 +74,7 @@ development server:
 
 ```dotenv
 NEXT_PUBLIC_APDL_URL=https://api.example.com
-NEXT_PUBLIC_APDL_CLIENT_KEY=client_demo_0123456789abcdef
+NEXT_PUBLIC_APDL_CLIENT_KEY=client_yourproject_replacewithrevealedkey
 ```
 
 The SDK uses direct, statically analyzable references to these public variables,
@@ -189,7 +189,7 @@ gateway URL (`make dev-core` starts the gateway on port 8000):
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,
   privacyMode: 'standard',

@@ -207,13 +207,14 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Shared OpenAI-compatible provider endpoint |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Shared Anthropic provider endpoint |
 | `GOOGLE_API_KEY` | — | Google provider |
 | `XAI_API_KEY` | — | xAI Grok provider at `https://api.x.ai/v1` |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names, including `LLM_FAST_XAI` (`grok-4.20-0309-non-reasoning`) and `LLM_REASONING_XAI` (`grok-4.5`); each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
-| `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
+| `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
 
 At least one policy-authorized provider must also be configured and reachable
 to execute an LLM-backed run. API keys alone grant no project permission.

@@ -97,14 +97,16 @@ make run-admin-api   # :8085, Vite proxies /api here
 make run-admin       # :5173
 ```
 
-Open `/register` to create an email/password account. New accounts have zero
-projects and zero roles; project access must be granted separately by an
-operator or created from `/settings/workspace`. Creating a project associates
-it with the current profile and grants core analytics roles plus
-`agents:read` and human-only credential management. The console preserves the
-returned role set: self-created projects can create a least-privilege SDK key
-and inspect Agents history, while trigger, approval, and custom-agent mutation
-controls remain unavailable.
+The normal local bootstrap starts with zero users, projects, and credentials.
+The root `.env.example` enables loopback-only registration: open `/register` to
+create an email/password account, then use `/settings/workspace` to create the
+first project. Creating a project associates it with the current profile and
+grants core analytics roles plus `agents:read` and human-only credential
+management. The console preserves the returned role set: self-created projects
+can create a least-privilege SDK key and inspect Agents history, while trigger,
+approval, and custom-agent mutation controls remain unavailable. Set
+`APDL_ADMIN_REGISTRATION_ENABLED=false`, use secure cookies, and configure an
+exact HTTPS origin before exposing Admin outside local development.
 
 `scripts/dev.sh up-core` runs the backend and SPA together in Docker. The Vite
 bundle has no environment-specific service URLs; nginx proxies `/api` over the

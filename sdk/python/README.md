@@ -82,7 +82,7 @@ Or as a context manager (auto-shutdown):
 
 ```python
 with APDL.init(
-    api_key="proj_demo_0123456789abcdef",
+    api_key="proj_yourproject_replacewithrevealedkey",
     endpoint="http://localhost:8000",
 ) as client:
     client.track("signup", user_id="u_999")
@@ -96,7 +96,7 @@ Pass keyword args to `APDL.init(...)` or build an `APDLConfig`:
 from apdl import APDL, APDLConfig
 
 client = APDL.init(APDLConfig(
-    api_key="proj_demo_0123456789abcdef",
+    api_key="proj_yourproject_replacewithrevealedkey",
     endpoint="https://apdl.example.com",   # required gateway origin for events + flags
     batch_size=20,                         # 1..100
     flush_interval=3.0,                    # seconds between background flushes

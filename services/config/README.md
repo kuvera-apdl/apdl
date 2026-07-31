@@ -62,12 +62,15 @@ never from query parameters. See
 
 Exposure logging is explicitly opt-in:
 
+Set `APDL_API_KEY` to a reveal-once confidential credential created in
+Workspace settings, then:
+
 ```bash
 curl -X POST "${CONFIG_SERVICE_URL:-http://localhost:8081}/v1/evaluate" \
-  -H "x-api-key: ${APDL_DEV_API_KEY}" \
+  -H "x-api-key: ${APDL_API_KEY}" \
   -H "content-type: application/json" \
   -d '{
-    "project_id": "demo",
+    "project_id": "yourproject",
     "key": "new-checkout",
     "context": {"user_id": "user-123", "attributes": {}},
     "log_exposure": true,
@@ -104,7 +107,7 @@ Create a flag:
 
 ```bash
 curl -X POST http://localhost:8081/v1/admin/flags \
-  -H "x-api-key: proj_demo_0123456789abcdef0123456789abcdef" \
+  -H "x-api-key: ${APDL_API_KEY}" \
   -H "content-type: application/json" \
   -d '{
     "key": "new-checkout",

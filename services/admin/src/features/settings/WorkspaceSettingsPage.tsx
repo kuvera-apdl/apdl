@@ -76,8 +76,8 @@ export function WorkspaceSettingsPage() {
           <CardHeader>
             <CardTitle>No project access yet</CardTitle>
             <CardDescription>
-              This account is registered but has not been assigned to a project. An operator must
-              grant project roles before service data becomes available.
+              This account starts empty. Create your first project below to receive the core roles
+              needed to configure it and issue SDK credentials.
             </CardDescription>
           </CardHeader>
         </Card>

@@ -30,10 +30,10 @@ docker info >/dev/null
 # another CI job. The migration helpers inherit this exact project identity.
 export COMPOSE_PROJECT_NAME="apdl-${SMOKE_SUITE}-fresh-$$-$(date -u +%s)"
 
-# Fixed, public test credentials. Their project is encoded in the canonical key
-# prefix; PostgreSQL stores only their hashes.
-export APDL_DEV_API_KEY="proj_demo_0123456789abcdef0123456789abcdef"
-export APDL_DEV_CLIENT_KEY="client_demo_0123456789abcdef0123456789abcdef"
+# Fixed, public smoke fixtures. Their project is encoded in the canonical key
+# prefix; the isolated PostgreSQL instance stores only their hashes.
+export APDL_SMOKE_CONFIDENTIAL_KEY="proj_demo_0123456789abcdef0123456789abcdef"
+export APDL_SMOKE_BROWSER_KEY="client_demo_0123456789abcdef0123456789abcdef"
 export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
 export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
@@ -43,6 +43,14 @@ export OPENAI_API_KEY=""
 export XAI_API_KEY=""
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
+
+SMOKE_CREDENTIAL_SQL="$ROOT_DIR/scripts/fixtures/provision-smoke-credential.sql"
+MAINTENANCE_INHIBITOR_LOCK_ID=4158044083
+MAINTENANCE_GUARD_LOCK_ID=4158044084
+[ -f "$SMOKE_CREDENTIAL_SQL" ] || {
+    echo "Smoke credential fixture not found: $SMOKE_CREDENTIAL_SQL" >&2
+    exit 1
+}
 
 case "${APDL_SMOKE_ALL_IMAGES:-false}" in
     true)
@@ -132,6 +140,118 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+assert_empty_bootstrap_catalogs() {
+    local postgres_id actual expected
+    postgres_id="$(compose ps -q postgres)"
+    [ -n "$postgres_id" ] || {
+        echo "PostgreSQL container is unavailable after initialization" >&2
+        return 1
+    }
+
+    actual="$(docker exec "$postgres_id" psql -X -A -t \
+        -v ON_ERROR_STOP=1 -U apdl -d apdl -c \
+        "SELECT catalog || '=' || row_count
+         FROM (
+             SELECT 'admin_managed_credentials' AS catalog, count(*) AS row_count
+             FROM admin_managed_credentials
+             UNION ALL
+             SELECT 'admin_project_execution_authorizations', count(*)
+             FROM admin_project_execution_authorizations
+             UNION ALL
+             SELECT 'admin_projects', count(*) FROM admin_projects
+             UNION ALL
+             SELECT 'admin_user_projects', count(*) FROM admin_user_projects
+             UNION ALL
+             SELECT 'admin_users', count(*) FROM admin_users
+             UNION ALL
+             SELECT 'auth_credentials', count(*) FROM auth_credentials
+             UNION ALL
+             SELECT 'llm_project_policies', count(*) FROM llm_project_policies
+             UNION ALL
+             SELECT 'llm_project_provider_policies', count(*)
+             FROM llm_project_provider_policies
+         ) AS catalogs
+         ORDER BY catalog")"
+    expected="admin_managed_credentials=0
+admin_project_execution_authorizations=0
+admin_projects=0
+admin_user_projects=0
+admin_users=0
+auth_credentials=0
+llm_project_policies=0
+llm_project_provider_policies=0"
+    if [ "$actual" != "$expected" ]; then
+        echo "Fresh PostgreSQL bootstrap did not leave identity catalogs empty" >&2
+        echo "Expected:" >&2
+        printf '%s\n' "$expected" >&2
+        echo "Actual:" >&2
+        printf '%s\n' "$actual" >&2
+        return 1
+    fi
+    echo "==> Fresh project, user, credential, policy, and authorization catalogs verified empty"
+}
+
+provision_smoke_credential() {
+    local raw_key="$1"
+    local credential_kind="$2"
+    local credential_id="$3"
+    local roles="$4"
+    local project_id
+    local key_prefix
+    local key_hash
+
+    if [ "$credential_kind" = "confidential" ]; then
+        if [[ ! "$raw_key" =~ ^proj_([A-Za-z0-9]{1,64})_([A-Za-z0-9]{16,128})$ ]]; then
+            echo "APDL_SMOKE_CONFIDENTIAL_KEY does not match proj_{project_id}_{secret}" >&2
+            exit 1
+        fi
+        project_id="${BASH_REMATCH[1]}"
+        key_prefix="proj_${project_id}_"
+    elif [ "$credential_kind" = "browser" ]; then
+        if [[ ! "$raw_key" =~ ^client_([A-Za-z0-9]{1,64})_([A-Za-z0-9]{16,128})$ ]]; then
+            echo "APDL_SMOKE_BROWSER_KEY does not match client_{project_id}_{token}" >&2
+            exit 1
+        fi
+        project_id="${BASH_REMATCH[1]}"
+        key_prefix="client_${project_id}_"
+    else
+        echo "Unsupported smoke credential kind: $credential_kind" >&2
+        exit 1
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        key_hash="$(printf %s "$raw_key" | sha256sum | awk '{print $1}')"
+    else
+        key_hash="$(printf %s "$raw_key" | shasum -a 256 | awk '{print $1}')"
+    fi
+    docker exec -i "$(compose ps -q postgres)" psql \
+        -v ON_ERROR_STOP=1 \
+        -v credential_id="$credential_id" \
+        -v project_id="$project_id" \
+        -v credential_kind="$credential_kind" \
+        -v key_prefix="$key_prefix" \
+        -v key_hash="$key_hash" \
+        -v roles="$roles" \
+        -v maintenance_inhibitor_lock_id="$MAINTENANCE_INHIBITOR_LOCK_ID" \
+        -v maintenance_guard_lock_id="$MAINTENANCE_GUARD_LOCK_ID" \
+        -U apdl \
+        -d apdl >/dev/null < "$SMOKE_CREDENTIAL_SQL"
+    echo "  Provisioned $credential_kind smoke credential for $project_id"
+}
+
+seed_smoke_credentials() {
+    provision_smoke_credential \
+        "$APDL_SMOKE_CONFIDENTIAL_KEY" \
+        "confidential" \
+        "smoke-confidential" \
+        "{events:write,config:read,config:write,config:evaluate,query:read}"
+    provision_smoke_credential \
+        "$APDL_SMOKE_BROWSER_KEY" \
+        "browser" \
+        "smoke-browser" \
+        "{events:write,config:read}"
+}
+
 assert_credentials() {
     local postgres_id actual expected
     postgres_id="$(compose ps -q postgres)"
@@ -146,8 +266,8 @@ assert_credentials() {
          FROM auth_credentials
          WHERE project_id = 'demo'
          ORDER BY credential_id")"
-    expected="local-dev-browser|demo|browser|client_demo_|{events:write,config:read}
-local-dev-confidential|demo|confidential|proj_demo_|{events:write,config:read,config:write,config:evaluate,query:read}"
+    expected="smoke-browser|demo|browser|client_demo_|{events:write,config:read}
+smoke-confidential|demo|confidential|proj_demo_|{events:write,config:read,config:write,config:evaluate,query:read}"
     if [ "$actual" != "$expected" ]; then
         echo "Fresh demo credential contract differs" >&2
         echo "Expected:" >&2
@@ -164,7 +284,7 @@ local-dev-confidential|demo|confidential|proj_demo_|{events:write,config:read,co
         echo "Fresh demo project is missing or has self-registration provenance" >&2
         return 1
     }
-    echo "==> Canonical demo credentials and operator project verified"
+    echo "==> Isolated smoke credentials and operator project verified"
 }
 
 assert_operator_recovery_indexes() {
@@ -296,6 +416,8 @@ POSTGRES_USE_PACKAGED_MIGRATIONS="$smoke_packaged_migrations" \
 POSTGRES_COMPOSE_FILE="$COMPOSE_FILE" \
 POSTGRES_COMPOSE_OVERRIDE_FILE="${APDL_SMOKE_COMPOSE_OVERRIDE:-}" \
     "$ROOT_DIR/scripts/init-postgres.sh"
+assert_empty_bootstrap_catalogs
+seed_smoke_credentials
 assert_credentials
 assert_operator_recovery_indexes
 
@@ -358,12 +480,12 @@ if [ "$SMOKE_SUITE" = "core" ]; then
         --config-url "$APDL_CONFIG_URL" \
         --query-url "$APDL_QUERY_URL" \
         --admin-url "$APDL_ADMIN_URL" \
-        --confidential-key "$APDL_DEV_API_KEY" \
-        --browser-key "$APDL_DEV_CLIENT_KEY"
+        --confidential-key "$APDL_SMOKE_CONFIDENTIAL_KEY" \
+        --browser-key "$APDL_SMOKE_BROWSER_KEY"
 else
     echo "==> Running authoritative experiment-analysis smoke"
     python3 "$ROOT_DIR/scripts/smoke_experiment_analysis.py" \
-        --api-key "$APDL_DEV_API_KEY" \
+        --api-key "$APDL_SMOKE_CONFIDENTIAL_KEY" \
         --ingestion-url "$APDL_INGESTION_URL" \
         --config-url "$APDL_CONFIG_URL" \
         --query-url "$APDL_QUERY_URL" \

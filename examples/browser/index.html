@@ -6,7 +6,9 @@
   <title>APDL Browser SDK Example</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
-    button { font-size: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    button, input { font-size: 1rem; padding: 0.5rem 1rem; }
+    button { cursor: pointer; }
+    input { box-sizing: border-box; width: 100%; }
     code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 3px; }
     #gate-status { font-weight: bold; }
     #log { background: #f8f8f8; border: 1px solid #ddd; padding: 0.75rem; min-height: 6rem; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; }
@@ -18,16 +20,24 @@
     Auto-capture is on: clicks, page views, scroll depth, and web vitals are
     tracked automatically. Prerequisites are in <code>examples/README.md</code>
     (stack running via <code>make dev-core</code>, SDK built via
-    <code>make build-sdk</code>, <code>new-checkout</code> flag created).
+    <code>make build-sdk</code>, project and browser key created,
+    <code>new-checkout</code> flag created).
   </p>
+
+  <p>
+    <label for="client-key">Reveal-once browser key</label>
+    <input id="client-key" type="password" autocomplete="off"
+      placeholder="client_yourproject_…" />
+  </p>
+  <p><button id="connect">Connect</button></p>
 
   <p>
     Gate <code>new-checkout</code>:
-    <span id="gate-status">checking…</span>
+    <span id="gate-status">not connected</span>
   </p>
 
   <p>
-    <button id="buy">Complete purchase ($49.99)</button>
+    <button id="buy" disabled>Complete purchase ($49.99)</button>
   </p>
 
   <div id="log"></div>
@@ -37,35 +47,57 @@
   <script>
     const logEl = document.getElementById('log');
     const log = (msg) => { logEl.textContent += msg + '\n'; };
-
-    const apdl = APDL.init({
-      endpoint: 'http://localhost:8000',
-      auth: { clientKey: 'client_demo_0123456789abcdef0123456789abcdef' },
-      autoCapture: true,
-      debug: true,
-    });
-
-    apdl.identify('user-42', { plan: 'pro' });
-    log('identified user-42');
+    const clientKeyEl = document.getElementById('client-key');
+    const connectEl = document.getElementById('connect');
+    const buyEl = document.getElementById('buy');
+    let apdl = null;
 
     // Manual event tracking
-    document.getElementById('buy').addEventListener('click', () => {
+    buyEl.addEventListener('click', () => {
+      if (!apdl) return;
       apdl.track('purchase_completed', { product_id: 'sku-123', revenue: 49.99 });
       log('tracked purchase_completed');
     });
 
     // Feature gate, evaluated locally once flags load
     const renderGate = () => {
+      if (!apdl) return;
       const result = apdl.getVariantDetails('new-checkout');
       document.getElementById('gate-status').textContent =
         `${result.variant} (reason: ${result.reason})`;
     };
-    setTimeout(renderGate, 500); // give the initial flag fetch a moment
 
-    // Live updates over SSE — toggle the flag via the admin API and watch
-    apdl.onVariantChange('new-checkout', (variant) => {
-      log(`flag update over SSE: new-checkout -> ${variant}`);
-      renderGate();
+    connectEl.addEventListener('click', () => {
+      const clientKey = clientKeyEl.value.trim();
+      if (!clientKey) {
+        log('paste a browser key created in Workspace settings');
+        return;
+      }
+      try {
+        apdl = APDL.init({
+          endpoint: 'http://localhost:8000',
+          auth: { clientKey },
+          autoCapture: true,
+          debug: true,
+        });
+      } catch (error) {
+        apdl = null;
+        log(error instanceof Error ? error.message : 'invalid browser key');
+        return;
+      }
+      clientKeyEl.value = '';
+      clientKeyEl.disabled = true;
+      connectEl.disabled = true;
+      buyEl.disabled = false;
+      apdl.identify('user-42', { plan: 'pro' });
+      log('connected and identified user-42');
+      setTimeout(renderGate, 500); // give the initial flag fetch a moment
+
+      // Live updates over SSE — toggle the flag via the Admin Console and watch.
+      apdl.onVariantChange('new-checkout', (variant) => {
+        log(`flag update over SSE: new-checkout -> ${variant}`);
+        renderGate();
+      });
     });
   </script>
 </body>
