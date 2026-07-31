@@ -13,6 +13,7 @@ export const adminRoleSchema = z.enum([
   'agents:manage',
   'agents:approve',
   'credentials:manage',
+  'members:manage',
 ])
 
 export type AdminRole = z.infer<typeof adminRoleSchema>

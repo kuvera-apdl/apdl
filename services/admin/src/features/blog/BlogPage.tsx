@@ -90,7 +90,7 @@ export function BlogPage() {
         <p className="mt-1 text-sm leading-6 text-muted-foreground">
           Create a browser or server credential in{' '}
           <Link to="/settings/workspace" className="font-medium text-foreground underline underline-offset-4">
-            Workspace settings
+            Project management
           </Link>
           , then follow the matching guide above.
         </p>

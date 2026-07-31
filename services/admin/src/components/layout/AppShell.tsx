@@ -30,7 +30,6 @@ import { useEffect, useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { SecurityNotificationBanner } from '@/components/layout/SecurityNotificationBanner'
 import {
@@ -151,12 +150,6 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'System',
     items: [
       {
-        to: '/settings/workspace',
-        label: 'Workspace',
-        icon: Settings,
-        isActive: (path) => path === '/settings/workspace',
-      },
-      {
         to: '/settings/verify',
         label: 'Verify integration',
         icon: BadgeCheck,
@@ -240,29 +233,50 @@ function Sidebar() {
   )
 }
 
-function WorkspaceSwitcher() {
+function ProjectSwitcher() {
   const { workspaces, active, setActive } = useWorkspace()
   const navigate = useNavigate()
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="gap-2">
-          {active ? active.name : 'No workspace'}
+        <Button
+          variant="outline"
+          size="sm"
+          className="min-w-44 max-w-72 justify-between gap-3"
+          aria-label={active ? `Project: ${active.name}` : 'No project selected'}
+        >
+          <span className="truncate">{active ? active.name : 'No project'}</span>
           <ChevronsUpDown className="h-3.5 w-3.5 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        <DropdownMenuLabel>Authorized projects</DropdownMenuLabel>
+      <DropdownMenuContent align="start" className="w-80">
+        <DropdownMenuLabel>Projects</DropdownMenuLabel>
         {workspaces.map((workspace) => (
-          <DropdownMenuItem key={workspace.id} onSelect={() => setActive(workspace.id)}>
-            <Check className={cn('opacity-0', workspace.id === active?.id && 'opacity-100')} />
-            {workspace.name}
+          <DropdownMenuItem
+            key={workspace.id}
+            className="w-full items-start gap-3 py-2.5"
+            onSelect={() => setActive(workspace.id)}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-medium">{workspace.name}</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                Project ID · {workspace.roles.length}{' '}
+                {workspace.roles.length === 1 ? 'permission' : 'permissions'}
+              </span>
+            </span>
+            <Check
+              className={cn(
+                'mt-0.5 opacity-0',
+                workspace.id === active?.id && 'opacity-100',
+              )}
+            />
           </DropdownMenuItem>
         ))}
         {workspaces.length > 0 ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => navigate('/settings/workspace')}>
-          View access…
+          <Settings />
+          Project management
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -342,7 +356,6 @@ function ThemeToggle() {
 }
 
 export function AppShell() {
-  const { projectId } = useWorkspace()
   const { identity, logout } = useAuth()
 
   return (
@@ -351,12 +364,7 @@ export function AppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b px-4">
           <div className="flex items-center gap-3">
-            <WorkspaceSwitcher />
-            {projectId ? (
-              <Badge variant="secondary" className="font-mono">
-                project: {projectId}
-              </Badge>
-            ) : null}
+            <ProjectSwitcher />
           </div>
           <div className="flex items-center gap-3">
             <UtcClock />

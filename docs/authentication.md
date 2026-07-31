@@ -301,7 +301,7 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 
 Normal local bootstrap runs only the PostgreSQL schema migrations, so the
 project and credential catalogs start empty. Register through the loopback
-Admin Console, create a project in Workspace settings, and create reveal-once
+Admin Console, create a project in Project management, and create reveal-once
 browser or confidential credentials there. The isolated fresh-smoke suite owns
 separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` fixtures; it
 first verifies the catalogs are empty, provisions those fixtures with the

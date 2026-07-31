@@ -502,6 +502,7 @@ export function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
       'agents:manage',
       'agents:approve',
       'credentials:manage',
+      'members:manage',
     ],
     ...overrides,
   }

@@ -380,7 +380,7 @@ export function ProjectCredentialsCard() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ShieldAlert className="h-5 w-5" />
-            SDK credentials
+            SDK Credentials
           </CardTitle>
           <CardDescription>
             Project <code className="font-mono">{active.projectId}</code> does not grant{' '}
@@ -405,7 +405,7 @@ export function ProjectCredentialsCard() {
             <div className="space-y-1.5">
               <CardTitle className="flex items-center gap-2">
                 <KeyRound className="h-5 w-5" />
-                SDK credentials
+                SDK Credentials
               </CardTitle>
               <CardDescription>
                 Reveal-once browser and server credentials for active project{' '}

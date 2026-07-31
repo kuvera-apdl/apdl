@@ -1,5 +1,5 @@
-import { Loader2, Plus, ShieldCheck } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { ChevronDown, FolderKanban, Loader2, Plus, ShieldCheck } from 'lucide-react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
@@ -13,13 +13,19 @@ import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
 import { ProjectCredentialsCard } from '@/features/settings/ProjectCredentialsCard'
+import { ProjectMembersCard } from '@/features/settings/ProjectMembersCard'
 
 export function WorkspaceSettingsPage() {
   const { identity, createProject } = useAuth()
   const { active, setActive } = useWorkspace()
+  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null)
   const [projectId, setProjectId] = useState('')
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setExpandedProjectId(active?.id ?? null)
+  }, [active?.id])
 
   const onCreateProject = async (event: FormEvent) => {
     event.preventDefault()
@@ -50,26 +56,21 @@ export function WorkspaceSettingsPage() {
     }
   }
 
+  const toggleProject = (nextProjectId: string) => {
+    if (expandedProjectId === nextProjectId) {
+      setExpandedProjectId(null)
+      return
+    }
+    setActive(nextProjectId)
+    setExpandedProjectId(nextProjectId)
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Workspace settings"
-        description="Project access, roles, and reveal-once SDK credentials."
+        title="Project management"
+        description="Review your projects, manage access, and issue reveal-once SDK credentials."
       />
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5" />
-            Secure session
-          </CardTitle>
-          <CardDescription>
-            Signed in as {identity?.email}. Authentication uses an HttpOnly session cookie; no API
-            keys or internal service tokens are stored persistently in this browser. Reveal-once
-            keys exist only while their dialog is open.
-          </CardDescription>
-        </CardHeader>
-      </Card>
 
       {identity?.projects.length === 0 ? (
         <Card>
@@ -81,6 +82,94 @@ export function WorkspaceSettingsPage() {
             </CardDescription>
           </CardHeader>
         </Card>
+      ) : null}
+
+      {identity?.projects.length ? (
+        <section aria-labelledby="projects-heading" className="space-y-3">
+          <div>
+            <h2 id="projects-heading" className="text-base font-semibold">
+              Projects
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Select a project to review its authority, collaborators, and integration access.
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            {identity.projects.map((project) => {
+              const expanded =
+                expandedProjectId === project.project_id && active?.id === project.project_id
+              const contentId = `project-${project.project_id}-management`
+
+              return (
+                <Card key={project.project_id} className="w-full overflow-hidden">
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-4 p-5 text-left transition-colors hover:bg-muted/40"
+                    aria-expanded={expanded}
+                    aria-controls={contentId}
+                    onClick={() => toggleProject(project.project_id)}
+                  >
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <FolderKanban className="h-5 w-5 text-muted-foreground" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="truncate font-mono font-semibold">
+                          {project.project_id}
+                        </span>
+                        {active?.id === project.project_id ? <Badge>active project</Badge> : null}
+                      </span>
+                      <span className="mt-1 block text-sm text-muted-foreground">
+                        {project.roles.length}{' '}
+                        {project.roles.length === 1 ? 'permission' : 'permissions'} ·{' '}
+                        {identity.email}
+                      </span>
+                    </span>
+                    <ChevronDown
+                      className={`h-5 w-5 shrink-0 text-muted-foreground transition-transform ${
+                        expanded ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+
+                  {expanded ? (
+                    <div
+                      id={contentId}
+                      className="space-y-4 border-t bg-muted/20 p-4 md:p-5"
+                    >
+                      <Card>
+                        <CardHeader>
+                          <CardTitle className="flex items-center gap-2">
+                            <ShieldCheck className="h-5 w-5" />
+                            Your Access
+                          </CardTitle>
+                          <CardDescription>
+                            Signed in as {identity.email}. These permissions apply only to project{' '}
+                            <span className="font-mono">{project.project_id}</span>.
+                          </CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="flex flex-wrap gap-1.5">
+                            {project.roles.map((role) => (
+                              <Badge key={role} variant="secondary" className="font-mono text-xs">
+                                {role}
+                              </Badge>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+
+                      <ProjectMembersCard />
+
+                      <ProjectCredentialsCard />
+                    </div>
+                  ) : null}
+                </Card>
+              )
+            })}
+          </div>
+        </section>
       ) : null}
 
       <Card>
@@ -118,35 +207,6 @@ export function WorkspaceSettingsPage() {
           </form>
         </CardContent>
       </Card>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        {identity?.projects.map((project) => (
-          <Card key={project.project_id} className={active?.id === project.project_id ? 'border-primary' : undefined}>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle className="font-mono text-base">{project.project_id}</CardTitle>
-                {active?.id === project.project_id ? <Badge>active</Badge> : null}
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-wrap gap-1.5">
-                {project.roles.map((role) => (
-                  <Badge key={role} variant="secondary" className="font-mono text-xs">
-                    {role}
-                  </Badge>
-                ))}
-              </div>
-              {active?.id !== project.project_id ? (
-                <Button variant="outline" size="sm" onClick={() => setActive(project.project_id)}>
-                  Activate project
-                </Button>
-              ) : null}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      <ProjectCredentialsCard />
     </div>
   )
 }

@@ -16,20 +16,20 @@ from app.security import hash_password
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PROJECT_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
-ROLES = frozenset(
-    {
-        "events:write",
-        "config:read",
-        "config:write",
-        "config:evaluate",
-        "query:read",
-        "agents:read",
-        "agents:run",
-        "agents:manage",
-        "agents:approve",
-        "credentials:manage",
-    }
+ROLE_ORDER = (
+    "events:write",
+    "config:read",
+    "config:write",
+    "config:evaluate",
+    "query:read",
+    "agents:read",
+    "agents:run",
+    "agents:manage",
+    "agents:approve",
+    "credentials:manage",
+    "members:manage",
 )
+ROLES = frozenset(ROLE_ORDER)
 EXECUTION_ROLES = frozenset({"agents:run", "agents:manage", "agents:approve"})
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
@@ -79,12 +79,13 @@ async def provision(args: argparse.Namespace) -> None:
         raise SystemExit("Invalid email")
     if PROJECT_PATTERN.fullmatch(args.project_id) is None:
         raise SystemExit("Invalid project ID")
-    roles = sorted(set(args.roles))
-    if not roles:
+    requested_roles = set(args.roles)
+    if not requested_roles:
         raise SystemExit("At least one role is required")
-    unknown = sorted(set(roles) - ROLES)
+    unknown = sorted(requested_roles - ROLES)
     if unknown:
         raise SystemExit(f"Unknown roles: {', '.join(unknown)}")
+    roles = [role for role in ROLE_ORDER if role in requested_roles]
     requested_execution = bool(EXECUTION_ROLES.intersection(roles))
     allow_override = bool(
         getattr(args, "allow_self_registered_execution", False)

@@ -1,4 +1,12 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 
 import type { ServiceConnection } from '@/api/http'
 import type { AdminRole, AuthIdentity } from '@/api/auth'
@@ -77,6 +85,7 @@ export function WorkspaceProvider({
   }
   const identity = auth?.identity ?? null
   const [activeId, setActiveId] = useState<string | null>(loadActiveId)
+  const pendingActiveId = useRef<string | null>(null)
   const workspaces = useMemo<Workspace[]>(
     () => initialWorkspaces ?? workspacesForIdentity(identity),
     [identity, initialWorkspaces],
@@ -84,6 +93,9 @@ export function WorkspaceProvider({
   const active = workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null
 
   useEffect(() => {
+    const candidateExists = workspaces.some((workspace) => workspace.id === activeId)
+    if (pendingActiveId.current === activeId && !candidateExists) return
+    if (candidateExists) pendingActiveId.current = null
     try {
       if (active === null) localStorage.removeItem(ACTIVE_KEY)
       else localStorage.setItem(ACTIVE_KEY, active.id)
@@ -99,7 +111,14 @@ export function WorkspaceProvider({
       active,
       projectId: active?.projectId ?? null,
       setActive: (id) => {
-        if (workspaces.some((workspace) => workspace.id === id)) setActiveId(id)
+        // Invitation acceptance updates AuthProvider and this provider in the
+        // same React turn. Preserve the strict candidate until the new
+        // identity supplies its workspace instead of falling back to the old
+        // active project.
+        if (/^[A-Za-z0-9]{1,64}$/.test(id)) {
+          pendingActiveId.current = id
+          setActiveId(id)
+        }
       },
     }),
     [active, workspaces],

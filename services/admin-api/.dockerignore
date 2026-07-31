@@ -4,4 +4,5 @@ __pycache__
 tests
 scripts/*
 !scripts/create_admin_user.py
+!scripts/assign_project_owner.py
 *.pyc

@@ -83,7 +83,7 @@ export function PythonSdkArticlePage() {
             to="/settings/workspace"
             className="font-medium text-foreground underline underline-offset-4"
           >
-            Workspace settings
+            Project management
           </Link>{' '}
           and find <strong className="text-foreground">SDK credentials</strong>. Choose{' '}
           <strong className="text-foreground">Create credential</strong>, select{' '}

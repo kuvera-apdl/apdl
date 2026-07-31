@@ -57,7 +57,8 @@ test('renders the application not-found boundary for an unknown route', () => {
   const router = createRouter()
 
   try {
-    const appRoutes = router.routes[2]?.children?.[0]?.children ?? []
+    const appRoutes =
+      router.routes.find((route) => route.path === undefined)?.children?.[0]?.children ?? []
     const notFoundRoute = appRoutes.find((route) => route.path === '*')
     const notFoundElement =
       notFoundRoute && 'element' in notFoundRoute

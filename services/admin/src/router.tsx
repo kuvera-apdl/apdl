@@ -59,6 +59,10 @@ export function createRouter() {
       lazy: lazyRoute(() => import('@/features/auth/RegisterPage'), 'RegisterPage'),
     },
     {
+      path: '/invitations/:token',
+      lazy: lazyRoute(() => import('@/features/auth/InvitationPage'), 'InvitationPage'),
+    },
+    {
       element: <RequireAuth />,
       children: [
         {

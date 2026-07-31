@@ -19,6 +19,10 @@ import {
 } from '@/api/auth'
 import { ApiError } from '@/api/http'
 import {
+  acceptProjectInvitation,
+  registerWithProjectInvitation,
+} from '@/api/members'
+import {
   AUTH_UNAUTHORIZED_EVENT,
   PROJECT_ACCESS_REVOKED_EVENT,
 } from '@/core/auth-events'
@@ -32,6 +36,8 @@ interface AuthContextValue {
   logoutReason: LogoutReason
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string) => Promise<void>
+  acceptInvitation: (token: string) => Promise<void>
+  registerInvitation: (token: string, password: string) => Promise<void>
   createProject: (projectId: string) => Promise<void>
   logout: () => Promise<void>
 }
@@ -121,6 +127,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       },
       register: async (email, password) => {
         const next = await registerAdmin(email, password)
+        queryClient.clear()
+        setIdentity(next)
+        setLogoutReason(null)
+      },
+      acceptInvitation: async (token) => {
+        const next = await acceptProjectInvitation(token)
+        queryClient.clear()
+        setIdentity(next)
+        setLogoutReason(null)
+      },
+      registerInvitation: async (token, password) => {
+        const next = await registerWithProjectInvitation(token, password)
         queryClient.clear()
         setIdentity(next)
         setLogoutReason(null)

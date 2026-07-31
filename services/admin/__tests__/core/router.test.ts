@@ -11,17 +11,17 @@ test('keeps auth and layout eager while resolving every screen through a lazy ro
   const router = createRouter()
 
   try {
-    const authRoute = router.routes[2]
+    const authRoute = router.routes.find((route) => route.path === undefined)
     const appShellRoute = authRoute?.children?.[0]
     const screenRoutes = [
-      ...router.routes.slice(0, 2),
+      ...router.routes.filter((route) => route.path !== undefined),
       ...descendants(appShellRoute?.children ?? []),
     ]
     const lazyRoutes = screenRoutes.filter((route) => route.lazy)
 
     expect(authRoute?.lazy).toBeUndefined()
     expect(appShellRoute?.lazy).toBeUndefined()
-    expect(lazyRoutes).toHaveLength(33)
+    expect(lazyRoutes).toHaveLength(34)
 
     for (const route of lazyRoutes) {
       if (!route.lazy) throw new Error(`Expected ${route.path ?? 'pathless route'} to be lazy`)
@@ -41,7 +41,8 @@ test('places every direct mutation screen behind its exact workspace role', () =
   const router = createRouter()
 
   try {
-    const appRoutes = router.routes[2]?.children?.[0]?.children ?? []
+    const appRoutes =
+      router.routes.find((route) => route.path === undefined)?.children?.[0]?.children ?? []
     const protectedGroups = appRoutes.filter((route) => route.path === undefined && route.children)
     const roleByPath = new Map<string, unknown>()
     for (const group of protectedGroups) {
