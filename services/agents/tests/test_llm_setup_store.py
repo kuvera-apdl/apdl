@@ -104,11 +104,13 @@ class _SetupConn:
             "effectful_execution_authorization_source": None,
         }
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetchrow_queries: list[str] = []
 
     def transaction(self, **kwargs: object) -> _Transaction:
         return _Transaction()
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        self.fetchrow_queries.append(query)
         if "SELECT project.owner_user_id, account.active" in query:
             return {
                 "owner_user_id": self.owner_user_id,
@@ -212,6 +214,31 @@ async def test_first_owner_activation_adds_analysis_roles_only(
     assert setup_audit[3] == 1
     assert '"connection_version": 3' in setup_audit[5]
     assert '"inventory_version": 2' in setup_audit[5]
+    assert any(
+        args == ("apdl:llm-vault:demo:openai",)
+        for query, args in conn.executed
+        if "pg_advisory_xact_lock" in query
+    )
+
+
+@pytest.mark.asyncio
+async def test_selection_locks_projections_without_vault_update_privilege() -> None:
+    conn = _SetupConn()
+
+    await AgentsSetupStore._validate_selection(
+        conn,
+        project_id="demo",
+        tier="fast",
+        selection=_selection(),
+    )
+
+    query = next(
+        query
+        for query in conn.fetchrow_queries
+        if "SELECT model.supported_tiers" in query
+    )
+    assert "FOR SHARE OF connection, model" in query
+    assert "credential, consumer" not in query
 
 
 @pytest.mark.asyncio

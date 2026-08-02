@@ -15,7 +15,11 @@ from app.llm.provider_catalog import (
     catalog_model,
     provider_runtime_endpoint,
 )
-from app.store.llm_credentials import REMOTE_PROVIDERS, RemoteProvider
+from app.store.llm_credentials import (
+    REMOTE_PROVIDERS,
+    ProjectCredentialStore,
+    RemoteProvider,
+)
 
 
 DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS = 20_000_000
@@ -584,7 +588,7 @@ class AgentsSetupStore:
               AND connection.inventory_version = $4
               AND connection.state = 'active'
               AND model.model_id = $5
-            FOR SHARE OF connection, model, credential, consumer
+            FOR SHARE OF connection, model
             """,
             project_id,
             selection.provider,
@@ -659,6 +663,19 @@ class AgentsSetupStore:
                 if int(policy["version"]) != expected_version:
                     raise AgentsSetupConflictError(
                         "The Agents setup version changed"
+                    )
+                # The runtime role may inspect vault authority but must never
+                # mutate it. PostgreSQL row-locking clauses require UPDATE
+                # privilege, so serialize with the same advisory pair locks
+                # used by the vault and lock only runtime-owned projections
+                # in the selection query below.
+                for provider in sorted(
+                    {selection.provider for _, selection in selections}
+                ):
+                    await ProjectCredentialStore.lock_pair(
+                        conn,
+                        project_id,
+                        provider,
                     )
                 previous_assignments = await self._assignment_rows(
                     conn, project_id

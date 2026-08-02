@@ -751,6 +751,7 @@ class _EgressAuthorityConn:
         if "SELECT attempt.attempt_id" in query:
             assert "FOR UPDATE OF attempt" in query
             assert "FOR SHARE OF policy, assignment, provider_policy" in query
+            assert "credential, consumer" not in query
             return args[0] if self.authorized else None
         if "UPDATE llm_provider_attempts" in query:
             return args[0]

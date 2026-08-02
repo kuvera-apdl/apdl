@@ -790,6 +790,11 @@ async def mark_provider_egress(
             async with conn.transaction():
                 await _assert_project_setup_active(conn, context)
                 await _assert_execution_active(conn, context)
+                # Vault authority is read-only to the runtime role. The exact
+                # credential was already revalidated by just-in-time vault
+                # access; row-lock only runtime-owned authority here because a
+                # PostgreSQL row lock would require forbidden vault UPDATE
+                # privilege.
                 authorized = await conn.fetchval(
                     """
                     SELECT attempt.attempt_id
@@ -850,7 +855,7 @@ async def mark_provider_egress(
                       AND attempt.status = 'prepared'
                     FOR UPDATE OF attempt
                     FOR SHARE OF policy, assignment, provider_policy,
-                                 connection, inventory, credential, consumer
+                                 connection, inventory
                     """,
                     attempt_id,
                     context.project_id,
