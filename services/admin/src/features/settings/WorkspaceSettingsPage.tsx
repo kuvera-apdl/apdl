@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, FolderKanban, KeyRound, Loader2, Plus, ShieldCheck } from 'lucide-react'
+import { ChevronDown, FolderKanban, Loader2, Plus, ShieldCheck } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
 import { AgenticRunsCard } from '@/features/agents/setup/AgenticRunsCard'
@@ -110,6 +111,9 @@ export function WorkspaceSettingsPage() {
               const expanded =
                 expandedProjectId === project.project_id && active?.id === project.project_id
               const contentId = `project-${project.project_id}-management`
+              const openAgentsSetup =
+                newProjectSetupId === project.project_id ||
+                (active?.id === project.project_id && searchParams.get('agents_setup') === '1')
 
               return (
                 <Card key={project.project_id} className="w-full overflow-hidden">
@@ -146,85 +150,84 @@ export function WorkspaceSettingsPage() {
                   {expanded ? (
                     <div
                       id={contentId}
-                      className="space-y-4 border-t bg-muted/20 p-4 md:p-5"
+                      className="border-t bg-muted/20 p-4 md:p-5"
                     >
-                      <Card>
-                        <CardHeader>
-                          <CardTitle className="flex items-center gap-2">
-                            <ShieldCheck className="h-5 w-5" />
-                            Your Access
-                          </CardTitle>
-                          <CardDescription>
-                            Signed in as {identity.email}. These permissions apply only to project{' '}
-                            <span className="font-mono">{project.project_id}</span>.
-                          </CardDescription>
-                        </CardHeader>
-                        <CardContent>
-                          <div className="flex flex-wrap gap-1.5">
-                            {project.roles.map((role) => (
-                              <Badge key={role} variant="secondary" className="font-mono text-xs">
-                                {role}
-                              </Badge>
-                            ))}
-                          </div>
-                        </CardContent>
-                      </Card>
+                      <Tabs defaultValue={openAgentsSetup ? 'agentic-runs' : 'access'}>
+                        <TabsList
+                          className="h-auto w-full justify-start gap-1 overflow-x-auto"
+                          aria-label={`Manage project ${project.project_id}`}
+                        >
+                          <TabsTrigger value="access" className="shrink-0">
+                            Access
+                          </TabsTrigger>
+                          <TabsTrigger value="members" className="shrink-0">
+                            Members
+                          </TabsTrigger>
+                          <TabsTrigger value="llm-connections" className="shrink-0">
+                            LLM connections
+                          </TabsTrigger>
+                          <TabsTrigger value="sdk-credentials" className="shrink-0">
+                            SDK credentials
+                          </TabsTrigger>
+                          <TabsTrigger value="agentic-runs" className="shrink-0">
+                            Agentic runs
+                          </TabsTrigger>
+                        </TabsList>
 
-                      <ProjectMembersCard />
+                        <TabsContent value="access">
+                          <Card>
+                            <CardHeader>
+                              <CardTitle className="flex items-center gap-2">
+                                <ShieldCheck className="h-5 w-5" />
+                                Your Access
+                              </CardTitle>
+                              <CardDescription>
+                                Signed in as {identity.email}. These permissions apply only to
+                                project <span className="font-mono">{project.project_id}</span>.
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent>
+                              <div className="flex flex-wrap gap-1.5">
+                                {project.roles.map((role) => (
+                                  <Badge
+                                    key={role}
+                                    variant="secondary"
+                                    className="font-mono text-xs"
+                                  >
+                                    {role}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </CardContent>
+                          </Card>
+                        </TabsContent>
 
-                      <section
-                        aria-labelledby={`project-${project.project_id}-agents-heading`}
-                        className="space-y-3"
-                      >
-                        <div>
-                          <h3
-                            id={`project-${project.project_id}-agents-heading`}
-                            className="flex items-center gap-2 font-semibold"
-                          >
-                            <Bot className="h-4 w-4" />
-                            Agents
-                          </h3>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            Connect the project credentials Agents uses for provider calls and
-                            discover the models available to each key.
-                          </p>
-                        </div>
-                        <ProjectLlmConnectionsCard />
-                      </section>
+                        <TabsContent value="members">
+                          <ProjectMembersCard />
+                        </TabsContent>
 
-                      <section
-                        aria-labelledby={`project-${project.project_id}-sdk-heading`}
-                        className="space-y-3"
-                      >
-                        <div>
-                          <h3
-                            id={`project-${project.project_id}-sdk-heading`}
-                            className="flex items-center gap-2 font-semibold"
-                          >
-                            <KeyRound className="h-4 w-4" />
-                            SDK connections
-                          </h3>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            Issue scoped reveal-once keys for browser and server SDKs.
-                          </p>
-                        </div>
-                        <ProjectCredentialsCard />
-                      </section>
-                      <AgenticRunsCard
-                        autoOpen={
-                          newProjectSetupId === project.project_id ||
-                          (active?.id === project.project_id &&
-                            searchParams.get('agents_setup') === '1')
-                        }
-                        onAutoOpenHandled={() => {
-                          setNewProjectSetupId(null)
-                          if (searchParams.get('agents_setup') === '1') {
-                            const next = new URLSearchParams(searchParams)
-                            next.delete('agents_setup')
-                            setSearchParams(next, { replace: true })
-                          }
-                        }}
-                      />
+                        <TabsContent value="llm-connections">
+                          <ProjectLlmConnectionsCard />
+                        </TabsContent>
+
+                        <TabsContent value="sdk-credentials">
+                          <ProjectCredentialsCard />
+                        </TabsContent>
+
+                        <TabsContent value="agentic-runs">
+                          <AgenticRunsCard
+                            autoOpen={openAgentsSetup}
+                            onAutoOpenHandled={() => {
+                              setNewProjectSetupId(null)
+                              if (searchParams.get('agents_setup') === '1') {
+                                const next = new URLSearchParams(searchParams)
+                                next.delete('agents_setup')
+                                setSearchParams(next, { replace: true })
+                              }
+                            }}
+                          />
+                        </TabsContent>
+                      </Tabs>
                     </div>
                   ) : null}
                 </Card>
