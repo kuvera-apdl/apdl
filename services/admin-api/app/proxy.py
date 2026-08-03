@@ -18,6 +18,7 @@ from starlette.responses import Response, StreamingResponse
 
 from app.auth import AdminSession, require_csrf, require_session
 from app.config import PROJECT_ID_PATTERN, SERVICE_NAMES, Settings
+from app.github import bind_repository_authorization_start_response
 from app.request_body_limit import RequestBodyTooLarge
 from app.security import require_allowed_origin
 
@@ -41,6 +42,12 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 _LLM_CONNECTION_READER = "llm-connections:read"
 _LLM_CONNECTION_MANAGER = "llm-connections:manage"
+_REPOSITORY_CONNECTION_MANAGER = "repository-connections:manage"
+_CODEGEN_REPOSITORY_AUTHORIZATION = re.compile(
+    r"^/v1/github/repository-authorizations/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 _SERVICE_CREDENTIAL_ROLES = frozenset(
     {
         "events:write",
@@ -431,6 +438,25 @@ def required_role(service: str, method: str, path: str) -> str | None:
             return "agents:manage"
         return ""
     if service == "codegen":
+        if (
+            method == "POST"
+            and path == "/v1/github/repository-authorizations"
+        ):
+            return _REPOSITORY_CONNECTION_MANAGER
+        if (
+            method == "GET"
+            and _CODEGEN_REPOSITORY_AUTHORIZATION.fullmatch(path) is not None
+        ):
+            return _REPOSITORY_CONNECTION_MANAGER
+        if (
+            method == "POST"
+            and path.endswith("/complete")
+            and _CODEGEN_REPOSITORY_AUTHORIZATION.fullmatch(
+                path.removesuffix("/complete")
+            )
+            is not None
+        ):
+            return _REPOSITORY_CONNECTION_MANAGER
         if path.startswith("/v1/llm-connections"):
             provider_path = (
                 r"/v1/llm-connections/"
@@ -500,6 +526,42 @@ async def _has_llm_connection_authority(
             uuid.UUID(user_id),
         )
     return row is not None and bool(row["llm_connection_authorized"])
+
+
+async def _has_repository_connection_authority(
+    request: Request,
+    project_id: str,
+    user_id: str,
+) -> bool:
+    """Recheck live owner/delegate authority for GitHub repository onboarding."""
+    async with request.app.state.pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT (
+                account.active
+                AND (
+                    project.owner_user_id = $2
+                    OR (
+                        'agents:manage' = ANY(
+                            COALESCE(membership.roles, ARRAY[]::TEXT[])
+                        )
+                        AND 'credentials:manage' = ANY(
+                            COALESCE(membership.roles, ARRAY[]::TEXT[])
+                        )
+                    )
+                )
+            ) AS repository_connection_authorized
+            FROM admin_projects AS project
+            JOIN admin_users AS account ON account.user_id = $2
+            LEFT JOIN admin_user_projects AS membership
+              ON membership.project_id = project.project_id
+             AND membership.user_id = account.user_id
+            WHERE project.project_id = $1
+            """,
+            project_id,
+            uuid.UUID(user_id),
+        )
+    return row is not None and bool(row["repository_connection_authorized"])
 
 
 def _assert_tenant_value(value: object, project_id: str) -> None:
@@ -641,6 +703,20 @@ async def proxy_service(
                     detail=detail,
                 )
             elevated_llm_connection_read = role == _LLM_CONNECTION_READER
+    elif role == _REPOSITORY_CONNECTION_MANAGER:
+        has_connection_authority = await _has_repository_connection_authority(
+            request,
+            project_id,
+            session.user_id,
+        )
+        if not has_connection_authority:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Repository connection management requires project ownership or "
+                    "delegated agents:manage and credentials:manage roles"
+                ),
+            )
     elif role is not None and role not in roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role"
@@ -671,9 +747,15 @@ async def proxy_service(
             request.method not in _SAFE_METHODS
             or upstream_path == "/v1/agents/setup"
         )
-    ) or role == _LLM_CONNECTION_MANAGER
+    ) or role in {
+        _LLM_CONNECTION_MANAGER,
+        _REPOSITORY_CONNECTION_MANAGER,
+    }
     credential_roles = roles
-    if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
+    if role in {
+        _LLM_CONNECTION_MANAGER,
+        _REPOSITORY_CONNECTION_MANAGER,
+    } or elevated_llm_connection_read:
         # Grant only the upstream read capability needed by this management
         # surface. The receiving service rechecks live authority inside
         # mutation transactions.
@@ -775,6 +857,17 @@ async def proxy_service(
     finally:
         await response.aclose()
         await _remove_ephemeral_credential(request, ephemeral_credential_id)
-    return Response(
+    outgoing = Response(
         content=content, status_code=response.status_code, headers=response_headers
     )
+    if (
+        service == "codegen"
+        and request.method == "POST"
+        and upstream_path == "/v1/github/repository-authorizations"
+    ):
+        return bind_repository_authorization_start_response(
+            outgoing,
+            content,
+            settings,
+        )
+    return outgoing

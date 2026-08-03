@@ -52,6 +52,13 @@ every request is authorized against a user, project, and role.
   injecting a server-side API key.
 - Caller-supplied API keys, authorization headers, cookies, internal tokens,
   and project assertions for another tenant are discarded or rejected.
+- The public GitHub App callback accepts only exact setup, approval-request, or
+  OAuth query shapes and binds them to a short-lived `HttpOnly` correlation
+  cookie. Installation and OAuth redirects must use the canonical
+  `https://github.com` origin. Success and approval redirects carry Codegen's
+  canonical project ID; missing, expired, malformed, or untrusted callback
+  results clear the cookie and redirect to the single generic Admin failure
+  status without reflecting upstream details.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.
   The Admin nginx edge clears `Forwarded` and `X-Real-IP`, overwrites
   `X-Forwarded-For` with its direct peer, and is the only network allowed to

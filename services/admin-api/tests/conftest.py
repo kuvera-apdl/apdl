@@ -64,6 +64,7 @@ class AuditConnection:
     def __init__(self, statements: list[tuple[str, tuple[object, ...]]]) -> None:
         self.statements = statements
         self.llm_connection_authorized = True
+        self.repository_connection_authorized = True
 
     @asynccontextmanager
     async def transaction(self):
@@ -78,6 +79,12 @@ class AuditConnection:
         if "AS llm_connection_authorized" in query:
             return {
                 "llm_connection_authorized": self.llm_connection_authorized
+            }
+        if "AS repository_connection_authorized" in query:
+            return {
+                "repository_connection_authorized": (
+                    self.repository_connection_authorized
+                )
             }
         if "AS session_active" in query and "AS project_authorized" in query:
             return {"session_active": True, "project_authorized": True}
