@@ -139,6 +139,42 @@ function renderCard({
 }
 
 describe('GitHubConnectionCard', () => {
+  test('preserves the selected project while authentication reloads the workspace list', async () => {
+    const connectionReads: string[] = []
+    localStorage.setItem('apdl-admin:active-project', 'demo')
+    server.use(
+      http.get('*/api/auth/me', () =>
+        HttpResponse.json(
+          identityWithProjects(DELEGATE_ID, [
+            {
+              project_id: 'other',
+              roles: ['agents:read', 'agents:manage', 'credentials:manage'],
+            },
+            {
+              project_id: 'demo',
+              roles: ['agents:read', 'agents:manage', 'credentials:manage'],
+            },
+          ]),
+        ),
+      ),
+      http.get(
+        '*/api/projects/:projectId/codegen/v1/connections/:connectionProjectId',
+        ({ params }) => {
+          connectionReads.push(String(params.projectId))
+          return new HttpResponse(null, { status: 404 })
+        },
+      ),
+    )
+
+    renderCard()
+
+    expect(await screen.findByText('demo', { selector: 'code' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(connectionReads).toEqual(['demo'])
+      expect(localStorage.getItem('apdl-admin:active-project')).toBe('demo')
+    })
+  })
+
   test('shows the project repository and lets its owner change it without exposing installation authority', async () => {
     installReads(identity(OWNER_ID, ['agents:read']), () => connection())
     renderCard()

@@ -99,6 +99,15 @@ export function WorkspaceProvider({
   const active = workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null
 
   useEffect(() => {
+    // AuthProvider populates the workspace list asynchronously on a full-page
+    // load. Keep the persisted selection until that initial request settles;
+    // otherwise every redirect briefly has zero workspaces and is normalized
+    // to the first project in the eventual identity.
+    if (initialWorkspaces === undefined && auth?.initializing) return
+    // A child can request a workspace change before this effect from the
+    // previous render runs. Do not let that stale normalization overwrite the
+    // newer explicit selection.
+    if (pendingActiveId.current !== null && pendingActiveId.current !== activeId) return
     const candidateExists = workspaces.some((workspace) => workspace.id === activeId)
     if (pendingActiveId.current === activeId && !candidateExists) return
     if (candidateExists) pendingActiveId.current = null
@@ -109,7 +118,7 @@ export function WorkspaceProvider({
       // The active project remains usable in memory when storage is unavailable.
     }
     if (active?.id !== activeId) setActiveId(active?.id ?? null)
-  }, [active, activeId])
+  }, [active, activeId, auth?.initializing, initialWorkspaces, workspaces])
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({

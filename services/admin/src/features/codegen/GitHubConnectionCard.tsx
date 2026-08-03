@@ -118,27 +118,28 @@ export function GitHubConnectionCard({
       return
     }
     if (initializing || handledCallbackRef.current === callbackKey) return
-    handledCallbackRef.current = callbackKey
 
     const authorizationValues = searchParams.getAll(AUTHORIZATION_PARAM)
     const projectValues = searchParams.getAll(AUTHORIZATION_PROJECT_PARAM)
     const statusValues = searchParams.getAll(AUTHORIZATION_STATUS_PARAM)
     const errorValues = searchParams.getAll(AUTHORIZATION_ERROR_PARAM)
 
-    setSearchParams(
-      (previous) => {
-        const next = new URLSearchParams(previous)
-        for (const name of CALLBACK_PARAMS) next.delete(name)
-        return next
-      },
-      { replace: true },
-    )
-
-    setAuthorizationId(null)
-    setAuthorizationProjectId(null)
-    setApprovalRequiredProjectId(null)
-    setSelectedCandidateId(null)
-    setDialogError(null)
+    const consumeCallback = () => {
+      handledCallbackRef.current = callbackKey
+      setSearchParams(
+        (previous) => {
+          const next = new URLSearchParams(previous)
+          for (const name of CALLBACK_PARAMS) next.delete(name)
+          return next
+        },
+        { replace: true },
+      )
+      setAuthorizationId(null)
+      setAuthorizationProjectId(null)
+      setApprovalRequiredProjectId(null)
+      setSelectedCandidateId(null)
+      setDialogError(null)
+    }
 
     if (
       errorValues.length === 1 &&
@@ -147,6 +148,7 @@ export function GitHubConnectionCard({
       projectValues.length === 0 &&
       statusValues.length === 0
     ) {
+      consumeCallback()
       setCallbackFailed(true)
       return
     }
@@ -165,8 +167,15 @@ export function GitHubConnectionCard({
         ? workspaces.find((workspace) => workspace.projectId === parsedProject.data)
         : undefined
       if (parsedAuthorization.success && parsedProject.success && targetWorkspace) {
+        if (active?.id !== targetWorkspace.id) {
+          // Keep the signed callback context in the URL until the exact
+          // project is active. Consuming it earlier can strand the dialog on
+          // the previously selected project after a full-page redirect.
+          setActive(targetWorkspace.id)
+          return
+        }
+        consumeCallback()
         setCallbackFailed(false)
-        setActive(targetWorkspace.id)
         setAuthorizationProjectId(parsedProject.data)
         setAuthorizationId(parsedAuthorization.data)
         return
@@ -190,15 +199,21 @@ export function GitHubConnectionCard({
         parsedProject.success &&
         targetWorkspace
       ) {
+        if (active?.id !== targetWorkspace.id) {
+          setActive(targetWorkspace.id)
+          return
+        }
+        consumeCallback()
         setCallbackFailed(false)
-        setActive(targetWorkspace.id)
         setApprovalRequiredProjectId(parsedProject.data)
         return
       }
     }
 
+    consumeCallback()
     setCallbackFailed(true)
   }, [
+    active?.id,
     callbackKey,
     callbackPayloadPresent,
     initializing,
