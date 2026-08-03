@@ -558,13 +558,16 @@ async def complete_authorization(
             if flow["status"] != RepositoryAuthorizationStatus.awaiting_selection.value:
                 raise RepositoryAuthorizationConflict
 
+            # The locked flow row serializes completion. Candidate rows are
+            # immutable, and the runtime role deliberately lacks UPDATE on this
+            # table, so this must remain a plain SELECT: PostgreSQL requires
+            # UPDATE privilege for SELECT ... FOR UPDATE.
             candidate = await conn.fetchrow(
                 """
                 SELECT installation_id, repository_id, repository_full_name,
                        default_base_branch, private
                 FROM github_repository_authorization_candidates
                 WHERE authorization_id = $1 AND candidate_id = $2
-                FOR UPDATE
                 """,
                 authorization_id,
                 candidate_id,

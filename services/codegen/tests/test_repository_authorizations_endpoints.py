@@ -480,7 +480,7 @@ async def test_stale_github_candidate_does_not_replace_existing_connection(
 
 
 @pytest.mark.asyncio
-async def test_locked_completion_rejects_candidate_replacement_after_verification():
+async def test_completion_rejects_candidate_replacement_after_verification():
     actor_user_id = uuid.uuid4()
     authorization_id = uuid.uuid4()
     candidate_id = uuid.uuid4()
@@ -524,8 +524,8 @@ async def test_locked_completion_rejects_candidate_replacement_after_verificatio
     )
 
     # Model a privileged delete+insert replacement after the GitHub check. The
-    # completion transaction must compare its locked row to `verified` before
-    # revoking the existing connection.
+    # completion transaction must compare the immutable stored row to `verified`
+    # before revoking the existing connection.
     pool.store["repository_authorization_candidates"][candidate_id].update(
         installation_id=99,
         repository_id=654,

@@ -755,6 +755,11 @@ class FakeConn:
             "FROM github_repository_authorization_candidates" in query
             and "candidate_id = $2" in query
         ):
+            if "FOR UPDATE" in query:
+                raise AssertionError(
+                    "Immutable repository authorization candidates must be read "
+                    "without UPDATE privilege"
+                )
             authorization_id, candidate_id = args
             row = self._rows("repository_authorization_candidates").get(
                 candidate_id
