@@ -426,7 +426,7 @@ dev:
 
 dev-core:
 	$(COMPOSE) --profile agents --profile codegen stop -t 30 \
-		ingestion config query agents codegen clickhouse-writer admin-api admin gateway
+		ingestion config query llm-vault agents codegen clickhouse-writer admin-api admin gateway
 	$(COMPOSE) --profile agents --profile codegen rm -f -s agents codegen
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)

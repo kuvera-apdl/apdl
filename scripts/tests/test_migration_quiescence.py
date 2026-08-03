@@ -231,6 +231,7 @@ class MigrationQuiescenceTests(unittest.TestCase):
         self.assertLess(stop, clickhouse_migration)
         self.assertLess(stop, postgres_migration)
         self.assertIn("clickhouse-writer", dev_core[stop:clickhouse_migration])
+        self.assertIn("llm-vault", dev_core[stop:clickhouse_migration])
         self.assertIn("stop_grace_period: 30s", COMPOSE)
 
     def test_dev_all_does_not_restart_migration_dependencies(self) -> None:
