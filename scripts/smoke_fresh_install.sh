@@ -47,6 +47,9 @@ export LLM_VAULT_ADMIN_TOKEN="smoke-llm-vault-admin-token-change-me"
 export LLM_VAULT_AGENTS_TOKEN="smoke-llm-vault-agents-token-change-me"
 export LLM_VAULT_CODEGEN_TOKEN="smoke-llm-vault-codegen-token-change-me"
 export LLM_VAULT_PROJECTION_TOKEN="smoke-llm-vault-projection-token-change-me"
+# Polling is intentionally disabled in the hermetic smoke stack, so Codegen's
+# conditional recovery contract requires a fixed public test-only webhook key.
+export GITHUB_WEBHOOK_SECRET="smoke_webhook_secret_0123456789abcdef"
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
 

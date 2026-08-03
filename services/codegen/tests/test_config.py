@@ -173,17 +173,53 @@ def test_github_origins_are_fixed_to_github_dot_com(monkeypatch):
 
 
 @pytest.mark.parametrize("length", [32, 128])
-def test_github_webhook_secret_accepts_canonical_boundaries(monkeypatch, length):
+@pytest.mark.parametrize("poll_interval", [0, 60])
+def test_github_webhook_secret_accepts_canonical_boundaries(
+    monkeypatch,
+    length,
+    poll_interval,
+):
     secret = "a" * length
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
 
-    assert config.require_github_webhook_secret() == secret
+    assert (
+        config.github_webhook_secret(ci_poll_interval=poll_interval) == secret
+    )
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["unset", "empty"])
+def test_github_webhook_secret_may_be_blank_while_polling(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    if configured:
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")
+    else:
+        monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+
+    assert config.github_webhook_secret(ci_poll_interval=60) is None
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["unset", "empty"])
+def test_github_webhook_secret_is_required_when_polling_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    if configured:
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")
+    else:
+        monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="required when CODEGEN_CI_POLL_INTERVAL is 0",
+    ):
+        config.github_webhook_secret(ci_poll_interval=0)
 
 
 @pytest.mark.parametrize(
     "secret",
     [
-        "",
         "a" * 31,
         "a" * 129,
         " leading" + "a" * 32,
@@ -192,7 +228,6 @@ def test_github_webhook_secret_accepts_canonical_boundaries(monkeypatch, length)
         "a" * 31 + "é",
     ],
     ids=[
-        "missing",
         "too-short",
         "too-long",
         "leading-space",
@@ -201,14 +236,16 @@ def test_github_webhook_secret_accepts_canonical_boundaries(monkeypatch, length)
         "non-ascii",
     ],
 )
+@pytest.mark.parametrize("poll_interval", [0, 60])
 def test_github_webhook_secret_rejects_noncanonical_values(
     monkeypatch: pytest.MonkeyPatch,
     secret: str,
+    poll_interval: int,
 ) -> None:
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
 
     with pytest.raises(RuntimeError, match="GITHUB_WEBHOOK_SECRET"):
-        config.require_github_webhook_secret()
+        config.github_webhook_secret(ci_poll_interval=poll_interval)
 
 
 @pytest.mark.parametrize(

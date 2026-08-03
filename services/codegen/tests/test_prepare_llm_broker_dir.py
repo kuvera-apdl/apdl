@@ -32,10 +32,12 @@ def test_controller_startup_prepares_root_before_opening_postgres() -> None:
     )
 
 
-def test_controller_validates_webhook_secret_before_opening_resources() -> None:
+def test_controller_validates_github_recovery_before_opening_resources() -> None:
     lifespan = MAIN.split("async def lifespan", 1)[1]
-    validation = lifespan.index("require_github_webhook_secret()")
+    poll_interval = lifespan.index("poll_interval = codegen_ci_poll_interval()")
+    validation = lifespan.index("github_webhook_secret(")
 
+    assert poll_interval < validation
     assert validation < lifespan.index("prepare_broker_root(")
     assert validation < lifespan.index("asyncpg.create_pool(")
 

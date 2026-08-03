@@ -120,13 +120,24 @@ def github_app_callback_url() -> str:
     return os.getenv("GITHUB_APP_CALLBACK_URL", "")
 
 
-def require_github_webhook_secret() -> str:
-    """Return the required canonical HMAC secret for inbound GitHub webhooks."""
+def github_webhook_secret(*, ci_poll_interval: int) -> str | None:
+    """Return the optional startup-bound GitHub webhook HMAC secret.
+
+    Polling is the recovery source when the webhook is disabled.  A deployment
+    may disable polling only after configuring a canonical webhook secret.
+    """
     secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+    if secret == "":
+        if ci_poll_interval == 0:
+            raise RuntimeError(
+                "GITHUB_WEBHOOK_SECRET is required when "
+                "CODEGEN_CI_POLL_INTERVAL is 0"
+            )
+        return None
     if _GITHUB_WEBHOOK_SECRET_PATTERN.fullmatch(secret) is None:
         raise RuntimeError(
-            "GITHUB_WEBHOOK_SECRET is required and must contain 32 to 128 "
-            "ASCII letters, digits, underscores, or hyphens"
+            "GITHUB_WEBHOOK_SECRET must contain 32 to 128 ASCII letters, "
+            "digits, underscores, or hyphens"
         )
     return secret
 

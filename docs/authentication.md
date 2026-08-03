@@ -84,16 +84,21 @@ project execution authority required for effectful autonomous runs.
 
 ### Canonical GitHub App configuration
 
-APDL supports one GitHub.com setup. Configure these seven required values:
+APDL supports one GitHub.com setup. Configure these six required App/OAuth values:
 `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
 `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-`GITHUB_APP_CALLBACK_URL`, and `GITHUB_WEBHOOK_SECRET`. Register the exact
+and `GITHUB_APP_CALLBACK_URL`. Register the exact
 `GITHUB_APP_CALLBACK_URL` as both the App setup URL and OAuth callback URL. Keep
 GitHub's automatic **Request user authorization (OAuth) during installation**
 option disabled because APDL starts the state-bound OAuth leg itself after the
 setup callback. For local development the canonical callback is
-`http://localhost:5173/api/github/codegen/callback`. Generate the webhook
-signing secret with `openssl rand -hex 32`.
+`http://localhost:5173/api/github/codegen/callback`.
+
+`GITHUB_WEBHOOK_SECRET` is conditional. Leaving it blank disables inbound
+webhooks and is valid only while `CODEGEN_CI_POLL_INTERVAL` is positive (the
+default is 60 seconds). Setting the polling interval to `0` requires a valid
+webhook secret so Codegen retains a GitHub CI recovery source. Generate the
+secret with `openssl rand -hex 32`.
 
 `POST /api/auth/register` accepts one strict `{email, password}` contract. It
 creates the user and session in one transaction, but deliberately creates no

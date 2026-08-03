@@ -112,6 +112,29 @@ def test_every_webhook_route_requires_hmac_dependency():
 
 
 @pytest.mark.asyncio
+async def test_rejects_unset_secret_before_routing(monkeypatch):
+    app.state.github_webhook_secret = None
+    app.state.pg_pool = FakePool()
+    calls = _patch_sync(monkeypatch)
+
+    response = await _post(
+        {
+            "repository": {"id": _REPOSITORY_ID, "full_name": "acme/widgets"},
+            "installation": {"id": _INSTALLATION_ID},
+            "sha": "head-exact",
+        },
+        event="status",
+        sign=False,
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "GitHub webhook endpoint is disabled until a secret is configured."
+    )
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_rejects_invalid_signature_before_routing(monkeypatch):
     app.state.pg_pool = FakePool()
     calls = _patch_sync(monkeypatch)

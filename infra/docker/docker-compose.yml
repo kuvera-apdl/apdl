@@ -279,7 +279,7 @@ services:
       - "8084"
     environment:
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
-      # Canonical GitHub.com App configuration; every value is required by Codegen.
+      # Canonical GitHub.com App configuration; the six App/OAuth values are required.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       # Canonical single-line Base64-encoded PEM (see .env.example).
       GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
@@ -287,6 +287,7 @@ services:
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       GITHUB_APP_CALLBACK_URL: ${GITHUB_APP_CALLBACK_URL:-http://localhost:5173/api/github/codegen/callback}
+      # Blank disables inbound webhooks while CI polling remains positive.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       LLM_VAULT_URL: http://llm-vault:8086
       LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
@@ -336,8 +337,8 @@ services:
       # on a host with cores to spare. Excess jobs wait in `queued`.
       CODEGEN_MAX_CONCURRENT_JOBS: ${CODEGEN_MAX_CONCURRENT_JOBS:-1}
       # CI-status poll interval (seconds). The zero-config trigger that advances
-      # open changesets without an inbound webhook. Default 60; set 0 to disable
-      # (e.g. once a low-latency GitHub webhook is wired as the sole driver).
+      # open changesets without an inbound webhook. Default 60; setting 0
+      # requires GITHUB_WEBHOOK_SECRET so webhooks become the recovery driver.
       CODEGEN_CI_POLL_INTERVAL: ${CODEGEN_CI_POLL_INTERVAL:-60}
       CODEGEN_CI_REPAIR_RETRIES: ${CODEGEN_CI_REPAIR_RETRIES:-2}
       CODEGEN_CI_REPAIR_BUDGET_SECONDS: ${CODEGEN_CI_REPAIR_BUDGET_SECONDS:-3600}

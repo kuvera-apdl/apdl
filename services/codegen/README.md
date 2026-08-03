@@ -91,13 +91,15 @@ GitHub access.
 | POST | `/v1/changesets/{id}/abandon` | Abandon queued pre-PR work |
 | POST | `/v1/changesets/{id}/retry` | Retry an eligible failed changeset after rechecking capability |
 | POST | `/v1/changesets/{id}/revert` | Enqueue a revert changeset after rechecking capability |
-| POST | `/webhooks/github` | HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
+| POST | `/webhooks/github` | Optional HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
 Two GitHub ingress routes sit outside the project API-key boundary. The
 short-lived `/github/repository-authorization/callback` accepts only a one-time
-state-bound GitHub setup or OAuth response. `/webhooks/github` always requires
-`X-Hub-Signature-256` verified with the required `GITHUB_WEBHOOK_SECRET`.
+state-bound GitHub setup or OAuth response. `/webhooks/github` is enabled only
+when `GITHUB_WEBHOOK_SECRET` is configured; enabled requests always require an
+`X-Hub-Signature-256` HMAC. Without a secret the route returns `503` before
+parsing or routing the payload.
 
 Create, retry, and revert synchronously re-evaluate the same project capability
 before writing a new changeset. This is an intentional API change: a project
@@ -231,9 +233,12 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 
 ## Environment
 
-The GitHub integration targets GitHub.com and has one canonical configuration:
-all seven `GITHUB_*` values below are required. Register the callback value
-exactly as both the App setup URL and OAuth callback URL.
+The GitHub integration targets GitHub.com and has one canonical configuration.
+The six App/OAuth `GITHUB_*` values below are always required. Register the
+callback value exactly as both the App setup URL and OAuth callback URL.
+`GITHUB_WEBHOOK_SECRET` may be blank only while CI polling is positive; blank
+disables inbound webhooks. Setting `CODEGEN_CI_POLL_INTERVAL=0` requires a
+valid webhook secret.
 
 ```
 POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl
@@ -244,6 +249,7 @@ GITHUB_APP_CLIENT_ID=
 GITHUB_APP_CLIENT_SECRET=
 GITHUB_APP_CALLBACK_URL=http://localhost:5173/api/github/codegen/callback
 GITHUB_WEBHOOK_SECRET=
+CODEGEN_CI_POLL_INTERVAL=60       # 0 requires GITHUB_WEBHOOK_SECRET
 LLM_VAULT_URL=http://localhost:8086
 LLM_VAULT_CODEGEN_TOKEN=           # Codegen-only JIT credential access token
 LLM_VAULT_PROJECTION_TOKEN=        # vault-to-Codegen model projection token
@@ -280,11 +286,17 @@ breaking configuration change; deployments that previously supplied an inline
 PEM or a PEM file path must encode the file and migrate to the single setting
 above.
 
-Generate the webhook signing secret independently:
+When enabling the webhook, generate its signing secret independently:
 
 ```bash
 openssl rand -hex 32
 ```
+
+With the default positive polling interval, leaving
+`GITHUB_WEBHOOK_SECRET` blank disables inbound webhooks and retains polling as
+the recovery path. Configure a valid secret to run polling and webhooks
+together. Set `CODEGEN_CI_POLL_INTERVAL=0` only after configuring the secret;
+that makes webhooks the sole CI recovery path.
 
 Generate the Codegen credential-encryption key independently from every provider
 credential and keep it in the deployment secret manager:
@@ -636,8 +648,8 @@ The autonomous loop runs once these external pieces are set up:
    unverified. Set
    `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
    `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-   `GITHUB_APP_CALLBACK_URL`, and `GITHUB_WEBHOOK_SECRET`. Configure the
-   callback URL as both the GitHub App setup URL and an OAuth callback URL.
+   and `GITHUB_APP_CALLBACK_URL`. Configure the callback URL as both the GitHub
+   App setup URL and an OAuth callback URL.
    Leave GitHub's automatic "Request user authorization (OAuth) during
    installation" option disabled; APDL starts its own state-bound OAuth leg
    after setup. Customers install the App and connect an exact repository from
@@ -653,10 +665,12 @@ The autonomous loop runs once these external pieces are set up:
    validate it with `make codegen-tenant-config`, and start it with
    `make codegen-tenant-up`. Optionally set each repo's test command through
    connection `tenant_policy.test_cmd` (otherwise it is auto-detected).
-3. **Configure the App webhook** → point GitHub at `POST /webhooks/github`
-   using the configured `GITHUB_WEBHOOK_SECRET` and subscribe to `pull_request`,
-   `check_run`, `check_suite`, and `status`. Polling remains the recovery path
-   for missed deliveries.
+3. **Optionally configure the App webhook** → point GitHub at
+   `POST /webhooks/github`, configure the same `GITHUB_WEBHOOK_SECRET` on both
+   sides, and subscribe to `pull_request`, `check_run`, `check_suite`, and
+   `status`. Leave polling positive as recovery for missed deliveries, or set
+   `CODEGEN_CI_POLL_INTERVAL=0` only when the webhook secret is configured and
+   webhooks will be the sole recovery path.
 4. **Enable GitHub branch protection/rulesets** on the default branch (require PR,
    reviews, and green checks). GitHub is the enforcement and merge authority.
 

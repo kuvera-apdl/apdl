@@ -44,8 +44,8 @@ from app.config import (
     codegen_sandbox_network,
     codegen_stale_sweep_interval,
     codegen_trusted_repos_only,
+    github_webhook_secret,
     postgres_url,
-    require_github_webhook_secret,
 )
 from app.db import assert_schema_ready
 from app.editor.aider_editor import AiderEditor
@@ -324,7 +324,10 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
-    application.state.github_webhook_secret = require_github_webhook_secret()
+    poll_interval = codegen_ci_poll_interval()
+    application.state.github_webhook_secret = github_webhook_secret(
+        ci_poll_interval=poll_interval
+    )
     platform_safety_policy = load_platform_safety_policy()
     application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
@@ -503,7 +506,6 @@ async def lifespan(application: FastAPI):
         # CI poller: the zero-config trigger that keeps open changesets advancing
         # without an inbound webhook (the common self-hosted case). Disabled when the
         # interval is 0 — e.g. once a low-latency GitHub webhook is wired instead.
-        poll_interval = codegen_ci_poll_interval()
         if poll_interval > 0:
             poller_task = asyncio.create_task(
                 run_github_poller(

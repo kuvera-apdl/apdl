@@ -28,8 +28,13 @@ def _signature_valid(body: bytes, signature: str, secret: str) -> bool:
 
 
 async def _verify_github_signature(request: Request) -> None:
-    """Fail closed unless the request has the startup-validated GitHub HMAC."""
-    secret = request.app.state.github_webhook_secret
+    """Reject disabled webhooks or requests without the startup-bound HMAC."""
+    secret: str | None = request.app.state.github_webhook_secret
+    if secret is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub webhook endpoint is disabled until a secret is configured.",
+        )
     body = await request.body()
     if not _signature_valid(
         body, request.headers.get("X-Hub-Signature-256", ""), secret
