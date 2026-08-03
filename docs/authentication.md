@@ -58,14 +58,42 @@ Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
-Project authorization does not imply GitHub repository ownership. Codegen
-accepts no tenant-supplied repository or GitHub App installation coordinates.
-A trusted operator must separately activate a grant binding the APDL project to
-GitHub's immutable numeric repository ID. Admin exposes only the read-only grant
-projection (`grant_id`, `repository_id`, and display-only
-`repository_full_name`); the installation ID remains inside the trusted
-Codegen control plane. Every GitHub token lease revalidates that grant and uses
-an operation-specific token restricted to the immutable repository ID.
+Project authorization does not imply GitHub repository authority. A project
+owner, or a member delegated both `agents:manage` and `credentials:manage`, must
+complete a project-scoped GitHub App user-authorization flow. The browser never
+submits repository or installation coordinates as authority: Codegen uses the
+authenticated GitHub user's short-lived token to discover only App-visible
+repositories the user administers, persists opaque candidates, and revokes the
+token after discovery. The callback relay binds the setup and OAuth legs to the
+initiating browser with a short-lived `HttpOnly` cookie, rotates the one-time
+state between legs, and requires S256 PKCE. Completing a candidate creates the
+grant that binds the APDL project to GitHub's immutable numeric repository ID.
+An organization approval request consumes the pending setup state without
+starting OAuth and returns a project-scoped approval-required status. Successful
+callbacks include Codegen's canonical project ID; Admin validates it against the
+signed-in user's workspace list before switching or issuing an authorization
+query. Recoverable callback failures clear the correlation cookie and expose
+only the fixed `authorization_failed` UI status.
+
+Admin exposes only the grant projection (`grant_id`, `repository_id`, and
+display-only `repository_full_name`); the installation ID remains inside the
+trusted Codegen control plane. Every GitHub token lease revalidates the active,
+same-project grant and uses an operation-specific token restricted to that
+immutable repository ID. Repository connection does not grant the separate
+project execution authority required for effectful autonomous runs.
+
+### Canonical GitHub App configuration
+
+APDL supports one GitHub.com setup. Configure these seven required values:
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
+`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
+`GITHUB_APP_CALLBACK_URL`, and `GITHUB_WEBHOOK_SECRET`. Register the exact
+`GITHUB_APP_CALLBACK_URL` as both the App setup URL and OAuth callback URL. Keep
+GitHub's automatic **Request user authorization (OAuth) during installation**
+option disabled because APDL starts the state-bound OAuth leg itself after the
+setup callback. For local development the canonical callback is
+`http://localhost:5173/api/github/codegen/callback`. Generate the webhook
+signing secret with `openssl rand -hex 32`.
 
 `POST /api/auth/register` accepts one strict `{email, password}` contract. It
 creates the user and session in one transaction, but deliberately creates no

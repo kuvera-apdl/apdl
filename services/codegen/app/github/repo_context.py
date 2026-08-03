@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 from app.github.client import gh_client, gh_headers
 from app.profiling import RepoProfile, profile_repository
 from app.profiling.models import (
@@ -166,7 +166,7 @@ async def fetch_repo_context(
     client: httpx.AsyncClient | None = None,
 ) -> RepoProfile:
     """Build the canonical profile from a bounded GitHub repository snapshot."""
-    api = github_api_url()
+    api = GITHUB_API_URL
     async with gh_client(client) as github:
         tree_response = await github.get(
             f"{api}/repos/{repo}/git/trees/{quote(branch, safe='')}",

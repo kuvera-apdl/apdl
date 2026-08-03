@@ -164,6 +164,53 @@ def test_empty_private_key_material_fails_closed(monkeypatch, caplog):
     assert encoded not in caplog.text
 
 
+def test_github_origins_are_fixed_to_github_dot_com(monkeypatch):
+    monkeypatch.setenv("GITHUB_API_URL", "https://attacker.example")
+    monkeypatch.setenv("GITHUB_WEB_URL", "https://attacker.example")
+
+    assert config.GITHUB_API_URL == "https://api.github.com"
+    assert config.GITHUB_WEB_URL == "https://github.com"
+
+
+@pytest.mark.parametrize("length", [32, 128])
+def test_github_webhook_secret_accepts_canonical_boundaries(monkeypatch, length):
+    secret = "a" * length
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+
+    assert config.require_github_webhook_secret() == secret
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "",
+        "a" * 31,
+        "a" * 129,
+        " leading" + "a" * 32,
+        "a" * 32 + " ",
+        "a" * 16 + "." + "b" * 16,
+        "a" * 31 + "é",
+    ],
+    ids=[
+        "missing",
+        "too-short",
+        "too-long",
+        "leading-space",
+        "trailing-space",
+        "punctuation",
+        "non-ascii",
+    ],
+)
+def test_github_webhook_secret_rejects_noncanonical_values(
+    monkeypatch: pytest.MonkeyPatch,
+    secret: str,
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+
+    with pytest.raises(RuntimeError, match="GITHUB_WEBHOOK_SECRET"):
+        config.require_github_webhook_secret()
+
+
 @pytest.mark.parametrize(
     "value",
     [

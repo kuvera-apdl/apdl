@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 from typing import Self
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
@@ -34,6 +35,7 @@ class RepositoryAuthorizationSource(StrEnum):
 
     github_oauth = "github_oauth"
     operator = "operator"
+    legacy_unverified = "legacy_unverified"
 
 
 class RepositoryTarget(BaseModel):
@@ -73,6 +75,8 @@ class RepositoryGrant(BaseModel):
         max_length=512,
         pattern=r"^[^\r\n]*\S[^\r\n]*$",
     )
+    authorized_by_user_id: UUID | None = None
+    github_user_id: int | None = Field(default=None, ge=1)
     verified_at: datetime | None
     revoked_at: datetime | None
     created_at: datetime
@@ -83,6 +87,25 @@ class RepositoryGrant(BaseModel):
         """Keep the domain contract as strict as the database constraint."""
         if self.authorization_subject != self.authorization_subject.strip():
             raise ValueError("Authorization subject must be canonical")
+        if self.authorization_source is RepositoryAuthorizationSource.operator:
+            evidence_valid = (
+                self.authorized_by_user_id is None and self.github_user_id is None
+            )
+        elif self.authorization_source is RepositoryAuthorizationSource.github_oauth:
+            evidence_valid = (
+                self.authorized_by_user_id is not None
+                and self.github_user_id is not None
+                and self.authorization_subject
+                == f"github_user:{self.github_user_id}"
+            )
+        else:
+            evidence_valid = (
+                self.authorized_by_user_id is None
+                and self.github_user_id is None
+                and self.status is RepositoryGrantStatus.revoked
+            )
+        if not evidence_valid:
+            raise ValueError("Repository grant user evidence does not match its source")
         if self.status is RepositoryGrantStatus.pending_reauthorization:
             valid = self.verified_at is None and self.revoked_at is None
         elif self.status is RepositoryGrantStatus.active:

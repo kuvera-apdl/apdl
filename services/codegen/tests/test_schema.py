@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from app.db import MIGRATION_NAME, MIGRATION_VERSION, REQUIRED_COLUMNS, assert_schema_ready
+from app.db import (
+    MIGRATION_NAME,
+    MIGRATION_VERSION,
+    REQUIRED_COLUMNS,
+    REQUIRED_CONSTRAINTS,
+    REQUIRED_TRIGGERS,
+    assert_schema_ready,
+)
 
 
 class FakeConn:
@@ -14,24 +21,43 @@ class FakeConn:
         ledger_exists: bool = True,
         migration_name: str | None = MIGRATION_NAME,
         columns=REQUIRED_COLUMNS,
+        constraints=REQUIRED_CONSTRAINTS,
+        triggers=REQUIRED_TRIGGERS,
+        candidate_update_allowed: bool = False,
     ):
         self.ledger_exists = ledger_exists
         self.migration_name = migration_name
         self.columns = set(columns)
+        self.constraints = set(constraints)
+        self.triggers = set(triggers)
+        self.candidate_update_allowed = candidate_update_allowed
 
     async def fetchval(self, sql: str, *args):
         if "to_regclass" in sql:
             return self.ledger_exists
         if "apdl_schema_migrations" in sql:
             return self.migration_name
+        if "has_table_privilege" in sql:
+            return self.candidate_update_allowed
         raise AssertionError(sql)
 
     async def fetch(self, sql: str, *args):
-        assert "information_schema.columns" in sql
-        return [
-            {"table_name": table, "column_name": column}
-            for table, column in self.columns
-        ]
+        if "information_schema.columns" in sql:
+            return [
+                {"table_name": table, "column_name": column}
+                for table, column in self.columns
+            ]
+        if "information_schema.table_constraints" in sql:
+            return [
+                {"table_name": table, "constraint_name": constraint}
+                for table, constraint in self.constraints
+            ]
+        if "information_schema.triggers" in sql:
+            return [
+                {"table_name": table, "trigger_name": trigger}
+                for table, trigger in self.triggers
+            ]
+        raise AssertionError(sql)
 
 
 @pytest.mark.asyncio
@@ -39,13 +65,41 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
-def test_startup_requires_service_capability_migration():
-    assert MIGRATION_VERSION == 58
-    assert MIGRATION_NAME == "058_agent_service_capabilities.sql"
+def test_startup_requires_github_user_authorization_migration():
+    assert MIGRATION_VERSION == 59
+    assert MIGRATION_NAME == "059_github_repository_user_authorization.sql"
     assert (
         "admin_project_execution_authorizations",
         "authorization_source",
     ) in REQUIRED_COLUMNS
+    assert (
+        "github_repository_grants",
+        "authorized_by_user_id",
+    ) in REQUIRED_COLUMNS
+    assert (
+        "github_repository_authorization_flows",
+        "state_hash",
+    ) in REQUIRED_COLUMNS
+    assert (
+        "github_repository_authorization_candidates",
+        "installation_id",
+    ) in REQUIRED_COLUMNS
+    assert (
+        "github_repository_grants",
+        "github_repository_grants_user_evidence_check",
+    ) in REQUIRED_CONSTRAINTS
+    assert (
+        "github_repository_grants",
+        "github_repository_grants_legacy_quarantine_check",
+    ) in REQUIRED_CONSTRAINTS
+    assert (
+        "github_repository_grants",
+        "github_repository_grants_oauth_subject_check",
+    ) in REQUIRED_CONSTRAINTS
+    assert (
+        "github_repository_authorization_candidates",
+        "github_repository_authorization_candidates_immutable",
+    ) in REQUIRED_TRIGGERS
 
 
 @pytest.mark.asyncio
@@ -55,10 +109,13 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_service_capability_migration():
-    with pytest.raises(RuntimeError, match="058_agent_service_capabilities.sql"):
+async def test_rejects_database_without_github_user_authorization_migration():
+    with pytest.raises(
+        RuntimeError,
+        match="059_github_repository_user_authorization.sql",
+    ):
         await assert_schema_ready(
-            FakeConn(migration_name="057_admin_proxy_audit_llm_vault.sql")
+            FakeConn(migration_name="058_agent_service_capabilities.sql")
         )
 
 
@@ -79,6 +136,36 @@ async def test_rejects_missing_execution_authorization_contract_at_startup():
         match="admin_project_execution_authorizations.actor",
     ):
         await assert_schema_ready(FakeConn(columns=columns))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_github_authorization_constraint_at_startup():
+    constraints = REQUIRED_CONSTRAINTS - {
+        (
+            "github_repository_authorization_flows",
+            "github_repository_authorization_flows_state_key",
+        )
+    }
+    with pytest.raises(
+        RuntimeError,
+        match="github_repository_authorization_flows_state_key",
+    ):
+        await assert_schema_ready(FakeConn(constraints=constraints))
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_candidate_immutability_trigger_at_startup():
+    with pytest.raises(
+        RuntimeError,
+        match="github_repository_authorization_candidates_immutable",
+    ):
+        await assert_schema_ready(FakeConn(triggers=frozenset()))
+
+
+@pytest.mark.asyncio
+async def test_rejects_runtime_candidate_update_privilege_at_startup():
+    with pytest.raises(RuntimeError, match="must not update"):
+        await assert_schema_ready(FakeConn(candidate_update_allowed=True))
 
 
 def test_codegen_startup_contains_no_postgres_ddl():

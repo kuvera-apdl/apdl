@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from app.config import github_api_url
+from app.config import GITHUB_API_URL
 from app.github.client import (
     GitHubPaginationIncompleteError,
     gh_client,
@@ -72,7 +72,7 @@ async def get_ci_evidence(
     client: httpx.AsyncClient | None = None,
 ) -> GitHubCIEvidence:
     """Fetch bounded raw status/check evidence for one exact GitHub head."""
-    base = github_api_url()
+    base = GITHUB_API_URL
     async with gh_client(client) as c:
         status_task = asyncio.create_task(
             _get_combined_status(c, repo, head_sha, token)
@@ -147,7 +147,7 @@ async def _get_combined_status(
     token: str,
 ) -> dict:
     url = (
-        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/status"
+        f"{GITHUB_API_URL}/repos/{repo}/commits/{head_sha}/status"
         f"?per_page={_PER_PAGE}"
     )
     combined: dict | None = None
@@ -190,7 +190,7 @@ async def _get_check_runs(
     token: str,
 ) -> list[dict]:
     url = (
-        f"{github_api_url()}/repos/{repo}/commits/{head_sha}/check-runs"
+        f"{GITHUB_API_URL}/repos/{repo}/commits/{head_sha}/check-runs"
         f"?per_page={_PER_PAGE}"
     )
     check_runs: list[dict] = []

@@ -262,11 +262,20 @@ renaming, editing, deleting, or inserting an older file fails closed.
 - `012_config_atomic_mutations.sql` -- transactional Config mutations and durable change outbox
 - `013_disable_automatic_guardrails.sql` -- release fence for automatic experiment decisions
 - `014_disable_self_registered_agents.sql` -- immutable project provenance and execution fence for self-registered projects
+- `058_agent_service_capabilities.sql` -- run-bound service capability issuance and consumption on top of the retained migration history
+- `059_github_repository_user_authorization.sql` -- project-scoped GitHub user authorization evidence and immutable repository candidates
 
-Config, Agents, and Codegen never create or alter tables at process startup.
-They verify the required ledger entry and schema columns, then fail with a
-`make migrate-postgres` instruction if the database is behind. Docker Compose
-gates all PostgreSQL consumers on the one-shot `postgres-migrate` service.
+Migration 059 terminally quarantines retained `github_oauth` grants that predate
+the APDL actor and immutable GitHub user evidence required by the new contract.
+It never invents or backfills that proof; affected projects must reconnect the
+repository through the Admin GitHub App flow.
+
+Config, Agents, Query, and Codegen never create or alter tables at process startup.
+They verify the required ledger entry and schema shape, then fail with a
+`make migrate-postgres` instruction if the database is behind. Config, Agents,
+and Query require migration 058; Codegen additionally requires migration 059.
+Docker Compose gates all PostgreSQL consumers on the one-shot
+`postgres-migrate` service.
 That gives PostgreSQL consumers the same ordering within the full-stack file,
 but bare Compose is not a supported startup path because it does not sequence
 the independently coordinated ClickHouse migration. Use `make dev-core` or

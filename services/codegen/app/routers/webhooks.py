@@ -9,7 +9,6 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 
-from app.config import github_webhook_secret
 from app.jobs.ci import sync_github_state
 from app.store import changesets as changeset_store
 
@@ -29,13 +28,8 @@ def _signature_valid(body: bytes, signature: str, secret: str) -> bool:
 
 
 async def _verify_github_signature(request: Request) -> None:
-    """Fail closed unless the request has a configured, valid GitHub HMAC."""
-    secret = github_webhook_secret()
-    if not secret:
-        raise HTTPException(
-            status_code=503,
-            detail="GitHub webhook endpoint is disabled until a secret is configured.",
-        )
+    """Fail closed unless the request has the startup-validated GitHub HMAC."""
+    secret = request.app.state.github_webhook_secret
     body = await request.body()
     if not _signature_valid(
         body, request.headers.get("X-Hub-Signature-256", ""), secret

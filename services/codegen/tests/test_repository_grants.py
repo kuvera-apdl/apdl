@@ -1,11 +1,13 @@
 """Repository authority is independent from tenant project credentials."""
 
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from app.models.connection import ConnectionCreate
+from app.models.connection import ConnectionCreate, RepositoryGrant
 from app.store.connections import (
     activate_operator_grant,
     delete_connection,
@@ -15,6 +17,62 @@ from app.store.connections import (
     upsert_connection,
 )
 from tests.fakes import FakePool
+
+
+def _grant_payload(**overrides):
+    now = datetime.now(timezone.utc)
+    payload = {
+        "grant_id": "ghg_verifiedgrant",
+        "project_id": "demo",
+        "installation_id": 42,
+        "repository_id": 987,
+        "repository_full_name": "acme/widgets",
+        "status": "active",
+        "authorization_source": "github_oauth",
+        "authorization_subject": "github_user:77",
+        "authorized_by_user_id": uuid4(),
+        "github_user_id": 77,
+        "verified_at": now,
+        "revoked_at": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_github_oauth_grant_requires_canonical_numeric_subject():
+    grant = RepositoryGrant.model_validate(_grant_payload())
+    assert grant.authorization_subject == "github_user:77"
+
+    with pytest.raises(ValidationError, match="user evidence"):
+        RepositoryGrant.model_validate(
+            _grant_payload(authorization_subject="octocat")
+        )
+
+
+def test_legacy_unverified_grant_is_terminal_and_has_no_invented_user_evidence():
+    now = datetime.now(timezone.utc)
+    grant = RepositoryGrant.model_validate(
+        _grant_payload(
+            status="revoked",
+            authorization_source="legacy_unverified",
+            authorization_subject="pre-002-oauth-label",
+            authorized_by_user_id=None,
+            github_user_id=None,
+            revoked_at=now,
+        )
+    )
+    assert grant.status.value == "revoked"
+
+    with pytest.raises(ValidationError, match="user evidence"):
+        RepositoryGrant.model_validate(
+            _grant_payload(
+                authorization_source="legacy_unverified",
+                authorized_by_user_id=None,
+                github_user_id=None,
+            )
+        )
 
 
 def test_connection_create_accepts_only_an_existing_grant_reference():

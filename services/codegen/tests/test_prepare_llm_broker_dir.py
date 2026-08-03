@@ -32,6 +32,14 @@ def test_controller_startup_prepares_root_before_opening_postgres() -> None:
     )
 
 
+def test_controller_validates_webhook_secret_before_opening_resources() -> None:
+    lifespan = MAIN.split("async def lifespan", 1)[1]
+    validation = lifespan.index("require_github_webhook_secret()")
+
+    assert validation < lifespan.index("prepare_broker_root(")
+    assert validation < lifespan.index("asyncpg.create_pool(")
+
+
 def test_preparer_rejects_root_without_changing_its_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

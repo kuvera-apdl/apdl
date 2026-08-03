@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from app.config import (
     codegen_revision,
@@ -297,6 +297,41 @@ class FakeConn:
         )
 
     async def execute(self, query: str, *args: Any) -> None:
+        if "DELETE FROM github_repository_authorization_flows AS flow" in query:
+            flows = self._rows("repository_authorization_flows")
+            expired = sorted(
+                (
+                    row
+                    for row in flows.values()
+                    if row["expires_at"] <= datetime.now(timezone.utc)
+                ),
+                key=lambda row: row["expires_at"],
+            )[:100]
+            authorization_ids = {row["authorization_id"] for row in expired}
+            for authorization_id in authorization_ids:
+                flows.pop(authorization_id, None)
+            candidates = self._rows("repository_authorization_candidates")
+            for candidate_id, candidate in list(candidates.items()):
+                if candidate["authorization_id"] in authorization_ids:
+                    del candidates[candidate_id]
+            return None
+        if "DELETE FROM github_repository_authorization_candidates" in query:
+            candidates = self._rows("repository_authorization_candidates")
+            if args:
+                authorization_ids = {args[0]}
+            else:
+                authorization_ids = {
+                    row["authorization_id"]
+                    for row in self._rows(
+                        "repository_authorization_flows"
+                    ).values()
+                    if row["expires_at"] <= datetime.now(timezone.utc)
+                    and row["status"] != "completed"
+                }
+            for candidate_id, candidate in list(candidates.items()):
+                if candidate["authorization_id"] in authorization_ids:
+                    del candidates[candidate_id]
+            return None
         if "SELECT pg_notify" in query:
             self.store.setdefault("grant_notifications", []).append(
                 {"channel": args[0], "grant_id": args[1]}
@@ -483,7 +518,268 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchval: {query}")
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        if "AS repository_connection_authorized" in query:
+            project_id, actor_user_id = args
+            project = self._rows("admin_projects").get(project_id)
+            account = self._rows("admin_users").get(actor_user_id)
+            membership = self._rows("admin_user_projects").get(
+                (actor_user_id, project_id)
+            )
+            roles = set(membership["roles"]) if membership is not None else set()
+            authorized = bool(
+                project is not None
+                and account is not None
+                and account["active"]
+                and (
+                    project.get("owner_user_id") == actor_user_id
+                    or {"agents:manage", "credentials:manage"}.issubset(roles)
+                )
+            )
+            return (
+                {"repository_connection_authorized": authorized}
+                if project is not None and account is not None
+                else None
+            )
+        if "SELECT project.owner_user_id, account.active" in query:
+            project_id, actor_user_id = args
+            project = self._rows("admin_projects").get(project_id)
+            account = self._rows("admin_users").get(actor_user_id)
+            if project is None or account is None:
+                return None
+            return {
+                "owner_user_id": project.get("owner_user_id"),
+                "active": account["active"],
+            }
+        if "SELECT roles" in query and "FROM admin_user_projects" in query:
+            project_id, actor_user_id = args
+            return self._rows("admin_user_projects").get(
+                (actor_user_id, project_id)
+            )
+        if "INSERT INTO github_repository_authorization_flows" in query:
+            authorization_id, project_id, actor_user_id, state_hash, expires_at = args
+            row = {
+                "authorization_id": authorization_id,
+                "project_id": project_id,
+                "actor_user_id": actor_user_id,
+                "state_hash": state_hash,
+                "status": "awaiting_installation",
+                "github_user_id": None,
+                "github_login": None,
+                "expires_at": expires_at,
+                "completed_at": None,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+            self._rows("repository_authorization_flows")[authorization_id] = row
+            return row
+        if (
+            "UPDATE github_repository_authorization_flows" in query
+            and "WHERE state_hash = $1" in query
+        ):
+            state_hash, replacement_hash = args
+            expected = (
+                "awaiting_installation"
+                if "status = 'awaiting_installation'" in query
+                else "awaiting_oauth"
+            )
+            row = next(
+                (
+                    item
+                    for item in self._rows(
+                        "repository_authorization_flows"
+                    ).values()
+                    if item["state_hash"] == state_hash
+                    and item["status"] == expected
+                    and item["expires_at"] > datetime.now(timezone.utc)
+                ),
+                None,
+            )
+            if row is None:
+                return None
+            row["state_hash"] = replacement_hash
+            if expected == "awaiting_installation":
+                row["status"] = "awaiting_oauth"
+            row["updated_at"] = datetime.now(timezone.utc)
+            return row
+        if (
+            "DELETE FROM github_repository_authorization_flows" in query
+            and "WHERE state_hash = $1" in query
+            and "status = 'awaiting_installation'" in query
+        ):
+            (state_hash,) = args
+            flows = self._rows("repository_authorization_flows")
+            match = next(
+                (
+                    (authorization_id, row)
+                    for authorization_id, row in flows.items()
+                    if row["state_hash"] == state_hash
+                    and row["status"] == "awaiting_installation"
+                    and row["expires_at"] > datetime.now(timezone.utc)
+                ),
+                None,
+            )
+            if match is None:
+                return None
+            authorization_id, row = match
+            del flows[authorization_id]
+            return row
+        if (
+            "DELETE FROM github_repository_authorization_flows" in query
+            and "RETURNING authorization_id" in query
+        ):
+            authorization_id, project_id, actor_user_id = args
+            flows = self._rows("repository_authorization_flows")
+            row = flows.get(authorization_id)
+            if (
+                row is None
+                or row["project_id"] != project_id
+                or row["actor_user_id"] != actor_user_id
+                or row["expires_at"] > datetime.now(timezone.utc)
+            ):
+                return None
+            del flows[authorization_id]
+            candidates = self._rows("repository_authorization_candidates")
+            for candidate_id, candidate in list(candidates.items()):
+                if candidate["authorization_id"] == authorization_id:
+                    del candidates[candidate_id]
+            return {"authorization_id": authorization_id}
+        if (
+            "SELECT status, expires_at"
+            in query
+            and "FROM github_repository_authorization_flows" in query
+        ):
+            authorization_id, project_id, actor_user_id = args
+            row = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            if (
+                row is None
+                or row["project_id"] != project_id
+                or row["actor_user_id"] != actor_user_id
+            ):
+                return None
+            return row
+        if "INSERT INTO github_repository_authorization_candidates" in query:
+            (
+                candidate_id,
+                authorization_id,
+                installation_id,
+                repository_id,
+                repository_full_name,
+                default_base_branch,
+                private,
+            ) = args
+            row = {
+                "candidate_id": candidate_id,
+                "authorization_id": authorization_id,
+                "installation_id": installation_id,
+                "repository_id": repository_id,
+                "repository_full_name": repository_full_name,
+                "default_base_branch": default_base_branch,
+                "private": private,
+                "created_at": datetime.now(timezone.utc),
+            }
+            self._rows("repository_authorization_candidates")[candidate_id] = row
+            return {"candidate_id": candidate_id}
+        if (
+            "UPDATE github_repository_authorization_flows" in query
+            and "SET status = 'awaiting_selection'" in query
+        ):
+            authorization_id, github_user_id, github_login = args
+            row = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            if row is None or row["status"] != "awaiting_oauth":
+                return None
+            row.update(
+                status="awaiting_selection",
+                github_user_id=github_user_id,
+                github_login=github_login,
+                updated_at=datetime.now(timezone.utc),
+            )
+            return {"authorization_id": authorization_id}
+        if (
+            "SELECT authorization_id, project_id, status, expires_at"
+            in query
+            and "FROM github_repository_authorization_flows" in query
+        ):
+            authorization_id, project_id, actor_user_id = args
+            row = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            if (
+                row is None
+                or row["project_id"] != project_id
+                or row["actor_user_id"] != actor_user_id
+            ):
+                return None
+            return row
+        if (
+            "FROM github_repository_authorization_flows AS flow" in query
+            and "JOIN github_repository_authorization_candidates AS candidate"
+            in query
+        ):
+            authorization_id, project_id, actor_user_id, candidate_id = args
+            flow = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            candidate = self._rows("repository_authorization_candidates").get(
+                candidate_id
+            )
+            if (
+                flow is None
+                or candidate is None
+                or flow["project_id"] != project_id
+                or flow["actor_user_id"] != actor_user_id
+                or candidate["authorization_id"] != authorization_id
+            ):
+                return None
+            return {**candidate, "status": flow["status"], "expires_at": flow["expires_at"]}
+        if (
+            "SELECT status, github_user_id, expires_at"
+            in query
+            and "FROM github_repository_authorization_flows" in query
+        ):
+            authorization_id, project_id, actor_user_id = args
+            row = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            if (
+                row is None
+                or row["project_id"] != project_id
+                or row["actor_user_id"] != actor_user_id
+            ):
+                return None
+            return row
+        if (
+            "FROM github_repository_authorization_candidates" in query
+            and "candidate_id = $2" in query
+        ):
+            authorization_id, candidate_id = args
+            row = self._rows("repository_authorization_candidates").get(
+                candidate_id
+            )
+            if row is None or row["authorization_id"] != authorization_id:
+                return None
+            return row
+        if (
+            "UPDATE github_repository_authorization_flows" in query
+            and "SET status = 'completed'" in query
+        ):
+            authorization_id = args[0]
+            row = self._rows("repository_authorization_flows").get(
+                authorization_id
+            )
+            if row is None or row["status"] != "awaiting_selection":
+                return None
+            row.update(
+                status="completed",
+                completed_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            return {"authorization_id": authorization_id}
         if "INSERT INTO github_repository_grants" in query:
+            oauth = "'github_oauth'" in query
             row = {
                 "grant_id": args[0],
                 "project_id": args[1],
@@ -491,8 +787,10 @@ class FakeConn:
                 "repository_id": args[3],
                 "repository_full_name": args[4],
                 "status": "active",
-                "authorization_source": "operator",
+                "authorization_source": "github_oauth" if oauth else "operator",
                 "authorization_subject": args[5],
+                "authorized_by_user_id": args[6] if oauth else None,
+                "github_user_id": args[7] if oauth else None,
                 "verified_at": _T0,
                 "revoked_at": None,
                 "created_at": _T0,
@@ -898,6 +1196,31 @@ class FakeConn:
                     grant["updated_at"] = _T0
                     revoked.append({"grant_id": grant["grant_id"]})
             return revoked
+        if "FROM github_repository_authorization_candidates" in query:
+            authorization_id = args[0]
+            rows = [
+                row
+                for row in self._rows(
+                    "repository_authorization_candidates"
+                ).values()
+                if row["authorization_id"] == authorization_id
+            ]
+            rows.sort(
+                key=lambda row: (
+                    row["repository_full_name"].lower(),
+                    row["repository_id"],
+                )
+            )
+            return [
+                {
+                    "candidate_id": row["candidate_id"],
+                    "repository_id": row["repository_id"],
+                    "repository_full_name": row["repository_full_name"],
+                    "default_base_branch": row["default_base_branch"],
+                    "private": row["private"],
+                }
+                for row in rows
+            ]
         if "FROM codegen_pull_request_observations" in query:
             changeset_id, head_sha, limit = args
             rows = [
@@ -1053,6 +1376,11 @@ class FakePool:
         for name in (
             "repository_grants",
             "connections",
+            "repository_authorization_flows",
+            "repository_authorization_candidates",
+            "admin_projects",
+            "admin_users",
+            "admin_user_projects",
             "llm_credentials",
             "llm_connections",
             "llm_connection_consumers",
@@ -1078,6 +1406,32 @@ class FakePool:
         self.acquire_count += 1
         self.conn = FakeConn(self.store)
         return _Acquire(self.conn)
+
+    def add_project_actor(
+        self,
+        project_id: str,
+        actor_user_id: UUID,
+        *,
+        owner: bool = True,
+        active: bool = True,
+        roles: frozenset[str] = frozenset(
+            {"agents:manage", "credentials:manage"}
+        ),
+    ) -> None:
+        """Seed live human authority for repository-authorization tests."""
+        self.store["admin_projects"][project_id] = {
+            "project_id": project_id,
+            "owner_user_id": actor_user_id if owner else None,
+        }
+        self.store["admin_users"][actor_user_id] = {
+            "user_id": actor_user_id,
+            "active": active,
+        }
+        self.store["admin_user_projects"][(actor_user_id, project_id)] = {
+            "user_id": actor_user_id,
+            "project_id": project_id,
+            "roles": list(roles),
+        }
 
     def add_llm_connection(
         self,
@@ -1240,6 +1594,8 @@ class FakePool:
             "status": "active",
             "authorization_source": "operator",
             "authorization_subject": "test-operator",
+            "authorized_by_user_id": None,
+            "github_user_id": None,
             "verified_at": _T0,
             "revoked_at": None,
             "created_at": _T0,
