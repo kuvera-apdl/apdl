@@ -785,13 +785,99 @@ export const changesetSchema = z
 
 export const changesetListSchema = z.array(changesetSchema)
 
-// Read-only repository grant projection
-// (services/codegen/app/models/connection.py). Repository authority is an
-// operator-verified grant bound to GitHub's immutable repository id; tenants
-// cannot submit a repo slug or installation id through the Admin surface.
+// Project-scoped repository authorization and the resulting read-only grant
+// projection. The browser selects only an opaque candidate id; GitHub App
+// installation coordinates remain server-side.
 export const REPO_SLUG_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 export const REPOSITORY_GRANT_ID_PATTERN = /^ghg_[A-Za-z0-9_-]+$/
 export const CODEGEN_PROJECT_ID_PATTERN = /^[A-Za-z0-9]{1,64}$/
+export const githubRepositoryAuthorizationIdSchema = z.string().uuid()
+export const githubRepositoryProjectIdSchema = z
+  .string()
+  .regex(CODEGEN_PROJECT_ID_PATTERN)
+export const githubRepositoryCallbackStatusSchema = z.literal(
+  'installation_approval_required',
+)
+
+export const githubRepositoryAuthorizationStartRequestSchema = z
+  .object({
+    project_id: githubRepositoryProjectIdSchema,
+  })
+  .strict()
+
+export const githubRepositoryAuthorizationStartSchema = z
+  .object({
+    schema_version: z.literal('github_repository_authorization_start@1'),
+    authorization_id: githubRepositoryAuthorizationIdSchema,
+    installation_url: externalHttpsUrlSchema,
+    expires_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+
+export const githubRepositoryCandidateSchema = z
+  .object({
+    candidate_id: z.string().uuid(),
+    repository_id: z.number().int().positive(),
+    repository_full_name: z.string().min(3).max(201).regex(REPO_SLUG_PATTERN),
+    default_base_branch: z.string().min(1).max(255).regex(/^[^\r\n]+$/),
+    private: z.boolean(),
+  })
+  .strict()
+
+export const githubRepositoryAuthorizationSchema = z
+  .object({
+    schema_version: z.literal('github_repository_authorization@1'),
+    authorization_id: githubRepositoryAuthorizationIdSchema,
+    project_id: githubRepositoryProjectIdSchema,
+    status: z.enum([
+      'awaiting_installation',
+      'awaiting_oauth',
+      'awaiting_selection',
+      'completed',
+    ]),
+    repositories: z.array(githubRepositoryCandidateSchema).max(1_000),
+    expires_at: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((authorization, context) => {
+    if (
+      authorization.status !== 'awaiting_selection' &&
+      authorization.repositories.length !== 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'repositories must be empty unless selection is awaiting',
+        path: ['repositories'],
+      })
+    }
+    const candidateIds = new Set<string>()
+    const repositoryIds = new Set<number>()
+    for (const [index, repository] of authorization.repositories.entries()) {
+      if (candidateIds.has(repository.candidate_id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'repository candidate ids must be unique',
+          path: ['repositories', index, 'candidate_id'],
+        })
+      }
+      if (repositoryIds.has(repository.repository_id)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'repository ids must be unique',
+          path: ['repositories', index, 'repository_id'],
+        })
+      }
+      candidateIds.add(repository.candidate_id)
+      repositoryIds.add(repository.repository_id)
+    }
+  })
+
+export const githubRepositoryAuthorizationCompleteRequestSchema = z
+  .object({
+    project_id: githubRepositoryProjectIdSchema,
+    candidate_id: z.string().uuid(),
+  })
+  .strict()
 
 const canonicalProtectedPathListSchema = z
   .array(z.string().min(1).max(256))

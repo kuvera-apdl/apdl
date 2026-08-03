@@ -3,10 +3,10 @@ import { z } from 'zod'
 /**
  * URL contract for server-provided links rendered as external anchors.
  *
- * GitHub Enterprise installations may use operator-owned hosts, so the client
- * cannot hard-code github.com. It can still reject active schemes, plaintext
- * transport, embedded credentials, fragments that obscure the destination,
- * and unbounded values before a link reaches the DOM.
+ * These links can target several server-selected external services, so this
+ * shared contract validates transport and URL safety rather than one host.
+ * GitHub-specific authorization redirects are separately restricted to the
+ * canonical github.com origin by the Admin callback relay.
  */
 export const externalHttpsUrlSchema = z
   .string()

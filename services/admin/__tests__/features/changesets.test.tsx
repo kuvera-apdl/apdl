@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { TooltipProvider } from '../../src/components/ui/tooltip'
+import { AuthProvider } from '../../src/core/auth'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { ChangesetsPage } from '../../src/features/codegen/ChangesetsPage'
 import { seedWorkspace } from '../helpers/fixtures'
@@ -62,6 +63,13 @@ beforeEach(() => {
   localStorage.clear()
   seedWorkspace()
   server.use(
+    http.get('*/api/auth/me', () =>
+      HttpResponse.json({
+        user_id: '10000000-0000-4000-8000-000000000001',
+        email: 'tester@example.com',
+        projects: [{ project_id: 'demo', roles: seedWorkspace().roles }],
+      }),
+    ),
     http.get(
       '*/api/projects/demo/codegen/v1/connections/demo',
       () => new HttpResponse(null, { status: 404 }),
@@ -72,15 +80,17 @@ beforeEach(() => {
 function renderPage() {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <MemoryRouter>
-            <ChangesetsPage />
-          </MemoryRouter>
-        </TooltipProvider>
-      </QueryClientProvider>
-    </WorkspaceProvider>,
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <WorkspaceProvider>
+          <TooltipProvider>
+            <MemoryRouter>
+              <ChangesetsPage />
+            </MemoryRouter>
+          </TooltipProvider>
+        </WorkspaceProvider>
+      </AuthProvider>
+    </QueryClientProvider>,
   )
 }
 

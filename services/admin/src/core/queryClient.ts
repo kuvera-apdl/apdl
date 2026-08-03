@@ -36,7 +36,8 @@ export const queryKeys = {
   projectMembers: (wsId: string) => [wsId, 'project-members'] as const,
   membershipAudit: (wsId: string) => [wsId, 'project-members', 'audit'] as const,
   ownershipAudit: (wsId: string) => [wsId, 'project-ownership', 'audit'] as const,
-  accessibleRepos: (wsId: string) => [wsId, 'github-repos'] as const,
+  githubRepositoryAuthorization: (wsId: string, authorizationId: string) =>
+    [wsId, 'github-repository-authorization', authorizationId] as const,
   changeset: (wsId: string, id: string) => [wsId, 'changeset', id] as const,
   changesetObservations: (wsId: string, id: string) =>
     [wsId, 'changeset', id, 'observations'] as const,
