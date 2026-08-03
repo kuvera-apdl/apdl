@@ -1,8 +1,44 @@
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
 
+from app.service_auth import CAPABILITY_HEADER
 from app.tools import flags
+from tests.capability_helpers import (
+    make_mutation_capability,
+    make_service_capability,
+)
+
+
+@pytest.fixture(autouse=True)
+def capability_authority(monkeypatch):
+    calls = []
+
+    @asynccontextmanager
+    async def fake_service_headers(
+        context,
+        *,
+        audiences,
+        roles,
+        request_method=None,
+        request_path=None,
+        request_json=None,
+        idempotency_key=None,
+    ):
+        call = {"context": context, "audiences": audiences, "roles": roles}
+        if request_method is not None:
+            call.update(
+                request_method=request_method,
+                request_path=request_path,
+                request_json=request_json,
+                idempotency_key=idempotency_key,
+            )
+        calls.append(call)
+        yield {CAPABILITY_HEADER: f"apdlcap_{'F' * 43}"}
+
+    monkeypatch.setattr(flags, "service_headers", fake_service_headers)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -10,6 +46,7 @@ async def test_create_flag_derives_enabled_from_active_state(monkeypatch):
     captured: dict[str, Any] = {}
 
     async def fake_post(
+        _capability,
         project_id: str,
         path: str,
         payload: dict[str, Any],
@@ -24,6 +61,7 @@ async def test_create_flag_derives_enabled_from_active_state(monkeypatch):
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.create_flag(
+        make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         key="checkout",
         name="Checkout",
@@ -52,6 +90,7 @@ async def test_create_flag_derives_draft_state_from_disabled_flag(monkeypatch):
     captured: dict[str, Any] = {}
 
     async def fake_post(
+        _capability,
         project_id: str,
         path: str,
         payload: dict[str, Any],
@@ -63,6 +102,7 @@ async def test_create_flag_derives_draft_state_from_disabled_flag(monkeypatch):
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.create_flag(
+        make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         key="checkout",
         name="Checkout",
@@ -77,6 +117,7 @@ async def test_create_flag_posts_canonical_variant_fields(monkeypatch):
     captured: dict[str, Any] = {}
 
     async def fake_post(
+        _capability,
         project_id: str,
         path: str,
         payload: dict[str, Any],
@@ -88,6 +129,7 @@ async def test_create_flag_posts_canonical_variant_fields(monkeypatch):
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.create_flag(
+        make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         key="checkout",
         name="Checkout",
@@ -117,6 +159,7 @@ async def test_create_flag_preserves_explicit_empty_canonical_inputs(monkeypatch
     captured: dict[str, Any] = {}
 
     async def fake_post(
+        _capability,
         project_id: str,
         path: str,
         payload: dict[str, Any],
@@ -128,6 +171,7 @@ async def test_create_flag_preserves_explicit_empty_canonical_inputs(monkeypatch
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.create_flag(
+        make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         key="checkout",
         name="Checkout",
@@ -144,6 +188,7 @@ async def test_update_flag_posts_canonical_variant_updates(monkeypatch):
     captured: dict[str, Any] = {}
 
     async def fake_put(
+        _capability,
         project_id: str,
         path: str,
         payload: dict[str, Any],
@@ -158,6 +203,7 @@ async def test_update_flag_posts_canonical_variant_updates(monkeypatch):
     monkeypatch.setattr(flags, "_put", fake_put)
 
     await flags.update_flag(
+        make_mutation_capability(project_id="apdl"),
         project_id="apdl",
         key="checkout",
         version=3,
@@ -185,7 +231,7 @@ async def test_update_flag_posts_canonical_variant_updates(monkeypatch):
 async def test_transition_flag_uses_dedicated_versioned_endpoint(monkeypatch):
     captured: dict[str, Any] = {}
 
-    async def fake_post(project_id, path, payload, params=None):
+    async def fake_post(_capability, project_id, path, payload, params=None):
         captured.update(
             project_id=project_id,
             path=path,
@@ -197,6 +243,7 @@ async def test_transition_flag_uses_dedicated_versioned_endpoint(monkeypatch):
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.transition_flag(
+        make_mutation_capability(project_id="apdl"),
         "apdl",
         "checkout",
         version=3,
@@ -215,13 +262,14 @@ async def test_transition_flag_uses_dedicated_versioned_endpoint(monkeypatch):
 async def test_disable_flag_sends_version_without_source_alias(monkeypatch):
     captured: dict[str, Any] = {}
 
-    async def fake_post(project_id, path, payload, params=None):
+    async def fake_post(_capability, project_id, path, payload, params=None):
         captured.update(path=path, payload=payload, params=params)
         return {"disabled": True}
 
     monkeypatch.setattr(flags, "_post", fake_post)
 
     await flags.disable_flag(
+        make_mutation_capability(project_id="apdl"),
         "apdl",
         "checkout",
         version=4,
@@ -240,7 +288,10 @@ async def test_disable_flag_sends_version_without_source_alias(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_gate_defaults_to_non_logging_request(monkeypatch):
+async def test_evaluate_gate_defaults_to_non_logging_request(
+    monkeypatch,
+    capability_authority,
+):
     captured: dict[str, Any] = {}
 
     class FakeResponse:
@@ -267,11 +318,23 @@ async def test_evaluate_gate_defaults_to_non_logging_request(monkeypatch):
         lambda **kwargs: FakeClient(),
     )
 
-    await flags.evaluate_gate("apdl", "checkout", user_id="user-1")
+    capability = make_service_capability(project_id="apdl")
+    await flags.evaluate_gate(
+        capability,
+        "apdl",
+        "checkout",
+        user_id="user-1",
+    )
 
     assert captured["path"] == "/v1/evaluate"
     assert captured["payload"]["log_exposure"] is False
     assert captured["payload"]["message_id"] == ""
+    assert captured["headers"] == {CAPABILITY_HEADER: f"apdlcap_{'F' * 43}"}
+    assert capability_authority[-1] == {
+        "context": capability,
+        "audiences": ("config",),
+        "roles": ("config:evaluate",),
+    }
 
 
 @pytest.mark.asyncio
@@ -290,9 +353,57 @@ async def test_evaluate_gate_rejects_invalid_logging_contract(
         match="log_exposure requires a stable nonblank message_id",
     ):
         await flags.evaluate_gate(
+            make_service_capability(project_id="apdl"),
             "apdl",
             "checkout",
             user_id="user-1",
             log_exposure=True,
             message_id=message_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_flag_mutation_uses_approval_effect_config_write_authority(
+    monkeypatch,
+    capability_authority,
+):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"created": True}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, _path, *, json, params, headers):
+            assert json == {"key": "checkout"}
+            assert params == {"project_id": "apdl"}
+            assert headers == {CAPABILITY_HEADER: f"apdlcap_{'F' * 43}"}
+            return FakeResponse()
+
+    monkeypatch.setattr(flags.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    capability = make_mutation_capability(project_id="apdl")
+
+    await flags._post(
+        capability,
+        "apdl",
+        "/v1/admin/flags",
+        {"key": "checkout"},
+        params={"project_id": "apdl"},
+    )
+
+    assert capability_authority[-1] == {
+        "context": capability,
+        "audiences": ("config",),
+        "roles": ("config:write",),
+        "request_method": "POST",
+        "request_path": "/v1/admin/flags",
+        "request_json": {"key": "checkout"},
+        "idempotency_key": None,
+    }

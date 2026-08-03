@@ -12,7 +12,7 @@ from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
 
 from app import outbox
-from app.auth import authorized_project
+from app.auth import authorized_project, authorized_project_any_role
 from app.flags import experiment_flag
 from app.models.schemas import (
     MAX_BIGSERIAL_ID,
@@ -345,7 +345,10 @@ async def list_flags(
     include_archived: bool = False,
 ):
     """List all flags for a project."""
-    project_id = authorized_project(request, "config:write")
+    project_id = authorized_project_any_role(
+        request,
+        frozenset({"config:write", "agents:read"}),
+    )
 
     flags = await pg_store.get_flags(
         request.app.state.pg_pool,
@@ -672,7 +675,10 @@ def _resolve_update_default_variant(
 @router.get("/experiments")
 async def list_experiments(request: Request):
     """List all experiments for a project."""
-    project_id = authorized_project(request, "config:write")
+    project_id = authorized_project_any_role(
+        request,
+        frozenset({"config:write", "agents:read"}),
+    )
 
     experiments = await pg_store.get_experiments(request.app.state.pg_pool, project_id)
     result = [_experiment_to_response(e) for e in experiments]

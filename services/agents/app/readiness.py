@@ -205,11 +205,14 @@ async def capability_report() -> dict[str, Any]:
 
 async def codegen_changeset_capability(
     project_id: str,
+    delegated_headers: dict[str, str] | None = None,
 ) -> CodegenChangesetCapability:
     """Return authenticated, executable capability for exactly one project."""
+    if delegated_headers is None:
+        return "unavailable"
     try:
         capability = await asyncio.wait_for(
-            get_changeset_creation_capability(project_id),
+            get_changeset_creation_capability(project_id, delegated_headers),
             timeout=_PROBE_TIMEOUT_SECONDS,
         )
     except (TimeoutError, httpx.HTTPError, RuntimeError, TypeError, ValueError):

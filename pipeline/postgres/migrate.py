@@ -707,7 +707,7 @@ SELECT format(
 WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'apdl_llm_vault'
 )
-\gexec
+\\gexec
 ALTER ROLE apdl_llm_vault WITH
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
     NOREPLICATION NOBYPASSRLS PASSWORD :'llm_vault_password';
@@ -716,6 +716,130 @@ COMMIT;
 """,
         fence,
         variables={"llm_vault_password": password},
+    )
+
+
+def _ensure_agent_capability_roles(fence: MaintenanceFence) -> None:
+    """Provision the Agents login and fixed capability-definer roles."""
+    password = os.environ.get("APDL_AGENTS_POSTGRES_PASSWORD")
+    if password is None:
+        raise MigrationError("APDL_AGENTS_POSTGRES_PASSWORD is required")
+    if ROLE_PASSWORD.fullmatch(password) is None:
+        raise MigrationError(
+            "APDL_AGENTS_POSTGRES_PASSWORD must be 16-128 "
+            "URI-unreserved characters"
+        )
+    _psql(
+        """
+BEGIN;
+SELECT format(
+    'CREATE ROLE apdl_agents LOGIN PASSWORD %L',
+    :'agents_password'
+)
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'apdl_agents'
+)
+\\gexec
+ALTER ROLE apdl_agents WITH
+    LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+    NOREPLICATION NOBYPASSRLS PASSWORD :'agents_password';
+
+SELECT 'CREATE ROLE apdl_project_authority_definer NOLOGIN'
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_project_authority_definer'
+)
+\\gexec
+ALTER ROLE apdl_project_authority_definer WITH
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+    NOREPLICATION NOBYPASSRLS;
+
+SELECT 'CREATE ROLE apdl_capability_consumer_definer NOLOGIN'
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_capability_consumer_definer'
+)
+\\gexec
+ALTER ROLE apdl_capability_consumer_definer WITH
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
+    NOREPLICATION NOBYPASSRLS;
+
+REVOKE CREATE ON SCHEMA public FROM
+    apdl_agents,
+    apdl_project_authority_definer,
+    apdl_capability_consumer_definer;
+
+DO $apdl_validate_agent_capability_roles$
+DECLARE
+    role_record RECORD;
+BEGIN
+    SELECT * INTO STRICT role_record
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_agents';
+    IF NOT role_record.rolcanlogin
+       OR role_record.rolsuper
+       OR role_record.rolcreatedb
+       OR role_record.rolcreaterole
+       OR role_record.rolinherit
+       OR role_record.rolreplication
+       OR role_record.rolbypassrls THEN
+        RAISE EXCEPTION 'apdl_agents has non-canonical role attributes';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_catalog.pg_auth_members
+        WHERE member = role_record.oid OR roleid = role_record.oid
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents must not participate in role membership';
+    END IF;
+
+    FOR role_record IN
+        SELECT * FROM pg_catalog.pg_roles
+        WHERE rolname IN (
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
+        )
+    LOOP
+        IF role_record.rolcanlogin
+           OR role_record.rolsuper
+           OR role_record.rolcreatedb
+           OR role_record.rolcreaterole
+           OR role_record.rolinherit
+           OR role_record.rolreplication
+           OR role_record.rolbypassrls THEN
+            RAISE EXCEPTION
+                '% has non-canonical role attributes', role_record.rolname;
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM pg_catalog.pg_auth_members
+            WHERE member = role_record.oid OR roleid = role_record.oid
+        ) THEN
+            RAISE EXCEPTION
+                '% must not participate in role membership', role_record.rolname;
+        END IF;
+    END LOOP;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_roles AS candidate
+        WHERE candidate.rolname IN (
+            'apdl_agents',
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
+        )
+          AND pg_catalog.has_schema_privilege(
+              candidate.rolname,
+              'public',
+              'CREATE'
+          )
+    ) THEN
+        RAISE EXCEPTION 'agent capability roles must not create public objects';
+    END IF;
+END
+$apdl_validate_agent_capability_roles$;
+COMMIT;
+""",
+        fence,
+        variables={"agents_password": password},
     )
 
 
@@ -856,6 +980,7 @@ def migrate(directory: Path) -> tuple[Migration, ...]:
     with _maintenance_fence() as fence:
         _ensure_ledger(fence)
         _ensure_llm_vault_role(fence)
+        _ensure_agent_capability_roles(fence)
         applied = _read_ledger(fence)
         _assert_fresh_database_for_empty_ledger(applied, fence)
         pending = plan_migrations(migrations, applied)

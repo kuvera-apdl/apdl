@@ -153,7 +153,7 @@ async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
     dsn = os.getenv(
         "POSTGRES_URL",
-        "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
+        "postgresql://apdl_agents:apdl_agents_dev1@localhost:5432/apdl",
     )
 
     pool = await asyncpg.create_pool(

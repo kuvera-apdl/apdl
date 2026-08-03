@@ -120,6 +120,54 @@ def test_existing_ledger_prefix_skips_fresh_database_preflight(monkeypatch):
     migrate._assert_fresh_database_for_empty_ledger((migration,), object())
 
 
+def test_agent_capability_roles_require_a_strict_password(monkeypatch):
+    monkeypatch.delenv("APDL_AGENTS_POSTGRES_PASSWORD", raising=False)
+    with pytest.raises(
+        migrate.MigrationError,
+        match="APDL_AGENTS_POSTGRES_PASSWORD is required",
+    ):
+        migrate._ensure_agent_capability_roles(object())
+
+    monkeypatch.setenv("APDL_AGENTS_POSTGRES_PASSWORD", "unsafe password")
+    with pytest.raises(
+        migrate.MigrationError,
+        match="16-128 URI-unreserved characters",
+    ):
+        migrate._ensure_agent_capability_roles(object())
+
+
+def test_agent_capability_roles_are_provisioned_with_fixed_posture(monkeypatch):
+    calls: list[tuple[str, dict[str, str] | None]] = []
+
+    def fake_psql(sql: str, fence, *, variables=None, capture: bool = False):
+        del fence, capture
+        calls.append((sql, variables))
+        return ""
+
+    monkeypatch.setenv(
+        "APDL_AGENTS_POSTGRES_PASSWORD",
+        "agents_password_123",
+    )
+    monkeypatch.setattr(migrate, "_psql", fake_psql)
+
+    migrate._ensure_agent_capability_roles(object())
+
+    assert len(calls) == 1
+    sql, variables = calls[0]
+    assert variables == {"agents_password": "agents_password_123"}
+    assert "CREATE ROLE apdl_agents LOGIN PASSWORD" in sql
+    assert "ALTER ROLE apdl_agents WITH\n    LOGIN NOSUPERUSER" in sql
+    for role in (
+        "apdl_project_authority_definer",
+        "apdl_capability_consumer_definer",
+    ):
+        assert f"CREATE ROLE {role} NOLOGIN" in sql
+        assert f"ALTER ROLE {role} WITH\n    NOLOGIN NOSUPERUSER" in sql
+    assert "rolinherit" in sql
+    assert "pg_catalog.pg_auth_members" in sql
+    assert "pg_catalog.has_schema_privilege" in sql
+
+
 def test_migrate_holds_exclusive_fence_across_every_schema_operation(
     tmp_path: Path,
     monkeypatch,
@@ -143,6 +191,16 @@ def test_migrate_holds_exclusive_fence_across_every_schema_operation(
         "_ensure_ledger",
         lambda _fence: events.append("ledger"),
     )
+    monkeypatch.setattr(
+        migrate,
+        "_ensure_llm_vault_role",
+        lambda _fence: events.append("vault-role"),
+    )
+    monkeypatch.setattr(
+        migrate,
+        "_ensure_agent_capability_roles",
+        lambda _fence: events.append("capability-roles"),
+    )
     monkeypatch.setattr(migrate, "_read_ledger", lambda _fence: ())
     monkeypatch.setattr(
         migrate,
@@ -161,6 +219,8 @@ def test_migrate_holds_exclusive_fence_across_every_schema_operation(
         "ready",
         "fence-enter",
         "ledger",
+        "vault-role",
+        "capability-roles",
         "fresh-check",
         "apply:001_first.sql",
         "fence-exit",

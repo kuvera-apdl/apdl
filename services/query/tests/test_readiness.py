@@ -112,8 +112,12 @@ class ClickHouseClient:
 @pytest.mark.asyncio
 async def test_postgres_decision_schema_accepts_exact_capabilities():
     assert readiness.REQUIRED_POSTGRES_MIGRATION == (
-        41,
-        "041_boundary_marker_retry_quarantine.sql",
+        58,
+        "058_agent_service_capabilities.sql",
+    )
+    assert readiness.REQUIRED_CLICKHOUSE_MIGRATION == (
+        16,
+        "016_personal_data_retention.sql",
     )
     await readiness.assert_postgres_decision_schema(
         PostgresPool(PostgresConnection())

@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 from scipy.stats import fisher_exact
 
-from app.auth import require_project
+from app.auth import delegated_auth_headers, require_project
 from app.clickhouse.client import ClickHouseClient
 from app.clickhouse.queries import (
     EXPERIMENT_ANALYSIS_QUERY,
@@ -325,10 +325,12 @@ async def experiment_results(
     principal = request.state.principal
     pid = project_id if project_id is not None else principal.project_id
     require_project(request, pid, "query:read")
-    api_key = request.headers.get("x-api-key", "")
-
     try:
-        metadata = await fetch_experiment_analysis(pid, experiment_key, api_key)
+        metadata = await fetch_experiment_analysis(
+            pid,
+            experiment_key,
+            delegated_auth_headers(request),
+        )
     except ExperimentNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ExperimentNotAnalyzable as exc:

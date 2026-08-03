@@ -7,7 +7,7 @@ from typing import Any, Literal, NotRequired, TypeAlias, TypedDict
 
 import httpx
 
-from app.service_auth import service_headers
+from app.service_auth import ServiceCapabilityContext, service_headers
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 _TIMEOUT = 30.0
@@ -40,19 +40,30 @@ class EventSelectorPayload(TypedDict):
     filters: list[EventPropertyFilterPayload]
 
 
-async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def _post(
+    capability: ServiceCapabilityContext,
+    path: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     """POST to the query service and return the JSON response."""
-    async with httpx.AsyncClient(base_url=QUERY_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            path,
-            json=payload,
-            headers=service_headers(str(payload["project_id"])),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if payload.get("project_id") != capability.project_id:
+        raise ValueError("Query payload project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("query",),
+        roles=("query:read",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=QUERY_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.post(path, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def query_events(
+    capability: ServiceCapabilityContext,
     project_id: str,
     start_date: str,
     end_date: str,
@@ -66,7 +77,7 @@ async def query_events(
         end_date: End date (YYYY-MM-DD).
         selectors: Event selectors to count.
     """
-    return await _post("/v1/query/events/count", {
+    return await _post(capability, "/v1/query/events/count", {
         "project_id": project_id,
         "start_date": start_date,
         "end_date": end_date,
@@ -75,6 +86,7 @@ async def query_events(
 
 
 async def discover_events(
+    capability: ServiceCapabilityContext,
     project_id: str,
     start_date: str,
     end_date: str,
@@ -91,7 +103,7 @@ async def discover_events(
         end_date: End date (YYYY-MM-DD).
         limit: Max distinct event names to return.
     """
-    return await _post("/v1/query/events/names", {
+    return await _post(capability, "/v1/query/events/names", {
         "project_id": project_id,
         "start_date": start_date,
         "end_date": end_date,
@@ -100,6 +112,7 @@ async def discover_events(
 
 
 async def query_timeseries(
+    capability: ServiceCapabilityContext,
     project_id: str,
     selector: EventSelectorPayload,
     start_date: str,
@@ -122,7 +135,7 @@ async def query_timeseries(
         interval = "1 DAY"
     else:
         interval = interval.upper()
-    return await _post("/v1/query/events/timeseries", {
+    return await _post(capability, "/v1/query/events/timeseries", {
         "project_id": project_id,
         "selector": selector,
         "start_date": start_date,
@@ -132,6 +145,7 @@ async def query_timeseries(
 
 
 async def query_funnel(
+    capability: ServiceCapabilityContext,
     project_id: str,
     steps: list[EventSelectorPayload],
     start_date: str,
@@ -147,7 +161,7 @@ async def query_funnel(
         end_date: End date (YYYY-MM-DD).
         window_days: Max days between first and last step.
     """
-    return await _post("/v1/query/funnel", {
+    return await _post(capability, "/v1/query/funnel", {
         "project_id": project_id,
         "steps": steps,
         "start_date": start_date,
@@ -157,6 +171,7 @@ async def query_funnel(
 
 
 async def query_retention(
+    capability: ServiceCapabilityContext,
     project_id: str,
     cohort_selector: EventSelectorPayload,
     return_selector: EventSelectorPayload,
@@ -177,7 +192,7 @@ async def query_retention(
             selected window. Existing actors may re-enter on that match.
         period: "day" or "week".
     """
-    return await _post("/v1/query/retention", {
+    return await _post(capability, "/v1/query/retention", {
         "project_id": project_id,
         "cohort_selector": cohort_selector,
         "return_selector": return_selector,
@@ -189,6 +204,7 @@ async def query_retention(
 
 
 async def query_cohort(
+    capability: ServiceCapabilityContext,
     project_id: str,
     cohort_property: str,
     metric_selector: EventSelectorPayload,
@@ -204,7 +220,7 @@ async def query_cohort(
         start_date: Start date (YYYY-MM-DD).
         end_date: End date (YYYY-MM-DD).
     """
-    return await _post("/v1/query/cohort", {
+    return await _post(capability, "/v1/query/cohort", {
         "project_id": project_id,
         "cohort_property": cohort_property,
         "metric_selector": metric_selector,
@@ -214,6 +230,7 @@ async def query_cohort(
 
 
 async def query_breakdown(
+    capability: ServiceCapabilityContext,
     project_id: str,
     selector: EventSelectorPayload,
     property_name: str,
@@ -231,7 +248,7 @@ async def query_breakdown(
         end_date: End date (YYYY-MM-DD).
         limit: Max number of distinct values to return.
     """
-    return await _post("/v1/query/events/breakdown", {
+    return await _post(capability, "/v1/query/events/breakdown", {
         "project_id": project_id,
         "selector": selector,
         "property": property_name,

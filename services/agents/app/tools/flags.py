@@ -8,56 +8,100 @@ from urllib.parse import quote
 
 import httpx
 
-from app.service_auth import service_headers
+from app.service_auth import ServiceCapabilityContext, service_headers
 
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
 
 
 async def _get(
-    project_id: str, path: str, params: dict[str, Any] | None = None
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    path: str,
+    params: dict[str, Any] | None = None,
 ) -> Any:
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get(path, params=params, headers=service_headers(project_id))
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Flag project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("agents:read",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.get(path, params=params, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def _post(
+    capability: ServiceCapabilityContext,
     project_id: str,
     path: str,
     payload: dict[str, Any],
     params: dict[str, Any] | None = None,
 ) -> Any:
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            path,
-            json=payload,
-            params=params,
-            headers=service_headers(project_id),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Flag project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("config:write",),
+        request_method="POST",
+        request_path=path,
+        request_json=payload,
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.post(
+                path,
+                json=payload,
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def _put(
+    capability: ServiceCapabilityContext,
     project_id: str,
     path: str,
     payload: dict[str, Any],
     params: dict[str, Any] | None = None,
 ) -> Any:
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.put(
-            path,
-            json=payload,
-            params=params,
-            headers=service_headers(project_id),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Flag project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("config:write",),
+        request_method="PUT",
+        request_path=path,
+        request_json=payload,
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.put(
+                path,
+                json=payload,
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
-async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
+async def get_active_flags(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+) -> list[dict[str, Any]]:
     """Get all active feature flags for a project.
 
     Args:
@@ -67,12 +111,16 @@ async def get_active_flags(project_id: str) -> list[dict[str, Any]]:
         List of flag configurations.
     """
     response = await _get(
-        project_id, "/v1/admin/flags", params={"project_id": project_id}
+        capability,
+        project_id,
+        "/v1/admin/flags",
+        params={"project_id": project_id},
     )
     return response.get("flags", []) if isinstance(response, dict) else response
 
 
 async def create_flag(
+    capability: ServiceCapabilityContext,
     project_id: str,
     key: str,
     name: str,
@@ -133,6 +181,7 @@ async def create_flag(
         "guardrails": guardrails or [],
     }
     return await _post(
+        capability,
         project_id,
         "/v1/admin/flags",
         payload,
@@ -141,6 +190,7 @@ async def create_flag(
 
 
 async def update_flag(
+    capability: ServiceCapabilityContext,
     project_id: str,
     key: str,
     version: int,
@@ -199,6 +249,7 @@ async def update_flag(
     # Flag keys are LLM-authored: quote the path segment so a key containing
     # '/' or '?' cannot reroute the PUT to a different admin endpoint.
     return await _put(
+        capability,
         project_id,
         f"/v1/admin/flags/{quote(key, safe='')}",
         payload,
@@ -207,6 +258,7 @@ async def update_flag(
 
 
 async def transition_flag(
+    capability: ServiceCapabilityContext,
     project_id: str,
     key: str,
     *,
@@ -215,6 +267,7 @@ async def transition_flag(
 ) -> dict[str, Any]:
     """Transition a standalone flag through Config's lifecycle authority."""
     return await _post(
+        capability,
         project_id,
         f"/v1/admin/flags/{quote(key, safe='')}/transition",
         {"version": version, "target_state": target_state},
@@ -223,6 +276,7 @@ async def transition_flag(
 
 
 async def disable_flag(
+    capability: ServiceCapabilityContext,
     project_id: str,
     key: str,
     *,
@@ -236,6 +290,7 @@ async def disable_flag(
     """
     payload = {"version": version, "reason": reason, "evidence": evidence or {}}
     return await _post(
+        capability,
         project_id,
         f"/v1/admin/flags/{quote(key, safe='')}/disable",
         payload,
@@ -244,6 +299,7 @@ async def disable_flag(
 
 
 async def evaluate_gate(
+    capability: ServiceCapabilityContext,
     project_id: str,
     key: str,
     user_id: str = "",
@@ -277,11 +333,21 @@ async def evaluate_gate(
         "log_exposure": log_exposure,
     }
 
-    async with httpx.AsyncClient(base_url=CONFIG_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            "/v1/evaluate",
-            json=payload,
-            headers=service_headers(project_id),
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Flag project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("config:evaluate",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.post(
+                "/v1/evaluate",
+                json=payload,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()

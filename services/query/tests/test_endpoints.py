@@ -1168,7 +1168,11 @@ async def test_completed_experiment_retains_live_stats_without_claiming_complete
     assert "comparisons" not in body
     assert "recommendation" not in body
     assert body["deployment_readiness"] == "not_assessed"
-    fetch.assert_awaited_once_with(PROJECT_ID, "exp_123", PROJECT_API_KEY)
+    fetch.assert_awaited_once_with(
+        PROJECT_ID,
+        "exp_123",
+        {"X-API-Key": PROJECT_API_KEY},
+    )
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ services:
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
       APDL_RUNTIME_POSTGRES_PASSWORD: ${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}
+      APDL_AGENTS_POSTGRES_PASSWORD: ${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}
       APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
     healthcheck:
       test:
@@ -83,6 +84,7 @@ services:
       PGPASSWORD: apdl_dev
       PGDATABASE: apdl
       POSTGRES_MIGRATIONS_DIR: /migrations
+      APDL_AGENTS_POSTGRES_PASSWORD: ${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}
       APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
     depends_on:
       postgres:

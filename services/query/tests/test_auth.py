@@ -5,10 +5,15 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.auth import PostgresAuthenticator, authenticate_request
+from app.auth import (
+    PostgresAuthenticator,
+    authenticate_request,
+    delegated_auth_headers,
+)
 
 
 API_KEY = "proj_verifiedproject_0123456789abcdef0123456789abcdef"
+CAPABILITY = "apdlcap_" + "A" * 43
 
 
 class FakeConnection:
@@ -48,6 +53,24 @@ def credential_row(**overrides):
         "roles": ["query:read", "events:write"],
         "active": True,
         "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+    }
+    row.update(overrides)
+    return row
+
+
+def capability_row(**overrides):
+    row = {
+        "capability_id": "00000000-0000-0000-0000-000000000001",
+        "token_hash": hashlib.sha256(CAPABILITY.encode("ascii")).hexdigest(),
+        "project_id": "verifiedproject",
+        "execution_kind": "agent_run",
+        "execution_id": "run-1",
+        "run_id": "run-1",
+        "execution_owner_id": "lease-1",
+        "roles": ["query:read"],
+        "request_sha256": None,
+        "consumed_at": None,
+        "execution_active": True,
     }
     row.update(overrides)
     return row
@@ -96,6 +119,127 @@ async def test_authentication_rejects_revoked_expired_or_wrong_key(overrides):
         FakePool(credential_row(**overrides))
     ).authenticate(API_KEY)
     assert principal is None
+
+
+@pytest.mark.asyncio
+async def test_internal_capability_derives_query_authority_from_live_record():
+    pool = FakePool(capability_row())
+    request = SimpleNamespace(
+        headers={"x-apdl-internal-capability": CAPABILITY},
+        app=SimpleNamespace(
+            state=SimpleNamespace(authenticator=PostgresAuthenticator(pool))
+        ),
+        state=SimpleNamespace(),
+    )
+
+    principal = await authenticate_request(request)
+
+    assert principal is not None
+    assert principal.project_id == "verifiedproject"
+    assert principal.roles == frozenset({"query:read"})
+    assert principal.auth_kind == "internal_capability"
+    assert principal.capability_run_id == "run-1"
+    assert principal.capability_execution_kind == "agent_run"
+    assert request.state.principal is principal
+    query, args = pool.connection.calls[0]
+    assert "FROM agent_service_capabilities AS capability" in query
+    assert "'query' = ANY(capability.audiences)" in query
+    assert "capability.issued_at <= now()" in query
+    assert "capability.expires_at > now()" in query
+    assert "run.lease_expires_at > now()" in query
+    assert args == (hashlib.sha256(CAPABILITY.encode("ascii")).hexdigest(),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        None,  # Includes unknown and SQL-filtered expired capability records.
+        capability_row(execution_active=False),
+        capability_row(roles=["config:read"]),
+        capability_row(roles=["query:read", "config:read"]),
+    ],
+)
+async def test_internal_capability_rejects_expired_stale_or_non_query_authority(row):
+    principal = await PostgresAuthenticator(FakePool(row)).authenticate_capability(
+        CAPABILITY
+    )
+
+    assert principal is None
+
+
+@pytest.mark.asyncio
+async def test_query_read_capability_remains_reusable_for_delegation():
+    pool = FakePool(capability_row())
+    authenticator = PostgresAuthenticator(pool)
+
+    first = await authenticator.authenticate_capability(CAPABILITY)
+    second = await authenticator.authenticate_capability(CAPABILITY)
+
+    assert first is not None
+    assert second is not None
+    assert len(pool.connection.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row",
+    [
+        capability_row(request_sha256="a" * 64),
+        capability_row(consumed_at=datetime.now(timezone.utc)),
+    ],
+)
+async def test_query_read_capability_rejects_mutation_binding_state(row):
+    principal = await PostgresAuthenticator(FakePool(row)).authenticate_capability(
+        CAPABILITY
+    )
+
+    assert principal is None
+
+
+@pytest.mark.asyncio
+async def test_authentication_rejects_dual_api_key_and_internal_capability():
+    calls: list[tuple[str, str]] = []
+
+    class CapturingAuthenticator:
+        async def authenticate(self, value):
+            calls.append(("api_key", value))
+            return None
+
+        async def authenticate_capability(self, value):
+            calls.append(("capability", value))
+            return None
+
+    request = SimpleNamespace(
+        headers={
+            "x-api-key": API_KEY,
+            "x-apdl-internal-capability": CAPABILITY,
+        },
+        app=SimpleNamespace(
+            state=SimpleNamespace(authenticator=CapturingAuthenticator())
+        ),
+        state=SimpleNamespace(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await authenticate_request(request)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Multiple authentication mechanisms are not allowed"
+    assert calls == []
+
+
+def test_delegated_auth_forwards_exact_verified_capability():
+    request = SimpleNamespace(
+        headers={"x-apdl-internal-capability": CAPABILITY},
+        state=SimpleNamespace(
+            principal=SimpleNamespace(auth_kind="internal_capability")
+        ),
+    )
+
+    assert delegated_auth_headers(request) == {
+        "X-APDL-Internal-Capability": CAPABILITY
+    }
 
 
 @pytest.mark.asyncio

@@ -6,10 +6,23 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 55
-MIGRATION_NAME = "055_codegen_tenant_publication.sql"
+MIGRATION_VERSION = 58
+MIGRATION_NAME = "058_agent_service_capabilities.sql"
 REQUIRED_COLUMNS = frozenset(
     {
+        ("agent_service_capabilities", "capability_id"),
+        ("agent_service_capabilities", "token_hash"),
+        ("agent_service_capabilities", "project_id"),
+        ("agent_service_capabilities", "execution_kind"),
+        ("agent_service_capabilities", "execution_id"),
+        ("agent_service_capabilities", "run_id"),
+        ("agent_service_capabilities", "execution_owner_id"),
+        ("agent_service_capabilities", "audiences"),
+        ("agent_service_capabilities", "roles"),
+        ("agent_service_capabilities", "request_sha256"),
+        ("agent_service_capabilities", "issued_at"),
+        ("agent_service_capabilities", "expires_at"),
+        ("agent_service_capabilities", "consumed_at"),
         ("admin_project_execution_authorizations", "project_id"),
         ("admin_project_execution_authorizations", "authorization_source"),
         ("admin_project_execution_authorizations", "actor"),

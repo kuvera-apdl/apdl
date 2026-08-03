@@ -16,7 +16,11 @@ def authorized_codegen_request() -> Iterable[
     """Keep existing endpoint tests focused while allowing explicit tenant tests."""
 
     def authorize(
-        project_id: str = "demo", roles: frozenset[str] | None = None
+        project_id: str = "demo",
+        roles: frozenset[str] | None = None,
+        *,
+        auth_kind: str = "api_key",
+        capability_run_id: str | None = None,
     ) -> None:
         resolved_roles = roles or frozenset({"agents:read", "agents:manage"})
 
@@ -26,6 +30,8 @@ def authorized_codegen_request() -> Iterable[
                 project_id=project_id,
                 roles=resolved_roles,
                 execution_authorized=True,
+                auth_kind=auth_kind,
+                capability_run_id=capability_run_id,
             )
             request.state.principal = principal
             return principal

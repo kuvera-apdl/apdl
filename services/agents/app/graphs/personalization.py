@@ -57,6 +57,7 @@ class PersonalizationAgent(BaseAgent):
         async def _fetch_breakdown(prop: str) -> dict | None:
             try:
                 result = await query_breakdown(
+                    capability=ctx.service_capability(),
                     project_id=ctx.project_id,
                     # Real ingested data names pageviews "page" (the JS SDK's
                     # name, standardized project-wide) — "page_view" matched
@@ -78,7 +79,10 @@ class PersonalizationAgent(BaseAgent):
             *[_fetch_breakdown(p) for p in _SEGMENT_PROPERTIES]
         )
         try:
-            existing = await list_ui_configs(project_id=ctx.project_id)
+            existing = await list_ui_configs(
+                capability=ctx.service_capability(),
+                project_id=ctx.project_id,
+            )
         except Exception:
             existing = []
 
@@ -125,6 +129,7 @@ class PersonalizationAgent(BaseAgent):
 
             try:
                 await create_ui_config(
+                    capability=ctx.service_capability(),
                     project_id=ctx.project_id,
                     config_id=config.get("config_id", f"ui_auto_{idx}"),
                     component=config.get("component", "feature_card"),

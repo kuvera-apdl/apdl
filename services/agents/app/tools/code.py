@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.service_auth import service_headers
+from app.service_auth import ServiceCapabilityContext, service_headers
 
 CODEGEN_SERVICE_URL = os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084")
 _TIMEOUT = 30.0
@@ -65,32 +65,60 @@ def derive_changeset_idempotency_key(scope: str, *identity: str) -> str:
 
 
 async def _get(
-    project_id: str, path: str, params: dict[str, Any] | None = None
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    path: str,
+    params: dict[str, Any] | None = None,
 ) -> Any:
-    async with httpx.AsyncClient(base_url=CODEGEN_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.get(path, params=params, headers=service_headers(project_id))
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Codegen project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("codegen",),
+        roles=("agents:read",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CODEGEN_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.get(path, params=params, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def _post(
-    project_id: str, path: str, payload: dict[str, Any] | None = None
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
 ) -> Any:
-    async with httpx.AsyncClient(base_url=CODEGEN_SERVICE_URL, timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            path, json=payload, headers=service_headers(project_id)
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Codegen project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("codegen",),
+        roles=("agents:manage",),
+        request_method="POST",
+        request_path=path,
+        request_json=payload,
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CODEGEN_SERVICE_URL,
+            timeout=_TIMEOUT,
+        ) as client:
+            resp = await client.post(path, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def open_changeset(
+    capability: ServiceCapabilityContext,
     project_id: str,
     title: str,
     spec: str,
     *,
     idempotency_key: str,
-    run_id: str | None = None,
+    run_id: str,
     base_branch: str | None = None,
     context: dict[str, Any] | None = None,
     constraints: list[str] | None = None,
@@ -104,6 +132,7 @@ async def open_changeset(
 
     payload: dict[str, Any] = {
         "project_id": project_id,
+        "run_id": run_id,
         "idempotency_key": idempotency_key,
         "task": {
             "title": title,
@@ -112,20 +141,31 @@ async def open_changeset(
             "constraints": constraints or [],
         },
     }
-    if run_id is not None:
-        payload["run_id"] = run_id
     if base_branch is not None:
         payload["base_branch"] = base_branch
-    return await _post(project_id, "/v1/changesets", payload)
+    if run_id != capability.run_id:
+        raise ValueError("Codegen run_id must match capability run")
+    return await _post(capability, project_id, "/v1/changesets", payload)
 
 
-async def get_changeset_creation_capability(project_id: str) -> str:
+async def get_changeset_creation_capability(
+    project_id: str,
+    delegated_headers: dict[str, str],
+) -> str:
     """Return Codegen's strict authenticated capability for one project."""
-    payload = await _get(
-        project_id,
-        "/v1/capabilities/changeset-creation",
-        params={"project_id": project_id},
-    )
+    if set(delegated_headers) != {"X-API-Key"}:
+        raise ValueError("Codegen capability probe requires one delegated API key")
+    async with httpx.AsyncClient(
+        base_url=CODEGEN_SERVICE_URL,
+        timeout=_TIMEOUT,
+    ) as client:
+        response = await client.get(
+            "/v1/capabilities/changeset-creation",
+            params={"project_id": project_id},
+            headers=delegated_headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
     if not isinstance(payload, dict) or set(payload) != {
         "project_id",
         "changeset_creation",
@@ -157,30 +197,58 @@ async def get_changeset_creation_capability(project_id: str) -> str:
     return state
 
 
-async def get_changeset(project_id: str, changeset_id: str) -> dict[str, Any]:
+async def get_changeset(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    changeset_id: str,
+) -> dict[str, Any]:
     """Fetch lifecycle, GitHub PR, external CI, and remediation projections."""
-    return await _get(project_id, f"/v1/changesets/{_seg(changeset_id)}")
+    return await _get(
+        capability,
+        project_id,
+        f"/v1/changesets/{_seg(changeset_id)}",
+    )
 
 
-async def get_repo_context(project_id: str) -> dict[str, Any]:
+async def get_repo_context(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+) -> dict[str, Any]:
     """Canonical repo profile (ecosystems, commands, contracts, CI, uncertainty).
 
     Grounds the feature-proposal prompt in what the repository actually is, so
     specs name real files and stay inside the repo's capabilities instead of
     demanding infrastructure it does not have.
     """
-    return await _get(project_id, f"/v1/connections/{_seg(project_id)}/repo-context")
+    return await _get(
+        capability,
+        project_id,
+        f"/v1/connections/{_seg(project_id)}/repo-context",
+    )
 
 
-async def list_changesets(project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+async def list_changesets(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
     """List the project's changesets (newest first), incl. task title + PR state."""
     return await _get(
+        capability,
         project_id,
         "/v1/changesets",
         params={"project_id": project_id, "limit": limit},
     )
 
 
-async def revert_changeset(project_id: str, changeset_id: str) -> dict[str, Any]:
+async def revert_changeset(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+    changeset_id: str,
+) -> dict[str, Any]:
     """Roll back a merged changeset by opening a revert PR (a new changeset)."""
-    return await _post(project_id, f"/v1/changesets/{_seg(changeset_id)}/revert")
+    return await _post(
+        capability,
+        project_id,
+        f"/v1/changesets/{_seg(changeset_id)}/revert",
+    )

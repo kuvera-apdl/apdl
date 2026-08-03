@@ -65,13 +65,20 @@ def _view(status: str = "queued") -> ApprovalCommandView:
 
 def _client() -> AsyncClient:
     app.state.pg_pool = object()
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    return AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": "proj_demo_0123456789abcdef"},
+    )
 
 
 @pytest.fixture(autouse=True)
 def codegen_available(monkeypatch):
-    async def available(project_id: str) -> str:
+    async def available(project_id: str, delegated_headers: dict[str, str]) -> str:
         assert project_id == "demo"
+        assert delegated_headers == {
+            "X-API-Key": "proj_demo_0123456789abcdef"
+        }
         return "available"
 
     monkeypatch.setattr(approvals, "codegen_changeset_capability", available)
@@ -137,8 +144,11 @@ async def test_post_returns_only_the_queued_command_envelope(monkeypatch) -> Non
 async def test_post_rejects_codegen_effect_when_capability_is_disabled(
     monkeypatch,
 ) -> None:
-    async def disabled(project_id: str) -> str:
+    async def disabled(project_id: str, delegated_headers: dict[str, str]) -> str:
         assert project_id == "demo"
+        assert delegated_headers == {
+            "X-API-Key": "proj_demo_0123456789abcdef"
+        }
         return "disabled"
 
     async def fake_enqueue(pool: Any, **kwargs: Any) -> ApprovalCommandView:
@@ -594,6 +604,7 @@ async def test_worker_reserves_quota_before_codegen_and_passes_persisted_key(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
+    captured: dict[str, Any] = {}
     effect = _effect("open_code_changeset", quota="open_pull_request")
 
     async def fake_reserve(pool: Any, **kwargs: Any) -> object:
@@ -601,6 +612,7 @@ async def test_worker_reserves_quota_before_codegen_and_passes_persisted_key(
         return object()
 
     async def fake_open(**kwargs: Any) -> dict[str, str]:
+        captured.update(kwargs)
         calls.append(("codegen", kwargs["idempotency_key"]))
         return {"changeset_id": "cs-1"}
 
@@ -618,6 +630,10 @@ async def test_worker_reserves_quota_before_codegen_and_passes_persisted_key(
         ("reserve", effect.idempotency_key),
         ("codegen", effect.idempotency_key),
     ]
+    assert captured["capability"].execution_kind == "approval_effect"
+    assert captured["capability"].execution_id == effect.effect_id
+    assert captured["capability"].run_id == effect.run_id
+    assert captured["capability"].execution_owner_id == effect.lease_owner_id
 
 
 @pytest.mark.asyncio
@@ -625,6 +641,7 @@ async def test_worker_reserves_quota_before_config_and_passes_persisted_key(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, str]] = []
+    captured: dict[str, Any] = {}
     effect = _effect("stage_experiment_draft", quota="create_experiment")
     object.__setattr__(
         effect,
@@ -638,8 +655,13 @@ async def test_worker_reserves_quota_before_config_and_passes_persisted_key(
         return object()
 
     async def fake_stage(
-        project_id: str, payload: dict[str, Any], *, idempotency_key: str
+        capability,
+        project_id: str,
+        payload: dict[str, Any],
+        *,
+        idempotency_key: str,
     ) -> None:
+        captured["capability"] = capability
         calls.append(("config", idempotency_key))
 
     async def fake_record(*args: Any, **kwargs: Any) -> None:
@@ -656,6 +678,10 @@ async def test_worker_reserves_quota_before_config_and_passes_persisted_key(
         ("reserve", effect.idempotency_key),
         ("config", effect.idempotency_key),
     ]
+    assert captured["capability"].execution_kind == "approval_effect"
+    assert captured["capability"].execution_id == effect.effect_id
+    assert captured["capability"].run_id == effect.run_id
+    assert captured["capability"].execution_owner_id == effect.lease_owner_id
 
 
 def test_http_handler_has_no_process_local_effect_symbols() -> None:

@@ -108,7 +108,15 @@ async def create_changeset(
 ) -> Changeset:
     """Enqueue a changeset for a connected project."""
     pool: asyncpg.Pool = request.app.state.pg_pool
-    require_project(request, body.project_id, "agents:manage")
+    principal = require_project(request, body.project_id, "agents:manage")
+    if (
+        principal.auth_kind == "internal_capability"
+        and body.run_id != principal.capability_run_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Internal capability is bound to a different agent run",
+        )
     task = body.task.model_dump()
     request_sha256 = store.changeset_request_sha256(
         project_id=body.project_id,

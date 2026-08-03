@@ -39,9 +39,9 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
-def test_startup_requires_tenant_publication_migration():
-    assert MIGRATION_VERSION == 55
-    assert MIGRATION_NAME == "055_codegen_tenant_publication.sql"
+def test_startup_requires_service_capability_migration():
+    assert MIGRATION_VERSION == 58
+    assert MIGRATION_NAME == "058_agent_service_capabilities.sql"
     assert (
         "admin_project_execution_authorizations",
         "authorization_source",
@@ -55,10 +55,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_tenant_publication_migration():
-    with pytest.raises(RuntimeError, match="055_codegen_tenant_publication.sql"):
+async def test_rejects_database_without_service_capability_migration():
+    with pytest.raises(RuntimeError, match="058_agent_service_capabilities.sql"):
         await assert_schema_ready(
-            FakeConn(migration_name="054_codegen_project_llm_routing.sql")
+            FakeConn(migration_name="057_admin_proxy_audit_llm_vault.sql")
         )
 
 

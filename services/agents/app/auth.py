@@ -148,3 +148,14 @@ def require_project(request: Request, project_id: str, role: str) -> Principal:
             detail="Credential is not authorized for this project",
         )
     return principal
+
+
+def delegated_api_key_headers(request: Request) -> dict[str, str]:
+    """Forward the already-verified caller key for one synchronous probe."""
+    api_key = request.headers.get("x-api-key", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Validated API key is unavailable for delegation",
+        )
+    return {"X-API-Key": api_key}

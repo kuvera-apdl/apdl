@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 44
-MIGRATION_NAME = "044_operator_recovery_and_retention.sql"
+MIGRATION_VERSION = 58
+MIGRATION_NAME = "058_agent_service_capabilities.sql"
 REQUIRED_CONSTRAINTS = frozenset(
     {
         ("flags", "flags_variants_canonical_check"),
@@ -17,6 +17,19 @@ REQUIRED_CONSTRAINTS = frozenset(
 )
 REQUIRED_COLUMNS = frozenset(
     {
+        ("agent_service_capabilities", "capability_id"),
+        ("agent_service_capabilities", "token_hash"),
+        ("agent_service_capabilities", "project_id"),
+        ("agent_service_capabilities", "execution_kind"),
+        ("agent_service_capabilities", "execution_id"),
+        ("agent_service_capabilities", "run_id"),
+        ("agent_service_capabilities", "execution_owner_id"),
+        ("agent_service_capabilities", "audiences"),
+        ("agent_service_capabilities", "roles"),
+        ("agent_service_capabilities", "request_sha256"),
+        ("agent_service_capabilities", "issued_at"),
+        ("agent_service_capabilities", "expires_at"),
+        ("agent_service_capabilities", "consumed_at"),
         ("flags", "key"),
         ("flags", "project_id"),
         ("flags", "state"),

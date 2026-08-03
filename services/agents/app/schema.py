@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 51
-MIGRATION_NAME = "051_agents_project_setup.sql"
+MIGRATION_VERSION = 58
+MIGRATION_NAME = "058_agent_service_capabilities.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -30,6 +30,19 @@ REQUIRED_COLUMNS = frozenset(
         ("agent_runs", "lease_expires_at"),
         ("agent_runs", "config"),
         ("agent_runs", "updated_at"),
+        ("agent_service_capabilities", "capability_id"),
+        ("agent_service_capabilities", "token_hash"),
+        ("agent_service_capabilities", "project_id"),
+        ("agent_service_capabilities", "execution_kind"),
+        ("agent_service_capabilities", "execution_id"),
+        ("agent_service_capabilities", "run_id"),
+        ("agent_service_capabilities", "execution_owner_id"),
+        ("agent_service_capabilities", "audiences"),
+        ("agent_service_capabilities", "roles"),
+        ("agent_service_capabilities", "request_sha256"),
+        ("agent_service_capabilities", "issued_at"),
+        ("agent_service_capabilities", "expires_at"),
+        ("agent_service_capabilities", "consumed_at"),
         ("agent_audit_log", "run_id"),
         ("agent_audit_log", "schema_version"),
         ("agent_audit_log", "occurred_at"),
@@ -253,9 +266,18 @@ async def assert_schema_ready(conn: Any) -> None:
     tables = sorted({table for table, _ in REQUIRED_COLUMNS})
     rows: list[Mapping[str, str]] = await conn.fetch(
         """
-        SELECT table_name, column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = ANY($1::text[])
+        SELECT relation.relname AS table_name,
+               attribute.attname AS column_name
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = relation.relnamespace
+        JOIN pg_catalog.pg_attribute AS attribute
+          ON attribute.attrelid = relation.oid
+         AND attribute.attnum > 0
+         AND NOT attribute.attisdropped
+        WHERE namespace.nspname = 'public'
+          AND relation.relkind IN ('r', 'p')
+          AND relation.relname = ANY($1::text[])
         """,
         tables,
     )
@@ -266,6 +288,71 @@ async def assert_schema_ready(conn: Any) -> None:
         raise RuntimeError(
             f"Agents PostgreSQL schema is incomplete ({formatted}); "
             "restore the database or apply migrations before startup"
+        )
+
+    issuer_ready = await conn.fetchval(
+        """
+        SELECT current_user = 'apdl_agents'
+           AND has_table_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'SELECT'
+               )
+           AND has_table_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'DELETE'
+               )
+           AND NOT has_table_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'UPDATE'
+               )
+           AND (
+                 SELECT bool_and(
+                     has_column_privilege(
+                         current_user,
+                         'public.agent_service_capabilities',
+                         required.column_name,
+                         'INSERT'
+                     )
+                 )
+                 FROM unnest(ARRAY[
+                     'token_hash',
+                     'project_id',
+                     'execution_kind',
+                     'execution_id',
+                     'run_id',
+                     'execution_owner_id',
+                     'audiences',
+                     'roles',
+                     'request_sha256',
+                     'expires_at'
+                 ]::text[]) AS required(column_name)
+               )
+           AND NOT has_column_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'capability_id',
+                 'INSERT'
+               )
+           AND NOT has_column_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'issued_at',
+                 'INSERT'
+               )
+           AND NOT has_column_privilege(
+                 current_user,
+                 'public.agent_service_capabilities',
+                 'consumed_at',
+                 'INSERT'
+               )
+        """
+    )
+    if issuer_ready is not True:
+        raise RuntimeError(
+            "Agents must use the dedicated apdl_agents capability issuer identity"
         )
 
     current_dimension = await conn.fetchval(

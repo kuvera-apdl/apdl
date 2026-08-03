@@ -149,4 +149,6 @@ allowed `Origin` and a session-bound double-submit CSRF token. The Admin API
 selects the project-scoped service key from server environment configuration,
 strips caller-supplied credentials, checks the user's project role, and then
 proxies the request. Production deployments must use HTTPS, secure cookies,
-and a least-privilege `APDL_SERVICE_API_KEYS` map.
+and least-privilege Admin proxy credentials. `APDL_SERVICE_API_KEYS` is an
+optional Admin API-only persistent map; Agents uses separate short-lived
+execution capabilities.

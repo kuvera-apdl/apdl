@@ -307,7 +307,10 @@ class ExperimentEvaluationAgent(BaseAgent):
         state: dict[str, Any],
         working: dict[str, Any],
     ) -> dict[str, Any]:
-        experiments = await get_active_experiments(ctx.project_id)
+        experiments = await get_active_experiments(
+            ctx.service_capability(),
+            ctx.project_id,
+        )
         completed = _completed_experiment_keys(experiments)
         selected = completed[:_MAX_EXPERIMENTS_PER_RUN]
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_QUERIES)
@@ -315,6 +318,7 @@ class ExperimentEvaluationAgent(BaseAgent):
         async def fetch(experiment_key: str) -> tuple[str, Any]:
             async with semaphore:
                 return experiment_key, await get_experiment_results(
+                    ctx.service_capability(),
                     experiment_key,
                     ctx.project_id,
                 )

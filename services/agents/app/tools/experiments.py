@@ -13,7 +13,7 @@ from app.models.experiment_design import (
     EXPERIMENT_BUCKET_BY_VALUES,
     ExperimentBucketBy,
 )
-from app.service_auth import service_headers
+from app.service_auth import ServiceCapabilityContext, service_headers
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
@@ -31,7 +31,10 @@ _STATISTICAL_PLAN_FIELDS = {
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 
 
-async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
+async def get_active_experiments(
+    capability: ServiceCapabilityContext,
+    project_id: str,
+) -> list[dict[str, Any]]:
     """Get all active experiments for a project from the config service.
 
     Args:
@@ -40,14 +43,24 @@ async def get_active_experiments(project_id: str) -> list[dict[str, Any]]:
     Returns:
         List of active experiment configurations.
     """
-    async with httpx.AsyncClient(
-        base_url=CONFIG_SERVICE_URL,
-        timeout=_TIMEOUT,
-        headers=service_headers(project_id),
-    ) as client:
-        resp = await client.get("/v1/admin/experiments", params={"project_id": project_id})
-        resp.raise_for_status()
-        data = resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Experiment project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("agents:read",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+            headers=headers,
+        ) as client:
+            resp = await client.get(
+                "/v1/admin/experiments",
+                params={"project_id": project_id},
+            )
+            resp.raise_for_status()
+            data = resp.json()
         if not isinstance(data, dict) or set(data) != {"experiments", "count"}:
             raise ValueError(
                 "Config experiments response must contain exactly experiments and count"
@@ -183,6 +196,7 @@ def _strict_statistical_plan(plan: Any) -> dict[str, Any]:
 
 
 async def create_experiment_draft(
+    capability: ServiceCapabilityContext,
     project_id: str,
     idempotency_key: str,
     experiment_id: str,
@@ -265,21 +279,29 @@ async def create_experiment_draft(
     if targeting_rules:
         payload["targeting_rules"] = targeting_rules
 
-    async with httpx.AsyncClient(
-        base_url=CONFIG_SERVICE_URL,
-        timeout=_TIMEOUT,
-        headers={
-            **service_headers(project_id),
-            "Idempotency-Key": idempotency_key,
-        },
-    ) as client:
-        resp = await client.post(
-            "/v1/admin/experiments",
-            json=payload,
-            params={"project_id": project_id},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Experiment project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config",),
+        roles=("config:write",),
+        request_method="POST",
+        request_path="/v1/admin/experiments",
+        request_json=payload,
+        idempotency_key=idempotency_key,
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=CONFIG_SERVICE_URL,
+            timeout=_TIMEOUT,
+            headers={**headers, "Idempotency-Key": idempotency_key},
+        ) as client:
+            resp = await client.post(
+                "/v1/admin/experiments",
+                json=payload,
+                params={"project_id": project_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def calculate_sample_size(
@@ -347,6 +369,7 @@ async def calculate_sample_size(
 
 
 async def get_experiment_results(
+    capability: ServiceCapabilityContext,
     experiment_id: str,
     project_id: str,
 ) -> dict[str, Any]:
@@ -359,17 +382,24 @@ async def get_experiment_results(
     Returns:
         Full experiment analysis results.
     """
-    async with httpx.AsyncClient(
-        base_url=QUERY_SERVICE_URL,
-        timeout=_TIMEOUT,
-        headers=service_headers(project_id),
-    ) as client:
-        resp = await client.get(
-            f"/v1/query/experiment/{quote(experiment_id, safe='')}",
-            params={"project_id": project_id},
-        )
-        resp.raise_for_status()
-        return resp.json()
+    if project_id != capability.project_id:
+        raise ValueError("Experiment project must match capability project")
+    async with service_headers(
+        capability,
+        audiences=("config", "query"),
+        roles=("query:read",),
+    ) as headers:
+        async with httpx.AsyncClient(
+            base_url=QUERY_SERVICE_URL,
+            timeout=_TIMEOUT,
+            headers=headers,
+        ) as client:
+            resp = await client.get(
+                f"/v1/query/experiment/{quote(experiment_id, safe='')}",
+                params={"project_id": project_id},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
 
 class _InlineAnalyzer:

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exact PostgreSQL proof for the migration-044 operator boundary.
+# Exact PostgreSQL proof for the migration-044 operator and migration-058
+# service-capability boundaries.
 #
 # Run only against a disposable database after the canonical migrations. The
 # script creates and drops one temporary login role and leaves uniquely named
@@ -107,11 +108,26 @@ owner_psql \
 DO $assert_roles$
 DECLARE
     canonical_function_oid OID;
+    agents_role_oid OID;
     current_database_oid OID;
     definer_role_oid OID;
     operator_role_oid OID;
     runtime_role_oid OID;
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_roles
+        WHERE rolname = 'apdl_agents'
+          AND NOT rolsuper
+          AND NOT rolcreatedb
+          AND NOT rolcreaterole
+          AND NOT rolreplication
+          AND NOT rolbypassrls
+          AND NOT rolinherit
+          AND rolcanlogin
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents is missing or privileged';
+    END IF;
     IF NOT EXISTS (
         SELECT 1
         FROM pg_catalog.pg_roles
@@ -156,6 +172,10 @@ BEGIN
     END IF;
 
     SELECT oid
+    INTO agents_role_oid
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_agents';
+    SELECT oid
     INTO runtime_role_oid
     FROM pg_catalog.pg_roles
     WHERE rolname = 'apdl_runtime';
@@ -179,6 +199,7 @@ BEGIN
         SELECT 1
         FROM pg_catalog.pg_auth_members
         WHERE member IN (
+            agents_role_oid,
             runtime_role_oid,
             operator_role_oid,
             definer_role_oid
@@ -186,6 +207,24 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'a fixed APDL role is a member of another role';
     END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_database
+        WHERE datdba = agents_role_oid
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_namespace
+        WHERE nspowner = agents_role_oid
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_shdepend
+        WHERE refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+          AND refobjid = agents_role_oid
+          AND deptype = 'o'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents owns a database, schema, or object';
+    END IF;
+
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_auth_members
@@ -210,6 +249,94 @@ BEGIN
           AND deptype = 'o'
     ) THEN
         RAISE EXCEPTION 'apdl_runtime owns a database, schema, or object';
+    END IF;
+
+    IF pg_catalog.has_table_privilege(
+        'apdl_runtime', 'public.agent_service_capabilities', 'INSERT'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_runtime', 'public.agent_service_capabilities', 'UPDATE'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_runtime', 'public.agent_service_capabilities', 'DELETE'
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_attribute AS attribute
+        WHERE attribute.attrelid =
+                'public.agent_service_capabilities'::pg_catalog.regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          AND (
+              pg_catalog.has_column_privilege(
+                  'apdl_runtime', attribute.attrelid, attribute.attnum, 'INSERT'
+              )
+              OR pg_catalog.has_column_privilege(
+                  'apdl_runtime', attribute.attrelid, attribute.attnum, 'UPDATE'
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'apdl_runtime can mint or revoke service capabilities';
+    END IF;
+    IF NOT pg_catalog.has_table_privilege(
+        'apdl_runtime',
+        'public.agent_service_capabilities',
+        'SELECT'
+    ) THEN
+        RAISE EXCEPTION 'apdl_runtime cannot validate service capabilities';
+    END IF;
+    IF NOT pg_catalog.has_table_privilege(
+        'apdl_agents',
+        'public.agent_service_capabilities',
+        'SELECT'
+    ) OR NOT pg_catalog.has_table_privilege(
+        'apdl_agents',
+        'public.agent_service_capabilities',
+        'DELETE'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents cannot manage service capabilities';
+    END IF;
+    IF pg_catalog.has_table_privilege(
+        'apdl_agents',
+        'public.agent_service_capabilities',
+        'UPDATE'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents',
+        'public.agent_service_capabilities',
+        'INSERT'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents has broad capability mutation authority';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+            'token_hash',
+            'project_id',
+            'execution_kind',
+            'execution_id',
+            'run_id',
+            'execution_owner_id',
+            'audiences',
+            'roles',
+            'request_sha256',
+            'expires_at'
+        ]::TEXT[]) AS required(column_name)
+        WHERE NOT pg_catalog.has_column_privilege(
+            'apdl_agents',
+            'public.agent_service_capabilities',
+            required.column_name,
+            'INSERT'
+        )
+    ) OR EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+            'capability_id', 'issued_at', 'consumed_at'
+        ]::TEXT[]) AS forbidden(column_name)
+        WHERE pg_catalog.has_column_privilege(
+            'apdl_agents',
+            'public.agent_service_capabilities',
+            forbidden.column_name,
+            'INSERT'
+        )
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents capability insert columns are not exact';
     END IF;
 
     IF canonical_function_oid IS NULL OR (
@@ -387,6 +514,419 @@ BEGIN
 END
 $assert_roles$;
 
+DO $assert_service_boundaries$
+DECLARE
+    capability_consumer_oid OID;
+    capability_function_oid OID;
+    project_authority_oid OID;
+    project_authority_function_oids OID[];
+    fixed_role_oids OID[];
+BEGIN
+    IF (
+        SELECT array_agg(role.rolname::TEXT ORDER BY role.rolname)
+        FROM pg_catalog.pg_roles AS role
+        WHERE role.rolname = ANY (ARRAY[
+            'apdl_runtime',
+            'apdl_agents',
+            'apdl_llm_vault',
+            'apdl_audit_operator',
+            'apdl_audit_purge_definer',
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
+        ]::TEXT[])
+    ) IS DISTINCT FROM ARRAY[
+        'apdl_agents',
+        'apdl_audit_operator',
+        'apdl_audit_purge_definer',
+        'apdl_capability_consumer_definer',
+        'apdl_llm_vault',
+        'apdl_project_authority_definer',
+        'apdl_runtime'
+    ]::TEXT[] THEN
+        RAISE EXCEPTION 'the seven fixed APDL roles are not present';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_roles AS role
+        WHERE role.rolname = ANY (ARRAY[
+            'apdl_runtime', 'apdl_agents', 'apdl_llm_vault'
+        ]::TEXT[])
+          AND (
+              NOT role.rolcanlogin OR role.rolsuper OR role.rolcreatedb
+              OR role.rolcreaterole OR role.rolreplication
+              OR role.rolbypassrls OR role.rolinherit
+          )
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_roles AS role
+        WHERE role.rolname = ANY (ARRAY[
+            'apdl_audit_operator',
+            'apdl_audit_purge_definer',
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
+        ]::TEXT[])
+          AND (
+              role.rolcanlogin OR role.rolsuper OR role.rolcreatedb
+              OR role.rolcreaterole OR role.rolreplication
+              OR role.rolbypassrls OR role.rolinherit
+          )
+    ) THEN
+        RAISE EXCEPTION 'a fixed APDL role has an unsafe role posture';
+    END IF;
+
+    SELECT array_agg(role.oid)
+    INTO fixed_role_oids
+    FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname = ANY (ARRAY[
+        'apdl_runtime',
+        'apdl_agents',
+        'apdl_llm_vault',
+        'apdl_audit_operator',
+        'apdl_audit_purge_definer',
+        'apdl_project_authority_definer',
+        'apdl_capability_consumer_definer'
+    ]::TEXT[]);
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_auth_members AS membership
+        WHERE membership.roleid = ANY (fixed_role_oids)
+           OR membership.member = ANY (fixed_role_oids)
+    ) THEN
+        RAISE EXCEPTION 'a fixed APDL role participates in role membership';
+    END IF;
+
+    IF EXISTS (
+        WITH expected(table_name, privilege_type) AS (
+            VALUES
+                ('agent_approval_commands', 'INSERT'),
+                ('agent_approval_commands', 'UPDATE'),
+                ('agent_approval_effects', 'INSERT'),
+                ('agent_approval_effects', 'UPDATE'),
+                ('agent_run_results', 'INSERT'),
+                ('agent_run_results', 'UPDATE'),
+                ('agent_runs', 'INSERT'),
+                ('agent_runs', 'UPDATE'),
+                ('custom_agent_test_runs', 'INSERT'),
+                ('custom_agent_test_runs', 'UPDATE'),
+                ('custom_agents', 'INSERT'),
+                ('custom_agents', 'UPDATE'),
+                ('designed_experiments', 'INSERT'),
+                ('designed_experiments', 'UPDATE'),
+                ('experiment_verdicts', 'INSERT'),
+                ('experiment_verdicts', 'UPDATE'),
+                ('feature_proposals', 'INSERT'),
+                ('feature_proposals', 'UPDATE'),
+                ('llm_calls', 'INSERT'),
+                ('llm_calls', 'UPDATE'),
+                ('llm_provider_attempts', 'INSERT'),
+                ('llm_provider_attempts', 'UPDATE'),
+                ('llm_project_policies', 'UPDATE'),
+                ('agent_memory', 'INSERT'),
+                ('agent_memory', 'DELETE'),
+                ('llm_project_model_assignments', 'INSERT'),
+                ('llm_project_model_assignments', 'DELETE'),
+                ('llm_project_provider_policies', 'INSERT'),
+                ('llm_project_provider_policies', 'DELETE'),
+                ('agent_service_capabilities', 'DELETE'),
+                ('agent_approval_decisions', 'INSERT'),
+                ('agent_audit_log', 'INSERT'),
+                ('agent_mutation_quota_reservations', 'INSERT'),
+                ('llm_project_setup_audit', 'INSERT')
+        ), actual AS (
+            SELECT class.relname::TEXT AS table_name,
+                   privilege.privilege_type
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            CROSS JOIN unnest(
+                ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']::TEXT[]
+            ) AS privilege(privilege_type)
+            WHERE namespace.nspname = 'public'
+              AND class.relkind IN ('r', 'p')
+              AND pg_catalog.has_table_privilege(
+                  'apdl_agents', class.oid, privilege.privilege_type
+              )
+        )
+        (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+        UNION ALL
+        (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents table DML allowlist is not exact';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_attribute AS attribute
+        WHERE attribute.attrelid =
+                'public.agent_service_capabilities'::pg_catalog.regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          AND pg_catalog.has_column_privilege(
+              'apdl_agents', attribute.attrelid, attribute.attnum, 'INSERT'
+          ) <> (attribute.attname = ANY (ARRAY[
+              'token_hash',
+              'project_id',
+              'execution_kind',
+              'execution_id',
+              'run_id',
+              'execution_owner_id',
+              'audiences',
+              'roles',
+              'request_sha256',
+              'expires_at'
+          ]::NAME[]))
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_service_capabilities', 'INSERT'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_service_capabilities', 'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents capability INSERT grant is not column-only';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS sequence
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = sequence.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND sequence.relkind = 'S'
+          AND (
+              pg_catalog.has_sequence_privilege(
+                  'apdl_agents', sequence.oid, 'USAGE'
+              ) OR pg_catalog.has_sequence_privilege(
+                  'apdl_agents', sequence.oid, 'SELECT'
+              ) OR pg_catalog.has_sequence_privilege(
+                  'apdl_agents', sequence.oid, 'UPDATE'
+              )
+          )
+          AND sequence.relname <> ALL (ARRAY[
+              'agent_audit_log_id_seq',
+              'agent_memory_id_seq',
+              'experiment_verdicts_id_seq'
+          ]::NAME[])
+    ) OR EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+            'agent_audit_log_id_seq',
+            'agent_memory_id_seq',
+            'experiment_verdicts_id_seq'
+        ]::TEXT[]) AS expected(sequence_name)
+        WHERE NOT pg_catalog.has_sequence_privilege(
+            'apdl_agents', 'public.' || expected.sequence_name, 'USAGE'
+        ) OR NOT pg_catalog.has_sequence_privilege(
+            'apdl_agents', 'public.' || expected.sequence_name, 'SELECT'
+        ) OR pg_catalog.has_sequence_privilege(
+            'apdl_agents', 'public.' || expected.sequence_name, 'UPDATE'
+        )
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents sequence allowlist is not exact';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+            'admin_credential_audit',
+            'admin_login_account_risk',
+            'admin_login_rate_buckets',
+            'admin_login_source_risk',
+            'admin_managed_credentials',
+            'admin_project_invitations',
+            'admin_project_membership_audit',
+            'admin_project_ownership_audit',
+            'admin_proxy_audit',
+            'admin_security_notifications',
+            'admin_sessions',
+            'llm_vault_access_audit',
+            'llm_vault_audit',
+            'llm_vault_connections',
+            'llm_vault_key_rotation_audit',
+            'llm_vault_provider_models',
+            'llm_vault_provider_secrets'
+        ]::TEXT[]) AS sensitive(table_name)
+        WHERE pg_catalog.has_table_privilege(
+            'apdl_agents', 'public.' || sensitive.table_name,
+            'SELECT, INSERT, UPDATE, DELETE, TRUNCATE'
+        )
+    ) OR pg_catalog.has_column_privilege(
+        'apdl_agents', 'public.admin_users', 'password_hash', 'SELECT'
+    ) OR pg_catalog.has_column_privilege(
+        'apdl_agents', 'public.admin_users', 'created_at', 'SELECT'
+    ) OR pg_catalog.has_column_privilege(
+        'apdl_agents', 'public.admin_users', 'updated_at', 'SELECT'
+    ) OR pg_catalog.has_column_privilege(
+        'apdl_agents', 'public.admin_user_projects', 'created_at', 'SELECT'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.admin_user_projects', 'UPDATE'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.admin_project_membership_audit', 'INSERT'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents can access sensitive Admin or vault state';
+    END IF;
+
+    SELECT role.oid
+    INTO capability_consumer_oid
+    FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname = 'apdl_capability_consumer_definer';
+    capability_function_oid := pg_catalog.to_regprocedure(
+        'public.apdl_consume_agent_service_capability(uuid,text,text,text,text)'
+    );
+    IF capability_function_oid IS NULL OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS procedure
+        WHERE procedure.oid = capability_function_oid
+          AND procedure.proowner = capability_consumer_oid
+          AND procedure.prosecdef
+          AND procedure.proconfig IS NOT DISTINCT FROM
+              ARRAY['search_path=pg_catalog, public']::TEXT[]
+    ) THEN
+        RAISE EXCEPTION 'capability consume function definition is invalid';
+    END IF;
+    IF (
+        SELECT count(*) = 2
+           AND count(*) FILTER (
+               WHERE acl.grantee = capability_consumer_oid
+                 AND acl.privilege_type = 'EXECUTE'
+                 AND NOT acl.is_grantable
+           ) = 1
+           AND count(*) FILTER (
+               WHERE acl.grantee = (
+                   SELECT oid FROM pg_catalog.pg_roles
+                   WHERE rolname = 'apdl_runtime'
+               )
+                 AND acl.privilege_type = 'EXECUTE'
+                 AND NOT acl.is_grantable
+           ) = 1
+        FROM pg_catalog.pg_proc AS procedure
+        CROSS JOIN LATERAL pg_catalog.aclexplode(
+            COALESCE(
+                procedure.proacl,
+                pg_catalog.acldefault('f', procedure.proowner)
+            )
+        ) AS acl
+        WHERE procedure.oid = capability_function_oid
+    ) IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'capability consume function ACL is not exact';
+    END IF;
+
+    IF EXISTS (
+        WITH expected(table_name, privilege_type) AS (
+            VALUES ('agent_service_capabilities', 'SELECT')
+        ), actual AS (
+            SELECT class.relname::TEXT, acl.privilege_type
+            FROM pg_catalog.pg_class AS class
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(class.relacl) AS acl
+            WHERE namespace.nspname = 'public'
+              AND class.relkind IN ('r', 'p')
+              AND acl.grantee = capability_consumer_oid
+        )
+        (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+        UNION ALL
+        (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    ) OR EXISTS (
+        WITH expected(table_name, column_name, privilege_type) AS (
+            VALUES
+                ('agent_service_capabilities', 'consumed_at', 'UPDATE'),
+                ('agent_approval_effects', 'effect_id', 'SELECT'),
+                ('agent_approval_effects', 'run_id', 'SELECT'),
+                ('agent_approval_effects', 'project_id', 'SELECT'),
+                ('agent_approval_effects', 'status', 'SELECT'),
+                ('agent_approval_effects', 'lease_owner_id', 'SELECT'),
+                ('agent_approval_effects', 'lease_expires_at', 'SELECT'),
+                ('agent_runs', 'run_id', 'SELECT'),
+                ('agent_runs', 'project_id', 'SELECT'),
+                ('agent_runs', 'execution_lane_project_id', 'SELECT'),
+                ('agent_runs', 'status', 'SELECT')
+        ), actual AS (
+            SELECT class.relname::TEXT, attribute.attname::TEXT,
+                   acl.privilege_type
+            FROM pg_catalog.pg_attribute AS attribute
+            JOIN pg_catalog.pg_class AS class
+              ON class.oid = attribute.attrelid
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = class.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS acl
+            WHERE namespace.nspname = 'public'
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
+              AND acl.grantee = capability_consumer_oid
+        )
+        (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+        UNION ALL
+        (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    ) THEN
+        RAISE EXCEPTION 'capability consumer table dependencies are not exact';
+    END IF;
+
+    SELECT role.oid
+    INTO project_authority_oid
+    FROM pg_catalog.pg_roles AS role
+    WHERE role.rolname = 'apdl_project_authority_definer';
+    project_authority_function_oids := ARRAY[
+        pg_catalog.to_regprocedure(
+            'public.apdl_project_management_authority(text,uuid)'
+        ),
+        pg_catalog.to_regprocedure(
+            'public.apdl_agents_grant_owner_execution_roles(text,uuid)'
+        ),
+        pg_catalog.to_regprocedure(
+            'public.apdl_assert_execution_project_authorized(text,text)'
+        )
+    ];
+    IF array_position(project_authority_function_oids, NULL) IS NOT NULL
+       OR EXISTS (
+           SELECT 1
+           FROM unnest(project_authority_function_oids) AS expected(oid)
+           JOIN pg_catalog.pg_proc AS procedure
+             ON procedure.oid = expected.oid
+           WHERE procedure.proowner <> project_authority_oid
+              OR NOT procedure.prosecdef
+              OR procedure.proconfig IS DISTINCT FROM
+                  ARRAY['search_path=pg_catalog, public']::TEXT[]
+       ) THEN
+        RAISE EXCEPTION 'project authority function ownership is invalid';
+    END IF;
+
+    IF EXISTS (
+        WITH expected(function_oid, grantee_name) AS (
+            VALUES
+                (project_authority_function_oids[1],
+                 'apdl_project_authority_definer'),
+                (project_authority_function_oids[1], 'apdl_agents'),
+                (project_authority_function_oids[1], 'apdl_llm_vault'),
+                (project_authority_function_oids[2],
+                 'apdl_project_authority_definer'),
+                (project_authority_function_oids[2], 'apdl_agents'),
+                (project_authority_function_oids[3],
+                 'apdl_project_authority_definer'),
+                (project_authority_function_oids[3], 'apdl_runtime'),
+                (project_authority_function_oids[3], 'apdl_agents')
+        ), actual AS (
+            SELECT procedure.oid, role.rolname::TEXT
+            FROM pg_catalog.pg_proc AS procedure
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(
+                    procedure.proacl,
+                    pg_catalog.acldefault('f', procedure.proowner)
+                )
+            ) AS acl
+            JOIN pg_catalog.pg_roles AS role ON role.oid = acl.grantee
+            WHERE procedure.oid = ANY (project_authority_function_oids)
+              AND acl.privilege_type = 'EXECUTE'
+              AND NOT acl.is_grantable
+        )
+        (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+        UNION ALL
+        (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+    ) THEN
+        RAISE EXCEPTION 'project authority function ACLs are not exact';
+    END IF;
+END
+$assert_service_boundaries$;
+
 SELECT 'DROP ROLE apdl_audit_privilege_test'
 WHERE EXISTS (
     SELECT 1
@@ -428,6 +968,152 @@ runtime_posture="$(
 )"
 if [ "$runtime_posture" != "apdl_runtime|apdl_runtime|f|f|f|f|f" ]; then
     echo "Unexpected apdl_runtime privilege posture: $runtime_posture" >&2
+    exit 1
+fi
+
+capability_id="$(
+    owner_psql --set=project_a="$project_a" <<'SQL'
+BEGIN;
+SET LOCAL session_replication_role = replica;
+
+INSERT INTO public.admin_projects (project_id)
+VALUES (:'project_a');
+
+INSERT INTO public.agent_runs (
+    run_id, project_id, trigger_type, status, phase
+)
+VALUES (
+    'capability-proof-run', :'project_a', 'manual',
+    'approval_queued', 'code_implementation_approval'
+);
+
+WITH command AS (
+    INSERT INTO public.agent_approval_commands (
+        command_id,
+        run_id,
+        project_id,
+        actor_credential_id,
+        request_sha256,
+        gate_id,
+        gate_agent,
+        status,
+        resume_status,
+        approved_count,
+        rejected_count
+    )
+    VALUES (
+        gen_random_uuid(),
+        'capability-proof-run',
+        :'project_a',
+        'test-agents',
+        repeat('1', 64),
+        'capability-proof-run:code_implementation',
+        'code_implementation',
+        'processing',
+        'approved',
+        1,
+        0
+    )
+    RETURNING command_id, run_id, project_id
+), effect AS (
+    INSERT INTO public.agent_approval_effects (
+        effect_id,
+        command_id,
+        run_id,
+        project_id,
+        item_id,
+        effect_type,
+        effect_order,
+        payload,
+        status,
+        idempotency_key,
+        lease_owner_id,
+        lease_expires_at
+    )
+    SELECT
+        gen_random_uuid(),
+        command.command_id,
+        command.run_id,
+        command.project_id,
+        'capability-proof-item',
+        'record_proposal_rejection',
+        0,
+        '{}'::JSONB,
+        'processing',
+        'capability-proof-effect',
+        'capability-proof-lease',
+        statement_timestamp() + interval '2 minutes'
+    FROM command
+    RETURNING effect_id, run_id, project_id
+), capability AS (
+    INSERT INTO public.agent_service_capabilities (
+        token_hash,
+        project_id,
+        execution_kind,
+        execution_id,
+        run_id,
+        execution_owner_id,
+        audiences,
+        roles,
+        request_sha256,
+        expires_at
+    )
+    SELECT
+        repeat('2', 64),
+        effect.project_id,
+        'approval_effect',
+        effect.effect_id::TEXT,
+        effect.run_id,
+        'capability-proof-lease',
+        ARRAY['config']::TEXT[],
+        ARRAY['config:write']::TEXT[],
+        repeat('3', 64),
+        statement_timestamp() + interval '1 minute'
+    FROM effect
+    RETURNING capability_id
+)
+SELECT capability_id FROM capability;
+COMMIT;
+SQL
+)"
+if [ -z "$capability_id" ]; then
+    echo "Failed to create the capability consume proof fixture" >&2
+    exit 1
+fi
+
+expect_failure runtime \
+    "UPDATE public.agent_service_capabilities
+     SET consumed_at = statement_timestamp()
+     WHERE capability_id = '$capability_id'"
+
+first_consume="$(
+    runtime_psql -c \
+        "SELECT public.apdl_consume_agent_service_capability(
+            '$capability_id',
+            repeat('2', 64),
+            'config',
+            'config:write',
+            repeat('3', 64)
+        )"
+)"
+second_consume="$(
+    runtime_psql -c \
+        "SELECT public.apdl_consume_agent_service_capability(
+            '$capability_id',
+            repeat('2', 64),
+            'config',
+            'config:write',
+            repeat('3', 64)
+        )"
+)"
+consumed_state="$(
+    runtime_psql -c \
+        "SELECT consumed_at IS NOT NULL
+         FROM public.agent_service_capabilities
+         WHERE capability_id = '$capability_id'"
+)"
+if [ "$first_consume|$second_consume|$consumed_state" != "t|f|t" ]; then
+    echo "Capability consumption was not one-shot: $first_consume|$second_consume|$consumed_state" >&2
     exit 1
 fi
 

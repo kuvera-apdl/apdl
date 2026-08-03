@@ -20,6 +20,7 @@ from app.llm.contracts import (
     LlmRequestContext,
 )
 from app.safety.audit import AuditLogger
+from app.service_auth import ServiceCapabilityContext
 
 
 @dataclass
@@ -60,6 +61,24 @@ class AgentContext:
                 if self.execution_kind == "agent_run"
                 else self.run_id
             ),
+        )
+
+    def service_capability(self) -> ServiceCapabilityContext:
+        """Bind downstream authority to this exact durable execution."""
+        execution_owner_id = (
+            self.lease_owner_id
+            if self.execution_kind == "agent_run"
+            else self.run_id
+        )
+        if execution_owner_id is None:
+            raise RuntimeError("Agent run service authority requires its exact lease owner")
+        return ServiceCapabilityContext(
+            pool=self.pool,
+            project_id=self.project_id,
+            execution_kind=self.execution_kind,
+            execution_id=self.run_id,
+            run_id=self.run_id,
+            execution_owner_id=execution_owner_id,
         )
 
 

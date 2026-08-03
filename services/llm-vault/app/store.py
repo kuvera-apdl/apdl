@@ -78,12 +78,12 @@ class ProjectLlmVaultStore:
         lock: bool,
     ) -> None:
         del lock
-        authorized = await conn.fetchval(
-            "SELECT apdl_llm_vault_has_management_authority($1, $2)",
+        authority = await conn.fetchval(
+            "SELECT apdl_project_management_authority($1, $2)",
             project_id,
             actor_user_id,
         )
-        if authorized is not True:
+        if str(authority) not in {"owner", "delegated"}:
             raise VaultAuthorizationError(
                 "Connection management requires project ownership or delegated "
                 "agents:manage and credentials:manage roles"

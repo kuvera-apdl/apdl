@@ -8,6 +8,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 SERVICES = (
@@ -23,6 +24,10 @@ SERVICES = (
 )
 
 SCOPED_SECRETS = {
+    # Bootstrap/migration input only. Long-running services receive a complete
+    # non-owner POSTGRES_URL and never the shared password as ambient authority.
+    "APDL_RUNTIME_POSTGRES_PASSWORD": frozenset(),
+    "APDL_SERVICE_API_KEYS": frozenset({"admin-api"}),
     "LLM_VAULT_ENCRYPTION_KEY_BASE64": frozenset({"llm-vault"}),
     "LLM_VAULT_ADMIN_TOKEN": frozenset({"llm-vault", "admin-api"}),
     "LLM_VAULT_AGENTS_TOKEN": frozenset({"llm-vault", "agents"}),
@@ -30,6 +35,7 @@ SCOPED_SECRETS = {
     "LLM_VAULT_PROJECTION_TOKEN": frozenset(
         {"llm-vault", "agents", "codegen"}
     ),
+    "APDL_AGENTS_POSTGRES_PASSWORD": frozenset({"agents"}),
     "APDL_LLM_VAULT_POSTGRES_PASSWORD": frozenset({"llm-vault"}),
 }
 LEGACY_LLM_PLATFORM_KEYS = frozenset(
@@ -186,6 +192,33 @@ def _permitted(service: str, name: str) -> bool:
     return True
 
 
+def _database_url_for_role(
+    base_url: str,
+    *,
+    username: str,
+    password: str,
+) -> str:
+    """Replace only PostgreSQL credentials without changing the destination."""
+    try:
+        parsed = urlsplit(base_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("POSTGRES_URL is not a valid PostgreSQL URL") from exc
+    if parsed.scheme not in {"postgres", "postgresql"} or not hostname:
+        raise ValueError("POSTGRES_URL is not a valid PostgreSQL URL")
+
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    rendered_port = f":{port}" if port is not None else ""
+    authority = (
+        f"{quote(username, safe='')}:{quote(password, safe='')}@"
+        f"{rendered_host}{rendered_port}"
+    )
+    return urlunsplit(
+        (parsed.scheme, authority, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
 def service_environment(
     service: str,
     *,
@@ -198,11 +231,46 @@ def service_environment(
     combined = dict(file_values)
     # Match normal dotenv behavior: an explicit inherited value wins over the file.
     combined.update(inherited)
-    return {
+    environment = {
         name: value
         for name, value in combined.items()
         if _permitted(service, name)
     }
+    dedicated_database = {
+        "agents": (
+            "APDL_AGENTS_POSTGRES_PASSWORD",
+            "apdl_agents",
+            "Agents",
+        ),
+        "llm-vault": (
+            "APDL_LLM_VAULT_POSTGRES_PASSWORD",
+            "apdl_llm_vault",
+            "LLM Vault",
+        ),
+    }.get(service)
+    if dedicated_database is not None:
+        password_name, database_username, label = dedicated_database
+        password = environment.pop(password_name, None)
+        if password is not None:
+            environment["POSTGRES_URL"] = _database_url_for_role(
+                environment.get(
+                    "POSTGRES_URL",
+                    "postgresql://localhost:5432/apdl",
+                ),
+                username=database_username,
+                password=password,
+            )
+        elif "POSTGRES_URL" in environment:
+            try:
+                database_user = urlsplit(environment["POSTGRES_URL"]).username
+            except ValueError as exc:
+                raise ValueError("POSTGRES_URL is not a valid PostgreSQL URL") from exc
+            if database_user != database_username:
+                raise ValueError(
+                    f"{label} requires {password_name} or an explicit "
+                    f"{database_username} POSTGRES_URL"
+                )
+    return environment
 
 
 def _arguments() -> argparse.Namespace:

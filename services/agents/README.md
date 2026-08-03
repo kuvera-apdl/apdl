@@ -21,12 +21,12 @@ The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
 hidden from definitions, and custom agents cannot select UI-config tools.
 
-Execution is enabled only for operator-provisioned projects or self-created
-projects with an explicit, audited operator override in the OSS developer
-preview. Projects created through the public workspace flow retain read-only
-definitions, run history, results, and audit access by default. This is
-enforced from canonical project execution authority even when a credential
-incorrectly contains an execution role.
+Projects created through the public workspace flow start with read-only
+definitions, run history, results, and audit access. Owner-controlled setup may
+enable governed L1/L2 analysis with `agents:run` and `agents:manage`.
+Approval, Config mutation, Codegen, repository access, and external effects are
+enabled only for operator-provisioned projects or self-created projects with an
+explicit, audited operator override, even if a credential is overprovisioned.
 
 A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
 PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
@@ -37,9 +37,10 @@ requeued at the persisted phase rather than terminalized as a failed run.
 ## API
 
 All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
-management, and approval operations use distinct project-scoped roles. The
-`agents:run`, `agents:manage`, and `agents:approve` roles are honored only for
-projects with a canonical `admin_project_execution_authorizations` row.
+management, and approval operations use distinct project-scoped roles. Active
+owner-controlled setup may grant analysis-only `agents:run` and
+`agents:manage`; `agents:approve` and every external effect additionally require
+a canonical `admin_project_execution_authorizations` row.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -212,7 +213,8 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Runs, audit log, and pgvector memory through the non-owner runtime role |
+| `POSTGRES_URL` | `postgresql://apdl_agents:apdl_agents_dev1@localhost:5432/apdl` | Runs, audit log, pgvector memory, and short-lived capability issuance through the dedicated non-owner Agents role |
+| `APDL_AGENTS_POSTGRES_PASSWORD` | `apdl_agents_dev1` | Compose/host-run bootstrap password used to construct the Agents-only database URL; replace it in deployments |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
@@ -222,7 +224,25 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
+
+Agents does not receive `APDL_SERVICE_API_KEYS`. Immediately before an
+eligible leased run, custom-agent test, or approval effect calls Config, Query,
+or Codegen, it creates a random 60-second execution capability. PostgreSQL
+stores only the token hash plus the exact project, execution, lease owner,
+audience, and roles. Mutation rows also store a hash of the exact method, path,
+canonical JSON body, and `Idempotency-Key`. The raw token is sent in
+`X-APDL-Internal-Capability` for that call and its row is deleted when the call
+finishes; expiry remains the fallback if cleanup fails.
+
+Each downstream service hashes the token, verifies its audience and roles,
+revalidates the durable execution lease, and atomically consumes mutation
+authority before accepting it. Ordinary runs and tests can receive read or
+server-side evaluation authority;
+`config:write` and `agents:manage` are limited to a leased approval effect. A
+request cannot combine an internal capability with
+`X-API-Key`, and Config does not accept internal capabilities on its SSE
+stream. External SDK credentials and the Admin API's separate proxy-key flow
+are unchanged.
 
 Remote provider keys are created in the project settings UI and held only by
 the private LLM Vault. Agents stores non-secret connection, inventory, policy,

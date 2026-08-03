@@ -17,7 +17,7 @@ import asyncpg
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.auth import require_role
+from app.auth import delegated_api_key_headers, require_role
 from app.readiness import codegen_changeset_capability
 from app.store.approval_effects import (
     ApprovalCapabilityError,
@@ -156,7 +156,10 @@ async def approve_action(
         for item in body.decisions
     )
     try:
-        codegen_capability = await codegen_changeset_capability(principal.project_id)
+        codegen_capability = await codegen_changeset_capability(
+            principal.project_id,
+            delegated_api_key_headers(request),
+        )
         command = await enqueue_approval_command(
             pool,
             run_id=run_id,

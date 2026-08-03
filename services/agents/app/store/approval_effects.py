@@ -28,6 +28,7 @@ from app.graphs.experiment_design import (
     treatment_changeset_task,
 )
 from app.readiness import CodegenChangesetCapability
+from app.service_auth import ServiceCapabilityContext
 from app.store.experiments import record_designed_experiment
 from app.store.mutation_quotas import (
     MutationQuotaExceededError,
@@ -945,6 +946,14 @@ async def _claim_effect(
 
 
 async def _execute_effect(pool: asyncpg.Pool, effect: _ClaimedEffect) -> dict[str, Any]:
+    capability = ServiceCapabilityContext(
+        pool=pool,
+        project_id=effect.project_id,
+        execution_kind="approval_effect",
+        execution_id=effect.effect_id,
+        run_id=effect.run_id,
+        execution_owner_id=effect.lease_owner_id,
+    )
     payload = effect.payload
     if isinstance(payload, str):
         try:
@@ -972,6 +981,7 @@ async def _execute_effect(pool: asyncpg.Pool, effect: _ClaimedEffect) -> dict[st
 
     if effect.effect_type == "stage_experiment_draft":
         await stage_experiment_draft(
+            capability,
             effect.project_id,
             payload,
             idempotency_key=effect.idempotency_key,
@@ -987,6 +997,7 @@ async def _execute_effect(pool: asyncpg.Pool, effect: _ClaimedEffect) -> dict[st
 
     if effect.effect_type == "open_treatment_changeset":
         changeset_id = await open_treatment_changeset(
+            capability,
             pool,
             effect.project_id,
             effect.run_id,
@@ -1013,6 +1024,7 @@ async def _execute_effect(pool: asyncpg.Pool, effect: _ClaimedEffect) -> dict[st
                 f"Approved proposal {proposal_id} has no canonical title/spec"
             )
         changeset = await open_changeset(
+            capability=capability,
             project_id=effect.project_id,
             title=title,
             spec=spec,

@@ -21,11 +21,13 @@ class FakeConn:
         migration_name: str | None = MIGRATION_NAME,
         columns=REQUIRED_COLUMNS,
         dimension: int = EMBEDDING_DIMENSIONS,
+        issuer_ready: bool = True,
     ):
         self.ledger_exists = ledger_exists
         self.migration_name = migration_name
         self.columns = set(columns)
         self.dimension = dimension
+        self.issuer_ready = issuer_ready
 
     async def fetchval(self, sql: str, *args):
         if "to_regclass" in sql:
@@ -34,10 +36,12 @@ class FakeConn:
             return self.migration_name
         if "atttypmod" in sql:
             return self.dimension
+        if "agent_service_capabilities" in sql:
+            return self.issuer_ready
         raise AssertionError(sql)
 
     async def fetch(self, sql: str, *args):
-        assert "information_schema.columns" in sql
+        assert "pg_catalog.pg_attribute" in sql
         return [
             {"table_name": table, "column_name": column}
             for table, column in self.columns
@@ -50,8 +54,8 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 51
-    assert MIGRATION_NAME == "051_agents_project_setup.sql"
+    assert MIGRATION_VERSION == 58
+    assert MIGRATION_NAME == "058_agent_service_capabilities.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
     assert (
         "admin_project_execution_authorizations",
@@ -124,6 +128,12 @@ async def test_rejects_missing_execution_authorization_contract_at_startup():
 async def test_rejects_vector_dimension_drift_without_mutating_rows():
     with pytest.raises(RuntimeError, match="explicit migration"):
         await assert_schema_ready(FakeConn(dimension=1536))
+
+
+@pytest.mark.asyncio
+async def test_rejects_a_non_issuer_database_identity():
+    with pytest.raises(RuntimeError, match="dedicated apdl_agents"):
+        await assert_schema_ready(FakeConn(issuer_ready=False))
 
 
 def test_agents_startup_contains_no_postgres_ddl():

@@ -56,10 +56,13 @@ protection metadata, and truncated snapshots are returned as explicit
 
 ## API
 
-All `/v1` endpoints require the canonical `X-API-Key`. Codegen derives the
-project and roles from PostgreSQL and independently checks every body, query,
-path, and changeset-owned project. There is no permissive or global internal
-bearer token. A project-scoped credential is not repository authority: only an
+All `/v1` endpoints require exactly one authority header: the canonical
+`X-API-Key`, or a private `X-APDL-Internal-Capability` minted just in time for
+one live Agents execution. Codegen derives the project and roles from
+PostgreSQL and independently checks every body, query, path, and
+changeset-owned project. Internal mutation capabilities are short-lived,
+request-bound, and consumed atomically; there is no permissive or global
+internal bearer token. Project authority is not repository authority: only an
 active operator-verified grant can authorize GitHub access.
 
 | Method | Path | Purpose |

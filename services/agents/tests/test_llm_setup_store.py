@@ -105,12 +105,14 @@ class _SetupConn:
         }
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
         self.fetchrow_queries: list[str] = []
+        self.operations: list[tuple[str, str, tuple[Any, ...]]] = []
 
     def transaction(self, **kwargs: object) -> _Transaction:
         return _Transaction()
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         self.fetchrow_queries.append(query)
+        self.operations.append(("fetchrow", query, args))
         if "SELECT project.owner_user_id, account.active" in query:
             return {
                 "owner_user_id": self.owner_user_id,
@@ -139,11 +141,26 @@ class _SetupConn:
         raise AssertionError(query)
 
     async def fetchval(self, query: str, *args: Any) -> Any:
+        self.operations.append(("fetchval", query, args))
+        if "apdl_project_management_authority" in query:
+            assert args == ("demo", ACTOR_ID)
+            if self.owner_user_id is None or not self.account_active:
+                return "none"
+            if self.owner_user_id == ACTOR_ID:
+                return "owner"
+            effective_roles = set(self.roles or [])
+            if {"agents:manage", "credentials:manage"} <= effective_roles:
+                return "delegated"
+            return "none"
+        if "apdl_agents_grant_owner_execution_roles" in query:
+            assert args == ("demo", ACTOR_ID)
+            return True
         if "SELECT roles" in query:
             return self.roles
         raise AssertionError(query)
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.operations.append(("fetch", query, args))
         if "FROM llm_project_model_assignments AS assignment" in query:
             return self.assignment_rows
         if "FROM llm_project_provider_connections AS connection" in query:
@@ -154,6 +171,7 @@ class _SetupConn:
 
     async def execute(self, query: str, *args: Any) -> str:
         self.executed.append((query, args))
+        self.operations.append(("execute", query, args))
         return "OK"
 
 
@@ -188,13 +206,16 @@ async def test_first_owner_activation_adds_analysis_roles_only(
     )
 
     assert result is returned
-    role_update = next(
+    role_grant = next(
         args
-        for query, args in conn.executed
-        if "UPDATE admin_user_projects" in query
+        for operation, query, args in conn.operations
+        if operation == "fetchval"
+        and "apdl_agents_grant_owner_execution_roles" in query
     )
-    assert set(role_update[2]) >= {"agents:run", "agents:manage"}
-    assert "agents:approve" not in role_update[2]
+    assert role_grant == ("demo", ACTOR_ID)
+    assert not any(
+        "UPDATE admin_user_projects" in query for query, _ in conn.executed
+    )
     assert not any(
         "admin_project_execution_authorizations" in query
         for query, _ in conn.executed
@@ -222,23 +243,40 @@ async def test_first_owner_activation_adds_analysis_roles_only(
 
 
 @pytest.mark.asyncio
-async def test_selection_locks_projections_without_vault_update_privilege() -> None:
+async def test_selection_uses_pair_lock_before_unlocked_vault_projection_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conn = _SetupConn()
+    store = AgentsSetupStore(_Pool(conn))
 
-    await AgentsSetupStore._validate_selection(
-        conn,
-        project_id="demo",
-        tier="fast",
-        selection=_selection(),
+    async def fake_get(project_id: str, *, actor_user_id: UUID | None) -> object:
+        return object()
+
+    monkeypatch.setattr(store, "get", fake_get)
+    await store.put(
+        "demo",
+        fast_model=_selection(),
+        reasoning_model=_selection(),
+        expected_version=0,
+        actor_user_id=ACTOR_ID,
     )
 
-    query = next(
-        query
-        for query in conn.fetchrow_queries
-        if "SELECT model.supported_tiers" in query
+    pair_lock_index = next(
+        index
+        for index, (operation, query, args) in enumerate(conn.operations)
+        if operation == "execute"
+        and "pg_advisory_xact_lock" in query
+        and args == ("apdl:llm-vault:demo:openai",)
     )
-    assert "FOR SHARE OF connection, model" in query
-    assert "credential, consumer" not in query
+    projection_reads = [
+        (index, query)
+        for index, (operation, query, _args) in enumerate(conn.operations)
+        if operation == "fetchrow" and "SELECT model.supported_tiers" in query
+    ]
+    assert len(projection_reads) == 2
+    assert all(pair_lock_index < index for index, _query in projection_reads)
+    assert all("FOR SHARE" not in query for _index, query in projection_reads)
+    assert all("FOR UPDATE" not in query for _index, query in projection_reads)
 
 
 @pytest.mark.asyncio

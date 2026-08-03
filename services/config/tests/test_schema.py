@@ -65,6 +65,8 @@ async def test_accepts_complete_migrated_schema():
 
     await assert_schema_ready(conn)
 
+    assert MIGRATION_VERSION == 58
+    assert MIGRATION_NAME == "058_agent_service_capabilities.sql"
     assert conn.migration_version == MIGRATION_VERSION
 
 

@@ -38,14 +38,18 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
 
 ## API
 
-**Auth:** send a registered credential as `x-api-key`. PostgreSQL supplies the
-verified project and roles; a `project_id` query/body field can only assert that
-same tenant. Admin routes require `config:write`, SDK reads require
-`config:read`, and `/v1/evaluate` requires `config:evaluate`. Browser keys use
-`client_{project_id}_{token}` and are restricted to exactly `events:write` plus
-`config:read`; confidential service keys use `proj_{project_id}_{secret}`. All
-credentials, including SSE credentials, are accepted only from `x-api-key` and
-never from query parameters. See
+**Auth:** callers send exactly one authority header: a registered `x-api-key`,
+or a private `x-apdl-internal-capability` minted just in time for one live
+Agents execution. PostgreSQL supplies the verified project and roles; a
+`project_id` query/body field can only assert that same tenant. Internal
+capabilities are audience-scoped, short-lived, hash-only at rest, and every use
+revalidates the owning execution lease. Mutation capabilities are also bound to
+one exact request and consumed atomically. Admin routes require `config:write`,
+SDK reads require `config:read`, and `/v1/evaluate` requires
+`config:evaluate`. Browser keys use `client_{project_id}_{token}` and are
+restricted to exactly `events:write` plus `config:read`; confidential service
+keys use `proj_{project_id}_{secret}`. SSE accepts only `x-api-key`, and no
+credential is accepted from query parameters. See
 [authentication](../../docs/authentication.md).
 
 ### SDK-facing

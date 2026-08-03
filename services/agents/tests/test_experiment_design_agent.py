@@ -1,6 +1,7 @@
 import pytest
 
 from app.graphs import experiment_design
+from tests.capability_helpers import make_mutation_capability
 
 
 @pytest.mark.asyncio
@@ -52,11 +53,16 @@ async def test_staging_uses_single_config_owned_draft_path(monkeypatch):
         },
     }
 
+    capability = make_mutation_capability(project_id="apdl")
     drafted = await experiment_design.stage_experiment_draft(
-        "apdl", experiment, idempotency_key="command:effect"
+        capability,
+        "apdl",
+        experiment,
+        idempotency_key="command:effect",
     )
 
     assert drafted is None
+    assert captured["experiment"]["capability"] is capability
     assert captured["experiment"]["idempotency_key"] == "command:effect"
     # Exactly one creation path, carrying the canonical link + variants.
     assert captured["experiment"]["experiment_id"] == "exp_checkout"
@@ -83,6 +89,7 @@ async def test_staging_rejects_missing_bucket_identity_without_a_fallback(monkey
 
     with pytest.raises(ValueError, match="bucket_by must be anonymous_id or user_id"):
         await experiment_design.stage_experiment_draft(
+            make_mutation_capability(project_id="apdl"),
             "apdl",
             {
                 "experiment_id": "exp_missing_identity",

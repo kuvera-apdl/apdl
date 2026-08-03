@@ -8,11 +8,15 @@
 set -Eeuo pipefail
 
 runtime_password="${APDL_RUNTIME_POSTGRES_PASSWORD:?APDL_RUNTIME_POSTGRES_PASSWORD is required}"
+agents_password="${APDL_AGENTS_POSTGRES_PASSWORD:?APDL_AGENTS_POSTGRES_PASSWORD is required}"
 llm_vault_password="${APDL_LLM_VAULT_POSTGRES_PASSWORD:?APDL_LLM_VAULT_POSTGRES_PASSWORD is required}"
 postgres_user="${POSTGRES_USER:-apdl}"
 postgres_db="${POSTGRES_DB:-$postgres_user}"
 
 if [ "$postgres_user" = "apdl_runtime" ] \
+    || [ "$postgres_user" = "apdl_agents" ] \
+    || [ "$postgres_user" = "apdl_capability_consumer_definer" ] \
+    || [ "$postgres_user" = "apdl_project_authority_definer" ] \
     || [ "$postgres_user" = "apdl_audit_operator" ] \
     || [ "$postgres_user" = "apdl_audit_purge_definer" ] \
     || [ "$postgres_user" = "apdl_llm_vault" ]; then
@@ -27,6 +31,10 @@ if [[ ! "$runtime_password" =~ ^[A-Za-z0-9._~-]{16,128}$ ]]; then
     echo "APDL_RUNTIME_POSTGRES_PASSWORD must be 16-128 URI-unreserved characters" >&2
     exit 1
 fi
+if [[ ! "$agents_password" =~ ^[A-Za-z0-9._~-]{16,128}$ ]]; then
+    echo "APDL_AGENTS_POSTGRES_PASSWORD must be 16-128 URI-unreserved characters" >&2
+    exit 1
+fi
 if [[ ! "$llm_vault_password" =~ ^[A-Za-z0-9._~-]{16,128}$ ]]; then
     echo "APDL_LLM_VAULT_POSTGRES_PASSWORD must be 16-128 URI-unreserved characters" >&2
     exit 1
@@ -36,6 +44,7 @@ PGPASSWORD="${POSTGRES_PASSWORD:-${PGPASSWORD:-}}" psql \
     --no-psqlrc \
     --set=ON_ERROR_STOP=1 \
     --set=runtime_password="$runtime_password" \
+    --set=agents_password="$agents_password" \
     --set=llm_vault_password="$llm_vault_password" \
     --username "$postgres_user" \
     --dbname "$postgres_db" <<'SQL'
@@ -59,6 +68,25 @@ ALTER ROLE apdl_runtime WITH
     NOREPLICATION
     NOBYPASSRLS
     PASSWORD :'runtime_password';
+
+SELECT format(
+    'CREATE ROLE apdl_agents LOGIN PASSWORD %L',
+    :'agents_password'
+)
+WHERE NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'apdl_agents'
+)
+\gexec
+
+ALTER ROLE apdl_agents WITH
+    LOGIN
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOINHERIT
+    NOREPLICATION
+    NOBYPASSRLS
+    PASSWORD :'agents_password';
 
 SELECT format(
     'CREATE ROLE apdl_llm_vault LOGIN PASSWORD %L',
@@ -113,10 +141,47 @@ ALTER ROLE apdl_audit_purge_definer WITH
     NOREPLICATION
     NOBYPASSRLS;
 
+SELECT
+    'CREATE ROLE apdl_project_authority_definer NOLOGIN'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_project_authority_definer'
+)
+\gexec
+
+ALTER ROLE apdl_project_authority_definer WITH
+    NOLOGIN
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOINHERIT
+    NOREPLICATION
+    NOBYPASSRLS;
+
+SELECT
+    'CREATE ROLE apdl_capability_consumer_definer NOLOGIN'
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_roles
+    WHERE rolname = 'apdl_capability_consumer_definer'
+)
+\gexec
+
+ALTER ROLE apdl_capability_consumer_definer WITH
+    NOLOGIN
+    NOSUPERUSER
+    NOCREATEDB
+    NOCREATEROLE
+    NOINHERIT
+    NOREPLICATION
+    NOBYPASSRLS;
+
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public
-    FROM apdl_runtime, apdl_llm_vault, apdl_audit_operator,
-         apdl_audit_purge_definer;
+    FROM apdl_runtime, apdl_agents, apdl_llm_vault, apdl_audit_operator,
+         apdl_audit_purge_definer, apdl_project_authority_definer,
+         apdl_capability_consumer_definer;
 
 DO $apdl_validate_fixed_roles$
 DECLARE
@@ -127,9 +192,12 @@ BEGIN
         FROM pg_catalog.pg_roles
         WHERE rolname IN (
             'apdl_runtime',
+            'apdl_agents',
             'apdl_llm_vault',
             'apdl_audit_operator',
-            'apdl_audit_purge_definer'
+            'apdl_audit_purge_definer',
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
         )
     LOOP
         IF EXISTS (
@@ -201,16 +269,16 @@ BEGIN
     SELECT oid, rolname
     INTO role_record
     FROM pg_catalog.pg_roles
-    WHERE rolname = 'apdl_audit_purge_definer';
+    WHERE rolname = 'apdl_agents';
     IF EXISTS (
         SELECT 1
-        FROM pg_catalog.pg_auth_members
-        WHERE roleid = role_record.oid
-    ) THEN
-        RAISE EXCEPTION
-            'apdl_audit_purge_definer must not be granted to any database role';
-    END IF;
-    IF EXISTS (
+        FROM pg_catalog.pg_database
+        WHERE datdba = role_record.oid
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_namespace
+        WHERE nspowner = role_record.oid
+    ) OR EXISTS (
         SELECT 1
         FROM pg_catalog.pg_shdepend
         WHERE refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
@@ -218,8 +286,39 @@ BEGIN
           AND deptype = 'o'
     ) THEN
         RAISE EXCEPTION
-            'apdl_audit_purge_definer must not own preexisting database objects';
+            'apdl_agents must not own a database, schema, or database object';
     END IF;
+
+    FOR role_record IN
+        SELECT oid, rolname
+        FROM pg_catalog.pg_roles
+        WHERE rolname IN (
+            'apdl_audit_purge_definer',
+            'apdl_project_authority_definer',
+            'apdl_capability_consumer_definer'
+        )
+    LOOP
+        IF EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_auth_members
+            WHERE roleid = role_record.oid
+        ) THEN
+            RAISE EXCEPTION
+                '% must not be granted to any database role',
+                role_record.rolname;
+        END IF;
+        IF EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_shdepend
+            WHERE refclassid = 'pg_catalog.pg_authid'::pg_catalog.regclass
+              AND refobjid = role_record.oid
+              AND deptype = 'o'
+        ) THEN
+            RAISE EXCEPTION
+                '% must not own preexisting database objects',
+                role_record.rolname;
+        END IF;
+    END LOOP;
 END
 $apdl_validate_fixed_roles$;
 
