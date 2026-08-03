@@ -1,7 +1,7 @@
 """HTTP contract tests for atomic Config administration."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import ANY, AsyncMock
 
 import asyncpg
@@ -583,6 +583,7 @@ async def test_create_experiment_requires_running_decision_contract():
 async def test_create_running_experiment_persists_valid_statistical_plan(
     monkeypatch,
 ):
+    now = datetime.now(timezone.utc)
     command = AsyncMock(
         return_value=(make_experiment({"status": "running", "version": 1}), make_flag())
     )
@@ -601,8 +602,8 @@ async def test_create_running_experiment_persists_valid_statistical_plan(
                 {"key": "control", "weight": 1},
                 {"key": "treatment", "weight": 1},
             ],
-            "start_date": "2026-07-01T00:00:00Z",
-            "end_date": "2026-08-01T00:00:00Z",
+            "start_date": (now - timedelta(days=1)).isoformat(),
+            "end_date": (now + timedelta(days=1)).isoformat(),
             "primary_metric": {
                 "event": "purchase",
                 "type": "conversion",
