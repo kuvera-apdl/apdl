@@ -47,7 +47,10 @@ Full specification: `local-files/docs/plans/admin-console-ui-implementation-plan
   lifecycle with optimistic versions. The read-only Results tab resolves the
   flag, binary-conversion metric, variants, control, and time window from
   Config, then displays every Bonferroni-adjusted treatment comparison or a
-  typed insufficient-data state. It does not recommend or trigger actions.
+  typed insufficient-data state. Browser-side zod validation mirrors Config's
+  canonical targeting limits for immediate feedback; Config remains the
+  authoritative enforcement boundary. The console does not recommend or
+  trigger experiment actions.
 - Integration verification (`/settings/verify`): the five-step console-native
   `dev.sh smoke` — ingest → pipeline poll (re-send at attempt 5) → flag
   bootstrap with X-Cache observation → SSE freshness.
