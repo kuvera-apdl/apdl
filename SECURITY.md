@@ -46,7 +46,7 @@ Reports are especially important when they affect:
 - Agents provider keys, spend boundaries, project-provenance enforcement, or
   action/audit authorization;
 - Codegen repository grants, secret handling, sandboxing, or any path that can
-  publish a branch or pull request despite the 0.3.3 offline-only boundary;
+  publish a branch or pull request despite the offline-only boundary;
 - release workflow permissions, dependency provenance, or published npm/PyPI
   artifacts; or
 - the local Gateway being mistaken for hardened production ingress.
@@ -62,7 +62,8 @@ Reports are especially important when they affect:
 - LLM provider credentials are server-side secrets and must never be exposed
   to clients or included in event, audit, or Codegen artifacts.
 - Self-registered projects cannot execute Agents. Autonomous experiment
-  decisions and Codegen publication are disabled in 0.3.3. A bypass of any of
-  these boundaries should be treated as a high-severity report.
+  decisions and Codegen publication are disabled in the current developer
+  preview. A bypass of any of these boundaries should be treated as a
+  high-severity report.
 - The shipped Compose/Gateway configuration is for isolated local development.
   It is not a production security perimeter.

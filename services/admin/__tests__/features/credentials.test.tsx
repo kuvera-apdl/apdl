@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import type {
   CredentialAuditEntry,
@@ -151,18 +152,33 @@ function storageValues(storage: Storage): string[] {
 function renderCard(workspace: Workspace = makeWorkspace()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const rendered = render(
-    <WorkspaceProvider initialWorkspaces={[workspace]}>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <ProjectCredentialsCard />
-        </TooltipProvider>
-      </QueryClientProvider>
-    </WorkspaceProvider>,
+    <MemoryRouter>
+      <WorkspaceProvider initialWorkspaces={[workspace]}>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <ProjectCredentialsCard />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </WorkspaceProvider>
+    </MemoryRouter>,
   )
   return { ...rendered, queryClient }
 }
 
 describe('ProjectCredentialsCard', () => {
+  test('links each credential type to its setup guide', () => {
+    renderCard()
+
+    expect(screen.getByRole('link', { name: /connect the javascript sdk/i })).toHaveAttribute(
+      'href',
+      '/blog/javascript-sdk',
+    )
+    expect(screen.getByRole('link', { name: /connect the python sdk/i })).toHaveAttribute(
+      'href',
+      '/blog/python-sdk',
+    )
+  })
+
   test('fails closed without credentials:manage and does not fetch metadata', async () => {
     renderCard(
       makeWorkspace({

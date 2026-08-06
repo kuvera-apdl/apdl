@@ -7,6 +7,7 @@ import { gateConditionSchema } from './flags'
 import {
   MAX_CONDITIONS_PER_RULE,
   MAX_IDENTIFIER_LENGTH,
+  MAX_RULES,
   MAX_STRING_LENGTH,
 } from '@/core/evaluator/targetingContract'
 
@@ -81,7 +82,7 @@ export const experimentEntrySchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     traffic_percentage: z.number(),
     variants: z.array(experimentVariantSchema).min(2).max(MAX_EXPERIMENT_VARIANTS),
-    targeting_rules: z.array(experimentTargetingRuleSchema),
+    targeting_rules: z.array(experimentTargetingRuleSchema).max(MAX_RULES),
     primary_metric: experimentMetricSchema.nullable(),
     statistical_plan: experimentStatisticalPlanSchema.nullable(),
     start_date: awareDateTimeSchema.nullable(),
@@ -115,7 +116,7 @@ export const experimentCreateSchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
     primary_metric: experimentMetricSchema.optional(),
     statistical_plan: experimentStatisticalPlanSchema.optional(),
-    targeting_rules: z.array(experimentTargetingRuleSchema),
+    targeting_rules: z.array(experimentTargetingRuleSchema).max(MAX_RULES),
   })
   .strict()
 
@@ -132,7 +133,7 @@ export const experimentUpdateSchema = z
     default_variant: z.string().min(1).max(MAX_IDENTIFIER_LENGTH).optional(),
     primary_metric: experimentMetricSchema.nullable().optional(),
     statistical_plan: experimentStatisticalPlanSchema.nullable().optional(),
-    targeting_rules: z.array(experimentTargetingRuleSchema).optional(),
+    targeting_rules: z.array(experimentTargetingRuleSchema).max(MAX_RULES).optional(),
   })
   .strict()
 

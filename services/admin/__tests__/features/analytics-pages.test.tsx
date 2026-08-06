@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -14,6 +14,7 @@ import { RetentionPage } from '../../src/features/analytics/RetentionPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
 const requests: { path: string; body: unknown }[] = []
+const catalogRequests: unknown[] = []
 
 const server = setupServer(
   http.post('*/api/projects/demo/query/v1/query/events/count', async ({ request }) => {
@@ -82,7 +83,8 @@ const server = setupServer(
       cohorts: [],
     })
   }),
-  http.post('*/api/projects/demo/query/v1/query/events/names', async () => {
+  http.post('*/api/projects/demo/query/v1/query/events/names', async ({ request }) => {
+    catalogRequests.push(await request.json())
     return HttpResponse.json({
       events: [
         { event_name: 'page', event_count: 76, unique_users: 11 },
@@ -101,6 +103,7 @@ beforeEach(() => {
   localStorage.clear()
   seedWorkspace()
   requests.length = 0
+  catalogRequests.length = 0
 })
 
 function renderPage(ui: React.ReactElement) {
@@ -117,6 +120,23 @@ function renderPage(ui: React.ReactElement) {
 }
 
 describe('EventsExplorerPage', () => {
+  test('loads the event catalog within the query service date-range limit', async () => {
+    renderPage(<EventsExplorerPage />)
+
+    await waitFor(() => expect(catalogRequests).toHaveLength(1))
+    const body = catalogRequests[0] as {
+      project_id: string
+      start_date: string
+      end_date: string
+      limit: number
+    }
+    const rangeDays =
+      (Date.parse(body.end_date) - Date.parse(body.start_date)) / (24 * 60 * 60 * 1000)
+
+    expect(body).toMatchObject({ project_id: 'demo', limit: 1000 })
+    expect(rangeDays).toBe(89)
+  })
+
   test('runs a counts query with project_id and renders the result table', async () => {
     renderPage(<EventsExplorerPage />)
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))

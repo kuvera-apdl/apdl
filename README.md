@@ -27,10 +27,10 @@
 
 APDL ingests user behavior events, runs analytics queries, evaluates feature
 flags and A/B experiments, and can use opt-in LLM workflows to generate
-insights and propose experiment designs. In 0.3.3 those workflows do not close
-the product loop: experiment designs require human approval, approval creates
-an inert Config draft with a disabled flag, treatment implementation is a
-separate changeset lifecycle, and an operator must separately activate any
+insights and propose experiment designs. In the current developer preview those
+workflows do not close the product loop: experiment designs require human
+approval, approval creates an inert Config draft with a disabled flag, treatment
+implementation is a separate changeset lifecycle, and an operator must activate any
 completed treatment. Personalization, autonomous evaluation, and rollback are
 disabled. The intended data flow is:
 
@@ -41,20 +41,20 @@ disabled. The intended data flow is:
 
 ## Release status
 
-APDL 0.3.3 is an OSS **developer preview**, not a production release. Its
+APDL is an OSS **developer preview**, not a production release. Its
 supported deployment is a fresh, single-node, source-built Docker Compose
 installation. The supported core consists of Ingestion, Config, Query, the
 Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console, together
 with Redis, ClickHouse, and PostgreSQL.
 
-The 0.3.3 release publishes exactly these installable artifacts from one tested
-revision:
+The current release publishes exactly these installable artifacts from one
+tested revision:
 
 - GitHub source archives for this repository;
 - [`@apdl-oss/sdk`](https://www.npmjs.com/package/@apdl-oss/sdk) on npm; and
 - [`apdl-sdk`](https://pypi.org/project/apdl-sdk/) on PyPI.
 
-APDL does **not** publish GHCR or other container images for 0.3.3. Compose
+APDL does **not** publish GHCR or other container images for this release. Compose
 builds the core images from the checked-out source. Agents is an opt-in,
 operator-provisioned preview. Only the Codegen API/control plane is available
 as a source-only, non-publishing `offline` preview; its Aider editor/worker and
@@ -151,7 +151,7 @@ if (checkoutVariant === 'treatment') {
 ```
 
 → [Full JS SDK docs](sdk/javascript/README.md): configuration, privacy
-controls, local UI rendering APIs, and real-time flag subscriptions. The 0.3.3
+controls, local UI rendering APIs, and real-time flag subscriptions. The current
 backend does not store or deliver UI configurations.
 
 ### Python (server-side) — [`apdl-sdk`](sdk/python/README.md)
@@ -475,10 +475,11 @@ per-project policy:
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns
 - **Experiment Design** — proposes A/B tests for human approval; an approval
   creates only a disabled experiment draft and may request separate treatment work
-- **Personalization** — disabled in 0.3.3; no canonical Config storage or SDK
-  delivery path exists yet
-- **Experiment Evaluation and Feature Proposals** — disabled in 0.3.3; current
-  statistical snapshots do not establish deployment readiness
+- **Personalization** — disabled in the current developer preview; no canonical
+  Config storage or SDK delivery path exists yet
+- **Experiment Evaluation and Feature Proposals** — disabled in the current
+  developer preview; current statistical snapshots do not establish deployment
+  readiness
 
 For eligible operator projects, proposed experiment drafts receive static
 validation and are recorded in the audit trail. Experiment design is hard-gated

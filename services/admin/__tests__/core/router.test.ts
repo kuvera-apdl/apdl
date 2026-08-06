@@ -21,7 +21,7 @@ test('keeps auth and layout eager while resolving every screen through a lazy ro
 
     expect(authRoute?.lazy).toBeUndefined()
     expect(appShellRoute?.lazy).toBeUndefined()
-    expect(lazyRoutes).toHaveLength(30)
+    expect(lazyRoutes).toHaveLength(33)
 
     for (const route of lazyRoutes) {
       if (!route.lazy) throw new Error(`Expected ${route.path ?? 'pathless route'} to be lazy`)

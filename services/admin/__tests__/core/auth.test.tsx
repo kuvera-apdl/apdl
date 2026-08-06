@@ -66,6 +66,31 @@ test('a 401 event ends the server-backed session and redirects protected routes'
   expect(await screen.findByText('Login route')).toBeInTheDocument()
 })
 
+test('an authenticated account without projects is redirected to workspace settings', async () => {
+  sessionProjects = []
+  const queryClient = new QueryClient()
+  render(
+    <QueryClientProvider client={queryClient}>
+      <AuthProvider>
+        <MemoryRouter initialEntries={['/private']}>
+          <Routes>
+            <Route element={<RequireAuth />}>
+              <Route path="/private" element={<div>Private console</div>} />
+              <Route
+                path="/settings/workspace"
+                element={<div>Workspace settings</div>}
+              />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </AuthProvider>
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByText('Workspace settings')).toBeInTheDocument()
+  expect(screen.queryByText('Private console')).not.toBeInTheDocument()
+})
+
 test('project authority revocation refreshes identity without ending the session', async () => {
   const queryClient = new QueryClient()
   render(

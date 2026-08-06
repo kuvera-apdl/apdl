@@ -17,6 +17,7 @@ import {
   LogOut,
   Monitor,
   Moon,
+  Newspaper,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
@@ -132,6 +133,17 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'Cohorts',
         icon: Users,
         isActive: (path) => path === '/analytics/cohorts',
+      },
+    ],
+  },
+  {
+    label: 'Resources',
+    items: [
+      {
+        to: '/blog',
+        label: 'Blog',
+        icon: Newspaper,
+        isActive: (path) => path === '/blog' || path.startsWith('/blog/'),
       },
     ],
   },

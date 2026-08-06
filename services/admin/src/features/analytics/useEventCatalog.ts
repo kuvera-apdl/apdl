@@ -8,9 +8,9 @@ import { useWorkspace } from '@/core/workspace'
 import { lastDays } from './selectorModel'
 import { useAnalyticsQuery } from './useAnalyticsQuery'
 
-// Wide lookback + max limit so the picker shows effectively all of a project's
-// events, independent of whatever analysis window a page is currently using.
-const CATALOG_LOOKBACK_DAYS = 365
+// Keep discovery independent of the page's analysis window while respecting
+// the query service's maximum supported date range.
+const CATALOG_LOOKBACK_DAYS = 90
 const CATALOG_LIMIT = 1000
 
 export function useEventCatalog() {

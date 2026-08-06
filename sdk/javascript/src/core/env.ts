@@ -4,31 +4,13 @@
  * When `endpoint` / `auth.clientKey` are not passed to `init()`, they are
  * resolved from these variables so the common case needs no manual wiring:
  *
- * - Browser bundlers (Next.js, Vite) inline the `NEXT_PUBLIC_*` / public vars.
+ * - Next.js inlines the `NEXT_PUBLIC_*` vars into browser bundles.
  * - Server runtimes read the unprefixed `APDL_*` vars from `process.env`.
  *
  * The earliest defined, non-empty value wins.
  */
 
-const ENDPOINT_ENV_VARS = [
-  'NEXT_PUBLIC_APDL_URL',
-  'NEXT_PUBLIC_APDL_ENDPOINT',
-  'APDL_URL',
-  'APDL_ENDPOINT',
-] as const;
-
-const CLIENT_KEY_ENV_VARS = [
-  'NEXT_PUBLIC_APDL_CLIENT_KEY',
-  'APDL_CLIENT_KEY',
-] as const;
-
-function readEnv(name: string): string | undefined {
-  // `process` is undefined in some browser bundles; guard before touching it.
-  if (typeof process === 'undefined' || process.env == null) {
-    return undefined;
-  }
-
-  const value = process.env[name];
+function normalizeEnv(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }
@@ -37,22 +19,46 @@ function readEnv(name: string): string | undefined {
   return trimmed === '' ? undefined : trimmed;
 }
 
-function firstEnv(names: readonly string[]): string | undefined {
-  for (const name of names) {
-    const value = readEnv(name);
-    if (value !== undefined) {
-      return value;
-    }
+function nextPublicEndpoint(): unknown {
+  try {
+    // Keep this as a direct property access: Next.js only inlines public
+    // variables when their names are statically analyzable.
+    return process.env.NEXT_PUBLIC_APDL_URL;
+  } catch {
+    // `process` is absent in unbundled browser and IIFE environments.
+    return undefined;
   }
-  return undefined;
+}
+
+function nextPublicClientKey(): unknown {
+  try {
+    // Keep this as a direct property access for Next.js browser inlining.
+    return process.env.NEXT_PUBLIC_APDL_CLIENT_KEY;
+  } catch {
+    return undefined;
+  }
+}
+
+function serverEndpoint(): unknown {
+  if (typeof process === 'undefined' || process.env == null) {
+    return undefined;
+  }
+  return process.env.APDL_URL;
+}
+
+function serverClientKey(): unknown {
+  if (typeof process === 'undefined' || process.env == null) {
+    return undefined;
+  }
+  return process.env.APDL_CLIENT_KEY;
 }
 
 /** Resolves the ingestion/config endpoint from documented env conventions. */
 export function endpointFromEnv(): string | undefined {
-  return firstEnv(ENDPOINT_ENV_VARS);
+  return normalizeEnv(nextPublicEndpoint()) ?? normalizeEnv(serverEndpoint());
 }
 
 /** Resolves the client key from documented env conventions. */
 export function clientKeyFromEnv(): string | undefined {
-  return firstEnv(CLIENT_KEY_ENV_VARS);
+  return normalizeEnv(nextPublicClientKey()) ?? normalizeEnv(serverClientKey());
 }

@@ -1,6 +1,6 @@
 # APDL Support Policy
 
-APDL 0.3.3 is a community-supported developer preview. It has no uptime,
+APDL is a community-supported developer preview. It has no uptime,
 response-time, data-recovery, or compatibility SLA.
 
 ## Supported Version
@@ -11,7 +11,7 @@ maintained release channels.
 
 ## Published Artifacts
 
-The complete 0.3.3 artifact set is:
+The complete supported artifact set is:
 
 - source archives from
   [GitHub Releases](https://github.com/kuvera-apdl/apdl/releases);
@@ -48,7 +48,7 @@ must not be treated as hardened public ingress.
   pull-request publication is disabled and not supported. The Aider editor,
   `.[agent]` dependency extra, `Dockerfile.worker`, sandbox execution, and all
   publication rollout overlays are experimental source only, are not installed
-  by the supported stack, and are outside the 0.3.3 dependency/security gate.
+  by the supported stack, and are outside the current dependency/security gate.
 - **Unsupported:** Kubernetes, Terraform, multi-replica operation,
   in-place upgrades, backup, restore, disaster recovery, managed cloud
   deployment, production ingress, and production security/SLO claims. Redis

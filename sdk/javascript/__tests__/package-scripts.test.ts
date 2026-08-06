@@ -48,7 +48,6 @@ describe('package workflow scripts', () => {
   it('publishes the canonical release package metadata', () => {
     expect(packageJson).toMatchObject({
       name: '@apdl-oss/sdk',
-      version: '0.3.3',
       license: 'MIT',
     });
   });

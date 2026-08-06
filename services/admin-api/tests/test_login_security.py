@@ -138,9 +138,11 @@ class _PreflightConnection:
         self.bucket_attempts: dict[tuple[str, str], int] = {}
         self.window_started_at: datetime | None = None
         self.next_allowed_at: dict[str, datetime] = {}
+        self.cleanup_calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def execute(self, query: str, *args):
         assert "DELETE FROM admin_login_" in query
+        self.cleanup_calls.append((query, args))
         return "DELETE 0"
 
     async def fetchrow(self, query: str, *args):
@@ -179,3 +181,10 @@ async def test_preflight_combines_global_network_device_and_source_limits() -> N
 
     conn.next_allowed_at["network"] = now + timedelta(seconds=75)
     assert await preflight_login(conn, source, settings, now) == 75
+
+    rate_cleanup_query, rate_cleanup_args = conn.cleanup_calls[0]
+    source_cleanup_query, source_cleanup_args = conn.cleanup_calls[1]
+    assert "INTERVAL" not in rate_cleanup_query
+    assert rate_cleanup_args == (now - timedelta(seconds=120),)
+    assert "INTERVAL" not in source_cleanup_query
+    assert source_cleanup_args == (now - timedelta(seconds=172_800),)

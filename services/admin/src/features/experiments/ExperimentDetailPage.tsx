@@ -317,7 +317,7 @@ export function ExperimentCreatePage() {
       <PageHeader
         backTo={{ to: '/experiments', label: 'Experiments' }}
         title="Create experiment"
-        description="Creating an experiment also creates its backing flag — start it as running to begin bucketing users immediately."
+        description="Start with the essentials and save a draft. Launch, allocation, analysis, and targeting controls are available under Advanced Settings."
       />
       <ExperimentForm
         values={values}

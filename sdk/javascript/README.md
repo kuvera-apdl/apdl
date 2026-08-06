@@ -69,6 +69,18 @@ variables, so `init()` can be called with no arguments:
 | endpoint | `NEXT_PUBLIC_APDL_URL` | `APDL_URL` |
 | clientKey | `NEXT_PUBLIC_APDL_CLIENT_KEY` | `APDL_CLIENT_KEY` |
 
+For Next.js, add the browser-safe values to `.env.local` and restart the
+development server:
+
+```dotenv
+NEXT_PUBLIC_APDL_URL=https://api.example.com
+NEXT_PUBLIC_APDL_CLIENT_KEY=client_demo_0123456789abcdef
+```
+
+The SDK uses direct, statically analyzable references to these public variables,
+so Next.js includes them in the browser bundle. Never put a secret server key in
+a `NEXT_PUBLIC_*` variable.
+
 For module-scope use without any `useEffect`, import the lazy `apdl` singleton.
 It no-ops on the server and auto-starts on the first browser tick, reading config
 from the env conventions above:

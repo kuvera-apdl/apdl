@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "version": "0.3.3",
-  "tag": "v0.3.3",
+  "version": "0.3.4",
+  "tag": "v0.3.4",
   "repository": "https://github.com/kuvera-apdl/apdl",
   "artifacts": {
     "source": {

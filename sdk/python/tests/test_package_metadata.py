@@ -5,10 +5,9 @@ from apdl.types import SDK_IDENTIFIER, SDK_VERSION
 
 
 def test_runtime_and_distribution_versions_match():
-    assert version("apdl-sdk") == "0.3.3"
-    assert apdl.__version__ == "0.3.3"
-    assert SDK_VERSION == "0.3.3"
-    assert SDK_IDENTIFIER == "python/0.3.3"
+    assert version("apdl-sdk") == apdl.__version__
+    assert SDK_VERSION == apdl.__version__
+    assert SDK_IDENTIFIER == f"python/{SDK_VERSION}"
 
 
 def test_distribution_metadata_is_release_ready():

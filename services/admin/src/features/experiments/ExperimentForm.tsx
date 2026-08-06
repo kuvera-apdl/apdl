@@ -1,10 +1,8 @@
 // Experiment setup form (gap G5): a structured editor over the canonical record.
 // An experiment owns a backing flag, so variants/default_variant/traffic map to
 // the flag and status drives flag serving through lifecycle-aware transitions.
-// Targeting stays a JSON editor but is validated against the experiment-only
-// eligibility schema rather than the feature-flag rollout schema.
 import { Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { z } from 'zod'
 
 import {
@@ -20,15 +18,22 @@ import type {
   ExperimentMetric,
   ExperimentStatisticalPlan,
   ExperimentStatus,
-  ExperimentTargetingRule,
   ExperimentUpdate,
   ExperimentVariant,
 } from '@/api/types/experiments'
 import { Button } from '@/components/ui/button'
+import { Disclosure } from '@/components/ui/disclosure'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
+import { MAX_RULES } from '@/core/evaluator/targetingContract'
+
+import {
+  ExperimentTargetingRules,
+  targetingRulesToFormValues,
+  targetingRulesToWire,
+  type ExperimentTargetingRuleFormValue,
+} from './ExperimentTargetingRules'
 
 // Mirrors the Config service _ALLOWED_STATUS_TRANSITIONS: completed/stopped are
 // terminal (no resume).
@@ -44,6 +49,10 @@ const STATUS_TRANSITIONS: Record<ExperimentStatus, ExperimentStatus[]> = {
 const METRIC_DIRECTIONS = ['increase', 'decrease'] as const
 const MAX_EXPERIMENT_VARIANTS = 10
 const MAX_EXPERIMENT_DURATION_MS = 90 * 24 * 60 * 60 * 1000
+
+function toDateInputValue(value: string | null): string {
+  return value?.slice(0, 10) ?? ''
+}
 
 export interface ExperimentVariantRow {
   key: string
@@ -70,7 +79,7 @@ export interface ExperimentFormValues {
   nominalPower: number
   requiredSampleSizePerArm: number
   dataSettlementSeconds: number
-  targetingRulesJson: string
+  targetingRules: ExperimentTargetingRuleFormValue[]
 }
 
 export function emptyExperimentValues(): ExperimentFormValues {
@@ -96,7 +105,7 @@ export function emptyExperimentValues(): ExperimentFormValues {
     nominalPower: 0.8,
     requiredSampleSizePerArm: 5000,
     dataSettlementSeconds: 300,
-    targetingRulesJson: '',
+    targetingRules: [],
   }
 }
 
@@ -108,8 +117,8 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     description: entry.description,
     bucket_by: entry.bucket_by,
     traffic_percentage: entry.traffic_percentage,
-    start_date: entry.start_date ?? '',
-    end_date: entry.end_date ?? '',
+    start_date: toDateInputValue(entry.start_date),
+    end_date: toDateInputValue(entry.end_date),
     variants: entry.variants.map((variant) => ({
       key: variant.key,
       weight: variant.weight,
@@ -124,28 +133,8 @@ export function entryToFormValues(entry: ExperimentEntry): ExperimentFormValues 
     nominalPower: entry.statistical_plan?.nominal_power ?? 0.8,
     requiredSampleSizePerArm: entry.statistical_plan?.required_sample_size_per_arm ?? 5000,
     dataSettlementSeconds: entry.statistical_plan?.data_settlement_seconds ?? 300,
-    targetingRulesJson:
-      entry.targeting_rules.length > 0 ? JSON.stringify(entry.targeting_rules, null, 2) : '',
+    targetingRules: targetingRulesToFormValues(entry.targeting_rules),
   }
-}
-
-export function parseTargetingRules(raw: string): {
-  value: ExperimentTargetingRule[] | null
-  error: string | null
-} {
-  if (raw.trim() === '') return { value: [], error: null }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return { value: null, error: 'Invalid JSON' }
-  }
-  if (!Array.isArray(parsed)) return { value: null, error: 'Must be a JSON array of rules' }
-  const result = z.array(experimentTargetingRuleSchema).safeParse(parsed)
-  if (!result.success) {
-    return { value: null, error: 'Each rule needs exactly id, name, and conditions' }
-  }
-  return { value: result.data, error: null }
 }
 
 function projectVariants(rows: ExperimentVariantRow[]): ExperimentVariant[] {
@@ -202,7 +191,7 @@ export function buildCreate(values: ExperimentFormValues): ExperimentCreate {
     end_date: toAwareDateTime(values.end_date),
     variants: projectVariants(values.variants),
     default_variant: values.default_variant,
-    targeting_rules: parseTargetingRules(values.targetingRulesJson).value ?? [],
+    targeting_rules: targetingRulesToWire(values.targetingRules),
   }
   const metric = buildMetric(values)
   if (metric) {
@@ -234,7 +223,7 @@ export function buildUpdate(
       update.traffic_percentage = values.traffic_percentage
     }
 
-    const targetingRules = parseTargetingRules(values.targetingRulesJson).value ?? []
+    const targetingRules = targetingRulesToWire(values.targetingRules)
     if (!same(targetingRules, base.targeting_rules)) update.targeting_rules = targetingRules
 
     const startDate = toAwareDateTime(values.start_date)
@@ -243,8 +232,8 @@ export function buildUpdate(
     const primaryMetric = buildMetric(values)
     const statisticalPlan = primaryMetric ? buildStatisticalPlan(values) : null
 
-    if (startDate !== base.start_date) update.start_date = startDate
-    if (endDate !== base.end_date) update.end_date = endDate
+    if (values.start_date !== toDateInputValue(base.start_date)) update.start_date = startDate
+    if (values.end_date !== toDateInputValue(base.end_date)) update.end_date = endDate
     if (!same(variants, base.variants)) update.variants = variants
     if (values.default_variant !== base.default_variant) {
       update.default_variant = values.default_variant
@@ -296,8 +285,13 @@ export function validateExperimentForm(values: ExperimentFormValues): Experiment
     errors.default_variant = 'Choose a control variant that matches a variant key'
   }
 
-  const rules = parseTargetingRules(values.targetingRulesJson)
-  if (rules.error) errors.targeting = rules.error
+  const rules = z
+    .array(experimentTargetingRuleSchema)
+    .max(MAX_RULES)
+    .safeParse(targetingRulesToWire(values.targetingRules))
+  if (!rules.success) {
+    errors.targeting = 'Each targeting condition needs a valid type, operator, and value'
+  }
 
   const start = toAwareDateTime(values.start_date)
   const end = toAwareDateTime(values.end_date)
@@ -378,6 +372,7 @@ export function ExperimentForm({
   readOnly = false,
 }: ExperimentFormProps) {
   const [errors, setErrors] = useState<ExperimentFormErrors>({})
+  const advancedSettingsRef = useRef<HTMLDivElement>(null)
   const set = (patch: Partial<ExperimentFormValues>) => onChange({ ...values, ...patch })
 
   const setVariant = (index: number, patch: Partial<ExperimentVariantRow>) =>
@@ -395,7 +390,19 @@ export function ExperimentForm({
   const submit = () => {
     const nextErrors = validateExperimentForm(values)
     setErrors(nextErrors)
-    if (Object.keys(nextErrors).length > 0) return
+    if (Object.keys(nextErrors).length > 0) {
+      if (
+        nextErrors.flagKey ||
+        nextErrors.targeting ||
+        nextErrors.dates ||
+        nextErrors.metric ||
+        nextErrors.statisticalPlan
+      ) {
+        const disclosure = advancedSettingsRef.current?.querySelector('details')
+        if (disclosure) disclosure.open = true
+      }
+      return
+    }
     onSubmit()
   }
 
@@ -414,44 +421,6 @@ export function ExperimentForm({
           {keyError || errors.key ? (
             <p className="text-xs text-destructive">{keyError ?? errors.key}</p>
           ) : null}
-        </div>
-        <div className="space-y-1.5">
-          <Label>Flag key</Label>
-          <Input
-            value={values.flagKey}
-            onChange={(event) => set({ flagKey: event.target.value })}
-            disabled={!isCreate}
-            placeholder={values.key || 'defaults to key'}
-            className="font-mono text-xs"
-          />
-          <p className="text-xs text-muted-foreground">
-            Backing flag whose exposures measure this experiment. Defaults to the key; immutable
-            once created.
-          </p>
-          {errors.flagKey ? <p className="text-xs text-destructive">{errors.flagKey}</p> : null}
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label>Status</Label>
-          <Select
-            value={values.status}
-            onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
-            disabled={terminal}
-            aria-label="Status"
-          >
-            {statusOptions.map((status) => (
-              <option key={status} value={status}>
-                {status}
-              </option>
-            ))}
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            {terminal
-              ? 'This experiment has ended — status is terminal.'
-              : 'Running enables the backing flag; completed/stopped disable it.'}
-          </p>
         </div>
         <div className="space-y-1.5">
           <Label>Description</Label>
@@ -518,11 +487,11 @@ export function ExperimentForm({
         </Button>
         {errors.variants ? <p className="text-xs text-destructive">{errors.variants}</p> : null}
         <p className="text-xs text-muted-foreground">
-          Weights set the split; traffic % gates who enters the experiment.
+          Weights set the split. Traffic defaults to 100% and can be changed in Advanced Settings.
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label>Control variant</Label>
           <Select
@@ -546,22 +515,6 @@ export function ExperimentForm({
           )}
         </div>
         <div className="space-y-1.5">
-          <Label>Traffic %</Label>
-          <Input
-            type="number"
-            min={0}
-            max={100}
-            step="any"
-            value={values.traffic_percentage}
-            onChange={(event) =>
-              set({ traffic_percentage: Math.min(100, Math.max(0, Number(event.target.value) || 0)) })
-            }
-            disabled={analysisFieldsLocked}
-            aria-label="Traffic percentage"
-            className="tabular-nums"
-          />
-        </div>
-        <div className="space-y-1.5">
           <Label>Bucketing identity</Label>
           <Select
             value={values.bucket_by}
@@ -583,164 +536,236 @@ export function ExperimentForm({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <Label>Primary metric</Label>
-        <div className="grid gap-2 sm:grid-cols-3">
-          <Input
-            value={values.metricEvent}
-            onChange={(event) => set({ metricEvent: event.target.value })}
-            placeholder="event (e.g. purchase_completed)"
-            aria-label="Metric event"
-            disabled={analysisFieldsLocked}
-            className="font-mono text-xs"
-          />
-          <Input value="conversion" disabled aria-label="Metric type" />
-          <Select
-            value={values.metricDirection}
-            onChange={(event) => set({ metricDirection: event.target.value as ExperimentMetric['direction'] })}
-            aria-label="Metric direction"
-            disabled={analysisFieldsLocked}
-          >
-            {METRIC_DIRECTIONS.map((direction) => (
-              <option key={direction} value={direction}>
-                {direction}
-              </option>
-            ))}
-          </Select>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Optional — leave the event blank to skip. Only the event drives results.
-        </p>
-        {errors.metric ? <p className="text-xs text-destructive">{errors.metric}</p> : null}
-      </div>
-      <div className="space-y-3 rounded-md border p-4">
-        <div>
-          <Label>Fixed-horizon statistical plan</Label>
-          <p className="text-xs text-muted-foreground">
-            Immutable after draft. Config validates the prospective per-arm target using the metric
-            direction and Bonferroni adjustment for every treatment arm.
-          </p>
-        </div>
-        <Input value="fixed_horizon_fisher_newcombe_cc_plan_v1" disabled aria-label="Statistical protocol" />
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <div className="space-y-1.5">
-            <Label>Baseline conversion</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step="any"
-              value={values.baselineConversionRate}
-              onChange={(event) => set({ baselineConversionRate: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Baseline conversion rate"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Minimum detectable effect</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step="any"
-              value={values.minimumDetectableEffect}
-              onChange={(event) => set({ minimumDetectableEffect: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Minimum detectable effect"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Significance level</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step="any"
-              value={values.significanceLevel}
-              onChange={(event) => set({ significanceLevel: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Significance level"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Nominal power</Label>
-            <Input
-              type="number"
-              min={0}
-              max={1}
-              step="any"
-              value={values.nominalPower}
-              onChange={(event) => set({ nominalPower: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Nominal power"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Required actors / arm</Label>
-            <Input
-              type="number"
-              min={2}
-              step={1}
-              value={values.requiredSampleSizePerArm}
-              onChange={(event) => set({ requiredSampleSizePerArm: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Required sample size per arm"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Settlement hold (seconds)</Label>
-            <Input
-              type="number"
-              min={1}
-              max={86_400}
-              step={1}
-              value={values.dataSettlementSeconds}
-              onChange={(event) => set({ dataSettlementSeconds: Number(event.target.value) })}
-              disabled={analysisFieldsLocked}
-              aria-label="Data settlement seconds"
-            />
-          </div>
-        </div>
-        {errors.statisticalPlan ? (
-          <p className="text-xs text-destructive">{errors.statisticalPlan}</p>
-        ) : null}
-      </div>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label>Start date</Label>
-          <Input
-            value={values.start_date}
-            onChange={(event) => set({ start_date: event.target.value })}
-            placeholder="YYYY-MM-DD"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label>End date</Label>
-          <Input
-            value={values.end_date}
-            onChange={(event) => set({ end_date: event.target.value })}
-            placeholder="YYYY-MM-DD"
-          />
-        </div>
-      </div>
-      {errors.dates ? <p className="text-xs text-destructive">{errors.dates}</p> : null}
+      <div ref={advancedSettingsRef}>
+        <Disclosure
+          summary={
+            <span>
+              <span className="block font-medium">Advanced Settings</span>
+              <span className="block text-xs text-muted-foreground">
+                Optional launch, allocation, analysis, and targeting controls.
+              </span>
+            </span>
+          }
+          defaultOpen={!isCreate}
+        >
+          <div className="space-y-5">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Status</Label>
+                <Select
+                  value={values.status}
+                  onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
+                  disabled={terminal}
+                  aria-label="Status"
+                >
+                  {statusOptions.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {terminal
+                    ? 'This experiment has ended — status is terminal.'
+                    : 'Defaults to draft. Running enables the backing flag.'}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Traffic %</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="any"
+                  value={values.traffic_percentage}
+                  onChange={(event) =>
+                    set({
+                      traffic_percentage: Math.min(
+                        100,
+                        Math.max(0, Number(event.target.value) || 0),
+                      ),
+                    })
+                  }
+                  disabled={analysisFieldsLocked}
+                  aria-label="Traffic percentage"
+                  className="tabular-nums"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Defaults to all eligible actors.
+                </p>
+              </div>
+            </div>
 
-      <div className="space-y-1.5">
-        <Label>Targeting rules (JSON array)</Label>
-        <Textarea
-          value={values.targetingRulesJson}
-          onChange={(event) => set({ targetingRulesJson: event.target.value })}
-          className="min-h-24 font-mono text-xs"
-          aria-label="Targeting rules JSON"
-          placeholder="[]"
-          disabled={analysisFieldsLocked}
-        />
-        {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
-        <p className="text-xs text-muted-foreground">
-          Eligibility rules need <code>id</code>, <code>name</code>, and <code>conditions</code>.
-          Traffic allocation is controlled only by the traffic percentage above. Leave empty to
-          target everyone.
-        </p>
+            <div className="space-y-1.5">
+              <Label>Flag key</Label>
+              <Input
+                value={values.flagKey}
+                onChange={(event) => set({ flagKey: event.target.value })}
+                disabled={!isCreate}
+                placeholder={values.key || 'defaults to key'}
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-muted-foreground">
+                Backing flag whose exposures measure this experiment. Defaults to the experiment
+                key and is immutable once created.
+              </p>
+              {errors.flagKey ? <p className="text-xs text-destructive">{errors.flagKey}</p> : null}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Primary metric</Label>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <Input
+                  value={values.metricEvent}
+                  onChange={(event) => set({ metricEvent: event.target.value })}
+                  placeholder="event (e.g. purchase_completed)"
+                  aria-label="Metric event"
+                  disabled={analysisFieldsLocked}
+                  className="font-mono text-xs"
+                />
+                <Input value="conversion" disabled aria-label="Metric type" />
+                <Select
+                  value={values.metricDirection}
+                  onChange={(event) => set({ metricDirection: event.target.value as ExperimentMetric['direction'] })}
+                  aria-label="Metric direction"
+                  disabled={analysisFieldsLocked}
+                >
+                  {METRIC_DIRECTIONS.map((direction) => (
+                    <option key={direction} value={direction}>
+                      {direction}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Optional — leave the event blank to skip. Only the event drives results.
+              </p>
+              {errors.metric ? <p className="text-xs text-destructive">{errors.metric}</p> : null}
+            </div>
+            <div className="space-y-3 rounded-md border p-4">
+              <div>
+                <Label>Fixed-horizon statistical plan</Label>
+                <p className="text-xs text-muted-foreground">
+                  Immutable after draft. Config validates the prospective per-arm target using the metric
+                  direction and Bonferroni adjustment for every treatment arm.
+                </p>
+              </div>
+              <Input value="fixed_horizon_fisher_newcombe_cc_plan_v1" disabled aria-label="Statistical protocol" />
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label>Baseline conversion</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step="any"
+                    value={values.baselineConversionRate}
+                    onChange={(event) => set({ baselineConversionRate: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Baseline conversion rate"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Minimum detectable effect</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step="any"
+                    value={values.minimumDetectableEffect}
+                    onChange={(event) => set({ minimumDetectableEffect: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Minimum detectable effect"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Significance level</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step="any"
+                    value={values.significanceLevel}
+                    onChange={(event) => set({ significanceLevel: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Significance level"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Nominal power</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step="any"
+                    value={values.nominalPower}
+                    onChange={(event) => set({ nominalPower: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Nominal power"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Required actors / arm</Label>
+                  <Input
+                    type="number"
+                    min={2}
+                    step={1}
+                    value={values.requiredSampleSizePerArm}
+                    onChange={(event) => set({ requiredSampleSizePerArm: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Required sample size per arm"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Settlement hold (seconds)</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={86_400}
+                    step={1}
+                    value={values.dataSettlementSeconds}
+                    onChange={(event) => set({ dataSettlementSeconds: Number(event.target.value) })}
+                    disabled={analysisFieldsLocked}
+                    aria-label="Data settlement seconds"
+                  />
+                </div>
+              </div>
+              {errors.statisticalPlan ? (
+                <p className="text-xs text-destructive">{errors.statisticalPlan}</p>
+              ) : null}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="experiment-start-date">Start date</Label>
+                <Input
+                  id="experiment-start-date"
+                  type="date"
+                  value={values.start_date}
+                  onChange={(event) => set({ start_date: event.target.value })}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="experiment-end-date">End date</Label>
+                <Input
+                  id="experiment-end-date"
+                  type="date"
+                  value={values.end_date}
+                  onChange={(event) => set({ end_date: event.target.value })}
+                />
+              </div>
+            </div>
+            {errors.dates ? <p className="text-xs text-destructive">{errors.dates}</p> : null}
+
+            <div className="space-y-1.5">
+              <ExperimentTargetingRules
+                value={values.targetingRules}
+                onChange={(targetingRules) => set({ targetingRules })}
+                disabled={analysisFieldsLocked}
+              />
+              {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
+            </div>
+          </div>
+        </Disclosure>
       </div>
 
       {!readOnly ? (

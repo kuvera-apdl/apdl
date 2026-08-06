@@ -1,6 +1,6 @@
 {
   "name": "@apdl-oss/sdk",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Client SDK for the Autonomous Product Development Loop platform",
   "keywords": [
     "analytics",

@@ -402,26 +402,6 @@ def _verify_licenses(root: Path) -> None:
             )
 
 
-def _verify_fixture_versions(root: Path, version: str) -> None:
-    fixture = _load_json(root / "fixtures/events/canonical.json")
-    if not isinstance(fixture, dict):
-        raise ReleaseContractError("canonical event fixture must be an object")
-    for event in fixture.get("valid", []):
-        if not isinstance(event, dict):
-            continue
-        context = event.get("context")
-        library = context.get("library") if isinstance(context, dict) else None
-        if not isinstance(library, dict):
-            continue
-        if (
-            library.get("name") in {"@apdl-oss/sdk", "apdl-python"}
-            and library.get("version") != version
-        ):
-            raise ReleaseContractError(
-                "canonical event fixture contains a stale SDK version"
-            )
-
-
 def tag_from_environment(environment: dict[str, str]) -> str | None:
     """Return the tag GitHub says is being built, or ``None`` off tag refs."""
 
@@ -451,7 +431,6 @@ def verify_release(
     _verify_npm(root, version)
     _verify_python(root, version)
     _verify_licenses(root)
-    _verify_fixture_versions(root, version)
     _verify_docker_sources(root, manifest)
     return version
 

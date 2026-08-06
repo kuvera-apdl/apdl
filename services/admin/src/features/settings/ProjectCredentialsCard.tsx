@@ -53,6 +53,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
+import { SdkConnectionLinks } from '@/features/settings/SdkConnectionLinks'
 import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
 
 const ROLE_DESCRIPTIONS: Record<CredentialRole, string> = {
@@ -387,6 +388,9 @@ export function ProjectCredentialsCard() {
             management actions remain unavailable.
           </CardDescription>
         </CardHeader>
+        <CardContent>
+          <SdkConnectionLinks />
+        </CardContent>
       </Card>
     )
   }
@@ -414,7 +418,8 @@ export function ProjectCredentialsCard() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-5">
+          <SdkConnectionLinks />
           {query.isPending ? (
             <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
               <Loader2 className="animate-spin" />

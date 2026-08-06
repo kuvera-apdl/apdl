@@ -8,6 +8,8 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-29
+
 ### Changed
 
 - Server-side flag evaluation now defaults exposure logging off consistently in
@@ -127,7 +129,8 @@ Ingestion, Config, Query, Agents, the Redis-to-ClickHouse writer, local Compose,
 and initial database schemas. This entry does not assert that every package or
 service was published to a registry.
 
-[Unreleased]: https://github.com/kuvera-apdl/apdl/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/kuvera-apdl/apdl/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/kuvera-apdl/apdl/releases/tag/v0.3.4
 [0.3.3]: https://github.com/kuvera-apdl/apdl/releases/tag/v0.3.3
 [0.2.0]: https://github.com/kuvera-apdl/apdl/commit/91a75cfd6572e0a75c718615582c515205d9c3f6
 [0.1.0]: https://github.com/kuvera-apdl/apdl/commit/03668bfa6b5d4e759d1b968cdb7c299402c0bd06

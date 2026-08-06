@@ -162,10 +162,9 @@ async def preflight_auth_rate_limit(
     await conn.execute(
         """
         DELETE FROM admin_login_rate_buckets
-        WHERE updated_at < $1 - ($2 * INTERVAL '1 second')
+        WHERE updated_at < $1
         """,
-        now,
-        settings.login_rate_window_seconds * 2,
+        now - timedelta(seconds=settings.login_rate_window_seconds * 2),
     )
     retry_after = 0
     for scope, key_hash, limit in (
@@ -203,10 +202,9 @@ async def preflight_login(
     await conn.execute(
         """
         DELETE FROM admin_login_source_risk
-        WHERE updated_at < $1 - ($2 * INTERVAL '1 second')
+        WHERE updated_at < $1
         """,
-        now,
-        settings.login_account_risk_window_seconds * 2,
+        now - timedelta(seconds=settings.login_account_risk_window_seconds * 2),
     )
 
     for scope, source_hash in (

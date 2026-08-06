@@ -193,9 +193,9 @@ Redis Streams --> ClickHouse Writer -------+--> ClickHouse
 - **CI runs on push/PR to main:** lint, tests, builds, package contracts,
   dependency audits, and isolated core/experiment smokes for the declared
   developer-preview surface.
-- **Releases:** the tag must match `release-manifest.json`; `v0.3.3` publishes
-  the JavaScript SDK to npm, the Python SDK to PyPI, and source/checksum assets
-  to GitHub Releases. No GHCR images are published for this release line.
+- **Releases:** the tag must match the version declared in
+  `release-manifest.json`; a release publishes the JavaScript SDK to npm, the
+  Python SDK to PyPI, and source/checksum assets to GitHub Releases.
 
 ## Strict Schema Rule
 

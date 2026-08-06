@@ -18,12 +18,15 @@ function lazyRoute<TExport extends string>(
 }
 
 export function RequireAuth() {
-  const { authenticated, initializing } = useAuth()
+  const { authenticated, identity, initializing } = useAuth()
   const location = useLocation()
   if (initializing) return null
   if (!authenticated) {
     const from = `${location.pathname}${location.search}${location.hash}`
     return <Navigate to="/login" replace state={{ from }} />
+  }
+  if (identity?.projects.length === 0 && location.pathname !== '/settings/workspace') {
+    return <Navigate to="/settings/workspace" replace />
   }
   return <Outlet />
 }
@@ -207,6 +210,24 @@ export function createRouter() {
               lazy: lazyRoute(
                 () => import('@/features/codegen/ChangesetDetailPage'),
                 'ChangesetDetailPage',
+              ),
+            },
+            {
+              path: '/blog',
+              lazy: lazyRoute(() => import('@/features/blog/BlogPage'), 'BlogPage'),
+            },
+            {
+              path: '/blog/javascript-sdk',
+              lazy: lazyRoute(
+                () => import('@/features/blog/JavaScriptSdkArticlePage'),
+                'JavaScriptSdkArticlePage',
+              ),
+            },
+            {
+              path: '/blog/python-sdk',
+              lazy: lazyRoute(
+                () => import('@/features/blog/PythonSdkArticlePage'),
+                'PythonSdkArticlePage',
               ),
             },
             {
