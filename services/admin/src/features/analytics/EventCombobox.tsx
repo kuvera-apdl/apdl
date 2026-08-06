@@ -33,13 +33,14 @@ export function EventCombobox({
   className,
   triggerClassName,
 }: EventComboboxProps) {
-  const { names, isPending, error } = useEventCatalog()
+  const { names, isPending, error, lookbackDays } = useEventCatalog()
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
+  const helpId = useId()
 
   // Always include the current value so a selection is never hidden, even if it
   // is older than the catalog window or the catalog failed to load.
@@ -101,6 +102,7 @@ export function EventCombobox({
           role="combobox"
           aria-expanded={open}
           aria-controls={listId}
+          aria-describedby={helpId}
           aria-label={ariaLabel}
           onClick={() => setOpen((prev) => !prev)}
           className={cn(
@@ -163,6 +165,9 @@ export function EventCombobox({
           </ul>
         </div>
       ) : null}
+      <p id={helpId} className="mt-1 text-xs text-muted-foreground">
+        Event list shows events observed in the last {lookbackDays} calendar days.
+      </p>
     </div>
   )
 }

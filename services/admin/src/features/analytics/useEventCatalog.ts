@@ -10,15 +10,24 @@ import { useAnalyticsQuery } from './useAnalyticsQuery'
 
 // Keep discovery independent of the page's analysis window while respecting
 // the query service's maximum supported date range.
-const CATALOG_LOOKBACK_DAYS = 90
+export const EVENT_CATALOG_LOOKBACK_DAYS = 90
 const CATALOG_LIMIT = 1000
 
 export function useEventCatalog() {
   const { projectId } = useWorkspace()
   const body = projectId
-    ? { project_id: projectId, ...lastDays(CATALOG_LOOKBACK_DAYS), limit: CATALOG_LIMIT }
+    ? {
+        project_id: projectId,
+        ...lastDays(EVENT_CATALOG_LOOKBACK_DAYS),
+        limit: CATALOG_LIMIT,
+      }
     : null
   const query = useAnalyticsQuery('event-catalog', body, eventNames)
   const names = (query.data?.events ?? []).map((event) => event.event_name)
-  return { names, isPending: query.isPending, error: query.error }
+  return {
+    names,
+    isPending: query.isPending,
+    error: query.error,
+    lookbackDays: EVENT_CATALOG_LOOKBACK_DAYS,
+  }
 }
