@@ -55,6 +55,10 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ### Removed
 
+- Removed the JavaScript SDK environment variables
+  `NEXT_PUBLIC_APDL_ENDPOINT` and `APDL_ENDPOINT`. Deployments must migrate to
+  the canonical `NEXT_PUBLIC_APDL_URL` and `APDL_URL` names respectively;
+  legacy names are ignored rather than treated as aliases.
 - Removed the disconnected Kafka topic definitions and Flink job scaffolding.
   Redis Streams is now the only event bus represented in the repository.
 - Removed the disconnected generic ETL/v2 design package and its setup, CI, and
