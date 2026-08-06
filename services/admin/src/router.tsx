@@ -17,6 +17,15 @@ function lazyRoute<TExport extends string>(
   }
 }
 
+function isProjectIndependentPath(pathname: string): boolean {
+  const normalizedPath = pathname.replace(/\/+$/, '') || '/'
+  return (
+    normalizedPath === '/settings/workspace' ||
+    normalizedPath === '/blog' ||
+    normalizedPath.startsWith('/blog/')
+  )
+}
+
 export function RequireAuth() {
   const { authenticated, identity, initializing } = useAuth()
   const location = useLocation()
@@ -25,7 +34,7 @@ export function RequireAuth() {
     const from = `${location.pathname}${location.search}${location.hash}`
     return <Navigate to="/login" replace state={{ from }} />
   }
-  if (identity?.projects.length === 0 && location.pathname !== '/settings/workspace') {
+  if (identity?.projects.length === 0 && !isProjectIndependentPath(location.pathname)) {
     return <Navigate to="/settings/workspace" replace />
   }
   return <Outlet />
