@@ -9,7 +9,6 @@ import {
   experimentBucketBySchema,
   experimentCreateStatusSchema,
   experimentPathKeySchema,
-  experimentTargetingRuleSchema,
 } from '@/api/schemas/experiments'
 import type {
   ExperimentBucketBy,
@@ -26,12 +25,16 @@ import { Disclosure } from '@/components/ui/disclosure'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import { MAX_RULES } from '@/core/evaluator/targetingContract'
+import { MEMBERSHIP_OPERATORS } from '@/core/evaluator/targetingContract'
 
 import {
   ExperimentTargetingRules,
+  safeTargetingRulesToWire,
+  targetingConditionErrorKey,
   targetingRulesToFormValues,
   targetingRulesToWire,
+  type ExperimentTargetingErrors,
+  type ExperimentTargetingRuleErrors,
   type ExperimentTargetingRuleFormValue,
 } from './ExperimentTargetingRules'
 
@@ -269,10 +272,74 @@ interface ExperimentFormErrors {
   bucket_by?: string
   variants?: string
   default_variant?: string
-  targeting?: string
+  targeting?: ExperimentTargetingErrors
   dates?: string
   metric?: string
   statisticalPlan?: string
+}
+
+function targetingErrorsFromIssues(
+  values: ExperimentFormValues,
+  issues: z.ZodIssue[],
+): ExperimentTargetingErrors {
+  const errors: ExperimentTargetingErrors = { rules: {} }
+
+  const ruleErrorsFor = (ruleId: string): ExperimentTargetingRuleErrors => {
+    const existing = errors.rules[ruleId]
+    if (existing) return existing
+    const created: ExperimentTargetingRuleErrors = { conditions: {} }
+    errors.rules[ruleId] = created
+    return created
+  }
+
+  for (const issue of issues) {
+    const [ruleIndex, ruleField, conditionIndex, conditionField] = issue.path
+    if (typeof ruleIndex !== 'number') {
+      errors.root ??= issue.message
+      continue
+    }
+
+    const rule = values.targetingRules[ruleIndex]
+    if (!rule) {
+      errors.root ??= issue.message
+      continue
+    }
+    const ruleErrors = ruleErrorsFor(rule.id)
+
+    if (ruleField === 'name') {
+      ruleErrors.name ??= issue.message
+      continue
+    }
+    if (ruleField !== 'conditions') {
+      ruleErrors.root ??= issue.message
+      continue
+    }
+    if (typeof conditionIndex !== 'number') {
+      ruleErrors.conditionsRoot ??= issue.message
+      continue
+    }
+
+    const condition = rule.conditions[conditionIndex]
+    if (!condition) {
+      ruleErrors.conditionsRoot ??= issue.message
+      continue
+    }
+    const conditionKey = targetingConditionErrorKey(condition, conditionIndex)
+    const conditionErrors = ruleErrors.conditions[conditionKey] ?? {}
+    ruleErrors.conditions[conditionKey] = conditionErrors
+
+    if (conditionField === 'attribute') conditionErrors.attribute ??= issue.message
+    else if (conditionField === 'operator') conditionErrors.operator ??= issue.message
+    else if (
+      conditionField === 'values' ||
+      (conditionField === 'value' && MEMBERSHIP_OPERATORS.has(condition.operator))
+    ) {
+      conditionErrors.values ??= issue.message
+    } else if (conditionField === 'value') conditionErrors.value ??= issue.message
+    else ruleErrors.root ??= issue.message
+  }
+
+  return errors
 }
 
 export function validateExperimentForm(values: ExperimentFormValues): ExperimentFormErrors {
@@ -301,12 +368,9 @@ export function validateExperimentForm(values: ExperimentFormValues): Experiment
     errors.default_variant = 'Choose a control variant that matches a variant key'
   }
 
-  const rules = z
-    .array(experimentTargetingRuleSchema)
-    .max(MAX_RULES)
-    .safeParse(targetingRulesToWire(values.targetingRules))
+  const rules = safeTargetingRulesToWire(values.targetingRules)
   if (!rules.success) {
-    errors.targeting = 'Each targeting condition needs a valid type, operator, and value'
+    errors.targeting = targetingErrorsFromIssues(values, rules.error.issues)
   }
 
   const startResult = optionalUtcDateTimeInputSchema.safeParse(values.start_date)
@@ -823,8 +887,8 @@ export function ExperimentForm({
                 value={values.targetingRules}
                 onChange={(targetingRules) => set({ targetingRules })}
                 disabled={analysisFieldsLocked}
+                errors={errors.targeting}
               />
-              {errors.targeting ? <p className="text-xs text-destructive">{errors.targeting}</p> : null}
             </div>
           </div>
         </Disclosure>

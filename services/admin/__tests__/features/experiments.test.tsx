@@ -19,7 +19,12 @@ import {
   experimentUpdateSchema,
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
-import { SUPPORTED_OPERATORS } from '../../src/core/evaluator/targetingContract'
+import {
+  MAX_CONDITIONS_PER_RULE,
+  MAX_MEMBERSHIP_VALUES,
+  MAX_RULES,
+  SUPPORTED_OPERATORS,
+} from '../../src/core/evaluator/targetingContract'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import type { Workspace } from '../../src/core/workspace'
 import {
@@ -31,6 +36,12 @@ import {
   validateExperimentForm,
   type ExperimentFormValues,
 } from '../../src/features/experiments/ExperimentForm'
+import {
+  safeTargetingRulesToWire,
+  targetingRulesToWire,
+  type ExperimentTargetingConditionFormValue,
+  type ExperimentTargetingRuleFormValue,
+} from '../../src/features/experiments/ExperimentTargetingRules'
 import { ExperimentListPage } from '../../src/features/experiments/ExperimentListPage'
 import { ExperimentDetailPage } from '../../src/features/experiments/ExperimentDetailPage'
 import { makeWorkspace, seedWorkspace } from '../helpers/fixtures'
@@ -441,6 +452,168 @@ describe('experiment form model', () => {
       ],
     }
     expect(validateExperimentForm(invalid).targeting).toBeTruthy()
+  })
+
+  test('preserves precise targeting validation paths and limit-specific messages', () => {
+    const validCondition = (
+      uiId: string,
+      patch: Partial<ExperimentTargetingConditionFormValue> = {},
+    ): ExperimentTargetingConditionFormValue => ({
+      uiId,
+      attribute: 'plan',
+      operator: 'equals',
+      valueType: 'string',
+      value: 'pro',
+      values: [],
+      ...patch,
+    })
+    const validRule = (
+      index: number,
+      conditions: ExperimentTargetingConditionFormValue[] = [
+        validCondition(`condition-${index}`),
+      ],
+    ): ExperimentTargetingRuleFormValue => ({
+      id: `rule-${index}`,
+      name: '',
+      conditions,
+    })
+
+    const cases: Array<{
+      rules: ExperimentTargetingRuleFormValue[]
+      path: PropertyKey[]
+      message: string
+    }> = [
+      {
+        rules: Array.from({ length: MAX_RULES + 1 }, (_, index) => validRule(index)),
+        path: [],
+        message: `At most ${MAX_RULES} targeting rules`,
+      },
+      {
+        rules: [
+          validRule(
+            0,
+            Array.from({ length: MAX_CONDITIONS_PER_RULE + 1 }, (_, index) =>
+              validCondition(`condition-${index}`),
+            ),
+          ),
+        ],
+        path: [0, 'conditions'],
+        message: `At most ${MAX_CONDITIONS_PER_RULE} conditions per rule`,
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-membership-limit', {
+              operator: 'in',
+              values: Array.from({ length: MAX_MEMBERSHIP_VALUES + 1 }, (_, index) => index),
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'values'],
+        message: `At most ${MAX_MEMBERSHIP_VALUES} membership values`,
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-membership-empty', {
+              operator: 'in',
+              values: [],
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'values'],
+        message: `Add 1–${MAX_MEMBERSHIP_VALUES} scalar values`,
+      },
+      {
+        rules: [validRule(0, [validCondition('condition-attribute', { attribute: ' ' })])],
+        path: [0, 'conditions', 0, 'attribute'],
+        message: 'Attribute is required',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-numeric-operator', {
+              operator: 'gte',
+              valueType: 'number',
+              value: 'not-a-number',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Use a finite number or canonical decimal',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-numeric-equality', {
+              valueType: 'number',
+              value: 'not-a-number',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Use a finite number or canonical decimal',
+      },
+      {
+        rules: [
+          validRule(0, [
+            validCondition('condition-boolean', {
+              valueType: 'boolean',
+              value: 'true',
+            }),
+          ]),
+        ],
+        path: [0, 'conditions', 0, 'value'],
+        message: 'Expected a boolean value',
+      },
+    ]
+
+    for (const testCase of cases) {
+      const result = safeTargetingRulesToWire(testCase.rules)
+      expect(result.success).toBe(false)
+      if (!result.success) {
+        expect(result.error.issues).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ path: testCase.path, message: testCase.message }),
+          ]),
+        )
+      }
+    }
+  })
+
+  test('rejects an invalid numeric draft before a wire payload can be serialized', () => {
+    const invalidRules: ExperimentTargetingRuleFormValue[] = [
+      {
+        id: 'rule-invalid',
+        name: '',
+        conditions: [
+          {
+            uiId: 'condition-invalid',
+            attribute: 'age',
+            operator: 'gte',
+            valueType: 'number',
+            value: 'not-a-number',
+            values: [],
+          },
+        ],
+      },
+    ]
+
+    expect(() => targetingRulesToWire(invalidRules)).toThrow(
+      'Use a finite number or canonical decimal',
+    )
+    expect(() => JSON.stringify(targetingRulesToWire(invalidRules))).toThrow(
+      'Use a finite number or canonical decimal',
+    )
+
+    const errors = validateExperimentForm({
+      ...emptyExperimentValues(),
+      key: 'experiment-1',
+      targetingRules: invalidRules,
+    })
+    expect(
+      errors.targeting?.rules['rule-invalid']?.conditions['condition-invalid']?.value,
+    ).toBe('Use a finite number or canonical decimal')
   })
 
   test('buildCreate projects the structured form to the canonical payload', () => {
@@ -959,6 +1132,61 @@ describe('ExperimentForm layout', () => {
     expect(
       screen.getByText('Scheduled and running experiments require a primary metric'),
     ).toBeVisible()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  test('places a targeting validation error beside the offending condition value', async () => {
+    const onSubmit = vi.fn()
+    render(
+      <ExperimentForm
+        values={{
+          ...emptyExperimentValues(),
+          key: 'checkout-test',
+          targetingRules: [
+            {
+              id: 'rule-targeting',
+              name: '',
+              conditions: [
+                {
+                  uiId: 'condition-valid',
+                  attribute: 'age',
+                  operator: 'gte',
+                  valueType: 'number',
+                  value: '18',
+                  values: [],
+                },
+                {
+                  uiId: 'condition-invalid',
+                  attribute: 'age',
+                  operator: 'gte',
+                  valueType: 'number',
+                  value: 'not-a-number',
+                  values: [],
+                },
+              ],
+            },
+          ],
+        }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={onSubmit}
+        submitting={false}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create experiment' }))
+
+    const invalidInput = screen.getByRole('textbox', {
+      name: 'Targeting rule 1 condition 2 value',
+    })
+    const validInput = screen.getByRole('textbox', {
+      name: 'Targeting rule 1 condition 1 value',
+    })
+    const error = screen.getByText('Use a finite number or canonical decimal')
+
+    expect(invalidInput).toHaveAttribute('aria-invalid', 'true')
+    expect(invalidInput.parentElement?.parentElement).toContainElement(error)
+    expect(validInput.parentElement?.parentElement).not.toContainElement(error)
     expect(onSubmit).not.toHaveBeenCalled()
   })
 

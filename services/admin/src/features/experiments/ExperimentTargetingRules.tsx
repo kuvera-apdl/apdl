@@ -1,23 +1,27 @@
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react'
+import { z } from 'zod'
 
+import { experimentTargetingRuleSchema } from '@/api/schemas/experiments'
 import type { ExperimentTargetingRule } from '@/api/types/experiments'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   MAX_CONDITIONS_PER_RULE,
+  MAX_IDENTIFIER_LENGTH,
   MAX_RULES,
   MAX_STRING_LENGTH,
 } from '@/core/evaluator/targetingContract'
 import {
   TargetingAttributesDatalist,
   TargetingConditionFields,
+  type TargetingConditionFieldErrors,
 } from '@/features/targeting/TargetingConditionFields'
 import {
   emptyTargetingCondition,
   newTargetingConditionUiId,
   newTargetingRuleId,
   targetingConditionToFormValue,
-  targetingConditionToWire,
+  targetingConditionWireSchema,
   type ScalarValueType,
   type TargetingConditionFormValue,
 } from '@/features/targeting/editorModel'
@@ -35,6 +39,25 @@ export interface ExperimentTargetingRuleFormValue {
   conditions: ExperimentTargetingConditionFormValue[]
 }
 
+export interface ExperimentTargetingRuleErrors {
+  root?: string
+  name?: string
+  conditionsRoot?: string
+  conditions: Record<string, TargetingConditionFieldErrors>
+}
+
+export interface ExperimentTargetingErrors {
+  root?: string
+  rules: Record<string, ExperimentTargetingRuleErrors>
+}
+
+export function targetingConditionErrorKey(
+  condition: ExperimentTargetingConditionFormValue,
+  index: number,
+): string {
+  return condition.uiId ?? `condition-index-${index}`
+}
+
 export function targetingRulesToFormValues(
   rules: ExperimentTargetingRule[],
 ): ExperimentTargetingRuleFormValue[] {
@@ -48,14 +71,31 @@ export function targetingRulesToFormValues(
   }))
 }
 
+const experimentTargetingRuleFormSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1, 'Rule id is required')
+      .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
+    name: z.string().max(MAX_STRING_LENGTH, `At most ${MAX_STRING_LENGTH} characters`),
+    conditions: z
+      .array(targetingConditionWireSchema)
+      .max(MAX_CONDITIONS_PER_RULE, `At most ${MAX_CONDITIONS_PER_RULE} conditions per rule`),
+  })
+  .pipe(experimentTargetingRuleSchema)
+
+export const experimentTargetingRulesWireSchema = z
+  .array(experimentTargetingRuleFormSchema)
+  .max(MAX_RULES, `At most ${MAX_RULES} targeting rules`)
+
+export function safeTargetingRulesToWire(rules: ExperimentTargetingRuleFormValue[]) {
+  return experimentTargetingRulesWireSchema.safeParse(rules)
+}
+
 export function targetingRulesToWire(
   rules: ExperimentTargetingRuleFormValue[],
 ): ExperimentTargetingRule[] {
-  return rules.map((rule) => ({
-    id: rule.id,
-    name: rule.name,
-    conditions: rule.conditions.map(targetingConditionToWire),
-  }))
+  return experimentTargetingRulesWireSchema.parse(rules)
 }
 
 function emptyCondition(): ExperimentTargetingConditionFormValue {
@@ -81,6 +121,7 @@ interface ConditionRowProps {
   onAddAfter: () => void
   onRemove: () => void
   canAdd: boolean
+  errors?: TargetingConditionFieldErrors
 }
 
 function ConditionRow({
@@ -91,6 +132,7 @@ function ConditionRow({
   onAddAfter,
   onRemove,
   canAdd,
+  errors,
 }: ConditionRowProps) {
   const prefix = `Targeting rule ${ruleIndex + 1} condition ${conditionIndex + 1}`
 
@@ -109,6 +151,7 @@ function ConditionRow({
         }}
         attributeLabel="Type"
         showLabels
+        errors={errors}
       />
       <div className="flex items-end gap-1">
         <Button
@@ -139,12 +182,14 @@ interface ExperimentTargetingRulesProps {
   value: ExperimentTargetingRuleFormValue[]
   onChange: (next: ExperimentTargetingRuleFormValue[]) => void
   disabled?: boolean
+  errors?: ExperimentTargetingErrors
 }
 
 export function ExperimentTargetingRules({
   value,
   onChange,
   disabled = false,
+  errors,
 }: ExperimentTargetingRulesProps) {
   const updateRule = (index: number, next: ExperimentTargetingRuleFormValue) => {
     onChange(value.map((rule, ruleIndex) => (ruleIndex === index ? next : rule)))
@@ -162,120 +207,141 @@ export function ExperimentTargetingRules({
     <fieldset className="space-y-3" disabled={disabled}>
       <legend className="text-sm font-medium">Targeting rules</legend>
       <TargetingAttributesDatalist />
+      {errors?.root ? <p className="text-xs text-destructive">{errors.root}</p> : null}
       {value.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No targeting rules — everyone is eligible for the traffic allocation.
         </p>
       ) : (
-        value.map((rule, ruleIndex) => (
-          <div key={rule.id} className="space-y-3 rounded-md border p-4">
-            <div className="flex items-center gap-2">
-              <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs tabular-nums">
-                {ruleIndex + 1}
-              </span>
-              <Input
-                value={rule.name}
-                onChange={(event) =>
-                  updateRule(ruleIndex, { ...rule, name: event.target.value })
-                }
-                placeholder="Rule name (optional)"
-                aria-label={`Targeting rule ${ruleIndex + 1} name`}
-                maxLength={MAX_STRING_LENGTH}
-                className="max-w-xs"
-              />
-              <span className="ml-auto flex items-center gap-1">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={ruleIndex === 0}
-                  onClick={() => moveRule(ruleIndex, ruleIndex - 1)}
-                  aria-label={`Move targeting rule ${ruleIndex + 1} up`}
-                >
-                  <ArrowUp />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  disabled={ruleIndex === value.length - 1}
-                  onClick={() => moveRule(ruleIndex, ruleIndex + 1)}
-                  aria-label={`Move targeting rule ${ruleIndex + 1} down`}
-                >
-                  <ArrowDown />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => onChange(value.filter((_, index) => index !== ruleIndex))}
-                  aria-label={`Remove targeting rule ${ruleIndex + 1}`}
-                >
-                  <Trash2 />
-                </Button>
-              </span>
-            </div>
-            <div className="space-y-2">
-              {rule.conditions.length === 0 ? (
-                <div className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-3">
-                  <p className="text-xs text-muted-foreground">
-                    No conditions — this rule matches everyone.
-                  </p>
+        value.map((rule, ruleIndex) => {
+          const ruleErrors = errors?.rules[rule.id]
+          return (
+            <div key={rule.id} className="space-y-3 rounded-md border p-4">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-xs tabular-nums">
+                  {ruleIndex + 1}
+                </span>
+                <Input
+                  value={rule.name}
+                  onChange={(event) =>
+                    updateRule(ruleIndex, { ...rule, name: event.target.value })
+                  }
+                  placeholder="Rule name (optional)"
+                  aria-label={`Targeting rule ${ruleIndex + 1} name`}
+                  aria-invalid={Boolean(ruleErrors?.name)}
+                  maxLength={MAX_STRING_LENGTH}
+                  className="max-w-xs"
+                />
+                <span className="ml-auto flex items-center gap-1">
                   <Button
                     type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      updateRule(ruleIndex, {
-                        ...rule,
-                        conditions: [emptyCondition()],
-                      })
-                    }
+                    variant="ghost"
+                    size="icon"
+                    disabled={ruleIndex === 0}
+                    onClick={() => moveRule(ruleIndex, ruleIndex - 1)}
+                    aria-label={`Move targeting rule ${ruleIndex + 1} up`}
                   >
-                    <Plus />
-                    Add condition
+                    <ArrowUp />
                   </Button>
-                </div>
-              ) : (
-                rule.conditions.map((condition, conditionIndex) => (
-                  <ConditionRow
-                    key={condition.uiId}
-                    ruleIndex={ruleIndex}
-                    conditionIndex={conditionIndex}
-                    condition={condition}
-                    onChange={(next) =>
-                      updateRule(ruleIndex, {
-                        ...rule,
-                        conditions: rule.conditions.map((current, index) =>
-                          index === conditionIndex ? next : current,
-                        ),
-                      })
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    disabled={ruleIndex === value.length - 1}
+                    onClick={() => moveRule(ruleIndex, ruleIndex + 1)}
+                    aria-label={`Move targeting rule ${ruleIndex + 1} down`}
+                  >
+                    <ArrowDown />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() =>
+                      onChange(value.filter((_, index) => index !== ruleIndex))
                     }
-                    onAddAfter={() =>
-                      updateRule(ruleIndex, {
-                        ...rule,
-                        conditions: [
-                          ...rule.conditions.slice(0, conditionIndex + 1),
-                          emptyCondition(),
-                          ...rule.conditions.slice(conditionIndex + 1),
-                        ],
-                      })
-                    }
-                    onRemove={() =>
-                      updateRule(ruleIndex, {
-                        ...rule,
-                        conditions: rule.conditions.filter(
-                          (_, index) => index !== conditionIndex,
-                        ),
-                      })
-                    }
-                    canAdd={rule.conditions.length < MAX_CONDITIONS_PER_RULE}
-                  />
-                ))
-              )}
+                    aria-label={`Remove targeting rule ${ruleIndex + 1}`}
+                  >
+                    <Trash2 />
+                  </Button>
+                </span>
+              </div>
+              {ruleErrors?.root ? (
+                <p className="text-xs text-destructive">{ruleErrors.root}</p>
+              ) : null}
+              {ruleErrors?.name ? (
+                <p className="text-xs text-destructive">{ruleErrors.name}</p>
+              ) : null}
+              <div className="space-y-2">
+                {rule.conditions.length === 0 ? (
+                  <div className="flex items-center justify-between gap-3 rounded-md bg-muted/40 p-3">
+                    <p className="text-xs text-muted-foreground">
+                      No conditions — this rule matches everyone.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        updateRule(ruleIndex, {
+                          ...rule,
+                          conditions: [emptyCondition()],
+                        })
+                      }
+                    >
+                      <Plus />
+                      Add condition
+                    </Button>
+                  </div>
+                ) : (
+                  rule.conditions.map((condition, conditionIndex) => (
+                    <ConditionRow
+                      key={targetingConditionErrorKey(condition, conditionIndex)}
+                      ruleIndex={ruleIndex}
+                      conditionIndex={conditionIndex}
+                      condition={condition}
+                      onChange={(next) =>
+                        updateRule(ruleIndex, {
+                          ...rule,
+                          conditions: rule.conditions.map((current, index) =>
+                            index === conditionIndex ? next : current,
+                          ),
+                        })
+                      }
+                      onAddAfter={() =>
+                        updateRule(ruleIndex, {
+                          ...rule,
+                          conditions: [
+                            ...rule.conditions.slice(0, conditionIndex + 1),
+                            emptyCondition(),
+                            ...rule.conditions.slice(conditionIndex + 1),
+                          ],
+                        })
+                      }
+                      onRemove={() =>
+                        updateRule(ruleIndex, {
+                          ...rule,
+                          conditions: rule.conditions.filter(
+                            (_, index) => index !== conditionIndex,
+                          ),
+                        })
+                      }
+                      canAdd={rule.conditions.length < MAX_CONDITIONS_PER_RULE}
+                      errors={
+                        ruleErrors?.conditions[
+                          targetingConditionErrorKey(condition, conditionIndex)
+                        ]
+                      }
+                    />
+                  ))
+                )}
+                {ruleErrors?.conditionsRoot ? (
+                  <p className="text-xs text-destructive">{ruleErrors.conditionsRoot}</p>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))
+          )
+        })
       )}
       <Button
         type="button"

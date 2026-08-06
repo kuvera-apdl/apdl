@@ -7,7 +7,6 @@
 import { z } from 'zod'
 
 import {
-  conditionOperatorSchema,
   evaluationModeSchema,
   guardrailMetricSchema,
   guardrailThresholdSchema,
@@ -24,18 +23,13 @@ import type {
 } from '@/api/types/flags'
 import type { EvaluableFlag } from '@/core/evaluator/evaluate'
 import {
-  MEMBERSHIP_OPERATORS,
   MAX_CONDITIONS_PER_RULE,
   MAX_IDENTIFIER_LENGTH,
-  MAX_MEMBERSHIP_VALUES,
   MAX_RULES,
   MAX_STRING_LENGTH,
-  NUMERIC_OPERATORS,
-  PRESENCE_OPERATORS,
-  isConditionValueValid,
-  isScalar,
 } from '@/core/evaluator/targetingContract'
 import {
+  targetingConditionFormSchema,
   targetingConditionToFormValue,
   targetingConditionToWire,
 } from '@/features/targeting/editorModel'
@@ -45,57 +39,6 @@ export const GUARDRAIL_PAIRING: Record<GuardrailMetric, GuardrailThreshold> = {
   frontend_error_rate: '2x_baseline',
   frontend_error_count: 'at_least_one',
 }
-
-const conditionFormSchema = z
-  .object({
-    attribute: z
-      .string()
-      .trim()
-      .min(1, 'Attribute is required')
-      .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
-    operator: conditionOperatorSchema,
-    valueType: z.enum(['string', 'number', 'boolean']),
-    /** Preserve an existing JSON scalar until the user edits the text input. */
-    value: z.union([
-      z.string().max(MAX_STRING_LENGTH),
-      z.number().finite(),
-      z.boolean(),
-    ]),
-    /** Chip list for in / not_in. */
-    values: z
-      .array(z.union([
-        z.string().max(MAX_STRING_LENGTH),
-        z.number().finite(),
-        z.boolean(),
-      ]))
-      .max(MAX_MEMBERSHIP_VALUES),
-  })
-  .superRefine((condition, ctx) => {
-    if (PRESENCE_OPERATORS.has(condition.operator)) return
-    if (MEMBERSHIP_OPERATORS.has(condition.operator)) {
-      if (
-        condition.values.length === 0 ||
-        condition.values.length > MAX_MEMBERSHIP_VALUES ||
-        !condition.values.every(isScalar)
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['values'],
-          message: `Add 1–${MAX_MEMBERSHIP_VALUES} scalar values`,
-        })
-      }
-      return
-    }
-    if (!isConditionValueValid(condition.operator, condition.value)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['value'],
-        message: NUMERIC_OPERATORS.has(condition.operator)
-          ? 'Use a finite number or canonical decimal'
-          : `Invalid ${condition.operator.replace(/_/g, ' ')} value`,
-      })
-    }
-  })
 
 const rolloutFormSchema = z.object({
   percentage: z
@@ -112,7 +55,7 @@ const rolloutFormSchema = z.object({
 const ruleFormSchema = z.object({
   id: z.string().min(1).max(MAX_IDENTIFIER_LENGTH),
   name: z.string().max(MAX_STRING_LENGTH),
-  conditions: z.array(conditionFormSchema).max(MAX_CONDITIONS_PER_RULE),
+  conditions: z.array(targetingConditionFormSchema).max(MAX_CONDITIONS_PER_RULE),
   rollout: rolloutFormSchema,
 })
 
@@ -195,7 +138,7 @@ export const flagFormSchema = z
   })
 
 export type FlagFormValues = z.infer<typeof flagFormSchema>
-export type ConditionFormValues = z.infer<typeof conditionFormSchema>
+export type ConditionFormValues = z.infer<typeof targetingConditionFormSchema>
 
 /** Create-mode defaults — mirrors the server's two-variant 1:1 template. */
 export function emptyFormValues(): FlagFormValues {

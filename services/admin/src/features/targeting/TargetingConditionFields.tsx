@@ -45,6 +45,7 @@ interface ScalarListInputProps {
   onValueTypeChange: (next: ScalarValueType) => void
   onChange: (next: JsonScalar[]) => void
   ariaLabel: string
+  invalid?: boolean
 }
 
 function ScalarListInput({
@@ -54,6 +55,7 @@ function ScalarListInput({
   onValueTypeChange,
   onChange,
   ariaLabel,
+  invalid = false,
 }: ScalarListInputProps) {
   const [draft, setDraft] = useState('')
   const [booleanDraft, setBooleanDraft] = useState(false)
@@ -141,6 +143,7 @@ function ScalarListInput({
             value={String(booleanDraft)}
             onChange={(event) => setBooleanDraft(event.target.value === 'true')}
             aria-label={ariaLabel}
+            aria-invalid={invalid}
             className="h-7 min-w-20 flex-1 border-0 shadow-none"
           >
             <option value="false">false</option>
@@ -157,6 +160,7 @@ function ScalarListInput({
             onKeyDown={onKeyDown}
             placeholder={valueType === 'number' ? 'canonical decimal' : 'add value, press Enter'}
             aria-label={ariaLabel}
+            aria-invalid={invalid}
             maxLength={MAX_STRING_LENGTH}
             className="min-w-24 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
           />
@@ -191,6 +195,7 @@ export interface TargetingConditionAriaLabels {
 
 export interface TargetingConditionFieldErrors {
   attribute?: string
+  operator?: string
   value?: string
   values?: string
 }
@@ -244,6 +249,7 @@ export function TargetingConditionFields({
           list={TARGETING_ATTRIBUTES_DATALIST_ID}
           placeholder={attributeLabel === 'Type' ? 'Select or enter a type' : 'attribute'}
           aria-label={ariaLabels.attribute}
+          aria-invalid={Boolean(errors?.attribute)}
           className="font-mono text-xs"
           maxLength={MAX_IDENTIFIER_LENGTH}
         />
@@ -262,6 +268,7 @@ export function TargetingConditionFields({
             )
           }
           aria-label={ariaLabels.operator}
+          aria-invalid={Boolean(errors?.operator)}
         >
           {TARGETING_OPERATOR_GROUPS.map((group) => (
             <optgroup key={group.label} label={group.label}>
@@ -273,6 +280,7 @@ export function TargetingConditionFields({
             </optgroup>
           ))}
         </Select>
+        {errors?.operator ? <p className="text-xs text-destructive">{errors.operator}</p> : null}
       </div>
       <div className="space-y-1.5">
         <FieldLabel
@@ -292,6 +300,7 @@ export function TargetingConditionFields({
               onValueTypeChange={(valueType) => onChange({ ...condition, valueType })}
               onChange={(values) => onChange({ ...condition, values })}
               ariaLabel={ariaLabels.values}
+              invalid={Boolean(errors?.values)}
             />
             {errors?.values ? <p className="text-xs text-destructive">{errors.values}</p> : null}
           </>
@@ -331,6 +340,7 @@ export function TargetingConditionFields({
                     onChange({ ...condition, value: event.target.value === 'true' })
                   }
                   aria-label={ariaLabels.value}
+                  aria-invalid={Boolean(errors?.value)}
                   className="flex-1"
                 >
                   <option value="false">false</option>
@@ -348,6 +358,7 @@ export function TargetingConditionFields({
                       : 'value'
                   }
                   aria-label={ariaLabels.value}
+                  aria-invalid={Boolean(errors?.value)}
                   maxLength={MAX_STRING_LENGTH}
                   className="min-w-0 flex-1 font-mono text-xs"
                 />
