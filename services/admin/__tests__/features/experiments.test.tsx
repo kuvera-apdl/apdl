@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -451,7 +451,7 @@ describe('experiment form model', () => {
       description: 'd',
       bucket_by: 'anonymous_id',
       traffic_percentage: 50,
-      start_date: '2026-06-01',
+      start_date: '2026-06-01T14:30:45',
       end_date: '',
       variants: [
         { key: 'control', weight: 1, description: 'Current' },
@@ -475,7 +475,7 @@ describe('experiment form model', () => {
       description: 'd',
       bucket_by: 'anonymous_id',
       traffic_percentage: 50,
-      start_date: '2026-06-01T00:00:00Z',
+      start_date: '2026-06-01T14:30:45Z',
       end_date: null,
       variants: [
         { key: 'control', weight: 1, description: 'Current' },
@@ -489,11 +489,18 @@ describe('experiment form model', () => {
 
   })
 
-  test('entryToFormValues projects aware timestamps to native date input values', () => {
+  test('entryToFormValues projects aware timestamps to precise UTC input values', () => {
     const values = entryToFormValues(experimentEntrySchema.parse(EXPERIMENT))
+    const nonMidnight = entryToFormValues(
+      experimentEntrySchema.parse({
+        ...EXPERIMENT,
+        start_date: '2026-06-01T14:30:45Z',
+      }),
+    )
 
-    expect(values.start_date).toBe('2026-06-01')
-    expect(values.end_date).toBe('2026-07-01')
+    expect(values.start_date).toBe('2026-06-01T00:00:00')
+    expect(values.end_date).toBe('2026-07-01T00:00:00')
+    expect(nonMidnight.start_date).toBe('2026-06-01T14:30:45')
   })
 
   test('buildUpdate diffs drafts and never sends frozen fields after draft', () => {
@@ -509,7 +516,7 @@ describe('experiment form model', () => {
     draftValues.description = 'Changed'
     draftValues.bucket_by = 'user_id'
     draftValues.default_variant = 'treatment'
-    draftValues.start_date = '2026-06-01'
+    draftValues.start_date = '2026-06-01T09:15:30'
     draftValues.traffic_percentage = 50
     draftValues.targetingRules = [
       {
@@ -539,7 +546,7 @@ describe('experiment form model', () => {
           conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
         },
       ],
-      start_date: '2026-06-01T00:00:00Z',
+      start_date: '2026-06-01T09:15:30Z',
     })
 
     const running = experimentEntrySchema.parse({
@@ -549,8 +556,8 @@ describe('experiment form model', () => {
     })
     const stoppedValues = entryToFormValues(running)
     stoppedValues.status = 'stopped'
-    stoppedValues.start_date = '2026-06-02'
-    stoppedValues.end_date = '2026-07-02'
+    stoppedValues.start_date = '2026-06-02T00:00:00'
+    stoppedValues.end_date = '2026-07-02T00:00:00'
     stoppedValues.variants[1]!.weight = 2
     stoppedValues.default_variant = 'treatment'
     stoppedValues.metricEvent = 'checkout_completed'
@@ -580,6 +587,25 @@ describe('experiment form model', () => {
     values.description = 'Changed'
 
     expect(buildUpdate(values, draft)).toEqual({ version: 2, description: 'Changed' })
+  })
+
+  test('normalizes offset timestamps to UTC and only sends an edited instant', () => {
+    const draft = experimentEntrySchema.parse({
+      ...DRAFT_EXPERIMENT,
+      start_date: '2026-06-01T14:30:45-07:00',
+      end_date: '2026-06-15T09:05:06-07:00',
+    })
+    const values = entryToFormValues(draft)
+
+    expect(values.start_date).toBe('2026-06-01T21:30:45')
+    expect(values.end_date).toBe('2026-06-15T16:05:06')
+    expect(buildUpdate(values, draft)).toEqual({ version: 2 })
+
+    values.start_date = '2026-06-01T22:45:30'
+    expect(buildUpdate(values, draft)).toEqual({
+      version: 2,
+      start_date: '2026-06-01T22:45:30Z',
+    })
   })
 
   test('validateExperimentForm catches duplicate keys and an out-of-set default', () => {
@@ -627,17 +653,33 @@ describe('experiment form model', () => {
     expect(
       validateExperimentForm({
         ...base,
-        start_date: '2026-01-01',
-        end_date: '2026-04-01',
+        start_date: '2026-01-01T14:30:00',
+        end_date: '2026-04-01T14:30:00',
       }).dates,
     ).toBeUndefined()
     expect(
       validateExperimentForm({
         ...base,
-        start_date: '2026-01-01',
-        end_date: '2026-04-02',
+        start_date: '2026-01-01T14:30:00',
+        end_date: '2026-04-01T14:30:01',
       }).dates,
     ).toBe('Experiment duration must not exceed 90 days')
+  })
+
+  test('validateExperimentForm requires a real UTC datetime-local value with seconds', () => {
+    const base = emptyExperimentValues()
+
+    for (const start_date of [
+      '2026-06-01',
+      '2026-06-01T14:30',
+      '2026-02-30T14:30:00',
+      '2026-06-01T24:00:00',
+      '2026-06-01T14:30:00Z',
+    ]) {
+      expect(validateExperimentForm({ ...base, start_date }).dates).toBe(
+        'Use YYYY-MM-DDTHH:mm:ss in UTC',
+      )
+    }
   })
 
   test('validateExperimentForm rejects path-unsafe experiment and flag keys', () => {
@@ -756,6 +798,10 @@ describe('ExperimentForm layout', () => {
     expect(
       within(disclosure!).queryByRole('spinbutton', { name: 'Traffic percentage' }),
     ).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('step', '1')
+    expect(screen.getByLabelText('End (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByText('Times are shown and saved in UTC.')).toBeVisible()
   })
 
   test('keeps edit controls visible when collapsed and preserves lifecycle locks', async () => {
@@ -915,6 +961,29 @@ describe('ExperimentForm layout', () => {
     ).toBeVisible()
     expect(onSubmit).not.toHaveBeenCalled()
   })
+
+  test('normalizes the browser minute form to the strict seconds form state', () => {
+    const values = { ...emptyExperimentValues(), key: 'checkout-test' }
+    const onChange = vi.fn()
+    render(
+      <ExperimentForm
+        values={values}
+        onChange={onChange}
+        isCreate
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Start (UTC)'), {
+      target: { value: '2026-06-01T14:30' },
+    })
+
+    expect(onChange).toHaveBeenCalledWith({
+      ...values,
+      start_date: '2026-06-01T14:30:00',
+    })
+  })
 })
 
 describe('ExperimentListPage', () => {
@@ -1059,10 +1128,12 @@ describe('ExperimentDetailPage', () => {
     renderDetail()
 
     await screen.findByDisplayValue('CTA experiment')
-    expect(screen.getByLabelText('Start date')).toHaveAttribute('type', 'date')
-    expect(screen.getByLabelText('Start date')).toHaveValue('2026-06-01')
-    expect(screen.getByLabelText('End date')).toHaveAttribute('type', 'date')
-    expect(screen.getByLabelText('End date')).toHaveValue('2026-07-01')
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('type', 'datetime-local')
+    // datetime-local normalizes a zero-seconds DOM value to its shortest form;
+    // the controlled form state restores :00 in the change handler.
+    expect(screen.getByLabelText('Start (UTC)')).toHaveValue('2026-06-01T00:00')
+    expect(screen.getByLabelText('End (UTC)')).toHaveAttribute('type', 'datetime-local')
+    expect(screen.getByLabelText('End (UTC)')).toHaveValue('2026-07-01T00:00')
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toHaveValue(
