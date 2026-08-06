@@ -14,7 +14,6 @@ import {
   writableFlagStateSchema,
 } from '@/api/schemas/flags'
 import type {
-  ConditionOperator,
   FlagConfig,
   FlagCreate,
   FlagUpdate,
@@ -25,18 +24,21 @@ import type {
 } from '@/api/types/flags'
 import type { EvaluableFlag } from '@/core/evaluator/evaluate'
 import {
+  MEMBERSHIP_OPERATORS,
   MAX_CONDITIONS_PER_RULE,
   MAX_IDENTIFIER_LENGTH,
   MAX_MEMBERSHIP_VALUES,
   MAX_RULES,
   MAX_STRING_LENGTH,
+  NUMERIC_OPERATORS,
+  PRESENCE_OPERATORS,
   isConditionValueValid,
   isScalar,
 } from '@/core/evaluator/targetingContract'
-
-export const EXISTENCE_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['exists', 'not_exists'])
-export const LIST_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['in', 'not_in'])
-export const NUMERIC_OPERATORS: ReadonlySet<ConditionOperator> = new Set(['gt', 'gte', 'lt', 'lte'])
+import {
+  targetingConditionToFormValue,
+  targetingConditionToWire,
+} from '@/features/targeting/editorModel'
 
 // The enforced metric↔threshold pairing (schemas.py GuardrailConfig).
 export const GUARDRAIL_PAIRING: Record<GuardrailMetric, GuardrailThreshold> = {
@@ -52,6 +54,7 @@ const conditionFormSchema = z
       .min(1, 'Attribute is required')
       .max(MAX_IDENTIFIER_LENGTH, `At most ${MAX_IDENTIFIER_LENGTH} characters`),
     operator: conditionOperatorSchema,
+    valueType: z.enum(['string', 'number', 'boolean']),
     /** Preserve an existing JSON scalar until the user edits the text input. */
     value: z.union([
       z.string().max(MAX_STRING_LENGTH),
@@ -68,8 +71,8 @@ const conditionFormSchema = z
       .max(MAX_MEMBERSHIP_VALUES),
   })
   .superRefine((condition, ctx) => {
-    if (EXISTENCE_OPERATORS.has(condition.operator)) return
-    if (LIST_OPERATORS.has(condition.operator)) {
+    if (PRESENCE_OPERATORS.has(condition.operator)) return
+    if (MEMBERSHIP_OPERATORS.has(condition.operator)) {
       if (
         condition.values.length === 0 ||
         condition.values.length > MAX_MEMBERSHIP_VALUES ||
@@ -194,10 +197,6 @@ export const flagFormSchema = z
 export type FlagFormValues = z.infer<typeof flagFormSchema>
 export type ConditionFormValues = z.infer<typeof conditionFormSchema>
 
-export function newRuleId(): string {
-  return `rule_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
-}
-
 /** Create-mode defaults — mirrors the server's two-variant 1:1 template. */
 export function emptyFormValues(): FlagFormValues {
   return {
@@ -221,21 +220,7 @@ export function emptyFormValues(): FlagFormValues {
 }
 
 function conditionToForm(condition: GateCondition): ConditionFormValues {
-  if (EXISTENCE_OPERATORS.has(condition.operator)) {
-    return { attribute: condition.attribute, operator: condition.operator, value: '', values: [] }
-  }
-  if (LIST_OPERATORS.has(condition.operator)) {
-    const values = Array.isArray(condition.value)
-      ? condition.value.filter(isScalar)
-      : []
-    return { attribute: condition.attribute, operator: condition.operator, value: '', values }
-  }
-  return {
-    attribute: condition.attribute,
-    operator: condition.operator,
-    value: isScalar(condition.value) ? condition.value : '',
-    values: [],
-  }
+  return targetingConditionToFormValue(condition)
 }
 
 export function flagToFormValues(flag: FlagConfig): FlagFormValues {
@@ -264,30 +249,7 @@ export function flagToFormValues(flag: FlagConfig): FlagFormValues {
 
 /** Wire form: existence operators OMIT the value key (JSON.stringify drops undefined). */
 export function conditionToWire(condition: ConditionFormValues): GateCondition {
-  if (EXISTENCE_OPERATORS.has(condition.operator)) {
-    return { attribute: condition.attribute.trim(), operator: condition.operator }
-  }
-  if (LIST_OPERATORS.has(condition.operator)) {
-    return {
-      attribute: condition.attribute.trim(),
-      operator: condition.operator,
-      value: condition.values,
-    }
-  }
-  if (NUMERIC_OPERATORS.has(condition.operator)) {
-    return {
-      attribute: condition.attribute.trim(),
-      operator: condition.operator,
-      value: typeof condition.value === 'number'
-        ? condition.value
-        : Number(condition.value),
-    }
-  }
-  return {
-    attribute: condition.attribute.trim(),
-    operator: condition.operator,
-    value: condition.value,
-  }
+  return targetingConditionToWire(condition)
 }
 
 export function rulesToWire(values: FlagFormValues): GateRule[] {
