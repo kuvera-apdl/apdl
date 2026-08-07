@@ -16,10 +16,16 @@ from app.editor import routed as routed_module
 from app.editor.base import EditRequest, EditResult
 from app.editor.routed import ProjectRoutedEditor
 from app.llm import broker as broker_module
-from app.llm.broker import LlmAttemptBroker, LlmBrokerClient, _AcquireRequest
+from app.llm.broker import (
+    LlmAttemptBroker,
+    LlmBrokerClient,
+    _AcquireRequest,
+    _SuccessResponse,
+)
 from app.llm.broker_directory import prepare_broker_root
 from app.llm.contracts import (
     LlmAssignmentSnapshot,
+    LlmAttemptLease,
     LlmExecutionAuthority,
     LlmExecutionSnapshot,
     LlmRuntimeBinding,
@@ -76,6 +82,19 @@ def _assignment(role: str) -> LlmAssignmentSnapshot:
         input_cost_per_million_tokens_usd_micros=250_000,
         output_cost_per_million_tokens_usd_micros=2_000_000,
     )
+
+
+def test_plaintext_lease_is_serialized_but_omitted_from_repr() -> None:
+    response = _SuccessResponse(
+        lease=LlmAttemptLease(
+            attempt_id=ATTEMPT_ID,
+            phase="edit",
+            binding=_attempt().binding,
+        )
+    )
+
+    assert SECRET in response.model_dump_json()
+    assert SECRET not in repr(response)
 
 
 def _execution_snapshot() -> LlmExecutionSnapshot:

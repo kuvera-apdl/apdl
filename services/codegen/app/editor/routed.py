@@ -46,7 +46,7 @@ async def _close_broker_barrier(
 
 
 class ProjectRoutedEditor:
-    """Expose one just-in-time credential lease per actual provider call."""
+    """Expose one just-in-time plaintext credential per worker phase attempt."""
 
     def __init__(
         self,

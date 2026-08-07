@@ -446,6 +446,20 @@ deployment-level provider model or credential. Every request resolves the
 project's active editor and helper assignments and obtains one phase-bound
 credential from the local broker.
 
+The socket capability gates credential acquisition; it does not keep plaintext
+out of the worker. A successful acquire serializes one attempt-scoped provider
+key to the worker, where helper calls pass it to LiteLLM and edit calls place it
+in the Aider subprocess environment. `repr=False` suppresses ordinary model
+representations only and is not a serialization or log-redaction boundary.
+
+Containment depends on the publication stage. Production `tenant_draft_pr`
+workers use Docker `--network none` and an attested Unix-socket proxy whose
+allowlist includes model providers, GitHub, and package registries while denying
+direct, private, metadata, and non-proxy egress. Local `development_pr` workers
+use an explicitly unfiltered bridge and therefore do not provide that secret
+containment. Offline mode cannot create changesets, and trusted in-process
+execution is restricted to that non-publishing mode.
+
 Build and validate the three runtime images, apply migrations, then start the
 tenant overlay:
 

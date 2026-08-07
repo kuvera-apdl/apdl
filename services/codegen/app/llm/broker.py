@@ -1,9 +1,9 @@
-"""Per-call Unix-socket broker for project-scoped Codegen LLM authority.
+"""Unix-socket broker for project-scoped Codegen LLM authority.
 
-The controller owns PostgreSQL and the platform encryption key. Isolated
-workers receive only a random, changeset-bound socket capability. Every model
-invocation acquires one credential lease immediately before egress and reports
-that exact attempt's terminal outcome afterward.
+A worker starts with a random, changeset-bound socket capability. A successful
+acquire then serializes one attempt-scoped plaintext provider credential to that
+worker. The production secret boundary is the worker's attested network policy,
+not the lease or this cooperative client's reference lifetime.
 """
 
 from __future__ import annotations
@@ -472,7 +472,7 @@ class LlmAttemptBroker:
 
 
 class LlmBrokerClient:
-    """Worker-side client that never caches credential-bearing leases."""
+    """Cooperative client that does not cache leases between phase attempts."""
 
     def __init__(self, authority: LlmExecutionAuthority, changeset_id: str) -> None:
         self._authority = authority
