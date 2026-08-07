@@ -859,6 +859,8 @@ class AiderEditor:
                             )
                             return content
                         finally:
+                            # Shorten cooperative reference lifetimes only;
+                            # immutable Python strings are not zeroized.
                             binding = None
                             lease = None
 
@@ -1230,6 +1232,8 @@ class AiderEditor:
                                 ),
                             )
                         finally:
+                            # This drops local references after the child exits;
+                            # it cannot zeroize Python strings or OS-level copies.
                             provider_environment.clear()
                             binding = None
                             lease = None

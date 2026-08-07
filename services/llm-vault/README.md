@@ -71,6 +71,10 @@ make rotate-llm-vault-key ARGS='--operator operator@example.com'
 The command acquires both exclusive APDL maintenance barriers, authenticates
 every active ciphertext before writing, re-encrypts the full set in one
 transaction, verifies the result, and appends immutable per-credential audit
-rows. Update `LLM_VAULT_ENCRYPTION_KEY_BASE64` to the new value before
-restarting services. The old and new rotation keys are command-only variables;
-they are never passed to Agents, Codegen, or the normal vault service process.
+rows. CPython cannot zeroize the immutable strings returned by decryption.
+Rotation therefore scopes plaintext to one credential preparation call at a
+time, retains only encrypted plans, and decrypts each credential once with the
+old key plus once with the new key for verification. Update
+`LLM_VAULT_ENCRYPTION_KEY_BASE64` to the new value before restarting services.
+The old and new rotation keys are command-only variables; they are never passed
+to Agents, Codegen, or the normal vault service process.
