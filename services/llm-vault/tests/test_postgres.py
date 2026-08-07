@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -27,6 +28,19 @@ from app.store import ProjectLlmVaultStore, VaultNotFoundError
 
 OWNER_URL = os.getenv("LLM_VAULT_TEST_OWNER_POSTGRES_URL", "").strip() or None
 VAULT_URL = os.getenv("LLM_VAULT_TEST_POSTGRES_URL", "").strip() or None
+ROOT = Path(__file__).resolve().parents[3]
+VAULT_MIGRATION = (
+    ROOT
+    / "pipeline"
+    / "postgres"
+    / "migrations"
+    / "056_project_llm_credential_vault.sql"
+).read_text(encoding="utf-8")
+PREFLIGHT_START = VAULT_MIGRATION.index(
+    "DO $apdl_require_empty_legacy_llm_credential_stores$"
+)
+PREFLIGHT_END = VAULT_MIGRATION.index("DO $apdl_ensure_llm_vault_role$")
+LEGACY_CREDENTIAL_PREFLIGHT = VAULT_MIGRATION[PREFLIGHT_START:PREFLIGHT_END]
 
 if os.getenv("GITHUB_ACTIONS") == "true" and (OWNER_URL is None or VAULT_URL is None):
     raise RuntimeError(
@@ -38,6 +52,41 @@ pytestmark = pytest.mark.skipif(
     OWNER_URL is None or VAULT_URL is None,
     reason="Live LLM Vault PostgreSQL URLs are not configured",
 )
+
+
+@pytest.mark.asyncio
+async def test_legacy_credential_history_requires_a_fresh_database() -> None:
+    assert OWNER_URL is not None
+    conn = await asyncpg.connect(OWNER_URL)
+    try:
+        await conn.execute(
+            """
+            CREATE TEMP TABLE llm_project_provider_credentials (
+                history_id INTEGER
+            );
+            CREATE TEMP TABLE codegen_project_provider_credentials (
+                history_id INTEGER
+            );
+            """
+        )
+        await conn.execute(LEGACY_CREDENTIAL_PREFLIGHT)
+
+        for table in (
+            "llm_project_provider_credentials",
+            "codegen_project_provider_credentials",
+        ):
+            await conn.execute(f"INSERT INTO {table} VALUES (1)")
+            with pytest.raises(asyncpg.PostgresError) as raised:
+                await conn.execute(LEGACY_CREDENTIAL_PREFLIGHT)
+            assert raised.value.sqlstate == "55000"
+            assert raised.value.hint == (
+                "Initialize a fresh PostgreSQL database, apply the canonical "
+                "migrations, and reconnect provider credentials; revocation "
+                "does not remove legacy credential history."
+            )
+            await conn.execute(f"TRUNCATE {table}")
+    finally:
+        await conn.close()
 
 
 def _projection() -> CodegenProjection:

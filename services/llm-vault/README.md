@@ -40,11 +40,14 @@ later setup runs; deployments must provision their own independent value.
   projection endpoints before opening its database transaction. Provider
   discovery or either requested projection failure leaves all state unchanged.
 
-Migration `056_project_llm_credential_vault.sql` is intentionally breaking when
-legacy Agents or Codegen secret tables contain rows, because their ciphertext
-was produced with independent keys. Revoke or export and reconnect those
-credentials before upgrading. The migration removes the legacy secret tables;
-there is no dual-schema compatibility mode.
+Migration `056_project_llm_credential_vault.sql` is a fresh-install-only custody
+cutover. Any legacy Agents or Codegen credential row, including replaced or
+revoked history, blocks it because the old ciphertext and credential lineage
+cannot be rebound safely to the new empty vault. Revocation crypto-shreds the
+secret bytes but deliberately retains that history, so it is not a supported
+remediation. Initialize a fresh PostgreSQL database, apply the canonical
+migrations, and reconnect providers through the shared vault. There is no
+in-place conversion or dual-schema compatibility mode.
 
 ## Local development
 

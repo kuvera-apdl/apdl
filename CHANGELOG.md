@@ -17,6 +17,11 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ### Changed
 
+- PostgreSQL migration 056 is a fresh-install-only credential-custody cutover.
+  Any legacy Agents or Codegen credential row, including revoked or replaced
+  history, blocks the migration. Initialize a fresh database, apply the
+  canonical migrations, and reconnect providers through the shared vault;
+  revocation alone cannot make an existing database eligible.
 - PostgreSQL migration 051 is a deliberate Agents setup cutover. It deactivates
   every Agents project, removes existing tier assignments and runtime provider
   policy copies, and discards pre-price-review model inventories. Existing

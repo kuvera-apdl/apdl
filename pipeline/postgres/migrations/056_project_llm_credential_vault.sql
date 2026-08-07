@@ -1,11 +1,13 @@
 -- Canonical project LLM credential custody shared by Agents and Codegen.
 --
 -- The legacy services encrypted different tables with different deployment
--- keys. Ciphertext cannot be moved safely in SQL, so this breaking migration
--- refuses to run when either legacy store contains data. Operators must revoke
--- or export/reconnect those credentials before upgrading. The new vault keeps
--- secret bytes in a table that apdl_runtime cannot read; consumers see only
--- non-secret version and lifecycle metadata.
+-- keys. Ciphertext and credential history cannot be moved safely in SQL, so
+-- this fresh-install-only migration refuses to run when either legacy store
+-- contains any row. Revocation crypto-shreds secret material but deliberately
+-- retains lifecycle history, so it cannot make an existing database eligible
+-- for this cutover. The new vault keeps secret bytes in a table that
+-- apdl_runtime cannot read; consumers see only non-secret version and lifecycle
+-- metadata.
 
 DO $apdl_require_empty_legacy_llm_credential_stores$
 BEGIN
@@ -13,8 +15,8 @@ BEGIN
        OR EXISTS (SELECT 1 FROM codegen_project_provider_credentials) THEN
         RAISE EXCEPTION USING
             ERRCODE = '55000',
-            MESSAGE = 'project LLM vault migration requires empty legacy credential stores',
-            HINT = 'Revoke or export and reconnect Agents and Codegen provider credentials before upgrading.';
+            MESSAGE = 'project LLM vault migration does not support legacy credential history',
+            HINT = 'Initialize a fresh PostgreSQL database, apply the canonical migrations, and reconnect provider credentials; revocation does not remove legacy credential history.';
     END IF;
 END
 $apdl_require_empty_legacy_llm_credential_stores$;

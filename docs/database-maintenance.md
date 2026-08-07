@@ -155,6 +155,19 @@ Migration checksums are immutable. A development database that applied an
 earlier, unmerged form of migration 051 must be rebuilt from an empty database;
 the migration ledger intentionally rejects that checksum drift.
 
+### Migration 056 requires a fresh database
+
+Migration `056_project_llm_credential_vault.sql` replaces the separate Agents
+and Codegen credential stores with one shared vault. It rejects any row in
+either legacy credential table, including replaced or revoked history. Those
+rows retain credential lineage after their secret bytes are crypto-shredded,
+and the migration cannot rebind that lineage safely to the new empty vault.
+
+Revocation is therefore not a remediation for an existing database. Initialize
+a fresh PostgreSQL database, apply the complete canonical migration sequence,
+and reconnect provider credentials through the shared vault. There is no
+supported in-place conversion or dual-schema compatibility mode.
+
 ## Failure and rerun
 
 Do not edit an applied migration. Preserve the logs and rerun the same supported
