@@ -8,7 +8,7 @@ const conn = {
 }
 
 describe('Config API examples', () => {
-  test('creates an untargeted flag with full initial rollout', () => {
+  test('creates an untargeted flag with full fallthrough rollout', () => {
     const example = createFlagExampleCurl(conn)
 
     expect(example.body).toMatchObject({

@@ -137,7 +137,7 @@ export function RuleBuilder() {
       <TargetingAttributesDatalist />
       {fields.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No targeting rules — Initial rollout applies to everyone.
+          No targeting rules — the fallthrough rollout applies to everyone.
         </p>
       ) : (
         fields.map((field, index) => (

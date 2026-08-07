@@ -22,6 +22,9 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
   RFC 4648 Base64 that decodes to non-empty UTF-8 PEM text; invalid values fail
   closed. Generate the value with
   `openssl base64 -A -in path/to/github-app.private-key.pem`.
+- New flags default to a 100% fallthrough rollout. Activating an otherwise
+  unchanged new flag assigns every eligible actor across its weighted variants;
+  existing flags retain their stored fallthrough percentage.
 
 ## [0.3.4] - 2026-07-29
 

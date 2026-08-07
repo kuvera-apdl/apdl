@@ -448,14 +448,14 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
               <div className="space-y-4">
                 <Section
                   title="Targeting"
-                  description="Set the default rollout first, then add optional first-match rules."
+                  description="Rules evaluate in order; the fallthrough rollout applies when none match."
                 >
                   <div className="space-y-5">
                     <div className="space-y-2">
                       <RolloutFields
                         pathPrefix="fallthrough.rollout"
-                        percentageLabel="Initial rollout %"
-                        bucketByLabel="Initial rollout bucket identity"
+                        percentageLabel="Fallthrough rollout %"
+                        bucketByLabel="Fallthrough rollout bucket identity"
                         percentageError={
                           formState.errors.fallthrough?.rollout?.percentage?.message
                         }
@@ -464,8 +464,8 @@ function FlagEditor({ flagKey: key }: { flagKey: string | undefined }) {
                         }
                       />
                       <p className="text-xs text-muted-foreground">
-                        Initial rollout applies when no rule matches, and therefore
-                        applies to everyone when this flag has no rules.
+                        The fallthrough rollout applies when no rule matches, including
+                        every evaluation when this flag has no rules.
                       </p>
                     </div>
                     <div className="border-t pt-4">
